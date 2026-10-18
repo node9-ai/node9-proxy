@@ -175,10 +175,12 @@ describe('maskPersonalData: tool arguments', () => {
   });
 });
 
-// Code review of the fw#318 fixes: masking shares the PII detector, so it
-// masks exactly what detectPii reports and never the fractional part of a
-// number (node9Firewall#333). Values are computed at run time.
-describe('maskPersonalData: what the PII detector does not call a card', () => {
+// Code review of the fw#318 fixes: masking shares the detector's card
+// patterns and Luhn check, but not its decimal-fraction exemption (second
+// review, finding 2): in text a card after "1." or "0," is masked, and so is
+// a Luhn-valid fractional part; a fraction passed as a number stays a number
+// (maskPersonalValue). Values are computed at run time.
+describe('maskPersonalData: stricter than the detector', () => {
   const FRACTIONS: number[] = [];
   for (let n = 2; n <= 100; n++) for (let k = 1; k < n; k++) FRACTIONS.push(k / n);
 
@@ -186,11 +188,18 @@ describe('maskPersonalData: what the PII detector does not call a card', () => {
     const frac = String(46 / 96).split('.')[1];
     expect(maskPersonalData(frac)).not.toBe(frac);
   });
-  it('leaves every fraction k/n (n <= 100) alone, as JSON and in a string', () => {
-    const changed = FRACTIONS.filter((x) => {
-      const json = JSON.stringify({ rate: x });
-      return maskPersonalData(json) !== json || maskPersonalData(`rate ${x}`) !== `rate ${x}`;
-    });
+  it('masks a card after a digit and a dot, a leading dot, or a lone 0 and a comma', () => {
+    for (const lead of ['ref 1.', 'x .', 'rate 0,'])
+      expect(maskPersonalData(lead + CARD)).toBe(lead + '**** **** **** 4242');
+  });
+  it('in text, a Luhn-valid fractional part is masked too (pinned trade-off)', () => {
+    const changed = FRACTIONS.filter((x) => maskPersonalData(`rate ${x}`) !== `rate ${x}`);
+    expect(changed.length).toBe(70);
+  });
+  it('as a value, every fraction k/n (n <= 100) stays the same number', () => {
+    const changed = FRACTIONS.filter(
+      (x) => (maskPersonalValue({ rate: x }) as { rate: unknown }).rate !== x
+    );
     expect(changed.length).toBe(0);
   });
   it('still masks a card in the same JSON shape', () => {
@@ -247,5 +256,32 @@ describe('maskPersonalValue: arguments as a value', () => {
     expect(maskPersonalValue(null)).toBe(null);
     expect(maskPersonalValue(true)).toBe(true);
     expect(maskPersonalValue('hi dana@acme.example')).toBe('hi d***@acme.example');
+  });
+});
+
+// Second code review: a string leaf is masked as raw text before its JSON
+// form, so a card or IBAN that begins a line (or follows a tab) is masked
+// (finding 1); keys that mask alike keep every entry (finding 3).
+describe('maskPersonalValue: line starts and key collisions', () => {
+  it('masks a card and an IBAN that begin a line inside a string', () => {
+    const csv = ['name,card', 'alice,x', CARD, 'bob', IBAN, ''].join('\n');
+    const out = (maskPersonalValue({ content: csv }) as { content: string }).content;
+    expect(out).not.toContain(CARD);
+    expect(out).not.toContain(IBAN);
+    expect(out).toContain('\n**** **** **** 4242\n');
+    expect(out).toContain(`\n${IBAN.slice(0, 4)} **** **** ${IBAN.slice(-4)}\n`);
+  });
+  it('masks a card after a tab', () => {
+    expect((maskPersonalValue({ c: 'a\t' + CARD }) as { c: string }).c).toBe(
+      'a\t**** **** **** 4242'
+    );
+  });
+  it('keeps both entries when two keys mask to the same text', () => {
+    expect(
+      maskPersonalValue({ 'dana@acme.example': 'approve', 'dave@acme.example': 'deny' })
+    ).toEqual({
+      'd***@acme.example': 'approve',
+      'd***@acme.example#2': 'deny',
+    });
   });
 });
