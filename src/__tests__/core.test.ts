@@ -314,12 +314,20 @@ describe('Bash tool — shell command interception', () => {
   // ── Smart rule: review-sudo ───────────────────────────────────────────────
   it.each([
     { cmd: 'sudo apt install vim', desc: 'sudo apt install' },
-    { cmd: 'sudo rm -rf /var', desc: 'sudo rm' },
+    // Not under a system directory: /var as a whole holds /var/log, and a
+    // removal there is attributed to files.system-dirs (still a review).
+    { cmd: 'sudo rm -rf /opt/app/cache', desc: 'sudo rm' },
     { cmd: 'sudo systemctl restart nginx', desc: 'sudo systemctl' },
   ])('review-sudo: flags "$desc" as review', async ({ cmd }) => {
     const result = await evaluatePolicy('Bash', { command: cmd });
     expect(result.decision).toBe('review');
     expect(result.ruleName).toBe('review-sudo');
+  });
+
+  it('sudo rm of a tree holding a system directory is still a review, owned by files.system-dirs', async () => {
+    const result = await evaluatePolicy('Bash', { command: 'sudo rm -rf /var' });
+    expect(result.decision).toBe('review');
+    expect(result.ruleName).toBe('review-system-dir-mutation');
   });
 
   // ── Smart rule: review-curl-pipe-shell ────────────────────────────────────

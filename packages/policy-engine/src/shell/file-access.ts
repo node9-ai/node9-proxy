@@ -70,6 +70,69 @@ function runnablePrefix(command: string): any | null {
   }
   return null;
 }
+
+/** Download tools: short flags that take a value (a bundle stops at the first). */
+const DOWNLOAD_SHORT_VALUE: Record<string, string> = {
+  curl: 'odDeEFHKmPrtTuUwxXyYzAbcCQ',
+  wget: 'OoaPiBetTwQlARDXIUY',
+  aria2c: 'odisx',
+};
+const DOWNLOAD_LONG_VALUE: Record<string, string[]> = {
+  curl: [
+    '--output',
+    '--output-dir',
+    '--dump-header',
+    '--cookie-jar',
+    '--data',
+    '--data-binary',
+    '--data-raw',
+    '--data-ascii',
+    '--data-urlencode',
+    '--form',
+    '--header',
+    '--request',
+    '--user',
+    '--user-agent',
+    '--referer',
+    '--cookie',
+    '--config',
+    '--json',
+    '--upload-file',
+    '--max-time',
+    '--proxy',
+    '--write-out',
+    '--url',
+  ],
+  wget: [
+    '--output-document',
+    '--output-file',
+    '--append-output',
+    '--directory-prefix',
+    '--input-file',
+    '--post-data',
+    '--post-file',
+    '--body-data',
+    '--body-file',
+    '--method',
+    '--header',
+    '--user-agent',
+    '--user',
+    '--password',
+    '--tries',
+    '--timeout',
+  ],
+  aria2c: ['--out', '--dir', '--input-file'],
+};
+const DOWNLOAD_OUTPUT_FLAGS: Record<string, string[]> = {
+  curl: ['-o', '--output', '-D', '--dump-header', '-c', '--cookie-jar'],
+  wget: ['-O', '--output-document', '-o', '--output-file', '-a', '--append-output'],
+  aria2c: ['-o', '--out'],
+};
+const DOWNLOAD_DIR_FLAGS: Record<string, string[]> = {
+  curl: ['--output-dir'],
+  wget: ['-P', '--directory-prefix'],
+  aria2c: ['-d', '--dir'],
+};
 const base = (s: string | null): string => (s ?? '').replace(/\/+$/, '').split('/').pop() ?? '';
 const quoteGlob = (s: string): string => s.replace(/[\\*?\[\]{}()!+@]/g, '\\$&');
 const asWord = (p: Piece): Word => ({ value: p.value, ...(p.glob ? { pattern: p.pattern } : {}) });
@@ -482,8 +545,104 @@ export function collectShellFileAccesses(
       }
       return;
     }
+    if (name === 'wget' || name === 'curl' || name === 'aria2c') {
+      downloadOutputs(name, args, state);
+      return;
+    }
     // Copy/archive source vocabulary already belongs to the credential jail.
     for (const p of copySourcePaths(words)) add('read', locate(p), state);
+  }
+  /**
+   * The files a download writes. `-O F` / `-o F` name it; a server-chosen or
+   * templated name (`-OJ`, `-o "f_#1"`, `wget -r`, `wget -i list`) is any
+   * file under the directory (`D/*`, dotfiles included); otherwise the URL's
+   * basename in the output directory. `-` is standard output. Header and
+   * cookie dumps (`curl -D`, `-c`) and wget's logs (`-o`, `-a`) are writes too.
+   */
+  function downloadOutputs(name: string, args: Array<Word | null>, state: State): void {
+    const valueShort = DOWNLOAD_SHORT_VALUE[name];
+    const outputs: Word[] = [];
+    const urls: string[] = [];
+    // Assigned inside `take`; the cast keeps TypeScript from narrowing it to null.
+    let dir = null as Word | null;
+    let remoteName = false;
+    let document = false;
+    let serverNamed = false;
+    const take = (flag: string, value: Word | null): void => {
+      if (!value) return;
+      if (DOWNLOAD_OUTPUT_FLAGS[name].includes(flag)) {
+        // wget -O and aria2c -o name the downloaded file (stdout included), so
+        // no URL basename is written; a log or a header dump does not.
+        if (
+          ['-O', '--output-document', '--out'].includes(flag) ||
+          (name === 'aria2c' && flag === '-o')
+        )
+          document = true;
+        if (value.value !== '-' || value.pattern || value.dynamic) outputs.push(value);
+      } else if (DOWNLOAD_DIR_FLAGS[name].includes(flag)) dir = value;
+      else if (name === 'wget' && (flag === '-i' || flag === '--input-file')) serverNamed = true;
+    };
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (!token) continue;
+      const v = token.value;
+      if (v.startsWith('--')) {
+        const eq = v.indexOf('=');
+        const flag = eq < 0 ? v : v.slice(0, eq);
+        if (['--remote-name', '--remote-name-all'].includes(flag)) remoteName = true;
+        if (['--remote-header-name', '--recursive', '--mirror', '--page-requisites'].includes(flag))
+          serverNamed = true;
+        if (DOWNLOAD_LONG_VALUE[name].includes(flag))
+          take(flag, eq < 0 ? (args[++i] ?? null) : { ...token, value: v.slice(eq + 1) });
+        continue;
+      }
+      if (v.startsWith('-') && v.length > 1 && !token.dynamic) {
+        for (let j = 1; j < v.length; j++) {
+          const c = v[j];
+          // wget's -nc, -nd, -nH, -np, -nv: two letters, no value.
+          if (name === 'wget' && c === 'n') {
+            j++;
+            continue;
+          }
+          if (name === 'curl' && c === 'O') remoteName = true;
+          if (name === 'curl' && c === 'J') serverNamed = true;
+          if (name === 'wget' && (c === 'r' || c === 'm' || c === 'p')) serverNamed = true;
+          if (valueShort.includes(c)) {
+            const rest = v.slice(j + 1);
+            take(`-${c}`, rest ? { value: rest } : (args[++i] ?? null));
+            break;
+          }
+        }
+        continue;
+      }
+      if (/^(?:https?|ftps?):\/\//i.test(v)) urls.push(v);
+    }
+    for (const out of outputs) {
+      // aria2c's -o names a file inside its -d directory.
+      const spelled =
+        name === 'aria2c' && dir?.value && !out.value.startsWith('/')
+          ? { ...out, value: `${dir.value.replace(/\/+$/, '')}/${out.value}` }
+          : out;
+      // curl's -o "file_#1" names files from the URL glob: any file there.
+      if (name === 'curl' && /#\d/.test(spelled.value))
+        add('write', { value: '', pattern: spelled.value.replace(/#\d+/g, '*'), dot: true }, state);
+      else add('write', spelled, state);
+    }
+    const remote = name === 'curl' ? remoteName || serverNamed : !document || serverNamed;
+    if (!remote) return;
+    const into = dir?.value ? dir.value.replace(/\/+$/, '') : '.';
+    if (serverNamed || urls.length === 0) {
+      add('write', { value: '', pattern: `${quoteGlob(into)}/*`, dot: true }, state);
+      return;
+    }
+    for (const url of urls) {
+      const file = url
+        .replace(/[?#].*$/, '')
+        .replace(/^[a-z]+:\/\/[^/]*/i, '')
+        .split('/')
+        .pop();
+      add('write', { value: `${into}/${file || 'index.html'}` }, state);
+    }
   }
   function findActions(
     tokens: Array<Word | null>,

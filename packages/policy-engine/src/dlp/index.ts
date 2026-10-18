@@ -316,7 +316,11 @@ function validateBasicCredential(raw: string): boolean {
   // A word that only looks like base64 does not survive the round trip.
   if (bytes.toString('base64').replace(/=+$/, '') !== bare) return false;
   const text = bytes.toString('utf8');
-  if (!Buffer.from(text, 'utf8').equals(bytes) || /[\u0000-\u001f\u007f]/.test(text)) return false;
+  if (!Buffer.from(text, 'utf8').equals(bytes)) return false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return false; // a control character: binary, not a credential
+  }
   const pair = BASIC_PAIR_RE.exec(text);
   if (!pair) return false;
   const password = pair[2];

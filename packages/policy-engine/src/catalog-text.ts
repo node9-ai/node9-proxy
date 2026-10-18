@@ -34,6 +34,13 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     example: 'cat /etc/shadow',
     advice: 'Keep Review, or choose Block when agents must never read system password hashes.',
   },
+  'files.system-dirs': {
+    plain:
+      'The agent writes, creates or deletes a file in a system directory, or sends a system file in a request. /usr/local and a container working directory under /usr/src are ordinary project space and are not included.',
+    example: 'wget -O /usr/bin/tool https://example.com/tool',
+    advice:
+      'Keep Review on a workstation. A container image build that installs into /usr can set it to Log.',
+  },
   // ── Commands ──────────────────────────────────────────────────────────────
   'commands.inline-exec': {
     plain: 'The agent runs a small program written inside the command itself.',

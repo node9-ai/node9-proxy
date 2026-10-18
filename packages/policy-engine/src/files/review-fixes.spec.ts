@@ -7,9 +7,12 @@ import { DEFAULT_CONFIG } from '../../../../src/config';
 // the fix it names in the describe title.
 const context = { cwd: '/work', homeDirs: ['/home/u'] };
 const home = { cwd: '/home/u', homeDirs: ['/home/u'] };
+// The #341 review rounds: files.system-dirs (writes anywhere under /etc,
+// /usr, /var/log) is off here and pinned in system-dirs.spec.
+const ONLY_341 = { checks: { 'files.system-dirs': 'off' as const } };
 const verdict = (command: string, ctx = context) =>
-  evaluateProtectedFileAccess(collectFileAccesses('Bash', { command }, ctx), ctx, {})?.decision ??
-  null;
+  evaluateProtectedFileAccess(collectFileAccesses('Bash', { command }, ctx), ctx, ONLY_341)
+    ?.decision ?? null;
 
 describe('dynamic operands keep their literal prefix', () => {
   it.each([

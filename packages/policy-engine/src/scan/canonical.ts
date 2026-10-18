@@ -699,6 +699,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // after a lone 0 ("0,479..."), so histories scanned under v26 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
 
+// 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
+// SYSTEM_DIRS sets for the live file policy (files.system-dirs); the extractor
+// does not read them, so its output is identical.
 // 2026-10-18, hash bumped with NO version bump: dlp/index.ts gained three
 // argument-gate patterns (HTTP Basic, OTP constructor, escaped JSON and wider
 // names for Assigned Secret), all argumentsOnly, and the context validators
@@ -741,7 +744,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'e2ad69466617fda5';
+export const CANONICAL_EXTRACTOR_HASH = '21b7b7e7477fc955';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
