@@ -341,8 +341,24 @@ export async function runMcpGateway(
   // because the post-exec attribution needs more fields (agent, mcpServer, ts).
   const pendingExecutions = new Map<
     string | number,
-    { ts: number; toolName: string; args: unknown; agent?: string; mcpServer?: string }
+    { ts: number; toolName: string; args?: unknown; agent?: string; mcpServer?: string }
   >();
+
+  // fw#318: the name the hook would give this server's tool, and whether the
+  // tool is a source of outside content under the current config: the same
+  // role the hook would give `mcp__<name>__<tool>`, so an explicit `read`
+  // role (or an agent-internal server) marks nothing.
+  const gatewayNsName = (tool: string) =>
+    `mcp__${configName || deriveServerName(upstreamCommand)}__${tool}`;
+  const gatewayToolIsSource = (tool: string, cfg?: ReturnType<typeof getConfig>): boolean => {
+    try {
+      const uc = (cfg ?? getConfig()).policy.untrustedContent;
+      return !!uc?.enabled && toolRole(gatewayNsName(tool), uc).source;
+    } catch {
+      // A config error must not fail the forward: no role, nothing kept.
+      return false;
+    }
+  };
 
   // Session identity for taint (gap1). MCP stdio carries no agent session id,
   // so the gateway process IS the session: a secret or an injected instruction
@@ -535,7 +551,11 @@ export async function runMcpGateway(
           pendingExecutions.set(message.id as string | number, {
             ts: Date.now(),
             toolName,
-            args: toolArgs,
+            // Only a source's arguments are needed later (its exposure-source
+            // row); holding every call's arguments until the response would
+            // keep each large write in memory. A role changed in between
+            // leaves the row without arguments, never the session unmarked.
+            ...(gatewayToolIsSource(toolName) ? { args: toolArgs } : {}),
             agent: clientName,
             mcpServer,
           });
@@ -848,10 +868,8 @@ export async function runMcpGateway(
             // its result marks the gateway session exposed and, with
             // spotlight, is framed whole.
             const uc = cfg.policy.untrustedContent;
-            // The same role the hook would give `mcp__<name>__<tool>`: an
-            // explicit `read` role (or an agent-internal server) marks nothing.
-            const nsName = `mcp__${configName || deriveServerName(upstreamCommand)}__${exec.toolName}`;
-            const isSource = !!uc?.enabled && toolRole(nsName, uc).source;
+            const nsName = gatewayNsName(exec.toolName);
+            const isSource = gatewayToolIsSource(exec.toolName, cfg);
             const scan = scanToolResult(line, parsed, exec.toolName, {
               dlpEnabled: cfg.policy.dlp.enabled,
               injection: cfg.policy.injectionScan,

@@ -238,6 +238,8 @@ describe('mcp-gateway response-channel scan', () => {
       });
       expect(typeof source?.eid).toBe('string');
       expect(String(source?.sessionId)).toMatch(/^mcp-gateway-/);
+      // Finding 8: a source's arguments are still kept until its response.
+      expect(String(source?.argsPreview)).toContain('p1');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

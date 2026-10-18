@@ -84,7 +84,6 @@ function mtimeOf(): number {
 }
 
 /** Is `value` on the list? Re-reads the file only when it changed. */
-
 export function isTrustedRecipient(value: string): boolean {
   const mtime = mtimeOf();
   if (!cache || cache.mtime !== mtime) {

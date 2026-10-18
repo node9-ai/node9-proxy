@@ -109,6 +109,20 @@ export function splitMcpToolName(toolName: string): { server: string; bare: stri
 }
 
 /**
+ * The role an admin configured for an MCP tool (`roles[server][tool]`), with
+ * the tool name as written or lower-cased; undefined when none is set. The
+ * one lookup toolRole and injectionOrigin share, so the gate and the
+ * injection scanner always read the same role.
+ */
+export function configuredRole(
+  mcp: { server: string; bare: string },
+  policy: Config['policy']['untrustedContent']
+): 'source' | 'action' | 'read' | undefined {
+  const server = policy.roles[mcp.server];
+  return server?.[mcp.bare] ?? server?.[mcp.bare.toLowerCase()];
+}
+
+/**
  * The role of a tool as the hook names it.
  *
  * - a `roles[server][tool]` entry wins outright;
@@ -121,7 +135,7 @@ export function toolRole(toolName: string, policy: Config['policy']['untrustedCo
   const mcp = splitMcpToolName(toolName);
   const bare = (mcp ? mcp.bare : toolName).toLowerCase();
   if (mcp) {
-    const configured = policy.roles[mcp.server]?.[mcp.bare] ?? policy.roles[mcp.server]?.[bare];
+    const configured = configuredRole(mcp, policy);
     if (configured === 'source') return { source: true, action: false };
     if (configured === 'action') return { source: false, action: true };
     if (configured === 'read') return { source: false, action: false };
@@ -154,9 +168,7 @@ export function injectionOrigin(
   if (sourceRead) return { untrusted: true };
   const mcp = splitMcpToolName(toolName);
   if (!mcp) return {};
-  const configured =
-    policy.roles[mcp.server]?.[mcp.bare] ?? policy.roles[mcp.server]?.[mcp.bare.toLowerCase()];
-  return configured === 'read' ? { untrusted: false } : {};
+  return configuredRole(mcp, policy) === 'read' ? { untrusted: false } : {};
 }
 
 /** The word for what a shell fetch read, from the classifier's fetch kinds. */
