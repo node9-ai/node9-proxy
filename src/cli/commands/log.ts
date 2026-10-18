@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  redactAuditText,
+  redactAuditArgs,
   appendToLog,
   appendLocalAudit,
   LOCAL_AUDIT_LOG,
@@ -169,7 +169,7 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
     // Decoding cut short (a nested layer, a flood of hostname labels, the
     // phrase budget) is not a clean scan either: the row keeps the hash.
     if (inspected.coverage === 'incomplete') return { ...hashed, argsUnscanned: true };
-    return { args: JSON.parse(redactAuditText(JSON.stringify(rawInput))) as unknown };
+    return { args: redactAuditArgs(rawInput) };
   } catch {
     return hashed;
   }

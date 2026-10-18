@@ -195,6 +195,7 @@ export {
   normalizeTrustedEntry,
   entryDisplay,
   maskPersonalData,
+  maskPersonalValue,
 } from './exposure/mask';
 export type { ShellExposure } from './exposure/shell';
 export { classifyShellExposure } from './exposure/shell';

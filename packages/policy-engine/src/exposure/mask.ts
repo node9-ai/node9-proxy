@@ -17,7 +17,8 @@
 // Pure, never throws.
 
 import { createHash } from 'crypto';
-import { IBAN_LENGTH, validateIban, validateLuhn } from '../scan/checksums';
+import { IBAN_LENGTH, validateIban } from '../scan/checksums';
+import { replaceValidCards } from '../scan/pii';
 import { extractArgDestinations } from './destinations';
 
 const MASKED_KINDS = new Set(['email', 'iban', 'account']);
@@ -157,9 +158,6 @@ export function entryDisplay(entry: string): string {
 // IBAN-shaped in either case, with optional single spaces or dashes between
 // groups; kept only when the mod-97 checksum holds.
 const IBAN_TEXT_RE = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/gi;
-// Card numbers as the PII detector reads them, kept only when Luhn holds.
-const CARD16_RE = /\b(?:4\d{3}|5[1-5]\d{2}|6\d{3})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g;
-const CARD15_RE = /\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/g;
 const EMAIL_TEXT_RE =
   /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?)*\.\p{L}{2,}/gu;
 // A JSON string value under a key that names an account: the number is a
@@ -169,14 +167,19 @@ const ACCOUNT_KEY_RE =
 // A JSON string value that is IBAN-shaped as a whole: the gate reads it as an
 // account (a sandbox account) even when the checksum fails, so it is masked
 // under any key and inside arrays, when its country is a registered one and
-// its length is that country's.
-const ACCOUNT_VALUE_RE = /"([A-Z]{2}\d{2}[A-Z0-9]{11,30})"/gi;
+// its length is that country's. Uppercase only: with no checksum to hold,
+// a lowercase hex id of the right length ("be12...", 16 characters) would
+// otherwise be masked as an account.
+const ACCOUNT_VALUE_RE = /"([A-Z]{2}\d{2}[A-Z0-9]{11,30})"/g;
 
 /**
- * IBANs (mod-97), card numbers (Luhn), account numbers (a whole IBAN-shaped
- * value, or a number under an account key) and email addresses inside a text, masked the way destinations are. Runs on
- * JSON-stringified arguments too: every replacement keeps the JSON valid
- * (no quote, no backslash is introduced or removed).
+ * IBANs (mod-97), card numbers (exactly what detectPii reports, so not the
+ * fractional part of a number), account numbers (a whole IBAN-shaped value,
+ * or a number under an account key) and email addresses inside a text,
+ * masked the way destinations are. No quote or backslash is introduced or
+ * removed, so a JSON string stays a JSON string; a card written as a bare
+ * JSON number does not stay a number, so arguments go through
+ * maskPersonalValue instead.
  */
 export function maskPersonalData(text: string): string {
   if (!text) return text;
@@ -186,11 +189,7 @@ export function maskPersonalData(text: string): string {
       const v = m.replace(/[ -]/g, '').toUpperCase();
       return validateIban(v) ? `${v.slice(0, 4)} **** **** ${v.slice(-4)}` : m;
     });
-    const card = (m: string) => {
-      const digits = m.replace(/[-\s]/g, '');
-      return validateLuhn(digits) ? `**** **** **** ${digits.slice(-4)}` : m;
-    };
-    out = out.replace(CARD16_RE, card).replace(CARD15_RE, card);
+    out = replaceValidCards(out, (digits) => `**** **** **** ${digits.slice(-4)}`);
     out = out.replace(ACCOUNT_VALUE_RE, (m, v: string) =>
       IBAN_LENGTH[v.slice(0, 2).toUpperCase()] === v.length ? `"****${v.slice(-4)}"` : m
     );
@@ -206,4 +205,53 @@ export function maskPersonalData(text: string): string {
   } catch {
     return text;
   }
+}
+
+const MAX_MASK_DEPTH = 64;
+
+/**
+ * maskPersonalData over a JSON-shaped value (tool arguments), leaf by leaf, so
+ * the result is always a value: a string leaf is masked in its JSON form under
+ * its own key (the account-key and whole-value rules still see both), an
+ * object key is masked as text, and a number whose text holds personal data (a
+ * card passed as a number) becomes the masked string. Anything deeper than 64
+ * levels is replaced by '[REDACTED]'. Pure, never throws.
+ */
+export function maskPersonalValue(value: unknown): unknown {
+  return maskLeaf(value, '', 0);
+}
+
+function maskLeaf(value: unknown, key: string, depth: number): unknown {
+  if (depth > MAX_MASK_DEPTH) return '[REDACTED]';
+  if (typeof value === 'string') {
+    try {
+      const wrapped = JSON.parse(maskPersonalData(JSON.stringify({ [key]: value }))) as Record<
+        string,
+        unknown
+      >;
+      return Object.values(wrapped)[0];
+    } catch {
+      return '[REDACTED]';
+    }
+  }
+  if (typeof value === 'number') {
+    const text = String(value);
+    const masked = maskPersonalData(text);
+    return masked === text ? value : masked;
+  }
+  if (Array.isArray(value)) return value.map((v) => maskLeaf(v, key, depth + 1));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    // defineProperty, not assignment: a parsed `__proto__` key must stay a
+    // plain property, never become the copy's prototype.
+    for (const [k, v] of Object.entries(value))
+      Object.defineProperty(out, maskPersonalData(k), {
+        value: maskLeaf(v, k, depth + 1),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    return out;
+  }
+  return value;
 }

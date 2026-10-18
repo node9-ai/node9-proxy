@@ -11,7 +11,7 @@
 // Best-effort, never throws: a failed record must not fail the hook or the
 // gateway's forward.
 
-import { appendLocalAudit } from '../audit';
+import { appendLocalAudit, appendToLog, HOOK_DEBUG_LOG } from '../audit';
 import { notifySessionExposure } from '../auth/daemon';
 import { markSessionExposed } from './marker';
 
@@ -52,8 +52,15 @@ export async function recordExposureSource(read: ExposureSourceRead): Promise<st
       },
       read.hashArgs
     );
-  } catch {
-    /* the record below still marks the session */
+  } catch (err) {
+    // The marker and the daemon record below still mark the session, but the
+    // held send loses its edge to this read: say so (CLAUDE.md, audit trail).
+    appendToLog(HOOK_DEBUG_LOG, {
+      ts: new Date().toISOString(),
+      event: 'exposure-source-row-fail',
+      tool: read.tool,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   markSessionExposed(read.sessionId);
   await notifySessionExposure(

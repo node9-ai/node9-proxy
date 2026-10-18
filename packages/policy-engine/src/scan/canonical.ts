@@ -699,6 +699,12 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // after a lone 0 ("0,479..."), so histories scanned under v26 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
 
+// 2026-10-18, hash bumped with NO version bump: scan/pii.ts only moved the
+// card loop into validCardRuns and exported replaceValidCards for the
+// personal-data masking (fw#318 code review). detectPii output is identical:
+// 0 of the strings in 984 local session transcripts and 0 of 499,500
+// fractions in four spellings changed.
+
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
 // not detector OUTPUT. Measured the way stage 1 taught: not on the rows the
@@ -727,7 +733,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'b2212912dd9234ec';
+export const CANONICAL_EXTRACTOR_HASH = 'a358f47eacca6e14';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

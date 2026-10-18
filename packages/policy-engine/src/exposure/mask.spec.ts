@@ -11,6 +11,7 @@ import {
   isHashedEntry,
   maskDestination,
   maskPersonalData,
+  maskPersonalValue,
   matchesTrustedEntry,
   matchesTrustedList,
   normalizeTrustedEntry,
@@ -171,5 +172,80 @@ describe('maskPersonalData: tool arguments', () => {
   it('is idempotent', () => {
     const once = maskPersonalData(`dana@acme.example ${IBAN} ${CARD}`);
     expect(maskPersonalData(once)).toBe(once);
+  });
+});
+
+// Code review of the fw#318 fixes: masking shares the PII detector, so it
+// masks exactly what detectPii reports and never the fractional part of a
+// number (node9Firewall#333). Values are computed at run time.
+describe('maskPersonalData: what the PII detector does not call a card', () => {
+  const FRACTIONS: number[] = [];
+  for (let n = 2; n <= 100; n++) for (let k = 1; k < n; k++) FRACTIONS.push(k / n);
+
+  it('instrument: 46/96 has a card-shaped, Luhn-valid fractional part', () => {
+    const frac = String(46 / 96).split('.')[1];
+    expect(maskPersonalData(frac)).not.toBe(frac);
+  });
+  it('leaves every fraction k/n (n <= 100) alone, as JSON and in a string', () => {
+    const changed = FRACTIONS.filter((x) => {
+      const json = JSON.stringify({ rate: x });
+      return maskPersonalData(json) !== json || maskPersonalData(`rate ${x}`) !== `rate ${x}`;
+    });
+    expect(changed.length).toBe(0);
+  });
+  it('still masks a card in the same JSON shape', () => {
+    expect(JSON.parse(maskPersonalData(JSON.stringify({ rate: CARD }))).rate).toBe(
+      '**** **** **** 4242'
+    );
+  });
+  it('a lowercase hex id of an account length is not an account', () => {
+    const hexId = 'be12' + 'a1b2c3d4e5f6';
+    expect(maskPersonalData(JSON.stringify({ trace: hexId }))).toBe(
+      JSON.stringify({ trace: hexId })
+    );
+    // The same value upper-cased is account-shaped for its country (BE, 16).
+    expect(JSON.parse(maskPersonalData(JSON.stringify({ trace: hexId.toUpperCase() }))).trace).toBe(
+      '****E5F6'
+    );
+  });
+});
+
+describe('maskPersonalValue: arguments as a value', () => {
+  it('a fraction stays the same number', () => {
+    expect(maskPersonalValue({ rate: 46 / 96, n: 3 })).toEqual({ rate: 46 / 96, n: 3 });
+  });
+  it('a card passed as a number becomes the masked string, and the value stays JSON', () => {
+    const out = maskPersonalValue({ card: Number(CARD), list: [Number(CARD), 1] });
+    expect(out).toEqual({ card: '**** **** **** 4242', list: ['**** **** **** 4242', 1] });
+    expect(JSON.parse(JSON.stringify(out))).toEqual(out);
+  });
+  it('applies the account-key and whole-value rules to nested leaves', () => {
+    const sandbox = 'GB00' + 'NODE' + '000000' + '12345678';
+    expect(
+      maskPersonalValue({
+        pay: { account: 'TEST00012345678', to: ['x', sandbox], note: 'billing' },
+      })
+    ).toEqual({ pay: { account: '****5678', to: ['x', '****5678'], note: 'billing' } });
+  });
+  it('masks an object key as text', () => {
+    expect(maskPersonalValue({ ['dana@acme.example']: 1 })).toEqual({ 'd***@acme.example': 1 });
+  });
+  it('keeps a parsed __proto__ key a plain property', () => {
+    const out = maskPersonalValue(JSON.parse('{"__proto__":{"to":"dana@acme.example"}}')) as object;
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(out, '__proto__')?.value).toEqual({
+      to: 'd***@acme.example',
+    });
+  });
+  it('replaces what is deeper than 64 levels', () => {
+    let deep: unknown = 'dana@acme.example';
+    for (let i = 0; i < 70; i++) deep = { d: deep };
+    expect(JSON.stringify(maskPersonalValue(deep))).toContain('"[REDACTED]"');
+    expect(JSON.stringify(maskPersonalValue(deep))).not.toContain('dana@');
+  });
+  it('passes null, booleans and plain strings through', () => {
+    expect(maskPersonalValue(null)).toBe(null);
+    expect(maskPersonalValue(true)).toBe(true);
+    expect(maskPersonalValue('hi dana@acme.example')).toBe('hi d***@acme.example');
   });
 });

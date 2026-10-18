@@ -86,6 +86,17 @@ describe('appendAuditLog redaction (on-disk)', () => {
     expect(readAuditLog()[0].args).toEqual({ to: 'd***@acme.example', body: 'hi' });
   });
 
+  // Code review of the fw#318 fixes: masked leaf by leaf, so a card passed as
+  // a number is masked and a fraction is kept (node9Firewall#333).
+  it('masks a card passed as a number and keeps a fraction', () => {
+    state.appendAuditLog({
+      toolName: 'Write',
+      args: { card: Number('4242'.repeat(4)), rate: 46 / 96 },
+      decision: 'allow',
+    });
+    expect(readAuditLog()[0].args).toEqual({ card: '**** **** **** 4242', rate: 46 / 96 });
+  });
+
   it('redacts secrets nested under a __proto__ argument', () => {
     const args = JSON.parse('{"__proto__":{"authToken":"sk-live-abcd"}}') as unknown;
     state.appendAuditLog({ toolName: 'Bash', args, decision: 'allow' });

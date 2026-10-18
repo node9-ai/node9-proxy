@@ -13,6 +13,7 @@ import {
   isMaskedKind,
   maskDestination,
   maskPersonalData,
+  maskPersonalValue,
 } from '@node9/policy-engine';
 
 export interface CloudApprovalResult {
@@ -81,7 +82,9 @@ const KNOWN_CHECKED_BY = new Set([
 export function maskArgsForCloud(args: unknown): unknown {
   if (args === undefined || args === null) return args;
   try {
-    return JSON.parse(maskPersonalData(JSON.stringify(args))) as unknown;
+    // The JSON round trip keeps what the wire would carry (no undefined, a
+    // toJSON applied); a circular value throws and ships as redacted.
+    return maskPersonalValue(JSON.parse(JSON.stringify(args)) as unknown);
   } catch {
     return { redacted: true };
   }

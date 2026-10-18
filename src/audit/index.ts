@@ -7,7 +7,12 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
-import { checkIdForRule, checkIdForCheckedBy, maskPersonalData } from '@node9/policy-engine';
+import {
+  checkIdForRule,
+  checkIdForCheckedBy,
+  maskPersonalData,
+  maskPersonalValue,
+} from '@node9/policy-engine';
 
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 export const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
@@ -66,6 +71,15 @@ export function redactAuditText(text: string): string {
 }
 
 /**
+ * The same for a call's arguments as a value: secrets redacted on the JSON
+ * text, then personal data masked leaf by leaf (maskPersonalValue), so a card
+ * passed as a number cannot leave invalid JSON behind and throw here.
+ */
+export function redactAuditArgs(args: unknown): unknown {
+  return maskPersonalValue(JSON.parse(redactSecrets(JSON.stringify(args))) as unknown);
+}
+
+/**
  * Short, redacted, human-readable preview stored ALONGSIDE argsHash so the
  * dashboard's Action column stays readable in hash mode (the default). The
  * legacy decision-time POST used to send raw redacted args; the shipper
@@ -107,7 +121,7 @@ export function appendHookDebug(
 ): void {
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args) }
-    : { args: args ? JSON.parse(redactAuditText(JSON.stringify(args))) : {} };
+    : { args: args ? redactAuditArgs(args) : {} };
   appendToLog(HOOK_DEBUG_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
@@ -251,7 +265,7 @@ export function appendLocalAudit(
   const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args), ...(preview ? { argsPreview: preview } : {}) }
-    : { args: args ? JSON.parse(redactAuditText(JSON.stringify(args))) : {} };
+    : { args: args ? redactAuditArgs(args) : {} };
   const testRun =
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
   const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};
