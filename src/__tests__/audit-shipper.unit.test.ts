@@ -138,15 +138,31 @@ describe('buildWireRows', () => {
     expect(rows[0].args).toBeUndefined();
   });
 
-  it('fw#318 2b: forwards exposure counts and the read-to-send edge; drops a malformed one', () => {
+  // fw#318 review F2: a read of outside content stays in the local log; only
+  // the held send (with its edge) and the logged count are shipped.
+  it('fw#318: skips the read row, forwards the edge and the count; drops a malformed one', () => {
     const content =
       row({ checkedBy: 'exposure-source', exposure: { kind: 'source', destinations: 2 } }) +
       row({ checkedBy: 'inline-review', ruleName: 'exposure', exposureFromEid: 'evt-read-1' }) +
+      row({ exposure: { kind: 'logged', destinations: 1 } }) +
       row({ exposure: { kind: 'bogus', destinations: 'x' } });
     const { rows } = buildWireRows(Buffer.from(content));
-    expect(rows[0]).toMatchObject({ exposure: { kind: 'source', destinations: 2 } });
-    expect(rows[1]).toMatchObject({ exposureFromEid: 'evt-read-1' });
+    expect(rows).toHaveLength(3);
+    expect(rows.some((r) => r.checkedBy === 'exposure-source')).toBe(false);
+    expect(rows[0]).toMatchObject({ exposureFromEid: 'evt-read-1' });
+    expect(rows[1]).toMatchObject({ exposure: { kind: 'logged', destinations: 1 } });
     expect(rows[2].exposure).toBeUndefined();
+  });
+
+  // fw#318 review P1: rows written before the audit writer masked personal
+  // data are masked on the way out.
+  it('fw#318: masks personal data in args and previews already in the log', () => {
+    const content =
+      row({ args: { to: 'dana@acme.example', body: 'hi' } }) +
+      row({ args: undefined, argsHash: 'h1', argsPreview: 'mail dana@acme.example' });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0].args).toEqual({ to: 'd***@acme.example', body: 'hi' });
+    expect(rows[1].argsPreview).toBe('mail d***@acme.example');
   });
 
   it('carries the redacted preview for hash-mode rows (dashboard readability)', () => {

@@ -19,9 +19,11 @@ export interface ResultScanConfig {
   /** fw#318 spotlight: frame EVERY result as data from this kind of source
    *  ('email', 'web page', ...). Undefined keeps the detection-only framing. */
   spotlight?: string;
-  /** fw#328 step 1: the result is from a #318 source, so the injection
-   *  scanner treats it as outside content (the bare tool name the gateway
-   *  sees never matches the scanner's own list of web tools). */
+  /** fw#328 step 1: true when the result is from a #318 source, so the
+   *  injection scanner treats it as outside content (the bare tool name the
+   *  gateway sees never matches the scanner's own list of web tools); false
+   *  for a tool the admin marked `read` (review F6); undefined leaves it to
+   *  the scanner. */
   untrusted?: boolean;
 }
 
@@ -130,7 +132,7 @@ export function scanToolResult(
   if (inj.enabled && !inj.allow.includes(tool) && texts.length > 0) {
     const m = scanInjection(texts.join('\n'), {
       tool,
-      ...(cfg.untrusted ? { untrusted: true } : {}),
+      ...(cfg.untrusted !== undefined ? { untrusted: cfg.untrusted } : {}),
     });
     if (m && CONFIDENCE_RANK[m.confidence] >= CONFIDENCE_RANK[inj.minConfidence]) {
       injection = m;

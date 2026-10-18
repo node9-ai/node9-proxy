@@ -17,14 +17,17 @@
 // \b on both sides, so a digit immediately before or after the number
 // defeats them, exactly as it did before Luhn was added.
 //
-// An unseparated card-shaped run that directly follows `<digit>.` is not a
-// card. A `.` is a word boundary, so without that rule the fractional part of
-// a float printed at full precision (16 or 17 digits after `0.`) is read as a
-// card, and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass Luhn
-// (node9Firewall#333). The rule lives in hasValidCard, not in the regexes, so
-// they stay lookbehind-free (safe-regex2, house style). Accepted gap: an
-// unseparated card written directly after a digit and a dot ("1.<card>") is
-// not detected; a grouped one still is, since a fraction has no separators.
+// An unseparated card-shaped run that is the fractional part of a number is
+// not a card: after `<digit>.`, after a leading `.` (".479..."), or after a
+// lone `0,` (comma decimal). A `.` and a `,` are word boundaries, so without
+// that rule a float printed at full precision (16 or 17 fractional digits) is
+// read as a card, and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass
+// Luhn in each spelling (node9Firewall#333). The rule lives in hasValidCard
+// (isDecimalFraction), not in the regexes, so they stay lookbehind-free
+// (safe-regex2, house style). Accepted gaps: an unseparated card written
+// directly after "1.", ".", or a standalone "0," is not detected; a grouped
+// one still is, since a fraction has no separators. A comma decimal above 1
+// ("12,479...") is still read as a card: "1,<run>" is a CSV row.
 //
 // This file is part of the extractor-version hash set
 // (scripts/check-extractor-version.mjs): editing it changes detector output.
@@ -59,16 +62,20 @@ const PII_CC15_RE = /\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b/;
 const PII_IBAN_RE = /\b[A-Z]{2}\d{2}(?:[A-Z0-9]|[ -][A-Z0-9]){11,30}\b/;
 
 /**
- * True if `text` contains at least one card-shaped run that also passes Luhn.
+ * Every card-shaped run in `text` that the detector accepts for one pattern:
+ * not the fractional part of a number (isDecimalFraction) and passing Luhn.
+ * Shared by hasValidCard and replaceValidCards, so detection and the masking
+ * in exposure/mask.ts cannot drift apart.
  *
  * Two properties matter here and both were found by adversarial review:
  *
- * 1. OVERLAPPING search. On a Luhn failure the scan resumes at m.index + 1,
+ * 1. OVERLAPPING search. On a rejected match the scan resumes at m.index + 1,
  *    not after the failed match. Otherwise a decoy 4-digit token directly in
  *    front of a real card ("4000 <valid visa>") is consumed together with the
  *    card's first three groups, fails Luhn, and the real card is never seen.
  *    The leading \b means the retry only lands on the next word boundary, so
  *    the cost is one extra exec per failed window, not one per character.
+ *    An accepted run resumes after its end.
  *
  * 2. NO module-level /g regex. A shared global regex carries lastIndex across
  *    calls and the repo's house style is `.test()` on module-level regexes,
@@ -76,30 +83,77 @@ const PII_IBAN_RE = /\b[A-Z]{2}\d{2}(?:[A-Z0-9]|[ -][A-Z0-9]){11,30}\b/;
  *    ~70 ns (V8 caches compiled patterns by source+flags) and cannot be
  *    misused.
  */
-function hasValidCard(text: string): boolean {
-  for (const base of [PII_CC16_RE, PII_CC15_RE]) {
-    const re = new RegExp(base.source, 'g');
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      const digits = m[0].replace(/\D/g, '');
-      if (!isDecimalFraction(text, m.index, digits.length === m[0].length)) {
-        if (validateLuhn(digits)) return true;
-      }
+function* validCardRuns(
+  text: string,
+  base: RegExp
+): Generator<{ index: number; length: number; digits: string }> {
+  const re = new RegExp(base.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const digits = m[0].replace(/\D/g, '');
+    if (!isDecimalFraction(text, m.index, digits.length === m[0].length) && validateLuhn(digits)) {
+      yield { index: m.index, length: m[0].length, digits };
+    } else {
       re.lastIndex = m.index + 1;
     }
+  }
+}
+
+/** True if `text` contains at least one card the detector accepts. */
+function hasValidCard(text: string): boolean {
+  for (const base of [PII_CC16_RE, PII_CC15_RE]) {
+    if (!validCardRuns(text, base).next().done) return true;
   }
   return false;
 }
 
 /**
+ * Replace every card the detector accepts with `replace(digits)`, the 16-digit
+ * pattern first, then the 15-digit one on the result. Used by the personal
+ * data masking (exposure/mask.ts) so it masks exactly what detectPii reports.
+ */
+export function replaceValidCards(text: string, replace: (digits: string) => string): string {
+  let out = text;
+  for (const base of [PII_CC16_RE, PII_CC15_RE]) {
+    let res = '';
+    let last = 0;
+    for (const run of validCardRuns(out, base)) {
+      res += out.slice(last, run.index) + replace(run.digits);
+      last = run.index + run.length;
+    }
+    out = res + out.slice(last);
+  }
+  return out;
+}
+
+// Characters that may stand directly before a number written with a leading
+// separator (".479...") or before the lone `0` of a comma decimal ("0,479...").
+// Letters, digits, `.` and `,` are deliberately absent, so "card.<run>",
+// "...<run>" and a CSV row "5,0,<run>" stay detectable.
+const NUMBER_LEAD_RE = /[\s:=;([{"'+-]/;
+
+/**
  * True if an unseparated digit run at `index` is the fractional part of a
- * number: it directly follows `<digit>.` (node9Firewall#333). A grouped run
- * ("4xxx 4xxx ...") is never a fraction, so it is not exempt.
+ * number (node9Firewall#333). Three spellings are recognised:
+ *   `<digit>.<run>`  "0.479...", "12.479..."  (JavaScript, Python, JSON)
+ *   `.<run>`         ".479..." at the start of the text or after NUMBER_LEAD_RE
+ *   `0,<run>`        "0,479..." with the `0` standing alone (comma decimal)
+ * A grouped run ("4xxx 4xxx ...") is never a fraction, so it is not exempt.
+ * A comma after any other digit is NOT exempt: "1,<run>" is a CSV row.
  */
 function isDecimalFraction(text: string, index: number, unseparated: boolean): boolean {
-  if (!unseparated || text[index - 1] !== '.') return false;
-  const before = text.charCodeAt(index - 2);
-  return before >= 48 && before <= 57;
+  if (!unseparated) return false;
+  const sep = text[index - 1];
+  const a = text[index - 2]; // undefined at the start of the text
+  if (sep === '.') {
+    if (a !== undefined && a >= '0' && a <= '9') return true;
+    return a === undefined || NUMBER_LEAD_RE.test(a);
+  }
+  if (sep === ',' && a === '0') {
+    const b = text[index - 3];
+    return b === undefined || NUMBER_LEAD_RE.test(b);
+  }
+  return false;
 }
 
 /** Same overlapping-search shape as hasValidCard; validateIban strips formatting itself. */

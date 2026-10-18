@@ -8,7 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { extractArgDestinations } from '@node9/policy-engine';
+import { normalizeRecipient } from '@node9/policy-engine';
 
 export interface TrustedRecipientEntry {
   value: string;
@@ -44,24 +44,10 @@ function writeTrustedRecipients(entries: TrustedRecipientEntry[]): void {
   fs.renameSync(tmp, filePath);
 }
 
-/**
- * Normalise a user-typed value to the stored form. An address becomes
- * `email:`, an IBAN `iban:`, a URL or hostname `host:`. Returns null when the
- * value is not one of those three (a bare word, a domain without a host part
- * is still a host, which is fine: it is exact, not a wildcard).
- */
-export function normalizeRecipient(raw: string): string | null {
-  const v = raw.trim();
-  if (!v) return null;
-  if (/^(email|host|iban):/i.test(v)) {
-    const i = v.indexOf(':');
-    const kind = v.slice(0, i).toLowerCase();
-    const inner = normalizeRecipient(v.slice(i + 1));
-    return inner && inner.startsWith(`${kind}:`) ? inner : null;
-  }
-  const found = extractArgDestinations({ to: v });
-  return found.length === 1 ? found[0] : null;
-}
+// The stored form of a typed value (an address `email:`, an IBAN `iban:`, a
+// URL or hostname `host:`, `account:<number>`) is the engine's, shared with
+// the dashboard's mirror.
+export { normalizeRecipient };
 
 /** Add a value. Returns the stored form, or null when it is not a destination. */
 export function addTrustedRecipient(

@@ -91,8 +91,9 @@ import {
   getCloudRules,
   extractRules,
   pushScanSnapshot,
+  personalTrustedRecipients,
 } from '../daemon/sync.js';
-import { CANONICAL_EXTRACTOR_VERSION } from '@node9/policy-engine';
+import { CANONICAL_EXTRACTOR_VERSION, trustedEntryOf } from '@node9/policy-engine';
 import { getConfig, _resetConfigCache, __resetRulesCacheStateForTest } from '../core.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -773,8 +774,51 @@ describe('getConfig — cloud-pushed runtime flags', () => {
         },
       }),
     });
+    // Stored in the entry form the dashboard uses (masked with its hash).
     expect(getConfig().policy.untrustedContent.trustedRecipients).toEqual([
-      'email:press@news.example',
+      trustedEntryOf('email:press@news.example'),
+      'host:drop.example',
+    ]);
+  });
+
+  // fw#318 review F4: the dashboard stores masked kinds as '<masked>#sha256:<hex>';
+  // the merge keeps them (the gate matches by hash) and keeps an account entry.
+  it('fw#318: managed hashed entries and accounts are kept; a broken hash is dropped', () => {
+    const entry = trustedEntryOf('email:dana@acme.example');
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({ settings: { mode: 'standard' } }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-10-18T00:00:00.000Z',
+        rules: [],
+        managedConfig: {
+          locked: [],
+          untrustedContent: {
+            trustedRecipients: [
+              entry.replace(/[0-9a-f]{64}$/, (h) => h.toUpperCase()),
+              'account:test 00012345678',
+              'email:d***@acme.example#sha256:xyz',
+            ],
+          },
+        },
+      }),
+    });
+    expect(getConfig().policy.untrustedContent.trustedRecipients).toEqual([
+      entry,
+      trustedEntryOf('account:TEST00012345678'),
+    ]);
+  });
+
+  it('fw#318: the snapshot ships the personal list masked, with the hash it matches by', () => {
+    mockFiles({
+      [path.join(MOCK_HOME, '.node9', 'trusted-recipients.json')]: JSON.stringify({
+        entries: [
+          { value: 'email:dana@acme.example', addedAt: 0, addedBy: 'approval' },
+          { value: 'host:drop.example', addedAt: 0, addedBy: 'user' },
+        ],
+      }),
+    });
+    expect(personalTrustedRecipients().map((e) => e.value)).toEqual([
+      trustedEntryOf('email:dana@acme.example'),
       'host:drop.example',
     ]);
   });

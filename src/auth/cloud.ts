@@ -7,6 +7,14 @@ import { type RiskMetadata } from '../context-sniper';
 import { HOOK_DEBUG_LOG } from '../audit';
 import { safeMessage } from '../utils/safe-text';
 import { readCappedText } from '../utils/read-capped';
+import {
+  destinationValue,
+  hashDestination,
+  isMaskedKind,
+  maskDestination,
+  maskPersonalData,
+  maskPersonalValue,
+} from '@node9/policy-engine';
 
 export interface CloudApprovalResult {
   approved: boolean;
@@ -19,6 +27,8 @@ export interface CloudApprovalResult {
 // when upstream redaction is incomplete.
 const DLP_SAMPLE_MAX_LEN = 200;
 const DLP_PATTERN_MAX_LEN = 100;
+// The riskMetadata arrays the SaaS schema declares (fw#318 2b, review F4).
+const CLOUD_ARRAY_KEYS = new Set(['exposureDestinations', 'exposureDestinationHashes']);
 
 // Known checkedBy values emitted by the orchestrator. Anything outside this
 // set is normalized to 'unknown' before transmission — defends against log
@@ -60,6 +70,50 @@ const KNOWN_CHECKED_BY = new Set([
   'mcp-discovered',
   'mcp-large-response',
 ]);
+
+/**
+ * fw#318 review P1/F4: personal data never reaches the SaaS in full. A call's
+ * arguments are masked like an audit row; every string in riskMetadata (the
+ * review sentence names where the call sends) has each held destination
+ * replaced by its masked form, then the free-text masks applied; the
+ * destinations travel masked, with a SHA-256 per masked kind ('' for a host)
+ * so "Approve and trust" can match them later.
+ */
+export function maskArgsForCloud(args: unknown): unknown {
+  if (args === undefined || args === null) return args;
+  try {
+    // The JSON round trip keeps what the wire would carry (no undefined, a
+    // toJSON applied); a circular value throws and ships as redacted.
+    return maskPersonalValue(JSON.parse(JSON.stringify(args)) as unknown);
+  } catch {
+    return { redacted: true };
+  }
+}
+
+export function maskRiskMetadataForCloud<T extends object>(rm: T): T {
+  const r = rm as Record<string, unknown>;
+  const dests = Array.isArray(r.exposureDestinations)
+    ? (r.exposureDestinations as unknown[]).filter((d): d is string => typeof d === 'string')
+    : [];
+  // Longest first, so a value that contains another is replaced whole.
+  const swaps = dests
+    .filter(isMaskedKind)
+    .map((d) => [destinationValue(d), destinationValue(maskDestination(d))] as const)
+    .filter(([full]) => full.length > 0)
+    .sort((a, b) => b[0].length - a[0].length);
+  const maskText = (text: string): string => {
+    let out = text;
+    for (const [full, masked] of swaps) out = out.split(full).join(masked);
+    return maskPersonalData(out);
+  };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(r)) out[k] = typeof v === 'string' ? maskText(v) : v;
+  if (dests.length > 0) {
+    out.exposureDestinations = dests.map(maskDestination);
+    out.exposureDestinationHashes = dests.map((d) => (isMaskedKind(d) ? hashDestination(d) : ''));
+  }
+  return out as T;
+}
 
 /**
  * The apiUrl pin, re-exported so existing importers keep working.
@@ -124,7 +178,9 @@ export function auditLocalAllow(
     return Promise.resolve();
   }
 
-  const safeArgs = containsSensitiveArgs ? { tool: toolName, redacted: true } : args;
+  const safeArgs = containsSensitiveArgs
+    ? { tool: toolName, redacted: true }
+    : maskArgsForCloud(args);
   const dlpSample =
     dlpInfo && typeof dlpInfo.redactedSample === 'string'
       ? dlpInfo.redactedSample.slice(0, DLP_SAMPLE_MAX_LEN)
@@ -139,12 +195,12 @@ export function auditLocalAllow(
   // doesn't reject the payload. Only forward keys that have a real value.
   const cleanedRiskMetadata = riskMetadata
     ? Object.fromEntries(
-        Object.entries(riskMetadata).filter(
+        Object.entries(maskRiskMetadataForCloud(riskMetadata)).filter(
           ([k, v]) =>
             (typeof v === 'string' && v.length > 0) ||
             (typeof v === 'number' && Number.isFinite(v)) ||
-            // fw#318 2b: the one array the SaaS schema declares.
-            (k === 'exposureDestinations' && Array.isArray(v) && v.length > 0)
+            // fw#318 2b: the arrays the SaaS schema declares.
+            (CLOUD_ARRAY_KEYS.has(k) && Array.isArray(v) && v.length > 0)
         )
       )
     : undefined;
@@ -243,7 +299,12 @@ export async function initNode9SaaS(
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${creds.apiKey}` },
       body: JSON.stringify({
         toolName,
-        args,
+        // Masked (fw#318 review P1). The SaaS runs the workspace's cloud
+        // rules on these args too: a condition on a full address, IBAN or
+        // account no longer matches there; one on a domain still does. The
+        // same rules sync to this machine and are enforced locally on the
+        // full values, so the local verdict is unchanged (founder, 2026-10-18).
+        args: maskArgsForCloud(args),
         // See auditLocalAllow above for the rationale on these two fields.
         ...(meta?.sessionId && { runId: meta.sessionId }),
         ...(meta?.transcriptPath && { transcriptPath: meta.transcriptPath }),
@@ -257,11 +318,11 @@ export async function initNode9SaaS(
         // The SaaS validates riskMetadata strictly and would drop it whole on
         // an unknown key, so only fields its schema declares go on the wire.
         // exposureDestinations ships since the dashboard's 2b contract
-        // (fw#318): "Approve and trust" needs them.
+        // (fw#318): "Approve and trust" needs them, masked with their hashes.
         ...(riskMetadata && {
           riskMetadata: Object.fromEntries(
-            Object.entries(riskMetadata).filter(
-              ([k, v]) => !Array.isArray(v) || k === 'exposureDestinations'
+            Object.entries(maskRiskMetadataForCloud(riskMetadata)).filter(
+              ([k, v]) => !Array.isArray(v) || CLOUD_ARRAY_KEYS.has(k)
             )
           ),
         }),

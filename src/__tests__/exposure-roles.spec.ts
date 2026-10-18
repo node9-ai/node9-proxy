@@ -5,7 +5,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { toolRole, resolveToolAnnotations, _resetRolesCache } from '../exposure/roles';
+import {
+  toolRole,
+  resolveToolAnnotations,
+  _resetRolesCache,
+  configuredRole,
+  injectionOrigin,
+} from '../exposure/roles';
 import { updateServerDiscovery, readMcpToolsConfig } from '../daemon/mcp-tools';
 
 const POLICY = {
@@ -144,5 +150,36 @@ describe('agent-internal servers', () => {
       source: true,
       action: false,
     });
+  });
+});
+
+// Code review of the fw#318 fixes (finding 6): the gate (toolRole) and the
+// injection scanner (injectionOrigin) read a configured role through one
+// lookup, so they agree for every role and every spelling of the tool name.
+describe('configuredRole: one lookup for the gate and the scanner', () => {
+  const roles = { gmail: { fetch_page: 'read' as const, send: 'action' as const } };
+  const policy = { ...POLICY, roles };
+
+  it('finds the role as written and lower-cased, undefined otherwise', () => {
+    expect(configuredRole({ server: 'gmail', bare: 'fetch_page' }, policy)).toBe('read');
+    expect(configuredRole({ server: 'gmail', bare: 'Fetch_Page' }, policy)).toBe('read');
+    expect(configuredRole({ server: 'gmail', bare: 'other' }, policy)).toBeUndefined();
+    expect(configuredRole({ server: 'slack', bare: 'fetch_page' }, policy)).toBeUndefined();
+  });
+
+  it('a tool the gate reads as `read` is trusted by the scanner, in either case', () => {
+    for (const name of ['mcp__gmail__fetch_page', 'mcp__gmail__Fetch_Page']) {
+      expect(toolRole(name, policy)).toEqual({ source: false, action: false });
+      expect(injectionOrigin(name, policy, false)).toEqual({ untrusted: false });
+    }
+  });
+
+  it('any other role leaves the scanner to its own list', () => {
+    expect(injectionOrigin('mcp__gmail__send', policy, false)).toEqual({});
+    expect(injectionOrigin('mcp__gmail__other', policy, false)).toEqual({});
+    expect(injectionOrigin('mcp__gmail__other', policy, true)).toEqual({ untrusted: true });
+    expect(injectionOrigin('mcp__gmail__fetch_page', { ...policy, enabled: false }, false)).toEqual(
+      {}
+    );
   });
 });

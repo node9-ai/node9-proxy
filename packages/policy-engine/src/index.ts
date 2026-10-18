@@ -180,6 +180,23 @@ export {
   gitRepoPath,
   MAX_DESTINATIONS,
 } from './exposure/destinations';
+// Personal data outside the machine: masked destinations, their hashes, the
+// trusted-entry form, and masking inside free text (fw#318 review F4/P1).
+export {
+  normalizeDestination,
+  maskDestination,
+  isMaskedKind,
+  hashDestination,
+  isHashedEntry,
+  trustedEntryOf,
+  matchesTrustedEntry,
+  matchesTrustedList,
+  normalizeRecipient,
+  normalizeTrustedEntry,
+  entryDisplay,
+  maskPersonalData,
+  maskPersonalValue,
+} from './exposure/mask';
 export type { ShellExposure } from './exposure/shell';
 export { classifyShellExposure } from './exposure/shell';
 

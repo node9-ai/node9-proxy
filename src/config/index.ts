@@ -1,4 +1,3 @@
-import { normalizeRecipient } from '../auth/trusted-recipients';
 import type { ToolInspection } from '@node9/policy-engine';
 // src/config/index.ts
 // Config types, constants, and runtime config loading.
@@ -41,7 +40,7 @@ import {
   type Verdict,
 } from '@node9/policy-engine';
 import { isV2File, v2ToLegacy } from './v2';
-import { classifySsrf } from '@node9/policy-engine';
+import { classifySsrf, normalizeTrustedEntry } from '@node9/policy-engine';
 // The trusted shield catalog. A cloud-mandated shield resolves its body from
 // here directly, never a user ~/.node9/shields/<name>.json that shadows the
 // builtin (B1: a mandate's rules must come from the fleet, not the dev's file).
@@ -2260,7 +2259,7 @@ function applyUntrustedContent(
       ...new Set(
         uc.trustedRecipients
           .filter((v): v is string => typeof v === 'string')
-          .map((v) => normalizeRecipient(v))
+          .map((v) => normalizeTrustedEntry(v))
           .filter((v): v is string => v !== null)
       ),
     ].slice(0, 200);

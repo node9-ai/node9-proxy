@@ -109,6 +109,20 @@ export function splitMcpToolName(toolName: string): { server: string; bare: stri
 }
 
 /**
+ * The role an admin configured for an MCP tool (`roles[server][tool]`), with
+ * the tool name as written or lower-cased; undefined when none is set. The
+ * one lookup toolRole and injectionOrigin share, so the gate and the
+ * injection scanner always read the same role.
+ */
+export function configuredRole(
+  mcp: { server: string; bare: string },
+  policy: Config['policy']['untrustedContent']
+): 'source' | 'action' | 'read' | undefined {
+  const server = policy.roles[mcp.server];
+  return server?.[mcp.bare] ?? server?.[mcp.bare.toLowerCase()];
+}
+
+/**
  * The role of a tool as the hook names it.
  *
  * - a `roles[server][tool]` entry wins outright;
@@ -121,7 +135,7 @@ export function toolRole(toolName: string, policy: Config['policy']['untrustedCo
   const mcp = splitMcpToolName(toolName);
   const bare = (mcp ? mcp.bare : toolName).toLowerCase();
   if (mcp) {
-    const configured = policy.roles[mcp.server]?.[mcp.bare] ?? policy.roles[mcp.server]?.[bare];
+    const configured = configuredRole(mcp, policy);
     if (configured === 'source') return { source: true, action: false };
     if (configured === 'action') return { source: false, action: true };
     if (configured === 'read') return { source: false, action: false };
@@ -136,6 +150,25 @@ export function toolRole(toolName: string, policy: Config['policy']['untrustedCo
     return { source: true, action: true, destructive: ann?.destructiveHint === true };
   }
   return { source: BUILTIN_SOURCES.has(bare), action: false };
+}
+
+/**
+ * The injection scanner's origin, from the source decision (fw#328, review
+ * F6). With untrustedContent on, a source read is outside content to the
+ * scanner too, and a tool the admin marked `read` is trusted by it (no
+ * outside-origin booster, whatever its name says). Anything else, and
+ * everything with untrustedContent off, is left to the scanner's own list.
+ */
+export function injectionOrigin(
+  toolName: string,
+  policy: Config['policy']['untrustedContent'] | undefined,
+  sourceRead: boolean
+): { untrusted?: boolean } {
+  if (!policy?.enabled) return {};
+  if (sourceRead) return { untrusted: true };
+  const mcp = splitMcpToolName(toolName);
+  if (!mcp) return {};
+  return configuredRole(mcp, policy) === 'read' ? { untrusted: false } : {};
 }
 
 /** The word for what a shell fetch read, from the classifier's fetch kinds. */
