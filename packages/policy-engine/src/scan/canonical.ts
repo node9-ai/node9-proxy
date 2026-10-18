@@ -694,7 +694,10 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // command, so histories scanned under v25 re-read.
 // The two new context patterns (`Credential in URL Query`, `Assigned Secret`)
 // are argumentsOnly: the live gate reviews them, scanArgs here does not.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v26';
+// canonical-v27 (node9Firewall#333 follow-up): the card detector also skips
+// a fraction written with a leading dot (".479...") or as a comma decimal
+// after a lone 0 ("0,479..."), so histories scanned under v26 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -724,7 +727,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v26';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'dec8c65145686360';
+export const CANONICAL_EXTRACTOR_HASH = 'b2212912dd9234ec';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

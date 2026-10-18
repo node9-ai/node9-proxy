@@ -163,6 +163,29 @@ describe('detectPii — decimal fractions are not cards (#333)', () => {
     );
     expect(flagged.length).toBe(0);
   });
+  it('sweep: 0 of 4,950 fractions are flagged with a leading dot or a comma decimal', () => {
+    const flagged = FRACTIONS.filter((x) => {
+      const frac = fractionDigits(x);
+      return (
+        hasCard('.' + frac) ||
+        hasCard('rate: -.' + frac) ||
+        hasCard('0,' + frac) ||
+        hasCard('rate 0,' + frac + ' done') ||
+        hasCard('a;0,' + frac + ';b')
+      );
+    });
+    expect(flagged.length).toBe(0);
+  });
+  it('every number-lead character exempts a leading-dot and a comma-decimal fraction', () => {
+    const frac = fractionDigits(46 / 96);
+    for (const lead of [' ', '\t', '\n', ':', '=', ';', '(', '[', '{', '"', "'", '+', '-']) {
+      expect(hasCard('x' + lead + '.' + frac), JSON.stringify(lead)).toBe(false);
+      expect(hasCard('x' + lead + '0,' + frac), JSON.stringify(lead)).toBe(false);
+    }
+  });
+  it('a comma decimal above 1 is still read as a card (accepted gap, pinned)', () => {
+    expect(hasCard('12,' + fractionDigits(46 / 96))).toBe(true);
+  });
   it('a real card in the same JSON shape still IS a card', () => {
     expect(hasCard(JSON.stringify({ catch_rate: asm(VALID_16[0].parts) }, null, 2))).toBe(true);
     expect(hasCard(JSON.stringify({ catch_rate: asm(VALID_15[0].parts) }, null, 2))).toBe(true);
