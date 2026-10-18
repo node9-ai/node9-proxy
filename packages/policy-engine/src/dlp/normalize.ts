@@ -11,6 +11,12 @@
 /** Invisible code points that split a word without changing how it reads. */
 const INVISIBLE_RE = /[­͏؜᠎​-‏‪-‮⁠-⁤⁪-⁯﻿︀-️]|[\u{E0000}-\u{E007F}]/gu;
 
+/** True for one invisible code unit `stripInvisible` removes (BMP set; tag characters are surrogate pairs). */
+export function isInvisibleChar(char: string): boolean {
+  return INVISIBLE_ONE.test(char);
+}
+const INVISIBLE_ONE = new RegExp(`^(?:${INVISIBLE_RE.source.split('|')[0]})$`, 'u');
+
 /** Remove zero-width and other invisible code points. */
 export function stripInvisible(text: string): string {
   return text.replace(INVISIBLE_RE, '');

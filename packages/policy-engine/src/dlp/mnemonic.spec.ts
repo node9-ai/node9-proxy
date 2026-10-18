@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { BIP39_ENGLISH } from './bip39-english';
-import { findMnemonic } from './mnemonic';
+import { findMnemonic, MAX_MNEMONIC_HASHES } from './mnemonic';
 import { scanArgumentSecrets } from './arguments';
 
 function fixture(bytes: number, label = 'node9 synthetic mnemonic fixture'): string {
@@ -58,8 +58,14 @@ describe('English BIP-39 argument detection', () => {
     expect(JSON.stringify(hit)).not.toContain(phrase);
   });
   it('reports exhaustion to the argument scanner instead of declaring a clean scan', () => {
-    const budget = { candidates: 1024, reasons: new Set<string>() };
+    const budget = { hashes: MAX_MNEMONIC_HASHES, reasons: new Set<string>() };
     expect(findMnemonic(fixture(16), budget)).toBe(false);
-    expect(budget.reasons.has('mnemonic-candidates')).toBe(true);
+    expect(budget.reasons.has('mnemonic-budget')).toBe(true);
+  });
+  // fw#338 review 3 (B5): the word list itself, or any ordered slice of it.
+  it('does not read the word list in its own order as a phrase', () => {
+    expect(findMnemonic(BIP39_ENGLISH.join('\n'))).toBe(false);
+    expect(findMnemonic(BIP39_ENGLISH.slice(100, 140).join(' '))).toBe(false);
+    expect(findMnemonic('the words are ' + fixture(16) + ' in a sentence')).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import type { ToolInspection, DlpMatch } from '@node9/policy-engine';
+import type { InspectionInput, InspectionLayers, DlpMatch } from '@node9/policy-engine';
 // src/policy/index.ts
 // Host wrapper around @node9/policy-engine.
 //
@@ -27,6 +27,8 @@ import {
   analyzeShellCommand,
   resolveShellInput,
   shellRuleArgs,
+  inspectionEntry,
+  inspectionLayers,
   type PolicyVerdict,
 } from '@node9/policy-engine';
 
@@ -61,7 +63,7 @@ export async function evaluatePolicy(
 ): Promise<PolicyVerdict> {
   const config = opts?.config ?? getConfig(cwd);
   const prepared =
-    opts?.fileAccess ?? prepareFileAccesses(toolName, args, cwd, config.policy.toolInspection);
+    opts?.fileAccess ?? prepareFileAccesses(toolName, args, cwd, inspectionLayers(config.policy));
   const activeEnvironment = getActiveEnvironment(config) ?? undefined;
   return engineEvaluatePolicy(
     config,
@@ -131,13 +133,16 @@ function tokenize(toolName: string): string[] {
 function explainExtractShellCommand(
   toolName: string,
   args: unknown,
-  toolInspection: ToolInspection
+  toolInspection: InspectionLayers
 ): { command: string | null; matchingPattern: string | undefined; fieldName: string } {
   const shell = resolveShellInput(toolName, args, toolInspection);
-  const matchingPattern = Object.keys(toolInspection).find((p) => matchesPattern(toolName, p));
+  const matchingPattern = [
+    ...Object.keys(toolInspection.trusted),
+    ...Object.keys(toolInspection.project ?? {}),
+  ].find((p) => matchesPattern(toolName, p));
   // Legacy non-shell mappings (notably SQL) still supply tokens for explain.
   // Do not use this fallback for an ambiguous or malformed shell invocation.
-  const entry = matchingPattern === undefined ? undefined : toolInspection[matchingPattern];
+  const entry = inspectionEntry(toolName, toolInspection);
   const legacyValue =
     shell.kind === 'not-shell' && typeof entry === 'string' ? getNestedValue(args, entry) : null;
   return {
@@ -149,11 +154,8 @@ function explainExtractShellCommand(
   };
 }
 
-function explainIsSqlTool(toolName: string, toolInspection: ToolInspection): boolean {
-  const patterns = Object.keys(toolInspection);
-  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
-  if (!matchingPattern) return false;
-  const fieldName = toolInspection[matchingPattern];
+function explainIsSqlTool(toolName: string, toolInspection: InspectionInput): boolean {
+  const fieldName = inspectionEntry(toolName, toolInspection);
   return fieldName === 'sql' || fieldName === 'query';
 }
 
@@ -181,7 +183,12 @@ export async function explainPolicy(
   agent: string = EXPLAIN_AGENT
 ): Promise<ExplainResult> {
   const config = getConfig();
-  const prepared = prepareFileAccesses(toolName, args, process.cwd(), config.policy.toolInspection);
+  const prepared = prepareFileAccesses(
+    toolName,
+    args,
+    process.cwd(),
+    inspectionLayers(config.policy)
+  );
   const derived = await deriveExplainTrace(toolName, args, prepared);
   const engine = await evaluatePolicy(toolName, args, agent, prepared.cwd, {
     fileAccess: prepared,
@@ -233,6 +240,7 @@ async function deriveExplainTrace(
   const credsPath = path.join(os.homedir(), '.node9', 'credentials.json');
 
   const config = getConfig();
+  const layers = inspectionLayers(config.policy);
   // I4: the waterfall must tell the PR-2 truth. On a workspace-governed
   // machine the local tiers exist on disk but are inert for policy, and the
   // env-var mode override is ignored too — labeling them 'active' would
@@ -349,11 +357,8 @@ async function deriveExplainTrace(
     // teaches the user the gate is wrong (/code-review round 3).
     const matchedRule = config.policy.smartRules.find(
       (rule) =>
-        toolMatchesRule(toolName, rule.tool, config.policy.toolInspection) &&
-        evaluateSmartConditions(
-          shellRuleArgs(toolName, args, rule.tool, config.policy.toolInspection),
-          rule
-        )
+        toolMatchesRule(toolName, rule.tool, layers) &&
+        evaluateSmartConditions(shellRuleArgs(toolName, args, rule.tool, layers), rule)
     );
     if (matchedRule) {
       const label = `Smart Rule: ${matchedRule.name ?? matchedRule.tool}`;
@@ -398,7 +403,7 @@ async function deriveExplainTrace(
     command: shellCommand,
     matchingPattern,
     fieldName,
-  } = explainExtractShellCommand(toolName, args, config.policy.toolInspection);
+  } = explainExtractShellCommand(toolName, args, layers);
   if (shellCommand) {
     const analyzed = analyzeShellCommand(shellCommand);
     allTokens = analyzed.allTokens;
@@ -467,7 +472,7 @@ async function deriveExplainTrace(
     });
 
     // ── 4. SQL DML keyword stripping ──────────────────────────────────────
-    if (explainIsSqlTool(toolName, config.policy.toolInspection)) {
+    if (explainIsSqlTool(toolName, layers)) {
       allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
       steps.push({
         name: 'SQL token stripping',

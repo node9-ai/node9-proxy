@@ -856,6 +856,7 @@ export async function runMcpGateway(
               dlpEnabled: cfg.policy.dlp.enabled,
               injection: cfg.policy.injectionScan,
               spotlight: isSource && uc.spotlight ? sourceWord(nsName) : undefined,
+              untrusted: isSource,
             });
             if (scan.changed) outLine = scan.line;
             if (isSource) {

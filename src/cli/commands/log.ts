@@ -159,9 +159,16 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
     // scanArgs; a value the gate reviewed as a credential must not be stored
     // in plaintext either. Only a real pattern match counts here: the
     // gate's "inspection incomplete" marker is not a finding.
-    const gateHit = inspectArgumentSecrets(rawInput).match;
-    if (gateHit)
-      return { ...hashed, dlpPattern: gateHit.patternName, dlpSample: gateHit.redactedSample };
+    const inspected = inspectArgumentSecrets(rawInput);
+    if (inspected.match)
+      return {
+        ...hashed,
+        dlpPattern: inspected.match.patternName,
+        dlpSample: inspected.match.redactedSample,
+      };
+    // Decoding cut short (a nested layer, a flood of hostname labels, the
+    // phrase budget) is not a clean scan either: the row keeps the hash.
+    if (inspected.coverage === 'incomplete') return { ...hashed, argsUnscanned: true };
     return { args: JSON.parse(redactSecrets(JSON.stringify(rawInput))) as unknown };
   } catch {
     return hashed;
@@ -449,6 +456,9 @@ export function registerLogCommand(program: Command): void {
                 {
                   agent,
                   ruleName: reviewLabel,
+                  ...(resolvedReview.exposureFromEid
+                    ? { exposureFromEid: resolvedReview.exposureFromEid }
+                    : {}),
                   ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
                   ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
                   ...(safeCwd ? { workingDir: safeCwd } : {}),
@@ -517,20 +527,24 @@ export function registerLogCommand(program: Command): void {
                 // output in place, so there's nothing to contain downstream.
                 const { result, found } = redactText(toolOutput);
                 let out = result;
+                // fw#318 layer 1: a SOURCE result marks the session exposed and
+                // is framed whole, whether or not anything in it looked hostile.
+                const ucA = config.policy.untrustedContent;
+                const shellA = ucA?.enabled ? shellFetch(tool, rawInput) : null;
+                const sourceA = !!ucA?.enabled && (toolRole(tool, ucA).source || !!shellA?.fetches);
                 let injection: ReturnType<typeof scanInjection> = null;
                 if (injectionOn) {
-                  const m = scanInjection(result, { tool: rawToolName });
+                  const m = scanInjection(result, {
+                    tool: rawToolName,
+                    ...(sourceA ? { untrusted: true } : {}),
+                  });
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     injection = m;
                     // Random per-frame boundary (utils/untrusted-frame.ts).
                     out = frameUntrusted(result);
                   }
                 }
-                // fw#318 layer 1: a SOURCE result marks the session exposed and
-                // is framed whole, whether or not anything in it looked hostile.
-                const ucA = config.policy.untrustedContent;
-                const shellA = ucA?.enabled ? shellFetch(tool, rawInput) : null;
-                if (ucA?.enabled && (toolRole(tool, ucA).source || shellA?.fetches)) {
+                if (sourceA) {
                   const wordA = shellA?.fetches
                     ? shellSourceWord(shellA.fetchKinds)
                     : sourceWord(tool);
@@ -610,16 +624,20 @@ export function registerLogCommand(program: Command): void {
                 }
 
                 if (injectionOn) {
-                  const m = scanInjection(toolOutput, { tool: rawToolName });
+                  // A #318 source (an unannotated MCP tool, a shell fetch) is
+                  // outside content to the scanner too, not only the web tools
+                  // its own name list knows (fw#328 step 1).
+                  const injCtx = { tool: rawToolName, ...(sourceRead ? { untrusted: true } : {}) };
+                  const m = scanInjection(toolOutput, injCtx);
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     if (spotlightApplies) {
-                      injectedLeaf = (leaf) => scanInjection(leaf, { tool: rawToolName }) !== null;
+                      injectedLeaf = (leaf) => scanInjection(leaf, injCtx) !== null;
                     }
                     if (agent === 'Claude Code' && !spotlightApplies) {
                       // Frame the leaves that carry the injection, inside the shape.
                       updatedToolOutput = frameToolOutputLeaves(
                         updatedToolOutput ?? payload.tool_response,
-                        (leaf) => scanInjection(leaf, { tool: rawToolName }) !== null,
+                        (leaf) => scanInjection(leaf, injCtx) !== null,
                         newUntrustedFrame,
                         neutralizeMarkers
                       );
@@ -640,6 +658,23 @@ export function registerLogCommand(program: Command): void {
                 if (sourceRead) {
                   const destinations = extractContentDestinations(toolOutput);
                   markSessionExposed(payloadSessionId ?? '');
+                  // fw#318 2b: an informational row beside the call's own
+                  // allow row (the SaaS keeps such rows out of its counts,
+                  // like mcp-discovered). Its eid is the source of the edge
+                  // a held send draws back to this read.
+                  const sourceEid = appendLocalAudit(
+                    tool,
+                    rawInput,
+                    'allow',
+                    'exposure-source',
+                    {
+                      agent,
+                      ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
+                      ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                      exposure: { kind: 'source', destinations: destinations.length },
+                    },
+                    config.settings.auditHashArgs === true
+                  );
                   await notifySessionExposure(
                     payloadSessionId ?? '',
                     {
@@ -648,16 +683,10 @@ export function registerLogCommand(program: Command): void {
                       ...(shellExposure?.fetches
                         ? { word: shellSourceWord(shellExposure.fetchKinds) }
                         : {}),
+                      eid: sourceEid,
                     },
                     destinations
                   );
-                  appendToLog(LOCAL_AUDIT_LOG, {
-                    ts: new Date().toISOString(),
-                    tool,
-                    source: 'exposure-source',
-                    destinations: destinations.length,
-                    ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
-                  });
                   if (spotlightApplies) {
                     const word = shellExposure?.fetches
                       ? shellSourceWord(shellExposure.fetchKinds)

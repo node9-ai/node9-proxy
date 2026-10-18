@@ -1,4 +1,4 @@
-import type { ToolInspection } from '@node9/policy-engine';
+import type { InspectionInput } from '@node9/policy-engine';
 // Host metadata preparation for the shared file policy. Never opens file contents.
 import fs from 'fs';
 import os from 'os';
@@ -61,7 +61,7 @@ export function prepareFileAccesses(
   tool: string,
   args: unknown,
   cwd = process.cwd(),
-  inspection: ToolInspection = {},
+  inspection: InspectionInput = {},
   home = os.homedir()
 ): PreparedFileAccess {
   const context = { cwd, homeDirs: [home, '/root'] };

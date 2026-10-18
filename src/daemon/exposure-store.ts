@@ -17,6 +17,9 @@ export interface ExposureSource {
   server?: string;
   /** What was read, as the prompt names it: 'email', 'web page', 'issue', 'repository'. */
   word?: string;
+  /** fw#318 2b: the eid of the audit row that recorded the read, so a send
+   *  held after it can name it (the session graph's edge). */
+  eid?: string;
   at: number;
 }
 
@@ -111,6 +114,7 @@ export class SessionExposureStore {
       tool: source.tool,
       server: source.server,
       ...(source.word ? { word: source.word } : {}),
+      ...(source.eid ? { eid: source.eid } : {}),
       at: source.at || Date.now(),
     });
     if (e.sources.length > MAX_SOURCES) e.sources.splice(0, e.sources.length - MAX_SOURCES);

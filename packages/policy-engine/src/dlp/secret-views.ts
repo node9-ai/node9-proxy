@@ -1,18 +1,34 @@
 import { stripInvisible } from './normalize';
+import type { MnemonicBudget } from './mnemonic';
 
 export const SECRET_VIEW_LIMITS = {
+  /** A decoded text that itself decodes is followed this many layers; a deeper layer is reviewed. */
   maxDepth: 4,
-  maxViewsPerLeaf: 64,
-  maxViews: 256,
-  maxDerivedBytes: 1_048_576,
-  maxCandidates: 4096,
+  /** Nested views per parent view, and nested text per call; past either the call is reviewed. */
+  maxNestedViewsPerLeaf: 64,
+  maxNestedBytes: 1_048_576,
+  /** Joined hostname-label text per call; past it the call is reviewed. */
+  maxJoinedLabelBytes: 1_048_576,
+  /** Decoded fragments are matched in batches of about this many characters. */
+  batchCharacters: 65_536,
+  /** Only a valid DNS name has its labels joined. */
+  maxHostLength: 253,
+  maxLabelLength: 63,
+  maxLabels: 127,
 } as const;
 
-export interface SecretViewBudget {
-  views: number;
-  bytes: number;
-  candidates: number;
-  reasons: Set<string>;
+/**
+ * Work that can grow faster than the input is charged here and reviews on
+ * exhaustion. First-level decoding is proportional to the text and has no
+ * budget: nothing an attacker pads can turn into an allow (fw#338, review 3).
+ */
+export interface SecretViewBudget extends MnemonicBudget {
+  nestedBytes: number;
+  joinedLabelBytes: number;
+}
+
+export function newSecretViewBudget(): SecretViewBudget {
+  return { hashes: 0, nestedBytes: 0, joinedLabelBytes: 0, reasons: new Set() };
 }
 
 export interface SecretView {
@@ -43,15 +59,52 @@ function percentOnce(text: string): string {
   });
 }
 
+/**
+ * Line-wrapped base64 (PEM, MIME, `base64` output, an indented YAML block):
+ * one or more lines of one width, optionally a shorter tail, joined without
+ * their line breaks and indentation as one more region of this level. Read
+ * line by line: a single regex over the text backtracks quadratically on a
+ * long run with no newline (19 s on 100 KB in the pre-push check).
+ */
+function* wrappedBase64(text: string): Generator<string> {
+  if (!text.includes('\n')) return;
+  const word = /^[A-Za-z0-9+/_-]+={0,2}$/;
+  let run: string[] = [];
+  let width = 0;
+  const flush = function* () {
+    if (run.length >= 2) yield run.join('');
+    run = [];
+    width = 0;
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const full = line.length >= 16 && word.test(line) && !line.includes('=');
+    if (full && (!run.length || line.length === width)) {
+      run.push(line);
+      width = line.length;
+      continue;
+    }
+    // A tail is shorter than the width (or the closing line with padding).
+    if (run.length && word.test(line) && line.length >= 2 && line.length <= width) {
+      run.push(line);
+      yield* flush();
+      continue;
+    }
+    yield* flush();
+    if (full) {
+      run.push(line);
+      width = line.length;
+    }
+  }
+  yield* flush();
+}
+
 function* encodedRegions(text: string, budget: SecretViewBudget): Generator<[string, boolean]> {
   yield [text, false];
+  for (const block of wrappedBase64(text)) yield [block, false];
   // The scheme is bounded and anchored on its left so a long alphanumeric run
   // is scanned once, not once per starting offset.
   for (const match of text.matchAll(/(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}:\/\/[^\s<>"']+/gi)) {
-    if (++budget.candidates > SECRET_VIEW_LIMITS.maxCandidates) {
-      budget.reasons.add('decode-candidates');
-      return;
-    }
     try {
       new URL(match[0]);
     } catch {
@@ -70,13 +123,18 @@ function* encodedRegions(text: string, budget: SecretViewBudget): Generator<[str
       ...(parts[3] ?? '').split('&'),
       parts[4] ?? '',
     ];
-    // Regions are substrings of text already counted; only decode attempts
-    // and label joins consume the candidate budget.
     for (const region of regions) if (region) yield [region, false];
-    // Join only contiguous labels sharing an encoding alphabet. This is a
-    // credential-content view, not a DNS anomaly verdict or domain boundary
+    // Join only contiguous labels sharing an encoding alphabet, and only for a
+    // valid DNS name: an exfiltration tool chunks a value into real labels. This
+    // is a credential-content view, not a DNS anomaly verdict or domain boundary
     // inference. No network/SSRF classification uses these reconstructed bytes.
     const labels = host.split('.');
+    if (
+      host.length > SECRET_VIEW_LIMITS.maxHostLength ||
+      labels.length > SECRET_VIEW_LIMITS.maxLabels ||
+      !labels.every((l) => l.length >= 1 && l.length <= SECRET_VIEW_LIMITS.maxLabelLength)
+    )
+      continue;
     for (let start = 0; start < labels.length; start++) {
       let joined = labels[start];
       for (let end = start + 1; end < Math.min(labels.length, start + 8); end++) {
@@ -87,11 +145,15 @@ function* encodedRegions(text: string, budget: SecretViewBudget): Generator<[str
         )
           break;
         joined += labels[end];
-        if (++budget.candidates > SECRET_VIEW_LIMITS.maxCandidates) {
-          budget.reasons.add('decode-candidates');
+        if (joined.length < 16) continue;
+        // Joins expand a host up to eight times; a flood of crafted hosts is
+        // held for review rather than decoded without end.
+        budget.joinedLabelBytes += joined.length;
+        if (budget.joinedLabelBytes > SECRET_VIEW_LIMITS.maxJoinedLabelBytes) {
+          budget.reasons.add('decode-labels');
           return;
         }
-        if (joined.length >= 16 && joined.length <= 253) yield [joined, true];
+        yield [joined, true];
       }
     }
   }
@@ -133,10 +195,6 @@ function* decodedCandidates(text: string, budget: SecretViewBudget): Generator<[
     if (joined) yield ['dns-labels', region];
     for (const [kind, re] of families) {
       for (const match of region.matchAll(re)) {
-        if (++budget.candidates > SECRET_VIEW_LIMITS.maxCandidates) {
-          budget.reasons.add('decode-candidates');
-          return;
-        }
         const raw = match[0];
         let buf: Buffer;
         if (kind === 'base64') {
@@ -160,33 +218,51 @@ function* decodedCandidates(text: string, budget: SecretViewBudget): Generator<[
   }
 }
 
-/** Secret-specific decoding; does not change injection or exact canary views. */
-export function* secretViews(text: string, budget: SecretViewBudget): Generator<SecretView> {
+/**
+ * Every decoded view of `text`, first level complete and without a count
+ * limit, deeper levels within SECRET_VIEW_LIMITS. The raw text is not
+ * included; the caller matches it separately. Secret-specific decoding; does
+ * not change injection or exact canary views.
+ */
+export function secretViews(text: string, budget: SecretViewBudget): SecretView[] {
   const seen = new Set([text]);
-  const queue: SecretView[] = [{ text, transforms: [] }];
-  for (let i = 0; i < queue.length; i++) {
-    const view = queue[i];
-    yield view;
-    for (const [kind, decoded] of decodedCandidates(view.text, budget)) {
-      if (seen.has(decoded)) continue;
-      if (view.transforms.length >= SECRET_VIEW_LIMITS.maxDepth) {
-        budget.reasons.add('decode-depth');
-        continue;
+  const out: SecretView[] = [];
+  let frontier: SecretView[] = [{ text, transforms: [] }];
+  for (let depth = 1; depth <= SECRET_VIEW_LIMITS.maxDepth; depth++) {
+    const next: SecretView[] = [];
+    for (const parent of frontier) {
+      let perLeaf = 0;
+      for (const [kind, decoded] of decodedCandidates(parent.text, budget)) {
+        if (seen.has(decoded)) continue;
+        seen.add(decoded);
+        // Removing invisibles and percent-decoding only shrink their input,
+        // so a chain of them costs at most depth times the window: no budget.
+        // Any decoding layer under them is charged.
+        const normalizing = kind === 'invisibles' || kind === 'percent';
+        if (depth >= 2 && !normalizing) {
+          budget.nestedBytes += Buffer.byteLength(decoded);
+          if (
+            ++perLeaf > SECRET_VIEW_LIMITS.maxNestedViewsPerLeaf ||
+            budget.nestedBytes > SECRET_VIEW_LIMITS.maxNestedBytes
+          ) {
+            budget.reasons.add('decode-nested');
+            return out;
+          }
+        }
+        const view = { text: decoded, transforms: [...parent.transforms, kind] };
+        out.push(view);
+        next.push(view);
       }
-      const bytes = Buffer.byteLength(decoded);
-      if (
-        queue.length >= SECRET_VIEW_LIMITS.maxViewsPerLeaf ||
-        budget.views >= SECRET_VIEW_LIMITS.maxViews ||
-        budget.bytes + bytes > SECRET_VIEW_LIMITS.maxDerivedBytes
-      ) {
-        budget.reasons.add('decode-budget');
-        return;
-      }
-      seen.add(decoded);
-      budget.views++;
-      budget.bytes += bytes;
-      queue.push({ text: decoded, transforms: [...view.transforms, kind] });
     }
-    if (budget.candidates > SECRET_VIEW_LIMITS.maxCandidates) return;
+    frontier = next;
+    if (!frontier.length) return out;
   }
+  // Depth exhausted while a view still decodes: an uninspected layer.
+  for (const view of frontier) {
+    if (!decodedCandidates(view.text, budget).next().done) {
+      budget.reasons.add('decode-nested');
+      break;
+    }
+  }
+  return out;
 }

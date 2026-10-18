@@ -16,6 +16,7 @@ import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
 import { buildPolicySnapshot } from '../policy-snapshot/build.js';
 import { readMcpToolsConfig } from './mcp-tools.js';
+import { readTrustedRecipients } from '../auth/trusted-recipients.js';
 import { atomicWriteSync } from './state.js';
 import { resolveMcpStatus } from '../mcp-status.js';
 import { shipPolicySnapshot } from '../policy-snapshot/ship.js';
@@ -195,6 +196,8 @@ export interface ManagedConfigCache {
     afterExposure?: 'ask-once' | 'ask-every-time' | 'log-only';
     orgDomains?: string[];
     roles?: Record<string, Record<string, 'source' | 'action' | 'read'>>;
+    /** fw#318 2b: the workspace's trusted recipients, exact values. */
+    trustedRecipients?: string[];
   };
   packageCheck?: {
     enabled?: boolean;
@@ -250,6 +253,7 @@ interface CloudPolicyBody {
       afterExposure?: unknown;
       orgDomains?: unknown;
       roles?: unknown;
+      trustedRecipients?: unknown;
     };
     packageCheck?: {
       enabled?: unknown;
@@ -792,6 +796,12 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
       out3.afterExposure = u.afterExposure;
     if (Array.isArray(u.orgDomains))
       out3.orgDomains = u.orgDomains.filter((x): x is string => typeof x === 'string');
+    // Cache even an empty list: present-but-empty is a REPLACE that clears
+    // the managed trust (the trustedHosts rule).
+    if (Array.isArray(u.trustedRecipients))
+      out3.trustedRecipients = u.trustedRecipients.filter(
+        (x): x is string => typeof x === 'string'
+      );
     if (u.roles && typeof u.roles === 'object' && !Array.isArray(u.roles)) {
       const roles: NonNullable<typeof out3.roles> = {};
       for (const [server, tools] of Object.entries(u.roles as Record<string, unknown>)) {
@@ -1099,6 +1109,23 @@ async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): P
 // Config mirror (Phase 1b): ship this machine's EFFECTIVE local policy so the
 // dashboard's Machines view shows what it enforces. Fire-and-forget like the
 // other pushes; opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
+/** fw#318 2b: the local trusted-recipients file in the snapshot's shape. */
+function personalTrustedRecipients(): Array<{
+  value: string;
+  addedBy: 'user' | 'approval';
+  addedAt?: string;
+}> {
+  try {
+    return readTrustedRecipients().map((e) => ({
+      value: e.value,
+      addedBy: e.addedBy === 'approval' ? 'approval' : 'user',
+      ...(Number.isFinite(e.addedAt) ? { addedAt: new Date(e.addedAt).toISOString() } : {}),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
     const cfg = getConfig();
@@ -1121,7 +1148,9 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
       readSyncHealth(),
       // Machine identity — heals legacy machineId-less keys on the SaaS side
       // (login-v2 duplicate-key fix). getMachineId mints on first need.
-      { machineId: getMachineId(), platform: process.platform }
+      { machineId: getMachineId(), platform: process.platform },
+      // fw#318 2b: the developer's personal trusted recipients.
+      personalTrustedRecipients()
     );
     await shipPolicySnapshot(body, creds);
   } catch {
@@ -1155,7 +1184,9 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
       // (daemon here, user shell in runPolicyPush); see the P2 design's two-env note.
       resolveMcpStatus(),
       readSyncHealth(),
-      { machineId: getMachineId(), platform: process.platform }
+      { machineId: getMachineId(), platform: process.platform },
+      // fw#318 2b: the developer's personal trusted recipients.
+      personalTrustedRecipients()
     );
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };

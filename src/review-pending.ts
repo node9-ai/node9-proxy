@@ -40,6 +40,8 @@ export interface PendingReview {
   /** fw#318: the '<tool>|<destination or path:p>' keys an exposure review held,
    *  approved for the session when the agent's inline prompt is accepted. */
   exposureKeys?: string[];
+  /** fw#318 2b: the eid of the read this held send followed. */
+  exposureFromEid?: string;
 }
 
 interface Store {

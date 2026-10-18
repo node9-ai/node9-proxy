@@ -107,11 +107,49 @@ describe('buildPolicySnapshot', () => {
       {
         key: 'srv123',
         name: 'slack',
-        tools: ['slack_post', 'slack_delete'],
+        tools: [{ name: 'slack_post' }, { name: 'slack_delete' }],
         toolCount: 2,
         status: 'approved',
         connection: 'connected', // in mcp-tools.json ⇒ it launched
       },
+    ]);
+  });
+
+  // fw#318 2b: the dashboard suggests a tool's role from its annotations, and
+  // shows the developer's personal trusted recipients to admins.
+  it("carries each tool's annotations, and the personal trusted recipients when any", () => {
+    const inventory = {
+      srv1: {
+        name: 'gmail',
+        tools: [
+          { name: 'get_message', annotations: { readOnlyHint: true, openWorldHint: true } },
+          { name: 'send_email' },
+        ],
+        disabled: [],
+        status: 'approved' as const,
+      },
+    };
+    const bare = buildPolicySnapshot(cfg(), [], {}, inventory);
+    expect(bare.mcpServers[0].tools).toEqual([
+      { name: 'get_message', annotations: { readOnlyHint: true, openWorldHint: true } },
+      { name: 'send_email' },
+    ]);
+    expect('trustedRecipients' in bare).toBe(false);
+    const withList = buildPolicySnapshot(cfg(), [], {}, inventory, [], undefined, undefined, [
+      {
+        value: 'email:press@news.example',
+        addedBy: 'approval',
+        addedAt: '2026-10-17T10:00:00.000Z',
+      },
+      { value: 'host:drop.example', addedBy: 'user' },
+    ]);
+    expect(withList.trustedRecipients).toEqual([
+      {
+        value: 'email:press@news.example',
+        addedBy: 'approval',
+        addedAt: '2026-10-17T10:00:00.000Z',
+      },
+      { value: 'host:drop.example', addedBy: 'user' },
     ]);
   });
 

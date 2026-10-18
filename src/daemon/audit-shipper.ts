@@ -51,6 +51,16 @@ const FETCH_TIMEOUT_MS = 10_000;
  */
 const SKIP_CHECKED_BY = new Set(['ignored']);
 
+/** fw#318 2b: the exposure counts as written, or null when malformed. */
+function exposureOf(v: unknown): WireRow['exposure'] | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as { kind?: unknown; destinations?: unknown };
+  if (o.kind !== 'source' && o.kind !== 'logged') return null;
+  const n =
+    typeof o.destinations === 'number' && Number.isFinite(o.destinations) ? o.destinations : 0;
+  return { kind: o.kind, destinations: Math.max(0, Math.min(1000, Math.floor(n))) };
+}
+
 export interface Watermark {
   /** Identity of the log file the offset belongs to — guards rotation. */
   fileSig: string;
@@ -100,6 +110,9 @@ export interface WireRow {
   /** Phase D2 — taint provenance on taint-based block rows (causal edge). */
   taintFromEid?: string;
   taintSource?: string;
+  /** fw#318 2b — exposure rows (counts only) and the read-to-send edge. */
+  exposure?: { kind: 'source' | 'logged'; destinations: number };
+  exposureFromEid?: string;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -203,6 +216,10 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
         : {}),
       ...(typeof parsed.taintFromEid === 'string' ? { taintFromEid: parsed.taintFromEid } : {}),
       ...(typeof parsed.taintSource === 'string' ? { taintSource: parsed.taintSource } : {}),
+      ...(exposureOf(parsed.exposure) ? { exposure: exposureOf(parsed.exposure)! } : {}),
+      ...(typeof parsed.exposureFromEid === 'string'
+        ? { exposureFromEid: parsed.exposureFromEid }
+        : {}),
     });
   }
   return { rows, consumed: lastNl + 1 };

@@ -25,6 +25,10 @@ export interface InjectionContext {
   /** Tool that produced the output. Untrusted origins (web/network) raise
    *  confidence — a fetched page is attacker-influenceable; a local read isn't. */
   tool?: string;
+  /** The caller's own answer to "did this output come from outside?" (the
+   *  #318 source roles: an unannotated MCP tool, a shell fetch). When set it
+   *  decides the booster; when absent the tool-name regex below does. */
+  untrusted?: boolean;
 }
 
 const MAX = 100_000; // mirror the DLP truncation bound
@@ -98,7 +102,7 @@ export function scanInjection(text: string, ctx: InjectionContext = {}): Injecti
   }
   if (matched.length === 0) return null;
 
-  const untrusted = !!ctx.tool && UNTRUSTED_TOOLS.test(ctx.tool);
+  const untrusted = ctx.untrusted ?? (!!ctx.tool && UNTRUSTED_TOOLS.test(ctx.tool));
   const score = matched.length + (untrusted ? 1 : 0);
   const confidence: InjectionConfidence = score >= 3 ? 'high' : score === 2 ? 'medium' : 'low';
 

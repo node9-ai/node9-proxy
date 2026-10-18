@@ -11,7 +11,7 @@
 import type { Config } from '../config/index.js';
 import type { ShieldOverrides } from '@node9/policy-engine';
 import { ENGINE_VERSION } from '@node9/policy-engine';
-import type { McpToolsConfig } from '../daemon/mcp-tools.js';
+import type { McpToolsConfig, McpToolAnnotations } from '../daemon/mcp-tools.js';
 import type { McpStatusEntry } from '../mcp-status.js';
 import type { SyncHealth } from '../daemon/sync.js';
 
@@ -46,7 +46,10 @@ export interface PolicySnapshotBody {
   mcpServers: Array<{
     key: string;
     name?: string;
-    tools: string[];
+    /** fw#318 2b: each tool with the annotations it declared (the four MCP
+     *  hints), so the dashboard can suggest its role. An older SaaS reads
+     *  names only; the schema there accepts both shapes. */
+    tools: Array<{ name: string; annotations?: McpToolAnnotations }>;
     toolCount: number;
     status: string;
     connection?: string;
@@ -55,6 +58,9 @@ export interface PolicySnapshotBody {
   // fleet-ship Step 2: the proxy's own cloud-policy sync health, so the dashboard
   // can show "sync failing" badges. The SaaS schema treats consecutiveFailures as
   // the load-bearing signal; lastErrorAt is stripped by the SaaS schema (.strip()).
+  /** fw#318 2b: the developer's personal trusted recipients on this machine
+   *  (what "Allow and trust" wrote), exact values only, shown to admins. */
+  trustedRecipients?: Array<{ value: string; addedBy: 'user' | 'approval'; addedAt?: string }>;
   syncHealth?: {
     lastCheckedAt?: string;
     lastChangedAt?: string;
@@ -85,7 +91,9 @@ export function buildPolicySnapshot(
   syncHealth?: SyncHealth,
   // Machine identity, passed by the caller (getMachineId() does disk I/O and
   // build.ts stays pure). undefined = omit, the SaaS then changes nothing.
-  identity?: { machineId: string; platform: string }
+  identity?: { machineId: string; platform: string },
+  // fw#318 2b: the local trusted-recipients file, read by the caller.
+  trustedRecipients: Array<{ value: string; addedBy: 'user' | 'approval'; addedAt?: string }> = []
 ): PolicySnapshotBody {
   const p = config.policy;
 
@@ -105,7 +113,9 @@ export function buildPolicySnapshot(
     .map(([key, cfg]) => ({
       key,
       ...(cfg.name && { name: cfg.name }),
-      tools: cfg.tools.map((t) => t.name).slice(0, MAX_MCP_TOOLS),
+      tools: cfg.tools
+        .slice(0, MAX_MCP_TOOLS)
+        .map((t) => ({ name: t.name, ...(t.annotations ? { annotations: t.annotations } : {}) })),
       toolCount: cfg.tools.length,
       status: cfg.status,
       // In mcp-tools.json ⇒ it launched ⇒ connected, unless the resolver says stale.
@@ -169,6 +179,15 @@ export function buildPolicySnapshot(
     engineVersion: ENGINE_VERSION,
     // Connected rows first so they win the cap; non-connected SEE rows fill the rest.
     mcpServers: [...connectedRows, ...extraRows].slice(0, MAX_MCP_SERVERS),
+    // fw#318 2b: the developer's personal trusted recipients (A1: read-only
+    // on the dashboard). Omitted when empty, so an old SaaS sees no change.
+    ...(trustedRecipients.length > 0 && {
+      trustedRecipients: trustedRecipients.slice(0, 200).map((e) => ({
+        value: e.value,
+        addedBy: e.addedBy,
+        ...(e.addedAt ? { addedAt: e.addedAt } : {}),
+      })),
+    }),
     // fleet-ship Step 2: ship the proxy's own sync health so the dashboard can
     // derive a "sync failing" badge. Only included when the caller passes it.
     ...(syncHealth && {

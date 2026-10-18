@@ -19,6 +19,10 @@ export interface ResultScanConfig {
   /** fw#318 spotlight: frame EVERY result as data from this kind of source
    *  ('email', 'web page', ...). Undefined keeps the detection-only framing. */
   spotlight?: string;
+  /** fw#328 step 1: the result is from a #318 source, so the injection
+   *  scanner treats it as outside content (the bare tool name the gateway
+   *  sees never matches the scanner's own list of web tools). */
+  untrusted?: boolean;
 }
 
 export interface ResultScan {
@@ -124,7 +128,10 @@ export function scanToolResult(
   let injection: InjectionMatch | null = null;
   const inj = cfg.injection;
   if (inj.enabled && !inj.allow.includes(tool) && texts.length > 0) {
-    const m = scanInjection(texts.join('\n'), { tool });
+    const m = scanInjection(texts.join('\n'), {
+      tool,
+      ...(cfg.untrusted ? { untrusted: true } : {}),
+    });
     if (m && CONFIDENCE_RANK[m.confidence] >= CONFIDENCE_RANK[inj.minConfidence]) {
       injection = m;
       mutated = true;

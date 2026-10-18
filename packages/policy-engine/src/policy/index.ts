@@ -1,4 +1,5 @@
-import type { ToolInspection } from '../shell/tool-input';
+import type { InspectionInput, ToolInspection } from '../shell/tool-input';
+import { inspectionEntry, inspectionLayers } from '../shell/tool-input';
 // Stateless policy evaluator. The host passes config, args, optional
 // context (agent, cwd, active environment) and an optional hook bag for
 // I/O-bound checks (binary provenance, trusted-host lookup).
@@ -56,6 +57,8 @@ export interface PolicyConfig {
     dangerousWords: string[];
     ignoredTools: string[];
     toolInspection: ToolInspection;
+    /** Entries from a repository-carried config file; they may only add inspection. */
+    projectToolInspection?: ToolInspection;
     smartRules: SmartRule[];
     dlp: {
       enabled: boolean;
@@ -242,22 +245,17 @@ function tokenize(toolName: string): string[] {
 function extractShellCommand(
   toolName: string,
   args: unknown,
-  toolInspection: ToolInspection
+  toolInspection: InspectionInput
 ): string | null {
-  const patterns = Object.keys(toolInspection);
-  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
-  if (!matchingPattern) return null;
-  const fieldPath = toolInspection[matchingPattern];
+  const fieldPath = inspectionEntry(toolName, toolInspection);
+  if (fieldPath === undefined) return null;
   const value = getNestedValue(args, typeof fieldPath === 'string' ? fieldPath : fieldPath.field);
   return typeof value === 'string' ? value : null;
 }
 
 /** Returns true when a tool's inspected field is SQL (sql or query). */
-function isSqlTool(toolName: string, toolInspection: ToolInspection): boolean {
-  const patterns = Object.keys(toolInspection);
-  const matchingPattern = patterns.find((p) => matchesPattern(toolName, p));
-  if (!matchingPattern) return false;
-  const fieldName = toolInspection[matchingPattern];
+function isSqlTool(toolName: string, toolInspection: InspectionInput): boolean {
+  const fieldName = inspectionEntry(toolName, toolInspection);
   return fieldName === 'sql' || fieldName === 'query';
 }
 
@@ -405,11 +403,10 @@ export async function evaluatePolicy(
   hooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
   let protectedVerdict: PolicyVerdict | null = null;
+  const layers = inspectionLayers(config.policy);
   if (context.agent !== 'Terminal') {
     try {
-      const accesses =
-        context.accesses ??
-        collectFileAccesses(toolName, args, context, config.policy.toolInspection);
+      const accesses = context.accesses ?? collectFileAccesses(toolName, args, context, layers);
       protectedVerdict = evaluateProtectedFileAccess(accesses, context, catalogSettings(config));
     } catch {
       // An exception while inspecting file operands must never fail open.
@@ -456,7 +453,7 @@ export async function evaluatePolicy(
   if (result.decision === 'block') return result;
   if (
     context.agent !== 'Terminal' &&
-    resolveShellInput(toolName, args, config.policy.toolInspection).kind === 'uninspectable'
+    resolveShellInput(toolName, args, layers).kind === 'uninspectable'
   ) {
     return {
       decision: 'review',
@@ -480,6 +477,7 @@ async function evaluatePolicyCore(
   const { agent, cwd, activeEnvironment } = context;
   const { checkProvenance, isTrustedHost } = hooks;
   const settingsView = catalogSettings(config);
+  const layers = inspectionLayers(config.policy);
   // ONE reader for every built-in site: the check's value in force.
   const cv = (id: string): Verdict => checkValue(settingsView, id);
   // A finding whose check is `log`: kept aside and returned only where the
@@ -491,7 +489,7 @@ async function evaluatePolicyCore(
   const allowed = (): PolicyVerdict => loggedFinding ?? { decision: 'allow' };
 
   // Content DLP is collected by evaluatePolicy before this waterfall.
-  const shellInput = resolveShellInput(toolName, args, config.policy.toolInspection);
+  const shellInput = resolveShellInput(toolName, args, layers);
   const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
 
   // ── SSRF floor, non-shell destinations ──────────────────────────────────
@@ -734,15 +732,10 @@ async function evaluatePolicyCore(
       return { id, value: cv(id) };
     };
     const matches = config.policy.smartRules.filter((rule) => {
-      if (!toolMatchesRule(toolName, rule.tool, config.policy.toolInspection)) return false;
+      if (!toolMatchesRule(toolName, rule.tool, layers)) return false;
       if (astSuppressed(rule)) return false;
       if (rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') return false;
-      if (
-        !evaluateSmartConditions(
-          shellRuleArgs(toolName, args, rule.tool, config.policy.toolInspection),
-          rule
-        )
-      )
+      if (!evaluateSmartConditions(shellRuleArgs(toolName, args, rule.tool, layers), rule))
         return false;
       const check = ruleCheck(rule);
       if (check?.value === 'off') return false;
@@ -810,7 +803,7 @@ async function evaluatePolicyCore(
     shellInput.kind === 'shell'
       ? shellInput.command
       : shellInput.kind === 'not-shell'
-        ? extractShellCommand(toolName, args, config.policy.toolInspection)
+        ? extractShellCommand(toolName, args, layers)
         : null;
   if (shellCommand) {
     const analyzed: ShellCommandAnalysis = analyzeShellCommand(shellCommand);
@@ -950,7 +943,7 @@ async function evaluatePolicyCore(
     if (['ssh', 'scp', 'rsync'].includes(firstToken)) {
       const rawTokens = shellCommand.trim().split(/\s+/);
       const sshHosts = extractAllSshHosts(rawTokens.slice(1));
-      allTokens.push(...sshHosts);
+      allTokens = allTokens.concat(sshHosts);
     }
 
     // ── Binary provenance check ───────────────────────────────────────────────
@@ -988,7 +981,7 @@ async function evaluatePolicyCore(
 
     // Strip DML keywords from tokens so user dangerousWords like "delete"/"update"
     // don't re-flag a SQL query that already passed the smart rules check above.
-    if (isSqlTool(toolName, config.policy.toolInspection)) {
+    if (isSqlTool(toolName, layers)) {
       allTokens = allTokens.filter((t) => !SQL_DML_KEYWORDS.has(t.toLowerCase()));
     }
   } else {
@@ -998,7 +991,10 @@ async function evaluatePolicyCore(
     if (args && typeof args === 'object') {
       const flattenedArgs = JSON.stringify(args).toLowerCase();
       const extraTokens = flattenedArgs.split(/[^a-zA-Z0-9]+/).filter((t) => t.length > 1);
-      allTokens.push(...extraTokens);
+      // concat, not push(...spread): a megabyte of arguments yields enough
+      // tokens to overflow the call stack, and the hook's outer catch fails
+      // open (fw#338 review 3: a 60k-element array was allowed unseen).
+      allTokens = allTokens.concat(extraTokens);
     }
   }
 

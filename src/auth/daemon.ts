@@ -598,7 +598,7 @@ async function exposurePost(route: string, body: unknown, timeoutMs: number): Pr
 /** The session read a source. */
 export async function notifySessionExposure(
   sessionId: string,
-  source: { tool: string; server?: string; word?: string },
+  source: { tool: string; server?: string; word?: string; eid?: string },
   destinations: readonly string[]
 ): Promise<void> {
   if (!sessionId || !isDaemonRunning()) return;

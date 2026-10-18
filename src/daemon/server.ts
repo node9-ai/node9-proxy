@@ -1273,7 +1273,7 @@ export function startDaemon(): void {
         if (req.method === 'POST' && pathname === '/session-exposure') {
           const body = JSON.parse(await readBody(req)) as {
             sessionId?: unknown;
-            source?: { tool?: unknown; server?: unknown; word?: unknown };
+            source?: { tool?: unknown; server?: unknown; word?: unknown; eid?: unknown };
             destinations?: unknown;
           };
           if (typeof body.sessionId !== 'string' || typeof body.source?.tool !== 'string')
@@ -1288,6 +1288,7 @@ export function startDaemon(): void {
                   : undefined,
               word:
                 typeof body.source.word === 'string' ? body.source.word.slice(0, 40) : undefined,
+              eid: typeof body.source.eid === 'string' ? body.source.eid.slice(0, 64) : undefined,
               at: Date.now(),
             },
             strings(body.destinations)

@@ -8,7 +8,7 @@
 // never leaves the module.
 
 import safeRegex from 'safe-regex2';
-import { findMnemonic } from './mnemonic';
+import { findMnemonic, type MnemonicBudget } from './mnemonic';
 import { isLegacySystemPath, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
@@ -1036,7 +1036,7 @@ function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
 export function matchArgumentText(
   text: string,
   fieldPath: string,
-  budget?: { candidates: number; reasons: Set<string> }
+  budget?: MnemonicBudget
 ): DlpMatch | null {
   const lower = text.toLowerCase();
   const assignment = isAssignmentContext(text);
@@ -1055,6 +1055,67 @@ export function matchArgumentText(
     };
     if (severity === 'block') return match;
     best ??= match;
+  }
+  if (findMnemonic(text, budget)) {
+    return {
+      patternName: 'BIP-39 Recovery Phrase',
+      fieldPath,
+      redactedSample: '[recovery phrase]',
+      severity: 'block',
+    };
+  }
+  return best;
+}
+
+/**
+ * Fragments are joined with a newline for the prefilter: a newline is a word
+ * boundary for every pattern, so no token is invented across fragments.
+ */
+const BATCH_SEPARATOR = '\n';
+
+/**
+ * Match decoded fragments: the batch is a prefilter, the match is exact. Each
+ * pattern runs once over the joined text with `m` added (so `^` and `$` also
+ * hold at every fragment edge, a superset of the per-fragment matches); only a
+ * pattern that hits there is run on the fragments one by one, with the same
+ * semantics as matching each fragment alone. Ordinary decoded text hits few
+ * patterns, so the cost stays linear in decoded bytes, which is what lets
+ * first-level decoding run without a count limit (fw#338 stage B).
+ */
+export function matchArgumentBatch(
+  fragments: string[],
+  fieldPath: string,
+  budget?: MnemonicBudget
+): DlpMatch | null {
+  if (!fragments.length) return null;
+  const text = fragments.join(BATCH_SEPARATOR);
+  const lower = text.toLowerCase();
+  let best: DlpMatch | null = null;
+  for (const pattern of DLP_PATTERNS) {
+    if (pattern.keywords && !pattern.keywords.some((kw) => lower.includes(kw.toLowerCase())))
+      continue;
+    const flags = pattern.regex.flags.replace(/[gmy]/g, '');
+    if (!new RegExp(pattern.regex.source, flags + 'm').test(text)) continue;
+    for (const fragment of fragments) {
+      if (firstAcceptedMatch(pattern, fragment) === null) continue;
+      const severity =
+        pattern.contextBoost && isAssignmentContext(fragment) ? 'block' : pattern.severity;
+      if (severity === 'block')
+        return {
+          patternName: pattern.name,
+          fieldPath,
+          redactedSample: '[encoded secret]',
+          severity,
+        };
+      best ??= {
+        patternName: pattern.name,
+        fieldPath,
+        redactedSample: '[encoded secret]',
+        severity,
+      };
+      // Only a context boost can make a later fragment stronger than this one.
+      if (!pattern.contextBoost) break;
+    }
   }
   if (findMnemonic(text, budget)) {
     return {

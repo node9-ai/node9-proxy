@@ -75,6 +75,26 @@ describe('extractWorkspaceConfig', () => {
   });
 });
 
+describe('toolInspection provenance on a keyed machine (fw#338 review 3)', () => {
+  it('ignores a repository toolInspection, and keeps it apart when unkeyed', () => {
+    const project = path.join(home, 'proj-338');
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(
+      path.join(project, 'node9.config.json'),
+      JSON.stringify({ policy: { toolInspection: { 'mcp__*': 'query' } } })
+    );
+    const unkeyed = getConfig(project);
+    expect(unkeyed.policy.projectToolInspection).toEqual({ 'mcp__*': 'query' });
+    expect(unkeyed.policy.toolInspection).not.toHaveProperty('mcp__*');
+    keyed();
+    cache({});
+    _resetConfigCache();
+    const managed = getConfig(project);
+    expect(managed.policy.projectToolInspection).toEqual({});
+    expect(managed.policy.toolInspection).not.toHaveProperty('mcp__*');
+  });
+});
+
 describe('a keyed machine with workspace checks', () => {
   it('takes them into policy.checks with source workspace, and the engine honours them', async () => {
     keyed();

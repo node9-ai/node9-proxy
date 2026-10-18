@@ -756,6 +756,39 @@ describe('getConfig — cloud-pushed runtime flags', () => {
     expect(dlp.pii).toBe('block');
   });
 
+  it('fw#318 2b: managed trusted recipients replace the local list, normalised; a local config cannot set them', () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { untrustedContent: { trustedRecipients: ['email:dev@local.example'] } },
+      }),
+      [CACHE_PATH]: JSON.stringify({
+        fetchedAt: '2026-10-17T00:00:00.000Z',
+        rules: [],
+        managedConfig: {
+          locked: [],
+          untrustedContent: {
+            trustedRecipients: ['email:Press@News.Example', 'drop.example', 'word', 7],
+          },
+        },
+      }),
+    });
+    expect(getConfig().policy.untrustedContent.trustedRecipients).toEqual([
+      'email:press@news.example',
+      'host:drop.example',
+    ]);
+  });
+
+  it("fw#318 2b: a local config cannot vouch for a recipient on the workspace's behalf", () => {
+    mockFiles({
+      [CONFIG_PATH]: JSON.stringify({
+        settings: { mode: 'standard' },
+        policy: { untrustedContent: { trustedRecipients: ['email:dev@local.example'] } },
+      }),
+    });
+    expect(getConfig().policy.untrustedContent.trustedRecipients).toEqual([]);
+  });
+
   it('managed dlp (M2c): a locked pii wins over a stricter local', () => {
     mockFiles({
       [CONFIG_PATH]: JSON.stringify({

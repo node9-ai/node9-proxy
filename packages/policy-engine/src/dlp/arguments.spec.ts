@@ -76,12 +76,13 @@ describe('bounded argument secret inspection', () => {
   it('keeps a detected block when another field is incomplete', () => {
     expect(scanArgumentSecrets({ large: ' '.repeat(5_000_000), token })?.severity).toBe('block');
   });
-  it('enforces decoding depth and leaves no clean result on an uninspected layer', () => {
+  it('enforces decoding depth and reviews an uninspected layer', () => {
     let value = token;
     for (let i = 0; i < 5; i++) value = encode(value);
     expect(inspectArgumentSecrets(value)).toMatchObject({
       coverage: 'incomplete',
-      reasons: ['decode-depth'],
+      reasons: ['decode-nested'],
     });
+    expect(scanArgumentSecrets(value)?.severity).toBe('review');
   });
 });

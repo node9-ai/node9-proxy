@@ -1,3 +1,4 @@
+import { normalizeRecipient } from '../auth/trusted-recipients';
 import type { ToolInspection } from '@node9/policy-engine';
 // src/config/index.ts
 // Config types, constants, and runtime config loading.
@@ -140,6 +141,13 @@ export interface Config {
     dangerousWords: string[];
     ignoredTools: string[];
     toolInspection: ToolInspection;
+    /**
+     * RESOLVED output: the `toolInspection` entries a repository-carried
+     * node9.config.json contributed. Kept apart from the trusted map because
+     * that file is agent-writable in-session: the resolver lets it add a shell
+     * tool or field but never remap a recognized executor away from shell.
+     */
+    projectToolInspection?: ToolInspection;
     smartRules: SmartRule[];
     /**
      * RESOLVED output, never user input: the shields the shield layer
@@ -244,6 +252,10 @@ export interface Config {
       afterExposure: 'ask-once' | 'ask-every-time' | 'log-only';
       orgDomains: string[];
       roles: Record<string, Record<string, 'source' | 'action' | 'read'>>;
+      /** fw#318 2b: destinations the workspace trusts ('email:x@y', 'host:h',
+       *  'iban:..', 'account:..'), managed only; the developer's own list is
+       *  the local trusted-recipients.json, read fresh by the gate. */
+      trustedRecipients: string[];
     };
     // Pipe-chain trusted hosts — downgrades secret|curl-host exfil verdicts.
     // ONLY the managed source populates this list; when unmanaged, the policy
@@ -573,6 +585,7 @@ export const DEFAULT_CONFIG: Config = {
       afterExposure: 'ask-once',
       orgDomains: [],
       roles: {},
+      trustedRecipients: [],
     },
     trustedHosts: [],
     trustedHostsManaged: false,
@@ -979,6 +992,7 @@ export function getConfig(cwd?: string): Config {
     dangerousWords: [...DEFAULT_CONFIG.policy.dangerousWords],
     ignoredTools: [...DEFAULT_CONFIG.policy.ignoredTools],
     toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
+    projectToolInspection: {},
     // Shipped rules carry `builtin`: the catalog's per-check value governs
     // them and only them (a user rule that reuses a name keeps its verdict).
     smartRules: DEFAULT_CONFIG.policy.smartRules.map((r) => ({ ...r, builtin: true })),
@@ -1006,6 +1020,7 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.untrustedContent,
       orgDomains: [...DEFAULT_CONFIG.policy.untrustedContent.orgDomains],
       roles: {},
+      trustedRecipients: [],
     },
     // Left empty on purpose: the local file is read fresh at policy-eval time
     // (getCachedHosts via isTrustedHost), NOT snapshotted into the frozen config
@@ -1088,8 +1103,17 @@ export function getConfig(cwd?: string): Config {
     // This allows a project to relax global restrictions.
     if (p.dangerousWords) mergedPolicy.dangerousWords = [...p.dangerousWords];
 
-    if (p.toolInspection)
-      mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
+    if (p.toolInspection) {
+      // A repo-carried file lands in its own map: the shell resolver reads it
+      // as additive only (fw#338 review 3: `"mcp__*": "query"` in a checked-out
+      // repo switched off inspection of every MCP executor).
+      if (isProject)
+        mergedPolicy.projectToolInspection = {
+          ...mergedPolicy.projectToolInspection,
+          ...p.toolInspection,
+        };
+      else mergedPolicy.toolInspection = { ...mergedPolicy.toolInspection, ...p.toolInspection };
+    }
     // Project rules are inserted between default block rules and default review/allow rules.
     // This gives project rules priority over built-in review rules (e.g. a stateful block
     // rule fires before the default review-git-push) while preserving the Layer 1 invariant:
@@ -2227,6 +2251,19 @@ function applyUntrustedContent(
       .filter((d) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d));
     if (replaceLists) cur.orgDomains = domains;
     else for (const d of domains) if (!cur.orgDomains.includes(d)) cur.orgDomains.push(d);
+  }
+  // The workspace's trusted recipients come from the managed layer only: a
+  // local or repository config cannot vouch for an address on the org's
+  // behalf (the developer's own list is the local file, consulted beside it).
+  if (replaceLists && Array.isArray(uc.trustedRecipients)) {
+    cur.trustedRecipients = [
+      ...new Set(
+        uc.trustedRecipients
+          .filter((v): v is string => typeof v === 'string')
+          .map((v) => normalizeRecipient(v))
+          .filter((v): v is string => v !== null)
+      ),
+    ].slice(0, 200);
   }
   if (uc.roles && typeof uc.roles === 'object' && !Array.isArray(uc.roles)) {
     const next: Config['policy']['untrustedContent']['roles'] = replaceLists ? {} : cur.roles;

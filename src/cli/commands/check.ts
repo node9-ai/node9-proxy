@@ -719,6 +719,7 @@ export function registerCheckCommand(program: Command): void {
             ruleDescription?: string;
             reason?: string;
             exposureKeys?: string[];
+            exposureFromEid?: string;
           }) => {
             const msg = buildReviewMessage(
               result.blockedByLabel,
@@ -744,6 +745,7 @@ export function registerCheckCommand(program: Command): void {
                   ts: Date.now(),
                   label: result.blockedByLabel,
                   ...(result.exposureKeys?.length ? { exposureKeys: result.exposureKeys } : {}),
+                  ...(result.exposureFromEid ? { exposureFromEid: result.exposureFromEid } : {}),
                 });
               }
             } catch {

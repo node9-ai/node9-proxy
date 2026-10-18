@@ -941,7 +941,11 @@ function dimensionOfBlock(
   if (
     checkedBy === 'loop-detected' ||
     checkedBy === 'mcp-pin-mismatch' ||
-    checkedBy.startsWith('injection')
+    checkedBy.startsWith('injection') ||
+    // fw#318: a send held after the session read outside content, and the
+    // read rows themselves. Mirrors node9Firewall canon-taxonomy.ts.
+    ruleName.startsWith('exposure') ||
+    checkedBy.startsWith('exposure')
   )
     return 'detection';
   if (checkedBy === 'app-permission-block' || ruleName.startsWith('app-permission:')) return 'apps';

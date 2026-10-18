@@ -4,6 +4,8 @@
 // session. Requires `npm run build`.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 import { startDaemonHook, cliExists, type DaemonHook } from './helpers/daemon-hook';
 
 const itUnix = it.skipIf(process.platform === 'win32' || !cliExists);
@@ -134,6 +136,34 @@ describe('exposure through the built hook and a real daemon', () => {
     ).toBeUndefined();
     writeConfig({ untrustedContent: { orgDomains: ['acme.example'] } });
   });
+
+  itUnix(
+    '2b: the read is an informational audit row with an eid, and the approved send points back to it',
+    () => {
+      const rows = fs
+        .readFileSync(path.join(h.home, '.node9', 'audit.log'), 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      const sources = rows.filter((r) => r.checkedBy === 'exposure-source');
+      expect(sources.length).toBeGreaterThan(0);
+      for (const s of sources) {
+        expect(typeof s.eid).toBe('string');
+        expect(s.decision).toBe('allow');
+        expect(s.exposure).toMatchObject({ kind: 'source' });
+      }
+      const approved = rows.find(
+        (r) => r.checkedBy === 'inline-review' && typeof r.exposureFromEid === 'string'
+      );
+      expect(approved, 'the inline-approved send carries the read it followed').toBeDefined();
+      expect(sources.map((s) => s.eid)).toContain(approved!.exposureFromEid);
+      // A send let through after exposure says so, counts only.
+      const logged = rows.find(
+        (r) => (r.exposure as { kind?: string } | undefined)?.kind === 'logged'
+      );
+      expect(logged).toBeDefined();
+    }
+  );
 
   itUnix('the taint and exposure routes refuse a caller without the token', async () => {
     for (const route of ['/session-taint/list', '/session-exposure/list']) {

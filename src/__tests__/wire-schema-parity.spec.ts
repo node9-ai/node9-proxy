@@ -61,6 +61,8 @@ const MAXIMAL_ROW = {
   transcriptPath: '/tmp/t.jsonl',
   taintFromEid: 'evt-aaaaaaaaaaaa',
   taintSource: 'DLP:AWS Access Key ID',
+  exposure: { kind: 'logged', destinations: 1 },
+  exposureFromEid: 'evt-bbbbbbbbbbbb',
 };
 
 describe('audit wire parity with the SaaS schema', () => {

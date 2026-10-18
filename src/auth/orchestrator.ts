@@ -19,6 +19,7 @@ import {
   sensitivePathMatch,
   analyzeFsOperation,
   isBashTool,
+  inspectionLayers,
   resolveShellInput,
   evaluateProtectedFileAccess,
   incompleteFileVerdict,
@@ -190,6 +191,8 @@ export interface AuthResult {
   ruleHit?: string;
   /** fw#318: the keys an exposure review held, for the inline-ask marker. */
   exposureKeys?: string[];
+  /** fw#318 2b: the eid of the read a held send followed (the audit edge). */
+  exposureFromEid?: string;
   /** Observe mode: this decision would have been blocked in standard mode. */
   observeWouldBlock?: boolean;
   /** Recovery command to suggest when a stateful rule hard-blocks (e.g. "npm test"). */
@@ -491,7 +494,13 @@ async function _authorizeHeadlessCore(
   // (dlpPattern / dlpSample) so EVERY later row -- persistent, trust, race
   // outcome, cloud -- says what was found, the way the block row already does.
   let meta:
-    | (NonNullable<typeof metaArg> & { dlpPattern?: string; dlpSample?: string; ruleName?: string })
+    | (NonNullable<typeof metaArg> & {
+        dlpPattern?: string;
+        dlpSample?: string;
+        ruleName?: string;
+        exposure?: { kind: 'source' | 'logged'; destinations: number };
+        exposureFromEid?: string;
+      })
     | undefined =
     options?.cwd && !metaArg?.workingDir ? { ...metaArg, workingDir: options.cwd } : metaArg;
   if (process.env.NODE9_PAUSED === '1') return { approved: true, checkedBy: 'paused' };
@@ -572,7 +581,7 @@ async function _authorizeHeadlessCore(
   let fileAccess: PreparedFileAccess;
   let fileFinding: ProtectedFileVerdict | null;
   try {
-    fileAccess = prepareFileAccesses(toolName, args, options?.cwd, config.policy.toolInspection);
+    fileAccess = prepareFileAccesses(toolName, args, options?.cwd, inspectionLayers(config.policy));
     fileFinding = isManual
       ? null
       : evaluateProtectedFileAccess(
@@ -597,7 +606,7 @@ async function _authorizeHeadlessCore(
     fileAccess = { cwd: options?.cwd, homeDirs: [], accesses: [], handledPaths: new Set() };
     fileFinding = isManual ? null : incompleteFileVerdict();
   }
-  const shellInput = resolveShellInput(toolName, args, config.policy.toolInspection);
+  const shellInput = resolveShellInput(toolName, args, inspectionLayers(config.policy));
   const networkShell = shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command);
   const shellReview = !isManual && shellInput.kind === 'uninspectable';
   if (shellReview) {
@@ -774,6 +783,7 @@ async function _authorizeHeadlessCore(
   let exposureReview: string | null = null;
   let exposureKeys: string[] = [];
   let exposureDestinations: string[] = [];
+  let exposureFromEid: string | undefined;
   const ucPolicy = config.policy.untrustedContent;
   if (ucPolicy?.enabled && !taintWarning && meta?.sessionId && !isManual) {
     // MCP actions (the hook's namespaced names, the gateway's flagged bare
@@ -794,7 +804,8 @@ async function _authorizeHeadlessCore(
     const mcpFileWrite = bareName !== undefined && fileToolOperation(bareName, args) === 'write';
     const writes = (
       mcpFileWrite
-        ? prepareFileAccesses(bareName!, args, options?.cwd, config.policy.toolInspection).accesses
+        ? prepareFileAccesses(bareName!, args, options?.cwd, inspectionLayers(config.policy))
+            .accesses
         : fileAccess.accesses
     ).filter((a) => ['write', 'create', 'remove'].includes(a.operation));
     const sendsSomething = (acts && !mcpFileWrite) || !!shellExp?.sends;
@@ -870,6 +881,7 @@ async function _authorizeHeadlessCore(
             (domain !== null && ucPolicy.orgDomains.includes(domain)) ||
             mentioned.has(d) ||
             isTrustedRecipient(d) ||
+            ucPolicy.trustedRecipients.includes(d) ||
             (destinationKind(d) === 'host' &&
               (isLoopbackHost(value) ||
                 isTrustedHost(value) ||
@@ -994,6 +1006,10 @@ async function _authorizeHeadlessCore(
             );
           }
           exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
+          // fw#318 2b: the edge from the read to this send, on every audit
+          // row written for it from here (a block, the inline outcome row).
+          exposureFromEid = last?.eid;
+          if (exposureFromEid) meta = { ...meta, exposureFromEid };
           exposureKeys = [
             ...held
               .filter((h) => h.dest || h.why === 'unresolved' || h.why === 'repository')
@@ -1022,8 +1038,14 @@ async function _authorizeHeadlessCore(
               '.';
           }
         } else if (held.length > 0 || writeHolds.length > 0 || logged.length > 0) {
-          // Judged and let through: a delivery row, not a decision (no eid,
-          // so the shipper skips it). Kinds and counts only, never a value.
+          // Judged and let through. The call's own allow row (written below
+          // by whichever path allows it) carries the fact, counts only, never
+          // a value (fw#318 2b); the debug log keeps the local detail.
+          meta = {
+            ...meta,
+            exposure: { kind: 'logged', destinations: logged.length },
+            ...(last?.eid ? { exposureFromEid: last.eid } : {}),
+          };
           appendToLog(HOOK_DEBUG_LOG, {
             ts: new Date().toISOString(),
             event: 'exposure-logged',
@@ -2053,6 +2075,7 @@ async function _authorizeHeadlessCore(
         explainableLabel ||
         'Node9 flagged this action for review.',
       ...(exposureReview && exposureKeys.length > 0 ? { exposureKeys } : {}),
+      ...(exposureReview && exposureFromEid ? { exposureFromEid } : {}),
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };
