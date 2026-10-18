@@ -225,11 +225,10 @@ function maskLeaf(value: unknown, key: string, depth: number): unknown {
   if (depth > MAX_MASK_DEPTH) return '[REDACTED]';
   if (typeof value === 'string') {
     try {
-      const wrapped = JSON.parse(maskPersonalData(JSON.stringify({ [key]: value }))) as Record<
-        string,
-        unknown
-      >;
-      return Object.values(wrapped)[0];
+      // The leaf in its JSON form under its own key, built as text so no
+      // property named by the input is ever written.
+      const json = `{${JSON.stringify(key)}:${JSON.stringify(value)}}`;
+      return Object.values(JSON.parse(maskPersonalData(json)) as object)[0];
     } catch {
       return '[REDACTED]';
     }
@@ -241,17 +240,11 @@ function maskLeaf(value: unknown, key: string, depth: number): unknown {
   }
   if (Array.isArray(value)) return value.map((v) => maskLeaf(v, key, depth + 1));
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    // defineProperty, not assignment: a parsed `__proto__` key must stay a
-    // plain property, never become the copy's prototype.
-    for (const [k, v] of Object.entries(value))
-      Object.defineProperty(out, maskPersonalData(k), {
-        value: maskLeaf(v, k, depth + 1),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
-    return out;
+    // Object.fromEntries defines each key as an own data property, so a
+    // parsed `__proto__` key stays a plain property, never the prototype.
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [maskPersonalData(k), maskLeaf(v, k, depth + 1)])
+    );
   }
   return value;
 }
