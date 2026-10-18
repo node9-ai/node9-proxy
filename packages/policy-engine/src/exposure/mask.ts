@@ -173,15 +173,25 @@ const ACCOUNT_KEY_RE =
 const ACCOUNT_VALUE_RE = /"([A-Z]{2}\d{2}[A-Z0-9]{11,30})"/g;
 
 /**
- * IBANs (mod-97), card numbers (exactly what detectPii reports, so not the
- * fractional part of a number), account numbers (a whole IBAN-shaped value,
- * or a number under an account key) and email addresses inside a text,
- * masked the way destinations are. No quote or backslash is introduced or
- * removed, so a JSON string stays a JSON string; a card written as a bare
- * JSON number does not stay a number, so arguments go through
- * maskPersonalValue instead.
+ * IBANs (mod-97), card numbers (the detector's patterns and Luhn check),
+ * account numbers (a whole IBAN-shaped value, or a number under an account
+ * key) and email addresses inside a text, masked the way destinations are.
+ * Masking is stricter than detection: a card is masked even where detectPii
+ * exempts it as the fractional part of a number ("1.<card>", "0,<card>"),
+ * since a hidden fraction in a log costs nothing and a shown card leaks; so
+ * a Luhn-valid fractional part inside text is masked too. No quote or
+ * backslash is introduced or removed, so a JSON string stays a JSON string;
+ * a card written as a bare JSON number does not stay a number, so arguments
+ * go through maskPersonalValue instead.
  */
 export function maskPersonalData(text: string): string {
+  return maskText(text, false);
+}
+
+/** maskPersonalData, with the detector's decimal-fraction exemption on or
+ *  off for cards. maskLeaf keeps it on for a number, so a fraction stays a
+ *  number and only a card written as a number becomes the masked string. */
+function maskText(text: string, exemptFractions: boolean): string {
   if (!text) return text;
   try {
     let out = text;
@@ -189,7 +199,9 @@ export function maskPersonalData(text: string): string {
       const v = m.replace(/[ -]/g, '').toUpperCase();
       return validateIban(v) ? `${v.slice(0, 4)} **** **** ${v.slice(-4)}` : m;
     });
-    out = replaceValidCards(out, (digits) => `**** **** **** ${digits.slice(-4)}`);
+    out = replaceValidCards(out, (digits) => `**** **** **** ${digits.slice(-4)}`, {
+      exemptFractions,
+    });
     out = out.replace(ACCOUNT_VALUE_RE, (m, v: string) =>
       IBAN_LENGTH[v.slice(0, 2).toUpperCase()] === v.length ? `"****${v.slice(-4)}"` : m
     );
@@ -211,11 +223,14 @@ const MAX_MASK_DEPTH = 64;
 
 /**
  * maskPersonalData over a JSON-shaped value (tool arguments), leaf by leaf, so
- * the result is always a value: a string leaf is masked in its JSON form under
- * its own key (the account-key and whole-value rules still see both), an
- * object key is masked as text, and a number whose text holds personal data (a
- * card passed as a number) becomes the masked string. Anything deeper than 64
- * levels is replaced by '[REDACTED]'. Pure, never throws.
+ * the result is always a value. A string leaf is masked twice: as raw text
+ * first (a real newline or tab stays a word boundary, so a card or IBAN that
+ * begins a line is found, as detectArgsPii finds it), then in its JSON form
+ * under its own key (the account-key and whole-value rules see both). An
+ * object key is masked as text; two keys that mask alike are told apart by a
+ * `#2`, `#3` suffix so no entry is lost. A number whose text holds a card
+ * becomes the masked string; a fraction stays the same number. Anything
+ * deeper than 64 levels is replaced by '[REDACTED]'. Pure, never throws.
  */
 export function maskPersonalValue(value: unknown): unknown {
   return maskLeaf(value, '', 0);
@@ -227,7 +242,7 @@ function maskLeaf(value: unknown, key: string, depth: number): unknown {
     try {
       // The leaf in its JSON form under its own key, built as text so no
       // property named by the input is ever written.
-      const json = `{${JSON.stringify(key)}:${JSON.stringify(value)}}`;
+      const json = `{${JSON.stringify(key)}:${JSON.stringify(maskPersonalData(value))}}`;
       return Object.values(JSON.parse(maskPersonalData(json)) as object)[0];
     } catch {
       return '[REDACTED]';
@@ -235,15 +250,22 @@ function maskLeaf(value: unknown, key: string, depth: number): unknown {
   }
   if (typeof value === 'number') {
     const text = String(value);
-    const masked = maskPersonalData(text);
+    const masked = maskText(text, true);
     return masked === text ? value : masked;
   }
   if (Array.isArray(value)) return value.map((v) => maskLeaf(v, key, depth + 1));
   if (value && typeof value === 'object') {
     // Object.fromEntries defines each key as an own data property, so a
     // parsed `__proto__` key stays a plain property, never the prototype.
+    const used = new Set<string>();
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [maskPersonalData(k), maskLeaf(v, k, depth + 1)])
+      Object.entries(value).map(([k, v]) => {
+        const base = maskPersonalData(k);
+        let name = base;
+        for (let n = 2; used.has(name); n++) name = `${base}#${n}`;
+        used.add(name);
+        return [name, maskLeaf(v, k, depth + 1)];
+      })
     );
   }
   return value;

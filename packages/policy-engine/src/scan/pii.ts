@@ -85,13 +85,16 @@ const PII_IBAN_RE = /\b[A-Z]{2}\d{2}(?:[A-Z0-9]|[ -][A-Z0-9]){11,30}\b/;
  */
 function* validCardRuns(
   text: string,
-  base: RegExp
+  base: RegExp,
+  exemptFractions = true
 ): Generator<{ index: number; length: number; digits: string }> {
   const re = new RegExp(base.source, 'g');
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const digits = m[0].replace(/\D/g, '');
-    if (!isDecimalFraction(text, m.index, digits.length === m[0].length) && validateLuhn(digits)) {
+    const fraction =
+      exemptFractions && isDecimalFraction(text, m.index, digits.length === m[0].length);
+    if (!fraction && validateLuhn(digits)) {
       yield { index: m.index, length: m[0].length, digits };
     } else {
       re.lastIndex = m.index + 1;
@@ -110,14 +113,22 @@ function hasValidCard(text: string): boolean {
 /**
  * Replace every card the detector accepts with `replace(digits)`, the 16-digit
  * pattern first, then the 15-digit one on the result. Used by the personal
- * data masking (exposure/mask.ts) so it masks exactly what detectPii reports.
+ * data masking (exposure/mask.ts), which shares the detector's patterns and
+ * Luhn check. `exemptFractions: false` drops the decimal-fraction exemption:
+ * masking text, a card after "1." is hidden too, at the cost of also hiding a
+ * Luhn-valid fractional part (a log shows "0.**** ..."); the detector keeps
+ * the exemption because a false positive there blocks the agent.
  */
-export function replaceValidCards(text: string, replace: (digits: string) => string): string {
+export function replaceValidCards(
+  text: string,
+  replace: (digits: string) => string,
+  { exemptFractions = true }: { exemptFractions?: boolean } = {}
+): string {
   let out = text;
   for (const base of [PII_CC16_RE, PII_CC15_RE]) {
     let res = '';
     let last = 0;
-    for (const run of validCardRuns(out, base)) {
+    for (const run of validCardRuns(out, base, exemptFractions)) {
       res += out.slice(last, run.index) + replace(run.digits);
       last = run.index + run.length;
     }

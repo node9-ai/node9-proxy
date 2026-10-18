@@ -23,7 +23,7 @@ import { authorizeHeadless } from '../auth/orchestrator';
 import { _resetConfigCache, getConfig } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
 import { getCredentials } from '../config';
-import { buildNegotiationMessage } from '../policy/negotiation';
+import { buildNegotiationMessage, isHumanDecision } from '../policy/negotiation';
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
@@ -518,14 +518,11 @@ export async function runMcpGateway(
           console.error(chalk.gray(`   Reason: ${result.reason ?? 'Security Policy'}\n`));
 
           const blockedByLabel = result.blockedByLabel ?? result.reason ?? 'Security Policy';
-          const isHumanDecision =
-            blockedByLabel.toLowerCase().includes('user') ||
-            blockedByLabel.toLowerCase().includes('daemon') ||
-            blockedByLabel.toLowerCase().includes('decision');
+          const humanDecision = isHumanDecision(blockedByLabel, result.blockedBy);
 
           const aiInstruction = buildNegotiationMessage(
             blockedByLabel,
-            isHumanDecision,
+            humanDecision,
             result.reason,
             undefined,
             { kind: result.blockKind, path: result.blockedPath }

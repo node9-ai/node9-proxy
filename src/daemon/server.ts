@@ -8,6 +8,11 @@ import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
 import { addTrustedRecipient } from '../auth/trusted-recipients';
+import {
+  backgroundPassSource,
+  DECISION_ROUTE_SOURCES,
+  HUMAN_DECISION_SOURCES,
+} from '../auth/decision-sources';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
@@ -207,6 +212,22 @@ export function buildDaemonReport(
   };
 }
 
+/** How long a card waits before the daemon denies it, or null for no timer.
+ *  0 means "no timer", as it does to the hook: read with `??` it armed a 0 ms
+ *  timer that denied every card the moment it opened. Unset takes the default.
+ *  The tail's countdown and the timer read this one value. */
+function autoDenyMs(): number | null {
+  const ms = getConfig().settings.approvalTimeoutMs;
+  if (ms === 0) return null;
+  return ms ?? AUTO_DENY_MS;
+}
+
+/** The card's auto-deny timer, or none when the timeout is 0. */
+function armAutoDeny(fire: () => void): ReturnType<typeof setTimeout> | undefined {
+  const ms = autoDenyMs();
+  return ms === null ? undefined : setTimeout(fire, ms);
+}
+
 export function startDaemon(): void {
   // A4c: a synchronous throw in these inits used to exit the process silently
   // (stdio:'ignore' on the auto-start path). Record it so a startup death is
@@ -370,7 +391,7 @@ export function startDaemon(): void {
             allowCount: (insightCounts.get(e.toolName) ?? 0) + 1,
           })),
           orgName: getOrgName(),
-          autoDenyMs: getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS,
+          autoDenyMs: autoDenyMs(),
         })}\n\n`
       );
       // event: decisions / shields-status / csrf removed in v3 sprint.
@@ -440,7 +461,7 @@ export function startDaemon(): void {
           timestamp: Date.now(),
           earlyDecision: null,
           waiter: null,
-          timer: setTimeout(() => {
+          timer: armAutoDeny(() => {
             if (pending.has(id)) {
               const e = pending.get(id)!;
               appendAuditLog({
@@ -448,6 +469,9 @@ export function startDaemon(): void {
                 args: e.args,
                 decision: 'auto-deny',
               });
+              // ENG-2: say no one answered, so the hook does not report a
+              // human rejection.
+              e.decisionSource = 'timeout';
               if (e.waiter) e.waiter('deny', 'No response — auto-denied after timeout');
               else {
                 e.earlyDecision = 'deny';
@@ -456,7 +480,7 @@ export function startDaemon(): void {
               pending.delete(id);
               broadcast('remove', { id, decision: 'deny' });
             }
-          }, getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS),
+          }),
         };
         pending.set(id, entry);
 
@@ -556,6 +580,10 @@ export function startDaemon(): void {
             clearTimeout(e.timer);
             const decision: Decision = result.approved ? 'allow' : 'deny';
             appendAuditLog({ toolName: e.toolName, args: e.args, decision });
+            // fw#304 review: say who decided. Without a source the hook could
+            // not tell an administrator's deny in Slack (this pass runs the
+            // cloud racer) from a rule, and credited the rule.
+            e.decisionSource = backgroundPassSource(result);
             if (e.waiter) {
               e.waiter(decision, result.reason);
               pending.delete(id);
@@ -705,8 +733,7 @@ export function startDaemon(): void {
 
         // source is validated against an allowlist AFTER appendAuditLog so the
         // raw user-supplied value never reaches any log string — no log injection.
-        const VALID_SOURCES = new Set(['terminal', 'browser', 'native', 'terminal-redirect']);
-        if (source && VALID_SOURCES.has(source)) entry.decisionSource = source;
+        if (source && DECISION_ROUTE_SOURCES.has(source)) entry.decisionSource = source;
         if (entry.waiter) {
           entry.waiter(resolvedDecision, reason);
           pending.delete(id!);
@@ -900,8 +927,7 @@ export function startDaemon(): void {
           saveInsightCounts();
         }
 
-        const VALID_RESOLVE_SOURCES = new Set(['terminal', 'browser', 'native']);
-        if (source && VALID_RESOLVE_SOURCES.has(source)) entry.decisionSource = source;
+        if (source && HUMAN_DECISION_SOURCES.has(source)) entry.decisionSource = source;
 
         if (entry.waiter) entry.waiter(resolvedResolveDecision);
         else entry.earlyDecision = resolvedResolveDecision;

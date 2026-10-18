@@ -122,7 +122,7 @@ Do NOT attempt to bypass this rule.
   const recovery = recoveryCommand
     ? `\nREQUIRED ACTION: Run \`${recoveryCommand}\` first, then retry your original command.`
     : '\n- Pivot to a non-destructive or read-only alternative.';
-  return `NODE9: Action blocked by security policy [${blockedByLabel}].
+  return `NODE9: Action blocked by security policy [${agentFacingLabel(blockedByLabel)}].
 INSTRUCTIONS:
 - Do NOT retry this exact command or attempt to bypass the rule.${recovery}
 - Inform the user which security rule was triggered and ask how to proceed.`;
@@ -153,4 +153,55 @@ export function buildReviewMessage(
   const trimmed = why.trimEnd();
   const sentence = /[.!?\u2026]$/.test(trimmed) ? trimmed : `${trimmed}.`;
   return `Node9 flagged this for your review: ${sentence} Approve to proceed, or deny to cancel.`;
+}
+
+/** ENG-2: whether a person refused this call, for the message the agent
+ *  reads. A verdict that names a rule, a timeout or the organisation's policy
+ *  as its decider (`blockedBy`) is never a person, whatever its label says: a
+ *  rule named `review-user-data` made the label test below report a human
+ *  rejection. The label words remain the signal for a person's own decision
+ *  (`User Decision (...)`, blockedBy `local-decision`) and for callers that
+ *  pass a bare label. */
+export function isHumanDecision(label: string, blockedBy?: string): boolean {
+  if (blockedBy !== undefined && blockedBy !== 'local-decision') return false;
+  const l = label.toLowerCase();
+  return l.includes('user') || l.includes('daemon') || l.includes('decision');
+}
+
+/** MSG-3: a label as the agent reads it. Labels carry emoji and the
+ *  "Node9" spelling for the dashboard and the developer's terminal, which key
+ *  on the exact string; agent-facing text has no emoji and names the product
+ *  "node9". */
+export function agentFacingLabel(label: string): string {
+  const plain = label
+    .replace(/[\p{Extended_Pictographic}\u200D\uFE0F]/gu, '')
+    .replace(/\bNode9\b/g, 'node9')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return plain || 'Security Policy';
+}
+
+const BLOCKED_BY = ' is blocked by ';
+const DASH_BLOCKED_BY = ' \u2014 blocked by ';
+const SHIELD = ' shield';
+
+/** MSG-5: a builtin shield's block sentence, for the approval card a softened
+ *  block opens. "Reading .env files is blocked by project-jail shield" reads
+ *  as a verdict above an Allow button; the card asks instead. Only the two
+ *  builtin shapes ending in "<name> shield" are rewritten; any other sentence,
+ *  a user's own rule included, is returned unchanged (the card's header
+ *  already says the rule is a block). indexOf, not a regex: the sentence can
+ *  come from a user's own rule. */
+export function asApprovalRequest(description: string): string {
+  const is = description.lastIndexOf(BLOCKED_BY);
+  if (is > 0) {
+    const by = description.slice(is + BLOCKED_BY.length).replace(/\.$/, '');
+    if (by.endsWith(SHIELD)) return `${description.slice(0, is)} needs your approval (${by})`;
+  }
+  const dash = description.lastIndexOf(DASH_BLOCKED_BY);
+  if (dash > 0) {
+    const by = description.slice(dash + DASH_BLOCKED_BY.length).replace(/\.$/, '');
+    if (by.endsWith(SHIELD)) return `${description.slice(0, dash)}. Needs your approval (${by})`;
+  }
+  return description;
 }

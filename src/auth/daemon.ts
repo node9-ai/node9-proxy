@@ -300,15 +300,32 @@ export async function registerDaemonEntry(
 /** Long-poll the daemon for a decision on an already-registered entry. */
 export async function waitForDaemonDecision(
   id: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Give up after this long; 0 waits for the daemon's answer however long it takes. */
+  maxWaitMs = 120_000
 ): Promise<{ decision: 'allow' | 'deny' | 'abandoned'; source?: string; reason?: string }> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const waitCtrl = new AbortController();
-  const waitTimer = setTimeout(() => waitCtrl.abort(), 120_000);
+  let capped = false;
+  const waitTimer =
+    maxWaitMs > 0
+      ? setTimeout(() => {
+          capped = true;
+          waitCtrl.abort();
+        }, maxWaitMs)
+      : undefined;
   const onAbort = () => waitCtrl.abort();
   if (signal) signal.addEventListener('abort', onAbort);
   try {
-    const waitRes = await fetch(`${base}/wait/${id}`, { signal: waitCtrl.signal });
+    const waitRes = await fetch(`${base}/wait/${id}`, { signal: waitCtrl.signal }).catch(
+      (err: unknown) => {
+        // Our own cap is a failed channel, not the race aborting this racer:
+        // the race ignores an AbortError, and a race with no other racer
+        // then never ended.
+        if (capped && !signal?.aborted) throw new Error('node9 daemon did not answer in time');
+        throw err;
+      }
+    );
     if (!waitRes.ok) return { decision: 'deny' };
     const { decision, source, reason } = (await waitRes.json()) as {
       decision: string;

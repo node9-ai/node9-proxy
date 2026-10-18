@@ -46,7 +46,10 @@ describe('appendLocalAudit with auditHashArgs off', () => {
     ).not.toThrow();
     expect(rowIn(LOCAL_AUDIT_LOG).args).toEqual({ card: '**** **** **** 4242', rate: 46 / 96 });
   });
-  it('a fraction inside written content is kept as written', () => {
+  // Second review, finding 2: masking is stricter than detection, so a
+  // Luhn-valid fractional part inside written text is hidden in the log (the
+  // row is still written and stays valid JSON).
+  it('a Luhn-valid fraction inside written content is masked, the row written', () => {
     const content = JSON.stringify({ catch_rate: 46 / 96 }, null, 2);
     appendLocalAudit(
       'Write',
@@ -56,7 +59,9 @@ describe('appendLocalAudit with auditHashArgs off', () => {
       {},
       false
     );
-    expect(rowIn(LOCAL_AUDIT_LOG).args).toEqual({ file_path: 'metrics.json', content });
+    const args = rowIn(LOCAL_AUDIT_LOG).args as { file_path: string; content: string };
+    expect(args.file_path).toBe('metrics.json');
+    expect(args.content).toBe(content.replace(/0\.\d+/, '0.**** **** **** 6667'));
   });
 });
 

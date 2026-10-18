@@ -63,11 +63,12 @@ export interface PendingEntry {
   mcpServer?: string;
   timestamp: number;
   slackDelegated: boolean;
-  timer: ReturnType<typeof setTimeout>;
+  /** The auto-deny timer; none when approvalTimeoutMs is 0 ("no timer"). */
+  timer: ReturnType<typeof setTimeout> | undefined;
   waiter: ((d: Decision, reason?: string) => void) | null;
   earlyDecision: Decision | null;
   earlyReason?: string;
-  decisionSource?: string; // 'browser', 'terminal', or undefined (cloud/auto)
+  decisionSource?: string; // 'browser', 'terminal', 'native', 'timeout' (the auto-deny timer), or undefined (cloud/auto)
   /** The agent session the call belongs to (fw#318 P5: trust-this-address clears its exposure). */
   sessionId?: string;
   /** New fields for MCP discovery */

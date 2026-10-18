@@ -81,6 +81,8 @@ import { runPackageCheck } from '../supply-chain/check';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
+import { asApprovalRequest } from '../policy/negotiation';
+import { HUMAN_DECISION_SOURCES, REDIRECT_SOURCE } from './decision-sources';
 
 /** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
  *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
@@ -447,6 +449,16 @@ export async function authorizeHeadless(
   return _authorizeHeadlessCore(toolName, args, meta, options);
 }
 
+/** How long the terminal racer waits on /wait. The daemon answers by its
+ *  own timer, so the cap only guards against a daemon that never does: a
+ *  fixed 120 s cap cut a longer configured timeout short (the abort closes
+ *  the long-poll, which removes the card), and a 0 ("no timer") must not be
+ *  capped at all. */
+export function daemonWaitCapMs(approvalTimeoutMs: number | undefined): number {
+  if (approvalTimeoutMs === 0) return 0;
+  return Math.max(approvalTimeoutMs ?? 0, 120_000) + 5_000;
+}
+
 /**
  * The message shown when the gate asked for approval and nobody answered.
  *
@@ -570,6 +582,11 @@ async function _authorizeHeadlessCore(
   // ruleName-less intrinsic blocks (pipe-chain/eval-remote/suspect-binary,
   // tier 3, no ruleName) from being resolved by any non-human channel.
   let hardBlockDowngraded = false;
+  // ENG-2: what the block would have said had no human been reachable. When the
+  // review a downgrade opened is denied by something other than a person (the
+  // daemon's timer, its own background pass), the agent gets this verdict, not
+  // a human rejection.
+  let downgradedBlock: AuthResult | null = null;
 
   // The argument scan (bounded decoding views) is the most expensive check on
   // the hot path. Run it at most once per call and hand the result to the
@@ -1671,6 +1688,17 @@ async function _authorizeHeadlessCore(
         overridable: policyResult.overridable,
       });
 
+      // The hard-block result, built before the downgrade below rewrites the label.
+      const blocked: AuthResult = {
+        approved: false,
+        reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
+        blockedBy: 'local-config',
+        blockedByLabel: policyResult.blockedByLabel,
+        ruleHit: policyResult.ruleName,
+        ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
+        ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
+        ...protectedPathFields(policyResult.ruleName, toolName, args, dlpReviewFlagged),
+      };
       // The audit row + hard-block result, shared by every non-softening path so
       // a fail-closed decision is a single call.
       const hardBlock = (): AuthResult => {
@@ -1685,17 +1713,10 @@ async function _authorizeHeadlessCore(
             { ...meta, ruleName: policyResult.ruleName },
             hashAuditArgs
           );
-        return {
-          approved: false,
-          reason: policyResult.reason ?? 'Action explicitly blocked by Smart Policy.',
-          blockedBy: 'local-config',
-          blockedByLabel: policyResult.blockedByLabel,
-          ruleHit: policyResult.ruleName,
-          ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
-          ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
-          ...protectedPathFields(policyResult.ruleName, toolName, args, dlpReviewFlagged),
-        };
+        return blocked;
       };
+      // Both softening paths below open a review in place of this block.
+      downgradedBlock = blocked;
 
       // Stateful (dependsOnState) rules keep their DELIBERATE downgrade-to-review
       // semantics: when predicates are unknown / the daemon can't check them,
@@ -1825,7 +1846,13 @@ async function _authorizeHeadlessCore(
     );
     // Truncate to 200 chars — descriptions come from local config but are
     // forwarded to the SaaS; cap length to prevent oversized payloads.
-    if (policyRuleDescription) riskMetadata.ruleDescription = policyRuleDescription.slice(0, 200);
+    // MSG-5: a softened block shows its rule's sentence on an approval card, so
+    // "Reading .env files is blocked" sat above "Enter = Allow". The card asks;
+    // the agent-facing reason (policyRuleDescription) keeps the block wording.
+    if (policyRuleDescription)
+      riskMetadata.ruleDescription = (
+        hardBlockDowngraded ? asApprovalRequest(policyRuleDescription) : policyRuleDescription
+      ).slice(0, 200);
 
     // A persistent allow must never override a smart rule with verdict "review".
     // Smart rules represent explicit user intent; a blanket "allow this tool"
@@ -2217,7 +2244,11 @@ async function _authorizeHeadlessCore(
       // callSpecificReview, not reviewDemanded (which the design first named):
       // a smart-rule label was overwritten here before this fix too, and
       // widening the term would change labels on calls DLP-3 is not about.
-      if (!callSpecificReview()) explainableLabel = 'Organization Policy (SaaS)';
+      // MSG-5 widens it to reviewDemanded: a local rule (a smart-rule review, a
+      // softened block such as the project jail) asked for this review, and the
+      // card said "Organization Policy (SaaS)" above it. Only a review no local
+      // rule asked for is the organisation's.
+      if (!reviewDemanded()) explainableLabel = 'Organization Policy (SaaS)';
     } catch {
       // Cloud API handshake failed — fall through to local rules silently
     }
@@ -2421,12 +2452,72 @@ async function _authorizeHeadlessCore(
           decision: daemonDecision,
           source: decisionSource,
           reason: daemonReason,
-        } = await waitForDaemonDecision(daemonEntryId!, signal);
+        } = await waitForDaemonDecision(
+          daemonEntryId!,
+          signal,
+          daemonWaitCapMs(config.settings.approvalTimeoutMs)
+        );
         if (daemonDecision === 'abandoned') throw new Error('Abandoned');
 
         const isApproved = daemonDecision === 'allow';
         // 'terminal-redirect' = tail choice [2]: AI redirect with a custom reason string
-        const isRedirect = decisionSource === 'terminal-redirect';
+        const isRedirect = decisionSource === REDIRECT_SOURCE;
+        // ENG-2: a deny is a person's in node9 tail only with a human source.
+        // The daemon names its own deciders: its timer ('timeout'), and for a
+        // card its background pass resolved, the pass's cloud racer ('cloud')
+        // or a rule ('policy'). No source at all means /wait failed (the
+        // daemon died or the card was gone). None of those is a person
+        // refusing in the terminal, and the agent must not be told one did: it
+        // stops and asks instead of reading the block's reason.
+        if (
+          !isApproved &&
+          !isRedirect &&
+          !(decisionSource && HUMAN_DECISION_SOURCES.has(decisionSource))
+        ) {
+          // The organisation decided, as when the hook's own cloud racer wins.
+          if (decisionSource === 'cloud')
+            return {
+              approved: false,
+              reason: daemonReason || 'Action rejected by organization administrator via Slack.',
+              blockedBy: 'team-policy',
+              blockedByLabel: 'Organization Policy (SaaS)',
+              decisionSource: 'cloud',
+            } as AuthResult;
+          const timedOut = decisionSource === 'timeout';
+          if (downgradedBlock)
+            return {
+              ...downgradedBlock,
+              blockedBy: timedOut ? 'timeout' : 'local-config',
+            } as AuthResult;
+          if (timedOut)
+            return {
+              approved: false,
+              reason: daemonReason || 'No response: auto-denied after the approval timeout.',
+              blockedBy: 'timeout',
+              blockedByLabel: 'Approval Timeout',
+            } as AuthResult;
+          if (decisionSource === 'policy')
+            return {
+              approved: false,
+              reason: daemonReason || 'Action blocked by policy.',
+              blockedBy: 'local-config',
+              blockedByLabel: explainableLabel,
+            } as AuthResult;
+          // /wait failed: no channel decided, so no rule is named either.
+          return {
+            approved: false,
+            reason: daemonReason || 'node9 could not get an approval decision for this call.',
+            blockedBy: 'no-approval-mechanism',
+            blockedByLabel: 'Approval Unavailable',
+          } as AuthResult;
+        }
+        // An allow the daemon's background pass made is its decider's, not a
+        // click in node9 tail: the organisation's (as the hook's own cloud
+        // racer reports one), or a rule's.
+        if (isApproved && decisionSource === 'cloud')
+          return { approved: true, checkedBy: 'cloud', decisionSource: 'cloud' } as AuthResult;
+        if (isApproved && decisionSource === 'policy')
+          return { approved: true, checkedBy: 'local-policy' } as AuthResult;
         const via = 'Terminal (node9 tail)';
         return {
           approved: isApproved,

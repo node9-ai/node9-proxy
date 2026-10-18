@@ -78,16 +78,28 @@ describe('checkData', () => {
 });
 
 describe('checkApprovalConfig', () => {
-  it('flags a zero approval timeout (every review auto-denies)', () => {
+  // A 0 timeout no longer auto-denies (the daemon gives its card the
+  // default), so it is not "every review denies instantly"; it turns node9's
+  // own timer off, and it must not hide the approver check below it.
+  it('flags a zero approval timeout as node9 never timing a review out', () => {
     getConfig.mockReturnValue(
       cfg({
         approvalTimeoutMs: 0,
         approvers: { native: true, browser: false, cloud: false, terminal: false },
       })
     );
-    const f = checkApprovalConfig(ctx)[0];
-    expect(f.severity).toBe('high');
-    expect(f.title).toMatch(/timeout is 0/i);
+    const found = checkApprovalConfig(ctx);
+    expect(found).toHaveLength(1);
+    expect(found[0].severity).toBe('medium');
+    expect(found[0].title).toMatch(/timeout is 0: node9 never times a review out/);
+    expect(found[0].title).not.toMatch(/auto-denies/);
+  });
+
+  it('a zero approval timeout does not hide a missing approver', () => {
+    getConfig.mockReturnValue(cfg({ approvalTimeoutMs: 0 }));
+    const titles = checkApprovalConfig(ctx).map((f) => f.title);
+    expect(titles.some((t) => /No approver is configured/.test(t))).toBe(true);
+    expect(titles.some((t) => /timeout is 0/.test(t))).toBe(true);
   });
 
   it('flags no approver channel as high', () => {

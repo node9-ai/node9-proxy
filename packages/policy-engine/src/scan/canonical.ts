@@ -704,6 +704,9 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
 // personal-data masking (fw#318 code review). detectPii output is identical:
 // 0 of the strings in 984 local session transcripts and 0 of 499,500
 // fractions in four spellings changed.
+// 2026-10-18, hash bumped with NO version bump: replaceValidCards takes an
+// exemptFractions option for the masking (second fw#318 review); its default
+// and detectPii keep the exemption, so detector output is identical.
 
 // 2026-09-11, hash bumped with NO version bump: stage 3 of the credential jail
 // (argument POSITION kept in extractLiteralArgs) changed detector SOURCE and
@@ -733,7 +736,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'a358f47eacca6e14';
+export const CANONICAL_EXTRACTOR_HASH = '60cee75c7e2a5c7c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
