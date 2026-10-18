@@ -106,3 +106,71 @@ describe('daemon auto-deny timer reports source=timeout (ENG-2)', () => {
     expect(body.source).toBe('timeout');
   });
 });
+
+// approvalTimeoutMs: 0 means "no timeout" to the hook (its own timer is off),
+// but the daemon read it with `??` and armed a 0 ms timer: every card was
+// denied the moment it opened, before any person could see it. A 0 now takes
+// the default, so the card is still open a moment later.
+describe('daemon with approvalTimeoutMs 0 keeps the card open', () => {
+  let tmpHome = '';
+  let port = 0;
+  let env: NodeJS.ProcessEnv = {};
+  let daemonProc: ChildProcess | undefined;
+
+  beforeAll(async () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-timeout-zero-'));
+    fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'config.json'),
+      JSON.stringify({ settings: { mode: 'audit', autoStartDaemon: false, approvalTimeoutMs: 0 } })
+    );
+    port = await freePort();
+    env = {
+      ...process.env,
+      HOME: tmpHome,
+      USERPROFILE: tmpHome,
+      NODE9_TESTING: '1',
+      NODE9_DAEMON_PORT: String(port),
+    };
+    daemonProc = spawn(process.execPath, [CLI, 'daemon', 'start'], { env, stdio: 'pipe' });
+    if (!(await waitForDaemon(port, 8000))) {
+      daemonProc.kill();
+      throw new Error('Daemon did not start within 8s');
+    }
+  }, 15_000);
+
+  afterAll(() => {
+    spawnSync(process.execPath, [CLI, 'daemon', 'stop'], { env, timeout: 3000 });
+    if (daemonProc?.exitCode === null) daemonProc.kill();
+    if (tmpHome) fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('the card waits for a person, and their decision is delivered', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toolName: 'bash', args: { command: 'echo timeout-zero' } }),
+    });
+    expect(res.ok).toBe(true);
+    const { id } = (await res.json()) as { id: string };
+
+    const waiting = fetch(`http://127.0.0.1:${port}/wait/${id}`);
+    // Before the fix the card was denied and gone within milliseconds.
+    await new Promise((r) => setTimeout(r, 1500));
+    const pid = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.node9', 'daemon.pid'), 'utf-8')
+    ) as { internalToken?: string };
+    const decided = await fetch(`http://127.0.0.1:${port}/decision/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': pid.internalToken ?? '' },
+      body: JSON.stringify({ decision: 'deny', source: 'terminal' }),
+    });
+    expect(decided.status).toBe(200);
+
+    const waitRes = await waiting;
+    expect(waitRes.ok).toBe(true);
+    const body = (await waitRes.json()) as { decision: string; source?: string };
+    expect(body.decision).toBe('deny');
+    expect(body.source).toBe('terminal');
+  });
+});

@@ -70,25 +70,29 @@ export function checkApprovalConfig(ctx: CheckContext): Finding[] {
   const a = s.approvers ?? { native: false, browser: false, cloud: false, terminal: false };
   const hasChannel = a.native || a.browser || a.cloud || a.terminal || s.reviewChannel === 'ask';
 
-  // A zero timeout auto-denies EVERY review instantly (the shipped-then-fixed
-  // approvalTimeout=0 bug class) — surface it if a user set it.
-  if (s.approvalTimeoutMs === 0) {
-    return [
-      {
-        category: 'Approvals',
-        severity: 'high',
-        title: 'Approval timeout is 0 — every review auto-denies instantly',
-        what: 'A review request is denied the moment it is raised; no human ever sees it.',
-        why: '`settings.approvalTimeoutMs` is 0.',
-        who: 'Legitimate actions that need a human OK are silently blocked.',
-        detail: [],
-        owner: 'node9',
-        fix: 'Set a real approval timeout (e.g. 300000 ms) or clear it to use the default.',
-      },
-    ];
-  }
+  // A zero approval timeout turns node9's own timer off. The daemon's card
+  // still expires at the default (it used to deny every card the moment it
+  // opened), but a review with no daemon card, a desktop popup alone, waits
+  // until the agent's own hook timeout ends the hook.
+  const zeroTimeout: Finding[] =
+    s.approvalTimeoutMs === 0
+      ? [
+          {
+            category: 'Approvals',
+            severity: 'medium',
+            title: 'Approval timeout is 0: node9 never times a review out',
+            what: "A review waits for a person; node9's own timer is off.",
+            why: '`settings.approvalTimeoutMs` is 0.',
+            who: "With no one at the screen, the agent's hook timeout decides instead of node9.",
+            detail: [],
+            owner: 'node9',
+            fix: 'Set a real approval timeout (e.g. 300000 ms) or clear it to use the default.',
+          },
+        ]
+      : [];
   if (!hasChannel) {
     return [
+      ...zeroTimeout,
       {
         category: 'Approvals',
         severity: 'high',
@@ -103,7 +107,7 @@ export function checkApprovalConfig(ctx: CheckContext): Finding[] {
     ];
   }
   // Wired → clean pass (✅), not a ⚠️ advisory on a good state.
-  return [];
+  return zeroTimeout;
 }
 
 /** TOOL GOVERNANCE — are any per-tool rules governing what agents may do? */

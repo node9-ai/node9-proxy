@@ -207,6 +207,14 @@ export function buildDaemonReport(
   };
 }
 
+/** How long a card waits before the daemon denies it. `||`, not `??`: 0 is
+ *  "no timer" to the hook, and read with `??` here it denied every card the
+ *  moment it opened. A 0 takes the default, as the dashboard sync does. The
+ *  tail's countdown and the timer read this one value. */
+function autoDenyMs(): number {
+  return getConfig().settings.approvalTimeoutMs || AUTO_DENY_MS;
+}
+
 export function startDaemon(): void {
   // A4c: a synchronous throw in these inits used to exit the process silently
   // (stdio:'ignore' on the auto-start path). Record it so a startup death is
@@ -370,7 +378,7 @@ export function startDaemon(): void {
             allowCount: (insightCounts.get(e.toolName) ?? 0) + 1,
           })),
           orgName: getOrgName(),
-          autoDenyMs: getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS,
+          autoDenyMs: autoDenyMs(),
         })}\n\n`
       );
       // event: decisions / shields-status / csrf removed in v3 sprint.
@@ -459,7 +467,7 @@ export function startDaemon(): void {
               pending.delete(id);
               broadcast('remove', { id, decision: 'deny' });
             }
-          }, getConfig().settings.approvalTimeoutMs ?? AUTO_DENY_MS),
+          }, autoDenyMs()),
         };
         pending.set(id, entry);
 
