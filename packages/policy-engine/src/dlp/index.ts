@@ -148,10 +148,12 @@ const IDENTIFIER_VALUE_RE = /^[A-Za-z_.-]+$/;
 const PATH_VALUE_RE = /^(?:\/|\.{1,2}\/|~\/)/;
 /** `jwtConstants.secretKey2024`, `cfg.auth.token`: a property reference. */
 const DOTTED_REFERENCE_RE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
+/** `'+secrets.token_hex(16)`: the right side of a string concatenation, code. */
+const CONCATENATION_RE = /^\+[A-Za-z_$][\w$]*\./;
 /** An email address next to a password is the login, not the secret. */
 const EMAIL_VALUE_RE = /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/;
 
-/** `base64-something-random`, `my_secret_value_2`: joined words in one case, digits aside. */
+/** `long-random-phrase`, `my_secret_value_2`: joined words in one case, digits aside. */
 function looksLikeJoinedWords(value: string): boolean {
   const segments = value.replace(/[0-9]/g, '').split(/[-_.]/);
   return (
@@ -198,6 +200,7 @@ function looksGenerated(
   if (EMAIL_VALUE_RE.test(value)) return false;
   if (looksLikeJoinedWords(value) || hasSequentialRun(value)) return false;
   if (PATH_VALUE_RE.test(value) || DOTTED_REFERENCE_RE.test(value)) return false;
+  if (CONCATENATION_RE.test(value)) return false;
   if (rejectedByStructuredValidator(value)) return false;
   return shannonEntropy(value) >= minEntropy;
 }
@@ -209,7 +212,7 @@ function looksGenerated(
  */
 const FIXTURE_NAME_RE = /(?:fake|dummy|example|sample|mock|stub|placeholder|test)/i;
 const DERIVATIVE_NAME_RE =
-  /(?:hash|digest|id|type|name|url|uri|path|file|len|length|count|size|ttl|expires?|expiry|age|date|time|format|field|header|param)$/i;
+  /(?:hash|digest|fingerprint|thumbprint|checksum|id|type|name|url|uri|path|file|len|length|count|size|ttl|expires?|expiry|age|date|time|format|field|header|param)$/i;
 
 function nameHoldsCredential(name: string): boolean {
   return !FIXTURE_NAME_RE.test(name) && !DERIVATIVE_NAME_RE.test(name);
@@ -218,24 +221,42 @@ function nameHoldsCredential(name: string): boolean {
 const QUERY_CREDENTIAL_VALUE_RE = /=([A-Za-z0-9%+/_.~-]{8,512}={0,2})$/;
 const OTP_SECRET_RE = /^[A-Z2-7]{16,}=*$/i;
 
+/**
+ * The OTP secrets that tutorials and library READMEs print (pyotp, otplib,
+ * speakeasy and Google's own documentation use the first; the second is the
+ * base32 of "1234567890"). An agent writing such a README is not leaking a
+ * secret, in either the otpauth URI or the constructor form.
+ */
+const OTP_DOC_SECRETS = new Set(['JBSWY3DPEHPK3PXP', 'GEZDGNBVGY3TQOJQ']);
+
+function isOtpDocSecret(value: string): boolean {
+  return OTP_DOC_SECRETS.has(value.replace(/=+$/, '').toUpperCase());
+}
+
 function validateQueryCredential(raw: string): boolean {
   const value = capturedValue(raw, QUERY_CREDENTIAL_VALUE_RE);
   if (value === null) return false;
   // An otpauth secret is base32: letters and digits 2-7, often letters only.
-  if (OTP_SECRET_RE.test(value)) return looksGenerated(value, 16, 3.0, true);
+  if (OTP_SECRET_RE.test(value))
+    return !isOtpDocSecret(value) && looksGenerated(value, 16, 3.0, true);
   // Anything else must mix letters and digits and be at least 12 long, so a
-  // fixture such as `?token=ftoken123` or a slug is not a finding.
+  // fixture such as `?token=qtoken789` or a slug is not a finding.
   if (!/[0-9]/.test(value) || !/[A-Za-z]/.test(value)) return false;
   return looksGenerated(value, 12, 3.0);
 }
 
 const ASSIGNED_SECRET_VALUE_RE =
-  /(?::=|=>|[:=])[ \t]{0,8}["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})$/;
+  /(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})$/;
 
 const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
 
+// `pass` comes after the longer words that start with it, so `password` is
+// read as `password`. The names added after node9Firewall#348 (consumer and
+// app keys, signing, encryption and master keys, a WeChat `jsapi_ticket`, a
+// `*_PASS` variable) are the shapes CredData's public split showed the gate
+// missing.
 const NAME_KEYWORD_RE =
-  /^(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)/i;
+  /^(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|jsapi[_-]?ticket|pass)/i;
 
 /**
  * The keyword must end the name or be followed by a new part of it: `_`,
@@ -251,6 +272,21 @@ function keywordEndsAPart(name: string): boolean {
   return lastIsLower && /[A-Z]/.test(next);
 }
 
+/**
+ * The short keyword `pass` must also START a part of the name: at the start,
+ * after a character that is not a letter or digit (`_`, `-`, a quote, a
+ * space), or as an uppercase letter after a lowercase one (`dbPass`). The
+ * pattern is unanchored, so without this `bypass:` and `compass_version:`
+ * would be read as a name `pass` with a prefix. The longer keywords keep
+ * their current behaviour (`dbpassword` is still a password).
+ */
+function keywordStartsAPart(name: string, before: string): boolean {
+  if (!/^pass(?![a-z])/i.test(name) || /^pass(?:word|phrase|wd)/i.test(name)) return true;
+  const prev = before.slice(-1);
+  if (prev === '' || !/[A-Za-z0-9]/.test(prev)) return true;
+  return /[a-z0-9]/.test(prev) && /^P/.test(name);
+}
+
 /** `arn:aws:secretsmanager:...:secret:prod/x`: an ARN segment, not an assignment. */
 const ARN_CONTEXT_RE = /\barn:[A-Za-z0-9-]*:[^\s"'`]*$/i;
 
@@ -258,12 +294,49 @@ function validateAssignedSecret(raw: string, before = ''): boolean {
   const value = capturedValue(raw, ASSIGNED_SECRET_VALUE_RE);
   const name = capturedValue(raw, ASSIGNED_SECRET_NAME_RE);
   if (value === null || name === null) return false;
-  if (!keywordEndsAPart(name) || ARN_CONTEXT_RE.test(before)) return false;
+  if (!keywordEndsAPart(name) || !keywordStartsAPart(name, before)) return false;
+  if (ARN_CONTEXT_RE.test(before)) return false;
   // The match starts at the keyword; the rest of the name (`FAKE_` in
   // `FAKE_TOKEN`, `mock` in `mockSecret`) is in the text just before it.
   const prefix = before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '';
   if (!nameHoldsCredential(prefix + name)) return false;
   return looksGenerated(value, 12, 3.5);
+}
+
+const BASIC_VALUE_RE = /([A-Za-z0-9+/]{8,512}={0,2})$/;
+const BASIC_PAIR_RE = /^([^:\s]{1,128}):(\S{8,256})$/;
+
+/** `Basic <b64>`: a canonical base64 of UTF-8 `user:password`, the password generated. */
+function validateBasicCredential(raw: string): boolean {
+  const b64 = capturedValue(raw, BASIC_VALUE_RE);
+  if (b64 === null) return false;
+  const bare = b64.replace(/=+$/, '');
+  if (bare.length % 4 === 1) return false;
+  const bytes = Buffer.from(b64, 'base64');
+  // A word that only looks like base64 does not survive the round trip.
+  if (bytes.toString('base64').replace(/=+$/, '') !== bare) return false;
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes) || /[\u0000-\u001f\u007f]/.test(text)) return false;
+  const pair = BASIC_PAIR_RE.exec(text);
+  if (!pair) return false;
+  const password = pair[2];
+  if (!/[0-9]/.test(password) || !/[A-Za-z]/.test(password)) return false;
+  // Not looksGenerated: its joined-words rule strips digits first, so a
+  // random token with dashes ("x7k2…-44v9…-7kvu…") reads as words. A password
+  // already mixes letters and digits here; it must not be a placeholder, a
+  // sequential run or low in entropy.
+  const lower = password.toLowerCase();
+  if (DLP_STOPWORDS.some((sw) => lower.includes(sw)) || hasSequentialRun(password)) return false;
+  return shannonEntropy(password) >= 3.0;
+}
+
+const OTP_CAPTURE_RE = /["']([A-Z2-7]{16,128}=*)["']$/i;
+
+/** A base32 constructor secret: not a documentation secret, not a run, generated. */
+function validateOtpSecret(raw: string): boolean {
+  const secret = capturedValue(raw, OTP_CAPTURE_RE);
+  if (secret === null || isOtpDocSecret(secret)) return false;
+  return looksGenerated(secret.replace(/=+$/, ''), 16, 3.0, true);
 }
 
 export const DLP_PATTERNS: DlpPattern[] = [
@@ -636,6 +709,23 @@ export const DLP_PATTERNS: DlpPattern[] = [
     minEntropy: 3.0,
   },
 
+  // ── HTTP Basic credential ─────────────────────────────────────────────────
+  // `Authorization: Basic <base64 of user:password>`, or the bare scheme in a
+  // config list. The validator decodes the value and accepts only a
+  // `user:password` whose password looks generated (letters and digits, 8+
+  // characters, the query-credential rule), so prose ("Basic authentication")
+  // and documentation pairs (`admin:changeme`, `user:pass1234`) stay allowed.
+  // review: the same weight as a bare Bearer token.
+  {
+    name: 'HTTP Basic Credential',
+    regex: /\bBasic[ \t]{1,8}([A-Za-z0-9+/]{8,512}={0,2})/i,
+    severity: 'review',
+    keywords: ['basic'],
+    validate: validateBasicCredential,
+    redactGroup: 1,
+    argumentsOnly: true,
+  },
+
   // ── Resend ────────────────────────────────────────────────────────────────
   {
     name: 'Resend API Key',
@@ -794,6 +884,21 @@ export const DLP_PATTERNS: DlpPattern[] = [
     argumentsOnly: true,
   },
 
+  // ── OTP secret in a constructor ───────────────────────────────────────────
+  // `ROTP::TOTP.new('<base32>')`, `pyotp.TOTP("<base32>")`, `new HOTP('...')`:
+  // the shared secret of a one-time-password generator written as a literal.
+  // The otpauth URI form is `Credential in URL Query`. review.
+  {
+    name: 'OTP Secret',
+    regex:
+      /\b(?:TOTP|HOTP|OTP)(?:\.new|\.create)?[ \t]{0,8}\(?[ \t]{0,8}["']([A-Z2-7]{16,128}=*)["']/i,
+    severity: 'review',
+    keywords: ['otp'],
+    validate: validateOtpSecret,
+    redactGroup: 1,
+    argumentsOnly: true,
+  },
+
   // ── Secret assigned to a telling name ─────────────────────────────────────
   // `password: ...`, `JWT_SECRET=...`, `api_key = "..."`. The name alone is
   // not a finding: most such lines hold a reference (`process.env.X`), a
@@ -801,13 +906,15 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // generated: 12+ characters, not an identifier, Shannon entropy of 3.5
   // bits per character or more. review, never block (node9Firewall#348,
   // item 4). Tuned on CredData's public split; its look-alike lines are the
-  // negative control.
+  // negative control. A quote may be escaped (`\"access_token\":\"...\"`):
+  // JSON written inside a string literal. The two optional quotes after the
+  // name are written out, not as a counted group, to keep star height 1.
   {
     name: 'Assigned Secret',
     regex:
-      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)[A-Za-z0-9_]{0,40}["'\]]{0,2}[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
+      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|jsapi[_-]?ticket|pass)[A-Za-z0-9_]{0,40}\\?["'\]]?\\?["'\]]?[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
     severity: 'review',
-    keywords: ['password', 'passphrase', 'passwd', 'pwd', 'secret', 'token', 'key'],
+    keywords: ['pass', 'pwd', 'secret', 'token', 'key', 'ticket'],
     validate: validateAssignedSecret,
     argumentsOnly: true,
   },
