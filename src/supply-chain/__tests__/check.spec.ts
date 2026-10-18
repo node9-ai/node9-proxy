@@ -8,6 +8,7 @@ import path from 'path';
 import { runPackageCheck, type PackageCheckConfig } from '../check';
 import { registryInfo } from '../registry';
 import { writeMeta, writeShard, shardOf, indexKey } from '../osv-index';
+import type { PackageEcosystem } from '@node9/policy-engine';
 
 const CFG: PackageCheckConfig = {
   enabled: true,
@@ -41,7 +42,7 @@ function npmDoc(latest: string, opts: { modified?: string; installScript?: boole
     versions: { [latest]: { hasInstallScript: opts.installScript || undefined } },
   });
 }
-function indexWith(eco: 'npm' | 'PyPI', name: string, entries: object[], fresh = true) {
+function indexWith(eco: PackageEcosystem, name: string, entries: object[], fresh = true) {
   const key = indexKey(eco, name);
   writeShard(eco, shardOf(key), { [key]: entries as never });
   writeMeta(eco, {
@@ -530,4 +531,90 @@ it('resolves a bare npm alias to the target package latest', async () => {
   const result = await runPackageCheck(...bash('npm install lint@npm:eslint'), CFG);
   expect(result.verdict).toBe('block');
   expect(result.findings[0].version).toBe('10.0.0');
+});
+
+describe('runPackageCheck — beyond npm and PyPI (node9Firewall#360)', () => {
+  const osvAnswer = (ids: string[][]) => () =>
+    json({ results: ids.map((list) => ({ vulns: list.map((id) => ({ id })) })) });
+
+  it('a pinned RubyGems version OSV online marks malicious blocks; no registry is asked', async () => {
+    routes['http://osv.test/v1/querybatch'] = osvAnswer([['MAL-0000-0101']]);
+    const r = await runPackageCheck(...bash('gem install example-mal-gem -v 1.0.0'), CFG);
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('RubyGems package "example-mal-gem@1.0.0"');
+    expect(r.reason).toContain('MAL-0000-0101');
+    expect(calls).toEqual(['http://osv.test/v1/querybatch']);
+  });
+
+  it('unpinned with a malicious record online: review, as an unpinned npm install is', async () => {
+    routes['http://osv.test/v1/querybatch'] = osvAnswer([['MAL-0000-0102']]);
+    const r = await runPackageCheck(...bash('dotnet add package Example.Mal'), CFG);
+    expect(r.verdict).toBe('review');
+    expect(r.reason).toContain('NuGet package "Example.Mal" has known malicious versions');
+    expect(r.misses).toEqual([]);
+  });
+
+  it('the online query carries the OSV ecosystem name and the name as written', async () => {
+    let body = '';
+    routes['http://osv.test/v1/querybatch'] = (init) => {
+      body = String(init?.body);
+      return osvAnswer([[]])();
+    };
+    await runPackageCheck(...bash('code --install-extension Acme.Widget@1.2.3'), CFG);
+    expect(JSON.parse(body)).toEqual({
+      queries: [{ package: { name: 'Acme.Widget', ecosystem: 'VSCode' }, version: '1.2.3' }],
+    });
+  });
+
+  it('a Go package path is looked up by every module prefix, longest first', async () => {
+    let body = '';
+    routes['http://osv.test/v1/querybatch'] = (init) => {
+      body = String(init?.body);
+      return osvAnswer([[], [], ['MAL-0000-0103'], []])();
+    };
+    const r = await runPackageCheck(
+      ...bash('go install example.test/owner/mod/cmd/tool@latest'),
+      CFG
+    );
+    expect(
+      JSON.parse(body).queries.map((q: { package: { name: string } }) => q.package.name)
+    ).toEqual([
+      'example.test/owner/mod/cmd/tool',
+      'example.test/owner/mod/cmd',
+      'example.test/owner/mod',
+      'example.test/owner',
+    ]);
+    expect(r.verdict).toBe('review');
+    expect(r.reason).toContain('MAL-0000-0103');
+  });
+
+  it('a Go module the local index marks malicious in every version blocks a sub-package install', async () => {
+    indexWith('Go', 'example.test/owner/mod', [{ id: 'MAL-0000-0104', all: true }]);
+    const r = await runPackageCheck(...bash('go get example.test/owner/mod/sub@v1.0.0'), CFG);
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('Go module "example.test/owner/mod/sub@1.0.0"');
+    expect(calls).toEqual([]);
+  });
+
+  it('a clean fresh crates.io index allows without any network call', async () => {
+    indexWith('crates.io', 'example-other', [{ id: 'MAL-0000-0105', all: true }]);
+    const r = await runPackageCheck(...bash('cargo add example-clean@1.0.0'), CFG);
+    expect(r.verdict).toBe('allow');
+    expect(calls).toEqual([]);
+    expect(r.misses).toEqual([]);
+  });
+
+  it('crates.io names match across - and _', async () => {
+    indexWith('crates.io', 'example-mal-crate', [{ id: 'MAL-0000-0106', versions: ['0.1.0'] }]);
+    const r = await runPackageCheck(...bash('cargo add example_mal_crate@0.1.0'), CFG);
+    expect(r.verdict).toBe('block');
+  });
+
+  it('OSV online down: allow with a miss, and still no registry request', async () => {
+    routes['http://osv.test/v1/querybatch'] = () => json({}, 503);
+    const r = await runPackageCheck(...bash('composer require acme/widget'), CFG);
+    expect(r.verdict).toBe('allow');
+    expect(r.misses.join(' ')).toContain('Packagist package "acme/widget"');
+    expect(calls).toEqual(['http://osv.test/v1/querybatch']);
+  });
 });

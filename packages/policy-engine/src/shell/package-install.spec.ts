@@ -246,3 +246,248 @@ describe('local execution context', () => {
     expect(one('cd app && cd frontend && npx eslint').localCwd).toEqual(['app', 'frontend']);
   });
 });
+
+describe('extractPackageInstalls — beyond npm and PyPI (node9Firewall#360)', () => {
+  it.each([
+    ['gem install example-gem', 'RubyGems', 'gem', 'example-gem', undefined],
+    ['gem install example-gem -v 1.2.3', 'RubyGems', 'gem', 'example-gem', '1.2.3'],
+    ['gem i example-gem --version=1.2.3', 'RubyGems', 'gem', 'example-gem', '1.2.3'],
+    ['gem install example-gem:1.2.3', 'RubyGems', 'gem', 'example-gem', '1.2.3'],
+    ["gem install example-gem -v '~> 1.2'", 'RubyGems', 'gem', 'example-gem', undefined],
+    ['gem install example-gem -v 1.0.0.pre', 'RubyGems', 'gem', 'example-gem', undefined],
+    [
+      'gem install example-gem -- --with-opt-dir=/opt/x',
+      'RubyGems',
+      'gem',
+      'example-gem',
+      undefined,
+    ],
+    ['bundle add example-gem', 'RubyGems', 'bundle add', 'example-gem', undefined],
+    [
+      'bundle add example-gem --version 2.0.0 --group test',
+      'RubyGems',
+      'bundle add',
+      'example-gem',
+      '2.0.0',
+    ],
+    ['cargo add example-crate', 'crates.io', 'cargo add', 'example-crate', undefined],
+    ['cargo add example-crate@1.2.3', 'crates.io', 'cargo add', 'example-crate', '1.2.3'],
+    ['cargo add example-crate@=1.2.3', 'crates.io', 'cargo add', 'example-crate', '1.2.3'],
+    ['cargo add example-crate@^1.2', 'crates.io', 'cargo add', 'example-crate', undefined],
+    ['cargo add example-crate -F derive', 'crates.io', 'cargo add', 'example-crate', undefined],
+    [
+      'cargo add -p member example-crate --dev',
+      'crates.io',
+      'cargo add',
+      'example-crate',
+      undefined,
+    ],
+    ['cargo +nightly add example-crate', 'crates.io', 'cargo add', 'example-crate', undefined],
+    [
+      'cargo install example-crate --version 0.4.0',
+      'crates.io',
+      'cargo install',
+      'example-crate',
+      '0.4.0',
+    ],
+    ['cargo install example-crate@0.4.0', 'crates.io', 'cargo install', 'example-crate', '0.4.0'],
+    ['go get example.test/owner/mod@v1.2.3', 'Go', 'go get', 'example.test/owner/mod', '1.2.3'],
+    ['go get example.test/owner/mod@latest', 'Go', 'go get', 'example.test/owner/mod', undefined],
+    ['go get -u example.test/owner/mod', 'Go', 'go get', 'example.test/owner/mod', undefined],
+    ['go get example.test/owner/mod/...', 'Go', 'go get', 'example.test/owner/mod', undefined],
+    [
+      'go install example.test/owner/mod/cmd/tool@latest',
+      'Go',
+      'go install',
+      'example.test/owner/mod/cmd/tool',
+      undefined,
+    ],
+    [
+      'go run example.test/owner/tool@v0.1.0 -flag',
+      'Go',
+      'go run',
+      'example.test/owner/tool',
+      '0.1.0',
+    ],
+    [
+      'dotnet add package Example.Package',
+      'NuGet',
+      'dotnet add package',
+      'Example.Package',
+      undefined,
+    ],
+    [
+      'dotnet add package Example.Package --version 1.2.3',
+      'NuGet',
+      'dotnet add package',
+      'Example.Package',
+      '1.2.3',
+    ],
+    [
+      'dotnet add src/App/App.csproj package Example.Package -v 1.2.3',
+      'NuGet',
+      'dotnet add package',
+      'Example.Package',
+      '1.2.3',
+    ],
+    [
+      'dotnet tool install -g example-tool --version 8.0.0',
+      'NuGet',
+      'dotnet tool',
+      'example-tool',
+      '8.0.0',
+    ],
+    [
+      'nuget install Example.Package -Version 1.0.0',
+      'NuGet',
+      'nuget install',
+      'Example.Package',
+      '1.0.0',
+    ],
+    [
+      'mvn dependency:get -Dartifact=org.example:widget:1.2.3',
+      'Maven',
+      'mvn dependency:get',
+      'org.example:widget',
+      '1.2.3',
+    ],
+    [
+      './mvnw dependency:get -Dartifact=org.example:widget:LATEST',
+      'Maven',
+      'mvn dependency:get',
+      'org.example:widget',
+      undefined,
+    ],
+    [
+      'mvn -q dependency:get -DgroupId=org.example -DartifactId=widget -Dversion=2.0',
+      'Maven',
+      'mvn dependency:get',
+      'org.example:widget',
+      '2.0',
+    ],
+    ['composer require acme/widget', 'Packagist', 'composer require', 'acme/widget', undefined],
+    ['composer require acme/widget:1.2.3', 'Packagist', 'composer require', 'acme/widget', '1.2.3'],
+    [
+      'composer require "acme/widget:^1.2"',
+      'Packagist',
+      'composer require',
+      'acme/widget',
+      undefined,
+    ],
+    [
+      'composer global require acme/installer',
+      'Packagist',
+      'composer require',
+      'acme/installer',
+      undefined,
+    ],
+    [
+      'composer create-project acme/skeleton app 3.0.0',
+      'Packagist',
+      'composer create-project',
+      'acme/skeleton',
+      '3.0.0',
+    ],
+    [
+      'code --install-extension acme.widget',
+      'VSCode',
+      'code --install-extension',
+      'acme.widget',
+      undefined,
+    ],
+    [
+      'code --install-extension acme.widget@1.2.3',
+      'VSCode',
+      'code --install-extension',
+      'acme.widget',
+      '1.2.3',
+    ],
+    [
+      'codium --install-extension=acme.widget',
+      'VSCode',
+      'code --install-extension',
+      'acme.widget',
+      undefined,
+    ],
+    [
+      'cursor --install-extension acme.widget --force',
+      'VSCode',
+      'code --install-extension',
+      'acme.widget',
+      undefined,
+    ],
+  ] as const)('%s', (cmd, ecosystem, manager, name, version) => {
+    const r = one(cmd);
+    expect(r.ecosystem).toBe(ecosystem);
+    expect(r.manager).toBe(manager);
+    expect(r.name).toBe(name);
+    expect(r.version).toBe(version);
+  });
+
+  it('every name of a multi-package command, and repeated --install-extension', () => {
+    expect(names('gem install a-gem b-gem -v 1.0')).toEqual(['a-gem', 'b-gem']);
+    expect(extractPackageInstalls('gem install a-gem b-gem -v 1.0').map((r) => r.version)).toEqual([
+      '1.0',
+      '1.0',
+    ]);
+    expect(names('cargo add crate-a crate-b@2.0.0')).toEqual(['crate-a', 'crate-b']);
+    expect(names('code --install-extension a.one --install-extension b.two@1.0.0')).toEqual([
+      'a.one',
+      'b.two',
+    ]);
+  });
+
+  it.each([
+    'gem install ./vendor/example.gem',
+    'gem install example.gem',
+    'bundle add example-gem --git https://git.example.test/x',
+    'bundle add example-gem --path ../x',
+    'cargo add example-crate --git https://git.example.test/x',
+    'cargo add --path ../local-crate',
+    'cargo add example-crate --registry internal',
+    'go get -u ./...',
+    'go get .',
+    'go get example.test/owner/mod@none',
+    'go run main.go',
+    'go run ./cmd/tool',
+    'go run example.test/owner/tool',
+    'go build ./...',
+    'dotnet add reference ../Lib/Lib.csproj',
+    'dotnet restore',
+    'nuget install packages.config',
+    'mvn clean install',
+    'mvn -Dartifact=org.example:widget:1.0 test',
+    'composer require php ext-json',
+    'composer install',
+    'code --install-extension ./dist/widget.vsix',
+    'code --install-extension widget.vsix',
+    'code --list-extensions',
+  ])('not a registry install: %s', (cmd) => {
+    expect(extractPackageInstalls(cmd)).toEqual([]);
+  });
+
+  it('reaches the new managers through wrappers and nested shells', () => {
+    expect(names('sudo -u deploy gem install example-gem')).toEqual(['example-gem']);
+    expect(names("bash -c 'cargo add example-crate'")).toEqual(['example-crate']);
+    expect(names('env FOO=1 dotnet add package Example.Package')).toEqual(['Example.Package']);
+    expect(names('cd app && composer require acme/widget')).toEqual(['acme/widget']);
+  });
+});
+
+describe('look-alike names are still packages', () => {
+  // OSV lists malicious NuGet ids that swap Latin letters for Cyrillic ones;
+  // a name shape that refuses them would skip exactly the attack.
+  const cyr = (s: string) => s.replace(/e/g, 'е').replace(/o/g, 'о');
+  it.each([
+    [`dotnet add package ${cyr('Example.Logger')} --version 1.0.0`, 'NuGet'],
+    [`gem install ${cyr('example-gem')}`, 'RubyGems'],
+    [`cargo add ${cyr('example-crate')}`, 'crates.io'],
+    [`code --install-extension ${cyr('acme.widget')}`, 'VSCode'],
+    [`composer require ${cyr('acme/widget')}`, 'Packagist'],
+    [`go get ${cyr('example.test/owner/mod')}`, 'Go'],
+  ])('%s', (cmd, ecosystem) => {
+    const r = one(cmd);
+    expect(r.ecosystem).toBe(ecosystem);
+    expect(/[Ѐ-ӿ]/.test(r.name)).toBe(true);
+  });
+});

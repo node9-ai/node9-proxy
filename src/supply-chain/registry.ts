@@ -129,6 +129,12 @@ async function pypiInfo(name: string, version?: string): Promise<RegistryInfo | 
   };
 }
 
+/**
+ * The ecosystems node9 reads registry metadata for (version resolution, publish
+ * age, install scripts). The others are checked against OSV only.
+ */
+export const HAS_REGISTRY_CLIENT: ReadonlySet<PackageEcosystem> = new Set(['npm', 'PyPI']);
+
 export async function registryInfo(
   eco: PackageEcosystem,
   name: string,
@@ -137,5 +143,7 @@ export async function registryInfo(
   freshWindowMs: number,
   raw?: string
 ): Promise<RegistryInfo | null> {
-  return eco === 'npm' ? npmInfo(name, version, freshWindowMs, raw) : pypiInfo(name, version);
+  if (eco === 'npm') return npmInfo(name, version, freshWindowMs, raw);
+  if (eco === 'PyPI') return pypiInfo(name, version);
+  return null;
 }

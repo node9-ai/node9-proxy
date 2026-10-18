@@ -15,11 +15,12 @@ import path from 'path';
 import {
   extractPackageInstalls,
   isBashTool,
+  type PackageEcosystem,
   type PackageInstallRequest,
 } from '@node9/policy-engine';
 import { lookupIndex, entryCovers, type OsvEntry } from './osv-index';
 import { queryOsvMalicious } from './osv-online';
-import { registryInfo, type RegistryInfo } from './registry';
+import { HAS_REGISTRY_CLIENT, registryInfo, type RegistryInfo } from './registry';
 import { resolveInstalled, LOCAL_FIRST_MANAGERS } from './local-resolve';
 
 export interface PackageCheckConfig {
@@ -66,8 +67,34 @@ function commandOf(toolName: string, args: unknown): string | null {
   return typeof a.command === 'string' ? a.command : typeof a.cmd === 'string' ? a.cmd : null;
 }
 
+const KIND: Record<PackageEcosystem, string> = {
+  npm: 'npm package',
+  PyPI: 'PyPI package',
+  RubyGems: 'RubyGems package',
+  'crates.io': 'crates.io package',
+  Go: 'Go module',
+  NuGet: 'NuGet package',
+  Maven: 'Maven artifact',
+  Packagist: 'Packagist package',
+  VSCode: 'VS Code extension',
+};
+
 function label(p: PackageInstallRequest, version?: string): string {
-  return `${p.ecosystem === 'npm' ? 'npm' : 'PyPI'} package "${p.name}${version ? `@${version}` : ''}"`;
+  return `${KIND[p.ecosystem]} "${p.name}${version ? `@${version}` : ''}"`;
+}
+
+/**
+ * The names OSV may file this package under. A Go command names a package
+ * path (`host/owner/repo/cmd/tool`) and OSV names the module that contains it,
+ * so every prefix of two or more elements is a candidate, longest first
+ * (at most six). Every other ecosystem: the name itself.
+ */
+export function osvNames(p: PackageInstallRequest): string[] {
+  if (p.ecosystem !== 'Go') return [p.name];
+  const parts = p.name.split('/');
+  const out: string[] = [];
+  for (let n = parts.length; n >= 2 && out.length < 6; n--) out.push(parts.slice(0, n).join('/'));
+  return out;
 }
 
 /** Malicious lookup for one package: local index first, OSV online on a gap. */
@@ -78,24 +105,31 @@ async function maliciousFor(
   misses: string[],
   networkCapped: boolean
 ): Promise<PackageFinding | null> {
-  const local = lookupIndex(p.ecosystem, p.name);
-  const entries: OsvEntry[] | null = local.status === 'hit' ? local.entries : null;
+  const names = osvNames(p);
+  const local = names.map((n) => lookupIndex(p.ecosystem, n));
+  const hits = local.flatMap((l) => (l.status === 'hit' ? l.entries : []));
+  const entries: OsvEntry[] | null = hits.length > 0 ? hits : null;
+  const freshClean = local.every((l) => l.status === 'clean' && l.fresh);
+  const status = local.some((l) => l.status === 'unavailable') ? 'unavailable' : local[0].status;
 
-  if (!entries && !(local.status === 'clean' && local.fresh)) {
+  if (!entries && !freshClean) {
     // No index, or a stale one that has nothing: ask OSV online.
     if (!cfg.onlineFallback || networkCapped) {
       misses.push(
-        `${label(p, version)}: local index ${local.status}, no online lookup (${networkCapped ? 'over the per-command network cap' : 'online fallback off'})`
+        `${label(p, version)}: local index ${status}, no online lookup (${networkCapped ? 'over the per-command network cap' : 'online fallback off'})`
       );
       return null;
     }
-    let ids: string[][] | null = null;
+    let perName: string[][] | null = null;
     try {
-      ids = await queryOsvMalicious([{ ecosystem: p.ecosystem, name: p.name, version }]);
+      perName = await queryOsvMalicious(
+        names.map((name) => ({ ecosystem: p.ecosystem, name, version }))
+      );
     } catch (err) {
       misses.push(`${label(p, version)}: OSV online ${(err as Error).message}`);
       return null;
     }
+    const ids = perName ? [[...new Set(perName.flat())]] : null;
     if (!ids) {
       misses.push(`${label(p, version)}: OSV online unavailable`);
       return null;
@@ -192,7 +226,12 @@ async function checkOne(
   }
   const findings: PackageFinding[] = [];
   let info: RegistryInfo | null = null;
-  const wantsRegistry = cfg.newPackage !== 'off' || cfg.installScript !== 'off';
+  // Registry metadata exists for npm and PyPI only; the other ecosystems are
+  // checked against OSV alone, and no request leaves for a registry that
+  // would answer for a different ecosystem.
+  const wantsRegistry =
+    (cfg.newPackage !== 'off' || cfg.installScript !== 'off') &&
+    HAS_REGISTRY_CLIENT.has(p.ecosystem);
   if (wantsRegistry && !networkCapped) {
     try {
       // With the age signal off there is no window, so the per-version time

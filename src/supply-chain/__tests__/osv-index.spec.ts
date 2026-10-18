@@ -155,3 +155,28 @@ describe('lookupIndex', () => {
     expect(lookupIndex('npm', 'node9-canary-zzz')).toEqual({ status: 'clean', fresh: false });
   });
 });
+
+describe('ecosystems beyond npm and PyPI (node9Firewall#360)', () => {
+  it('indexKey follows each registry: case-insensitive names, crates.io - and _, Go and Maven as written', () => {
+    expect(indexKey('NuGet', 'Example.Package')).toBe(indexKey('NuGet', 'example.package'));
+    expect(indexKey('RubyGems', 'Example-Gem')).toBe('example-gem');
+    expect(indexKey('VSCode', 'Acme.Widget')).toBe('acme.widget');
+    expect(indexKey('Packagist', 'Acme/Widget')).toBe('acme/widget');
+    expect(indexKey('crates.io', 'Example_Crate')).toBe(indexKey('crates.io', 'example-crate'));
+    expect(indexKey('Go', 'example.test/Owner/Mod')).toBe('example.test/Owner/Mod');
+    expect(indexKey('Maven', 'org.example:Widget')).toBe('org.example:Widget');
+  });
+
+  it('an Open VSX record belongs to the VSCode index; a sub-ecosystem never crosses to another', () => {
+    const rec = malRecord('MAL-0000-0201', 'VSCode:https://open-vsx.org', 'Acme.Widget', {
+      versions: ['1.0.0'],
+    });
+    expect(entriesFromRecord('VSCode', rec)?.rows.get('acme.widget')).toEqual({
+      id: 'MAL-0000-0201',
+      versions: ['1.0.0'],
+    });
+    expect(entriesFromRecord('npm', rec)?.rows.size).toBe(0);
+    const prefixOnly = malRecord('MAL-0000-0202', 'VSCodeX', 'acme.other');
+    expect(entriesFromRecord('VSCode', prefixOnly)?.rows.size).toBe(0);
+  });
+});

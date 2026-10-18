@@ -270,7 +270,7 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   'loading.malicious-package': {
     plain:
-      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago.',
+      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only.',
     example: 'npm install of a package flagged as malware',
     advice: 'Keep Block for known-malicious packages; brand-new packages already stop for Review.',
   },

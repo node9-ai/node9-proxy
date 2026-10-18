@@ -10,6 +10,8 @@ import chalk from 'chalk';
 import { readMeta } from '../../supply-chain/osv-index';
 import { ECOSYSTEMS, syncOsvIndex } from '../../supply-chain/osv-sync';
 
+const ECO_WIDTH = Math.max(...ECOSYSTEMS.map((e) => e.length));
+
 export function registerPackageIndexCommand(program: Command): void {
   const cmd = program
     .command('package-index')
@@ -22,11 +24,11 @@ export function registerPackageIndexCommand(program: Command): void {
       for (const eco of ECOSYSTEMS) {
         const meta = readMeta(eco);
         if (!meta) {
-          console.log(`${eco.padEnd(5)}  ${chalk.yellow('not synced')}`);
+          console.log(`${eco.padEnd(ECO_WIDTH)}  ${chalk.yellow('not synced')}`);
           continue;
         }
         console.log(
-          `${eco.padEnd(5)}  ${meta.records} records  synced ${meta.syncedAt} (${meta.mode})`
+          `${eco.padEnd(ECO_WIDTH)}  ${meta.records} records  synced ${meta.syncedAt} (${meta.mode})`
         );
       }
     });
@@ -41,9 +43,9 @@ export function registerPackageIndexCommand(program: Command): void {
       for (const r of results) {
         if (r.error) {
           failed = true;
-          console.error(`${r.ecosystem.padEnd(5)}  ${chalk.red('failed')}: ${r.error}`);
+          console.error(`${r.ecosystem.padEnd(ECO_WIDTH)}  ${chalk.red('failed')}: ${r.error}`);
         } else {
-          console.log(`${r.ecosystem.padEnd(5)}  ${r.mode}: ${r.records} records`);
+          console.log(`${r.ecosystem.padEnd(ECO_WIDTH)}  ${r.mode}: ${r.records} records`);
         }
       }
       process.exitCode = failed ? 1 : 0;
