@@ -1,0 +1,48 @@
+{
+  "_comment": "fw#318 F4: masking and hashing of destinations. A copy of node9Firewall contract/personal-data.vectors.json: the engine (mask.spec.ts) and the backend mirror assert the same values. IBANs are given as parts (country, BBAN) and assembled with computed check digits by the test, so no full IBAN appears in this file.",
+  "vectors": [
+    {
+      "iban": {
+        "country": "GB",
+        "bban": "NODE00000012345678"
+      },
+      "masked": "iban:GB54 **** **** 5678",
+      "hash": "7e66dce0ca6f2915cdc90a47d1805a5513638e794eb9feed1db30d2e4701f558",
+      "entry": "iban:GB54 **** **** 5678#sha256:7e66dce0ca6f2915cdc90a47d1805a5513638e794eb9feed1db30d2e4701f558"
+    },
+    {
+      "iban": {
+        "country": "GB",
+        "bban": "NODE00000012345678"
+      },
+      "spaced": true,
+      "masked": "iban:GB54 **** **** 5678",
+      "hash": "7e66dce0ca6f2915cdc90a47d1805a5513638e794eb9feed1db30d2e4701f558",
+      "entry": "iban:GB54 **** **** 5678#sha256:7e66dce0ca6f2915cdc90a47d1805a5513638e794eb9feed1db30d2e4701f558"
+    },
+    {
+      "dest": "account:TEST00012345678",
+      "masked": "account:****5678",
+      "hash": "925b6675e25beb99bf9ee1776c0a3d090cf684bc28cc88eaf69cc5a2e2bd879c",
+      "entry": "account:****5678#sha256:925b6675e25beb99bf9ee1776c0a3d090cf684bc28cc88eaf69cc5a2e2bd879c"
+    },
+    {
+      "dest": "email:Dana@Acme.Example",
+      "masked": "email:d***@acme.example",
+      "hash": "f953d78d04e1454825c08af40c2558460b4dcbed5f8511d5d0eceed9976f78f8",
+      "entry": "email:d***@acme.example#sha256:f953d78d04e1454825c08af40c2558460b4dcbed5f8511d5d0eceed9976f78f8"
+    },
+    {
+      "dest": "email:x@drop.example",
+      "masked": "email:x***@drop.example",
+      "hash": "420c2edf917447c5a0c30927c282023a2895f55a3c3caa09071c1858533ef31e",
+      "entry": "email:x***@drop.example#sha256:420c2edf917447c5a0c30927c282023a2895f55a3c3caa09071c1858533ef31e"
+    },
+    {
+      "dest": "host:Drop.Example",
+      "masked": "host:drop.example",
+      "hash": "a0ec903a00e238780f5bdb1cfe8120a6bd0e10c0542d2a3ab285066650fe3f0a",
+      "entry": "host:drop.example"
+    }
+  ]
+}

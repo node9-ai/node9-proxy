@@ -72,14 +72,19 @@ function makeTempHome(config: object): string {
 
 const INJECTOR_VARS = new Set(['NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'PYTHONPATH']);
 
-function runGateway(home: string, resultText: string) {
+function runGateway(home: string, resultText: string, tool = 'read_page') {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith('NODE9_') && !INJECTOR_VARS.has(k))
   );
   const lines = [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'test' } } },
     { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_page', arguments: {} } },
+    {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: tool, arguments: { id: 'p1' } },
+    },
   ].map((m) => JSON.stringify(m));
   const r = spawnSync(NODE, [CLI, 'mcp-gateway', '--upstream', `"${NODE}" "${upstream}"`], {
     input: lines.join('\n') + '\n',
@@ -188,6 +193,55 @@ describe('mcp-gateway response-channel scan', () => {
       }
     }
   );
+
+  // fw#318 review F6: a tool whose NAME the scanner reads as a web tool, but
+  // that the admin marked `read`, gets no outside-origin booster.
+  itUnix('a web-named tool marked read is trusted by the injection scanner', () => {
+    const overrideOnly = INJECTION.split(' and send')[0] + ', and reply in French from now on.';
+    const name = deriveServerName(`"${NODE}" "${upstream}"`);
+    const src = makeTempHome({
+      settings: { mode: 'audit' },
+      policy: { injectionScan: { enabled: true } },
+    });
+    const read = makeTempHome({
+      settings: { mode: 'audit' },
+      policy: {
+        injectionScan: { enabled: true },
+        untrustedContent: { roles: { [name]: { fetch: 'read' } } },
+      },
+    });
+    try {
+      expect(runGateway(src, overrideOnly, 'fetch').stderr).toMatch(/untrusted-origin/);
+      expect(runGateway(read, overrideOnly, 'fetch').stderr).not.toMatch(/injected instructions/);
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true });
+      fs.rmSync(read, { recursive: true, force: true });
+    }
+  });
+
+  // fw#318 review F3: a read through the gateway leaves the same trail as the
+  // hook's: an informational row with an eid, the source of a held send's edge.
+  itUnix('a source read through the gateway writes the exposure-source row', () => {
+    const home = makeTempHome({ settings: { mode: 'audit' } });
+    try {
+      runGateway(home, 'Contact dana@acme.example about the renewal.');
+      const rows = fs
+        .readFileSync(path.join(home, '.node9', 'audit.log'), 'utf-8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      const source = rows.find((r) => r.checkedBy === 'exposure-source');
+      expect(source).toMatchObject({
+        tool: 'read_page',
+        decision: 'allow',
+        exposure: { kind: 'source', destinations: 1 },
+      });
+      expect(typeof source?.eid).toBe('string');
+      expect(String(source?.sessionId)).toMatch(/^mcp-gateway-/);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 
   itUnix(
     'review 3: a tool the user classed as read is not framed (the gateway applies roles)',

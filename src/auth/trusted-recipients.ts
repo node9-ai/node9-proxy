@@ -8,7 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { extractArgDestinations } from '@node9/policy-engine';
+import { extractArgDestinations, isHashedEntry, normalizeDestination } from '@node9/policy-engine';
 
 export interface TrustedRecipientEntry {
   value: string;
@@ -98,6 +98,26 @@ function mtimeOf(): number {
 }
 
 /** Is `value` on the list? Re-reads the file only when it changed. */
+/**
+ * An entry of the WORKSPACE list as the dashboard stores it (fw#318 review
+ * F4): a masked kind arrives as '<masked>#sha256:<hex>' and is matched by its
+ * hash; a host, or an older full value, is normalised like a typed one; an
+ * account number keeps its kind. Null for anything else.
+ */
+export function normalizeTrustedEntry(raw: string): string | null {
+  const v = raw.trim();
+  const i = v.indexOf('#sha256:');
+  if (i > 0) {
+    const entry = `${v.slice(0, i)}#sha256:${v.slice(i + 8).toLowerCase()}`;
+    return isHashedEntry(entry) ? entry : null;
+  }
+  if (/^account:/i.test(v)) {
+    const n = normalizeDestination(v);
+    return /^account:[A-Z0-9]{6,34}$/.test(n) ? n : null;
+  }
+  return normalizeRecipient(v);
+}
+
 export function isTrustedRecipient(value: string): boolean {
   const mtime = mtimeOf();
   if (!cache || cache.mtime !== mtime) {

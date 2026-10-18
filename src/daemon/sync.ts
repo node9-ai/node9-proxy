@@ -6,7 +6,7 @@
 // The proxy reads rules-cache.json via getConfig() to enforce cloud-defined rules
 // even when offline.
 import fs from 'fs';
-import { isVerdict, configurableValues, type Verdict } from '@node9/policy-engine';
+import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
 import https from 'https';
 import os from 'os';
 import path from 'path';
@@ -1109,15 +1109,18 @@ async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): P
 // Config mirror (Phase 1b): ship this machine's EFFECTIVE local policy so the
 // dashboard's Machines view shows what it enforces. Fire-and-forget like the
 // other pushes; opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
-/** fw#318 2b: the local trusted-recipients file in the snapshot's shape. */
-function personalTrustedRecipients(): Array<{
+/** fw#318 2b: the local trusted-recipients file in the snapshot's shape.
+ *  Exported for its test. */
+export function personalTrustedRecipients(): Array<{
   value: string;
   addedBy: 'user' | 'approval';
   addedAt?: string;
 }> {
   try {
+    // fw#318 review F4: the full value stays in the local file; the
+    // dashboard gets the masked entry with the hash it matches by.
     return readTrustedRecipients().map((e) => ({
-      value: e.value,
+      value: trustedEntryOf(e.value),
       addedBy: e.addedBy === 'approval' ? 'approval' : 'user',
       ...(Number.isFinite(e.addedAt) ? { addedAt: new Date(e.addedAt).toISOString() } : {}),
     }));

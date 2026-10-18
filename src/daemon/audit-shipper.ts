@@ -25,7 +25,8 @@ import {
 } from '../audit/index.js';
 import { getConfig } from '../config/index.js';
 import { readCredentials } from './sync.js';
-import { validateApiUrl } from '../auth/cloud.js';
+import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
+import { maskPersonalData } from '@node9/policy-engine';
 
 export const AUDIT_SHIP_WATERMARK = path.join(os.homedir(), '.node9', 'audit-ship.json');
 
@@ -49,7 +50,11 @@ const FETCH_TIMEOUT_MS = 10_000;
  * - 'cloud' row WITHOUT it  → legacy/pre-wire row; unlinkable, skip to avoid
  *   double-counting the BE-origin row.
  */
-const SKIP_CHECKED_BY = new Set(['ignored']);
+// - 'exposure-source' (fw#318 review F2): a read of outside content, an
+//   informational row beside the call's own allow row. It stays in the local
+//   log (the read-to-send edge starts there); shipped, it counted every read
+//   twice on the dashboard.
+const SKIP_CHECKED_BY = new Set(['ignored', 'exposure-source']);
 
 /** fw#318 2b: the exposure counts as written, or null when malformed. */
 function exposureOf(v: unknown): WireRow['exposure'] | null {
@@ -187,13 +192,15 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       eid: parsed.eid,
       ts: parsed.ts,
       tool: parsed.tool,
+      // Masked again on the way out (fw#318 review P1): rows written before
+      // the audit writer masked personal data are still in the log.
       ...(parsed.args && typeof parsed.args === 'object'
-        ? { args: parsed.args as Record<string, unknown> }
+        ? { args: maskArgsForCloud(parsed.args) as Record<string, unknown> }
         : {}),
       ...(typeof parsed.argsHash === 'string' ? { argsHash: parsed.argsHash } : {}),
       // Repair previews already queued by versions that counted code points.
       ...(typeof parsed.argsPreview === 'string'
-        ? { argsPreview: truncateAuditPreview(parsed.argsPreview) }
+        ? { argsPreview: truncateAuditPreview(maskPersonalData(parsed.argsPreview)) }
         : {}),
       decision: parsed.decision,
       ...(checkedBy ? { checkedBy } : {}),

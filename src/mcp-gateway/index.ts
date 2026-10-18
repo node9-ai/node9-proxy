@@ -36,12 +36,11 @@ import {
   getInternalToken,
   notifyActivitySocket,
   notifySessionTaint,
-  notifySessionExposure,
 } from '../auth/daemon';
 import { stripControlChars } from '../utils/safe-text';
 import { scanToolResult } from './result-scan';
-import { sourceWord, toolRole } from '../exposure/roles';
-import { markSessionExposed } from '../exposure/marker';
+import { injectionOrigin, sourceWord, toolRole } from '../exposure/roles';
+import { recordExposureSource } from '../exposure/source';
 
 // readActiveShields + waitForMcpApproval helper removed — the
 // mcp-tool-gating shield (which used the browser dashboard for the
@@ -342,7 +341,7 @@ export async function runMcpGateway(
   // because the post-exec attribution needs more fields (agent, mcpServer, ts).
   const pendingExecutions = new Map<
     string | number,
-    { ts: number; toolName: string; agent?: string; mcpServer?: string }
+    { ts: number; toolName: string; args: unknown; agent?: string; mcpServer?: string }
   >();
 
   // Session identity for taint (gap1). MCP stdio carries no agent session id,
@@ -536,6 +535,7 @@ export async function runMcpGateway(
           pendingExecutions.set(message.id as string | number, {
             ts: Date.now(),
             toolName,
+            args: toolArgs,
             agent: clientName,
             mcpServer,
           });
@@ -856,16 +856,24 @@ export async function runMcpGateway(
               dlpEnabled: cfg.policy.dlp.enabled,
               injection: cfg.policy.injectionScan,
               spotlight: isSource && uc.spotlight ? sourceWord(nsName) : undefined,
-              untrusted: isSource,
+              ...injectionOrigin(nsName, uc, isSource),
             });
             if (scan.changed) outLine = scan.line;
             if (isSource) {
-              markSessionExposed(gatewaySessionId);
-              notifySessionExposure(
-                gatewaySessionId,
-                { tool: exec.toolName, server: configName || undefined },
-                scan.destinations
-              ).catch(() => {});
+              // The same trail the hook leaves (review F3): the row with its
+              // eid, the marker, the daemon record. Not awaited, like the
+              // taint notice below: holding this line back would let later
+              // lines overtake it.
+              recordExposureSource({
+                tool: exec.toolName,
+                args: exec.args,
+                sessionId: gatewaySessionId,
+                ...(configName ? { server: configName } : {}),
+                destinations: scan.destinations,
+                agent: exec.agent,
+                mcpServer: exec.mcpServer,
+                hashArgs: cfg.settings.auditHashArgs === true,
+              }).catch(() => {});
             }
             // A redacted secret never reaches the model, so it taints nothing
             // (the same reasoning as the PostToolUse redact-output mode). An

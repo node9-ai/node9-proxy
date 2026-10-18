@@ -1,4 +1,4 @@
-import { normalizeRecipient } from '../auth/trusted-recipients';
+import { normalizeTrustedEntry } from '../auth/trusted-recipients';
 import type { ToolInspection } from '@node9/policy-engine';
 // src/config/index.ts
 // Config types, constants, and runtime config loading.
@@ -2260,7 +2260,7 @@ function applyUntrustedContent(
       ...new Set(
         uc.trustedRecipients
           .filter((v): v is string => typeof v === 'string')
-          .map((v) => normalizeRecipient(v))
+          .map((v) => normalizeTrustedEntry(v))
           .filter((v): v is string => v !== null)
       ),
     ].slice(0, 200);

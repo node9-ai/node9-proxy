@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  redactSecrets,
+  redactAuditText,
   appendToLog,
   appendLocalAudit,
   LOCAL_AUDIT_LOG,
@@ -19,16 +19,16 @@ import {
   isDaemonRunning,
   notifyActivitySocket,
   notifySessionTaint,
-  notifySessionExposure,
   approveSessionExposure,
 } from '../../auth/daemon';
 import { extractContentDestinations, classifyShellExposure } from '@node9/policy-engine';
-import { markSessionExposed } from '../../exposure/marker';
+import { recordExposureSource } from '../../exposure/source';
 import {
   toolRole,
   sourceWord,
   shellSourceWord,
   splitMcpToolName,
+  injectionOrigin,
   EXPOSURE_LABEL,
 } from '../../exposure/roles';
 import {
@@ -169,7 +169,7 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
     // Decoding cut short (a nested layer, a flood of hostname labels, the
     // phrase budget) is not a clean scan either: the row keeps the hash.
     if (inspected.coverage === 'incomplete') return { ...hashed, argsUnscanned: true };
-    return { args: JSON.parse(redactSecrets(JSON.stringify(rawInput))) as unknown };
+    return { args: JSON.parse(redactAuditText(JSON.stringify(rawInput))) as unknown };
   } catch {
     return hashed;
   }
@@ -536,7 +536,7 @@ export function registerLogCommand(program: Command): void {
                 if (injectionOn) {
                   const m = scanInjection(result, {
                     tool: rawToolName,
-                    ...(sourceA ? { untrusted: true } : {}),
+                    ...injectionOrigin(tool, ucA, sourceA),
                   });
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     injection = m;
@@ -548,16 +548,17 @@ export function registerLogCommand(program: Command): void {
                   const wordA = shellA?.fetches
                     ? shellSourceWord(shellA.fetchKinds)
                     : sourceWord(tool);
-                  markSessionExposed(payloadSessionId ?? '');
-                  await notifySessionExposure(
-                    payloadSessionId ?? '',
-                    {
-                      tool,
-                      server: splitMcpToolName(tool)?.server,
-                      ...(shellA?.fetches ? { word: wordA } : {}),
-                    },
-                    extractContentDestinations(result)
-                  );
+                  await recordExposureSource({
+                    tool,
+                    args: rawInput,
+                    sessionId: payloadSessionId ?? '',
+                    server: splitMcpToolName(tool)?.server,
+                    ...(shellA?.fetches ? { word: wordA } : {}),
+                    destinations: extractContentDestinations(result),
+                    agent,
+                    agentToolName: rawToolName,
+                    hashArgs: config.settings.auditHashArgs === true,
+                  });
                   if (ucA.spotlight) out = frameUntrustedSource(result, wordA);
                 }
                 process.stdout.write(JSON.stringify({ redacted: out, found, injection }) + '\n');
@@ -627,7 +628,8 @@ export function registerLogCommand(program: Command): void {
                   // A #318 source (an unannotated MCP tool, a shell fetch) is
                   // outside content to the scanner too, not only the web tools
                   // its own name list knows (fw#328 step 1).
-                  const injCtx = { tool: rawToolName, ...(sourceRead ? { untrusted: true } : {}) };
+                  // A tool the admin marked `read` is trusted by it (F6).
+                  const injCtx = { tool: rawToolName, ...injectionOrigin(tool, uc, sourceRead) };
                   const m = scanInjection(toolOutput, injCtx);
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     if (spotlightApplies) {
@@ -656,37 +658,22 @@ export function registerLogCommand(program: Command): void {
                 }
 
                 if (sourceRead) {
-                  const destinations = extractContentDestinations(toolOutput);
-                  markSessionExposed(payloadSessionId ?? '');
                   // fw#318 2b: an informational row beside the call's own
-                  // allow row (the SaaS keeps such rows out of its counts,
-                  // like mcp-discovered). Its eid is the source of the edge
-                  // a held send draws back to this read.
-                  const sourceEid = appendLocalAudit(
+                  // allow row, whose eid is the source of the edge a held
+                  // send draws back to this read (one helper, every path: F3).
+                  await recordExposureSource({
                     tool,
-                    rawInput,
-                    'allow',
-                    'exposure-source',
-                    {
-                      agent,
-                      ...(payloadSessionId ? { sessionId: payloadSessionId } : {}),
-                      ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
-                      exposure: { kind: 'source', destinations: destinations.length },
-                    },
-                    config.settings.auditHashArgs === true
-                  );
-                  await notifySessionExposure(
-                    payloadSessionId ?? '',
-                    {
-                      tool,
-                      server: splitMcpToolName(tool)?.server,
-                      ...(shellExposure?.fetches
-                        ? { word: shellSourceWord(shellExposure.fetchKinds) }
-                        : {}),
-                      eid: sourceEid,
-                    },
-                    destinations
-                  );
+                    args: rawInput,
+                    sessionId: payloadSessionId ?? '',
+                    server: splitMcpToolName(tool)?.server,
+                    ...(shellExposure?.fetches
+                      ? { word: shellSourceWord(shellExposure.fetchKinds) }
+                      : {}),
+                    destinations: extractContentDestinations(toolOutput),
+                    agent,
+                    agentToolName: rawToolName,
+                    hashArgs: config.settings.auditHashArgs === true,
+                  });
                   if (spotlightApplies) {
                     const word = shellExposure?.fetches
                       ? shellSourceWord(shellExposure.fetchKinds)

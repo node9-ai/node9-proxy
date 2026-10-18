@@ -7,7 +7,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
-import { checkIdForRule, checkIdForCheckedBy } from '@node9/policy-engine';
+import { checkIdForRule, checkIdForCheckedBy, maskPersonalData } from '@node9/policy-engine';
 
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
 export const HOOK_DEBUG_LOG = path.join(os.homedir(), '.node9', 'hook-debug.log');
@@ -55,6 +55,17 @@ export function redactSecrets(text: string): string {
 }
 
 /**
+ * What an audit row may hold of a call's arguments: secrets redacted, and
+ * personal data (IBANs, card and account numbers, email addresses) masked
+ * the way the dashboard shows destinations (fw#318 review P1). Applies to
+ * the local audit.log and so to everything the shipper sends. Runs on the
+ * JSON text and keeps it parseable.
+ */
+export function redactAuditText(text: string): string {
+  return maskPersonalData(redactSecrets(text));
+}
+
+/**
  * Short, redacted, human-readable preview stored ALONGSIDE argsHash so the
  * dashboard's Action column stays readable in hash mode (the default). The
  * legacy decision-time POST used to send raw redacted args; the shipper
@@ -69,7 +80,7 @@ export function buildArgsPreview(args: unknown): string | undefined {
     const primary = o && (o.command ?? o.file_path ?? o.path ?? o.url ?? o.query);
     const text = typeof primary === 'string' ? primary : args ? JSON.stringify(args) : '';
     if (!text) return undefined;
-    return truncateAuditPreview(redactSecrets(text));
+    return truncateAuditPreview(redactAuditText(text));
   } catch {
     return undefined;
   }
@@ -96,7 +107,7 @@ export function appendHookDebug(
 ): void {
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args) }
-    : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
+    : { args: args ? JSON.parse(redactAuditText(JSON.stringify(args))) : {} };
   appendToLog(HOOK_DEBUG_LOG, {
     ts: new Date().toISOString(),
     tool: toolName,
@@ -240,7 +251,7 @@ export function appendLocalAudit(
   const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args), ...(preview ? { argsPreview: preview } : {}) }
-    : { args: args ? JSON.parse(redactSecrets(JSON.stringify(args))) : {} };
+    : { args: args ? JSON.parse(redactAuditText(JSON.stringify(args))) : {} };
   const testRun =
     isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
   const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};

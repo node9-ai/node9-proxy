@@ -76,6 +76,16 @@ describe('appendAuditLog redaction (on-disk)', () => {
     expect(logged.command).toBe('curl x');
   });
 
+  // fw#318 review P1: personal data is masked in the daemon's row too.
+  it('masks an email address on the way to disk', () => {
+    state.appendAuditLog({
+      toolName: 'mcp__gmail__send_email',
+      args: { to: 'dana@acme.example', body: 'hi' },
+      decision: 'allow',
+    });
+    expect(readAuditLog()[0].args).toEqual({ to: 'd***@acme.example', body: 'hi' });
+  });
+
   it('redacts secrets nested under a __proto__ argument', () => {
     const args = JSON.parse('{"__proto__":{"authToken":"sk-live-abcd"}}') as unknown;
     state.appendAuditLog({ toolName: 'Bash', args, decision: 'allow' });

@@ -11,7 +11,7 @@ import os from 'os';
 import { randomUUID } from 'crypto';
 import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
-import { scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
+import { maskPersonalData, scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore, SessionTaintStore } from './taint-store.js';
 import { SessionExposureStore } from './exposure-store.js';
@@ -213,6 +213,20 @@ export function redactArgs(value: unknown): unknown {
   return redactArgFields(value);
 }
 
+/** fw#318 review P1: IBANs, card and account numbers and email addresses are
+ *  masked in the row the daemon writes, as in every other audit row. The
+ *  parsed copy goes through redactArgFields again for its null prototype. */
+function maskPersonalArgs(value: unknown): unknown {
+  if (!value || typeof value !== 'object') {
+    return typeof value === 'string' ? maskPersonalData(value) : value;
+  }
+  try {
+    return redactArgFields(JSON.parse(maskPersonalData(JSON.stringify(value))));
+  } catch {
+    return '[REDACTED]';
+  }
+}
+
 function redactArgFields(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(redactArgFields);
@@ -236,7 +250,7 @@ export function appendAuditLog(data: { toolName: string; args: unknown; decision
     const entry: AuditEntry = {
       ts: new Date().toISOString(),
       tool: data.toolName,
-      args: redactArgs(data.args),
+      args: maskPersonalArgs(redactArgs(data.args)),
       decision: data.decision,
       source: 'daemon',
     };

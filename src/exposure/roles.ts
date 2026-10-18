@@ -138,6 +138,27 @@ export function toolRole(toolName: string, policy: Config['policy']['untrustedCo
   return { source: BUILTIN_SOURCES.has(bare), action: false };
 }
 
+/**
+ * The injection scanner's origin, from the source decision (fw#328, review
+ * F6). With untrustedContent on, a source read is outside content to the
+ * scanner too, and a tool the admin marked `read` is trusted by it (no
+ * outside-origin booster, whatever its name says). Anything else, and
+ * everything with untrustedContent off, is left to the scanner's own list.
+ */
+export function injectionOrigin(
+  toolName: string,
+  policy: Config['policy']['untrustedContent'] | undefined,
+  sourceRead: boolean
+): { untrusted?: boolean } {
+  if (!policy?.enabled) return {};
+  if (sourceRead) return { untrusted: true };
+  const mcp = splitMcpToolName(toolName);
+  if (!mcp) return {};
+  const configured =
+    policy.roles[mcp.server]?.[mcp.bare] ?? policy.roles[mcp.server]?.[mcp.bare.toLowerCase()];
+  return configured === 'read' ? { untrusted: false } : {};
+}
+
 /** The word for what a shell fetch read, from the classifier's fetch kinds. */
 export function shellSourceWord(kinds: readonly string[]): string {
   if (kinds.some((k) => /^gh (issue|pr)/.test(k))) return 'issue';

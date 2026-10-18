@@ -43,6 +43,7 @@ import {
   hostMatches,
   classifyShellExposure,
   fileToolOperation,
+  matchesTrustedEntry,
 } from '@node9/policy-engine';
 import { knownProjectHosts } from '../exposure/known-hosts';
 import { judgeWritesAfterExposure, type WriteHold } from '../exposure/writes';
@@ -784,6 +785,18 @@ async function _authorizeHeadlessCore(
   let exposureKeys: string[] = [];
   let exposureDestinations: string[] = [];
   let exposureFromEid: string | undefined;
+  // The exposure fields of this call's audit rows (fw#318 2b), kept apart
+  // from the shared `meta` so a row another gate writes (a DLP block, a
+  // package review) never carries them (review F5). Held: the read's eid,
+  // on the review's outcome rows. Logged: the count, on the allow row.
+  let exposureMeta: {
+    exposure?: { kind: 'source' | 'logged'; destinations: number };
+    exposureFromEid?: string;
+  } = {};
+  const ownRowMeta = (approved: boolean) =>
+    exposureMeta.exposureFromEid || (approved && exposureMeta.exposure)
+      ? { ...meta, ...exposureMeta }
+      : meta;
   const ucPolicy = config.policy.untrustedContent;
   if (ucPolicy?.enabled && !taintWarning && meta?.sessionId && !isManual) {
     // MCP actions (the hook's namespaced names, the gateway's flagged bare
@@ -881,7 +894,7 @@ async function _authorizeHeadlessCore(
             (domain !== null && ucPolicy.orgDomains.includes(domain)) ||
             mentioned.has(d) ||
             isTrustedRecipient(d) ||
-            ucPolicy.trustedRecipients.includes(d) ||
+            ucPolicy.trustedRecipients.some((e) => matchesTrustedEntry(d, e)) ||
             (destinationKind(d) === 'host' &&
               (isLoopbackHost(value) ||
                 isTrustedHost(value) ||
@@ -1006,10 +1019,11 @@ async function _authorizeHeadlessCore(
             );
           }
           exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
-          // fw#318 2b: the edge from the read to this send, on every audit
-          // row written for it from here (a block, the inline outcome row).
+          // fw#318 2b: the edge from the read to this send, on the rows the
+          // review writes (the race outcome, the no-channel deny) and, through
+          // the review marker, the inline outcome row.
           exposureFromEid = last?.eid;
-          if (exposureFromEid) meta = { ...meta, exposureFromEid };
+          if (exposureFromEid) exposureMeta = { exposureFromEid };
           exposureKeys = [
             ...held
               .filter((h) => h.dest || h.why === 'unresolved' || h.why === 'repository')
@@ -1040,12 +1054,9 @@ async function _authorizeHeadlessCore(
         } else if (held.length > 0 || writeHolds.length > 0 || logged.length > 0) {
           // Judged and let through. The call's own allow row (written below
           // by whichever path allows it) carries the fact, counts only, never
-          // a value (fw#318 2b); the debug log keeps the local detail.
-          meta = {
-            ...meta,
-            exposure: { kind: 'logged', destinations: logged.length },
-            ...(last?.eid ? { exposureFromEid: last.eid } : {}),
-          };
+          // a value (fw#318 2b); the debug log keeps the local detail. No
+          // edge to the read: only a send the gate held draws one (review F1).
+          exposureMeta = { exposure: { kind: 'logged', destinations: logged.length } };
           appendToLog(HOOK_DEBUG_LOG, {
             ts: new Date().toISOString(),
             event: 'exposure-logged',
@@ -1394,7 +1405,7 @@ async function _authorizeHeadlessCore(
           args,
           'allow',
           wouldBlock ? 'observe-mode-would-block' : 'observe-mode',
-          meta,
+          ownRowMeta(true),
           hashAuditArgs
         );
       return {
@@ -1417,7 +1428,7 @@ async function _authorizeHeadlessCore(
         // Local row only — the outbox shipper delivers it to the SaaS.
         // (The old decision-time POST is gone: it was a latency tax when
         // awaited and silently lossy when not.)
-        appendLocalAudit(toolName, args, 'allow', 'audit-mode', meta, hashAuditArgs);
+        appendLocalAudit(toolName, args, 'allow', 'audit-mode', ownRowMeta(true), hashAuditArgs);
         // Note: desktop notification intentionally omitted — notify-send routes through
         // the browser on many Linux setups (Firefox as D-Bus handler), causing spurious popups.
       }
@@ -1620,7 +1631,7 @@ async function _authorizeHeadlessCore(
           args,
           'allow',
           'local-policy',
-          { ...meta, ruleName: policyResult.ruleName },
+          { ...ownRowMeta(true), ruleName: policyResult.ruleName },
           hashAuditArgs
         );
       return { approved: true, checkedBy: 'local-policy' };
@@ -1842,7 +1853,8 @@ async function _authorizeHeadlessCore(
     // (fix #3). A persistent DENY still short-circuits (tightening is fine).
     if (persistent === 'allow' && !callSpecificReview()) {
       // Local row only — cloud delivery via the outbox shipper.
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'persistent', meta, hashAuditArgs);
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'allow', 'persistent', ownRowMeta(true), hashAuditArgs);
       return { approved: true, checkedBy: 'persistent' };
     }
     if (persistent === 'deny') {
@@ -1946,20 +1958,23 @@ async function _authorizeHeadlessCore(
         // with path/pattern rules): fall through to the approver race — fail
         // toward a human, never to allow.
       } else {
-        if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
+        if (!isManual)
+          appendLocalAudit(toolName, args, 'allow', 'ignored', ownRowMeta(true), hashAuditArgs);
         return { approved: true };
       }
     } else {
       // ignoredTools (read, glob, grep, ls…) fire on every agent operation — too
       // frequent and too noisy to send to the SaaS audit log.
-      if (!isManual) appendLocalAudit(toolName, args, 'allow', 'ignored', meta, hashAuditArgs);
+      if (!isManual)
+        appendLocalAudit(toolName, args, 'allow', 'ignored', ownRowMeta(true), hashAuditArgs);
       return { approved: true };
     }
   }
 
   if (standingTrustApplies() && getActiveTrustSession(toolName, args)) {
     // Local row only — cloud delivery via the outbox shipper.
-    if (!isManual) appendLocalAudit(toolName, args, 'allow', 'trust', meta, hashAuditArgs);
+    if (!isManual)
+      appendLocalAudit(toolName, args, 'allow', 'trust', ownRowMeta(true), hashAuditArgs);
     return { approved: true, checkedBy: 'trust' };
   }
 
@@ -2439,7 +2454,16 @@ async function _authorizeHeadlessCore(
         args,
         'deny',
         'app-permission-review',
-        { ...meta, ruleName: `app-permission:${appPermReviewTool}` },
+        { ...ownRowMeta(false), ruleName: `app-permission:${appPermReviewTool}` },
+        hashAuditArgs
+      );
+    else if (!isManual && exposureReview)
+      appendLocalAudit(
+        toolName,
+        args,
+        'deny',
+        'no-approval-mechanism',
+        { ...ownRowMeta(false), ruleName: 'exposure' },
         hashAuditArgs
       );
     return {
@@ -2548,7 +2572,7 @@ async function _authorizeHeadlessCore(
       // fix #6: carry app-perm attribution so a race-resolved approve/deny isn't
       // anonymous on the dashboard (matches the block row's ruleName).
       {
-        ...meta,
+        ...ownRowMeta(finalResult.approved),
         ...(cloudRequestId && { cloudRequestId }),
         ...(appPermReview && { ruleName: `app-permission:${appPermReviewTool}` }),
       },
