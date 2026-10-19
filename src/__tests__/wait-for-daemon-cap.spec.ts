@@ -10,8 +10,26 @@ let server: http.Server;
 let port = 0;
 
 beforeAll(async () => {
-  // A daemon that accepts /wait and never answers.
-  server = http.createServer(() => {});
+  // A daemon that accepts /wait and, by default, never answers.
+  server = http.createServer((req, res) => {
+    if (req.url === '/wait/now') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ decision: 'deny', source: 'terminal', reason: 'no' }));
+    } else if (req.url === '/wait/headers-then-hold') {
+      // Headers now, the body never ends.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"decision":');
+    } else if (req.url === '/wait/headers-then-close') {
+      // The daemon dies in the middle of its answer.
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"decision":');
+      setTimeout(() => res.destroy(), 50);
+    } else if (req.url === '/wait/headers-then-body') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"decision":');
+      setTimeout(() => res.end('"allow","source":"terminal"}'), 100);
+    }
+  });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   port = (server.address() as AddressInfo).port;
 });
@@ -42,5 +60,46 @@ describe('waitForDaemonDecision cap', () => {
     setTimeout(() => ctrl.abort(), 50);
     const err = (await p) as Error;
     expect(err.name).toBe('AbortError');
+  });
+
+  // undici's fetch ends a request with no response headers after 300 s, and
+  // the daemon answers /wait only when the card is decided, so a fetch-based
+  // wait could never outlast 300 s (review of 232b7e8). The 300 s itself is
+  // covered by daemon-wait-long.integration.test.ts (NODE9_SLOW_TESTS=1).
+  it('does not go through fetch', async () => {
+    const wait = await loadWait();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('fetch must not be used for /wait')));
+    try {
+      await expect(wait('now', undefined, 5000)).resolves.toEqual({
+        decision: 'deny',
+        source: 'terminal',
+        reason: 'no',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reads a body that arrives after the headers', async () => {
+    const wait = await loadWait();
+    await expect(wait('headers-then-body', undefined, 5000)).resolves.toEqual({
+      decision: 'allow',
+      source: 'terminal',
+    });
+  });
+
+  it('its cap firing while the body is read is still a failed channel', async () => {
+    const wait = await loadWait();
+    const err = await wait('headers-then-hold', undefined, 200).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).not.toBe('AbortError');
+    expect((err as Error).message).toMatch(/did not answer in time/);
+  });
+
+  it('a daemon that dies mid-answer fails the channel, with no cap', async () => {
+    const wait = await loadWait();
+    const err = await wait('headers-then-close', undefined, 0).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).name).not.toBe('AbortError');
   });
 });

@@ -1,6 +1,7 @@
 // src/auth/daemon.ts
 // Daemon interaction helpers: PID check, entry registration, long-polling, viewer cards.
 import fs from 'fs';
+import http from 'http';
 import net from 'net';
 import path from 'path';
 import os from 'os';
@@ -297,14 +298,17 @@ export async function registerDaemonEntry(
   }
 }
 
-/** Long-poll the daemon for a decision on an already-registered entry. */
+/** Long-poll the daemon for a decision on an already-registered entry.
+ *  node:http, not fetch: undici ends a request with no response headers
+ *  after 300 s (headersTimeout), and the daemon answers /wait only when the
+ *  card is decided, so a fetch-based wait cut every review longer than 300 s,
+ *  including the "no timer" of approvalTimeoutMs 0 (review of 232b7e8). */
 export async function waitForDaemonDecision(
   id: string,
   signal?: AbortSignal,
   /** Give up after this long; 0 waits for the daemon's answer however long it takes. */
   maxWaitMs = 120_000
 ): Promise<{ decision: 'allow' | 'deny' | 'abandoned'; source?: string; reason?: string }> {
-  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const waitCtrl = new AbortController();
   let capped = false;
   const waitTimer =
@@ -317,7 +321,9 @@ export async function waitForDaemonDecision(
   const onAbort = () => waitCtrl.abort();
   if (signal) signal.addEventListener('abort', onAbort);
   try {
-    const waitRes = await fetch(`${base}/wait/${id}`, { signal: waitCtrl.signal }).catch(
+    // The body is read inside this catch too: a cap that fired while the body
+    // was read used to escape as an AbortError.
+    const { status, body } = await daemonGet(`/wait/${id}`, waitCtrl.signal).catch(
       (err: unknown) => {
         // Our own cap is a failed channel, not the race aborting this racer:
         // the race ignores an AbortError, and a race with no other racer
@@ -326,8 +332,8 @@ export async function waitForDaemonDecision(
         throw err;
       }
     );
-    if (!waitRes.ok) return { decision: 'deny' };
-    const { decision, source, reason } = (await waitRes.json()) as {
+    if (status !== 200) return { decision: 'deny' };
+    const { decision, source, reason } = JSON.parse(body) as {
       decision: string;
       source?: string;
       reason?: string;
@@ -339,6 +345,28 @@ export async function waitForDaemonDecision(
     clearTimeout(waitTimer);
     if (signal) signal.removeEventListener('abort', onAbort);
   }
+}
+
+/** A GET on the daemon with no client-side timeout; only `signal` ends it.
+ *  Its own socket (agent: false), so a long-held wait stays out of the
+ *  keep-alive pool. */
+function daemonGet(
+  urlPath: string,
+  signal: AbortSignal
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      { host: DAEMON_HOST, port: DAEMON_PORT, path: urlPath, signal, agent: false },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => (body += chunk));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        res.on('error', reject);
+      }
+    );
+    req.on('error', reject);
+  });
 }
 
 /** Register a viewer-mode card on the daemon (Slack is the real authority).
