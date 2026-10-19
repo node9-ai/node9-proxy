@@ -51,6 +51,19 @@ describe('file policy: arguments bound at the call', () => {
     expect(analyzeFsOperation('f() { shift; cat "$1"; }; f .env notes.txt')).toBeNull();
   });
 
+  it('set -- inside a body gives $1 a new meaning: the call argument is not bound (review finding)', () => {
+    // bash removes ./a here; binding $1 to the call's argument would invent a
+    // removal of /etc/wgetrc.
+    expect(files('f() { set -- ./a; rm "$1"; }; f /etc/wgetrc')).toBeNull();
+    expect(analyzeFsOperation('f() { set -- notes.txt; cat "$1"; }; f .env')).toBeNull();
+  });
+
+  it('a call is walked again when the variables its body reads changed (review finding)', () => {
+    expect(files('X=/tmp/a\nf() { rm "$X"; }\nf\nX=/etc/wgetrc\nf')?.checkId).toBe(
+      'files.system-dirs'
+    );
+  });
+
   it('a function that shadows a command hides nothing', () => {
     expect(files('rm() { :; }; rm /etc/wgetrc')?.checkId).toBe('files.system-dirs');
   });
@@ -80,6 +93,10 @@ describe('destinations: variables and function arguments', () => {
     expect(tokens(script)).toEqual(['docs.example.test']);
   });
 
+  it('an assignment between the definition and the call is visible in the body (review finding)', () => {
+    expect(hosts('f() { curl "$u"; }\nu=https://x.example.test\nf')).toEqual(['x.example.test']);
+  });
+
   it('an unknown argument and a later assignment name nothing', () => {
     expect(hosts('fetch() { curl -s "$1"; }; fetch "$u"')).toEqual([]);
     expect(hosts('curl "$u"; u=https://late.example.test')).toEqual([]);
@@ -97,6 +114,23 @@ describe('credential jail: arguments bound at the call', () => {
     expect(direct).toBe('block');
     expect(analyzeFsOperation('show() { cat "$1"; }; show .env')?.verdict).toBe(direct);
     expect(analyzeFsOperation('show() { local f=$1; cat "$f"; }; show .env')?.verdict).toBe(direct);
+  });
+
+  it('a variable assigned after the definition and before the call is visible (review finding)', () => {
+    expect(analyzeFsOperation('f() { cat "$K"; }\nK=.env\nf')?.verdict).toBe('block');
+  });
+
+  it('nested payloads share one call budget and finish quickly (review finding)', () => {
+    // A guard against explosive growth, not a benchmark: 16 payloads of 16
+    // calls each stay far below the hook's time limit even under load.
+    const calls = Array.from({ length: 16 }, (_, i) => `f ./d${i}`).join('; ');
+    const payload = `f() { cat "$1"; }; ${calls}`;
+    const command = Array.from({ length: 16 }, (_, i) => `sh -c '${payload}; echo ${i}'`).join(
+      '\n'
+    );
+    const start = performance.now();
+    analyzeFsOperation(command);
+    expect(performance.now() - start).toBeLessThan(5000);
   });
 
   it('an ordinary file through the same function stays allowed', () => {

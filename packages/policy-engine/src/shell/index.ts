@@ -2726,8 +2726,9 @@ const MAX_CALL_WALKS = 256;
 let callDepth = 0;
 let callWalks = 0;
 
+/** Every function body defined in the script, by name (all definitions). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function functionBodies(f: any): Map<string, any[]> {
+export function functionBodies(f: any): Map<string, any[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const out = new Map<string, any[]>();
   syntax.Walk(f, (node: unknown) => {
@@ -2743,18 +2744,40 @@ function functionBodies(f: any): Map<string, any[]> {
   return out;
 }
 
+/**
+ * Does a function body give $1.. a new meaning? `shift` moves them; `set --`
+ * and `set` with operands replace them. Such a body gets no bindings: its $1
+ * is not the call's first argument.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function usesShift(body: any): boolean {
+export function rebindsPositionals(body: any): boolean {
   let found = false;
   syntax.Walk(body, (node: unknown) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
     if (found || !n) return false;
-    if (syntax.NodeType(n) === 'CallExpr' && resolveWordLiteral(n.Args?.[0]) === 'shift')
-      found = true;
+    if (syntax.NodeType(n) === 'CallExpr') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words = ((n.Args as any[]) || []).map((a) => resolveWordLiteral(a));
+      if (words[0] === 'shift') found = true;
+      else if (
+        words[0] === 'set' &&
+        words.slice(1).some((w) => w === null || w === '--' || !/^[-+]/.test(w))
+      )
+        found = true;
+    }
     return !found;
   });
   return found;
+}
+
+/** The bindings in force, so one call is walked once per distinct meaning. */
+function tableBindings(): string {
+  if (!assignmentTable) return '';
+  const out: string[] = [];
+  for (const [name, rec] of assignmentTable)
+    if (rec.at < currentStmtOffset) out.push(`${name}=${rec.value ?? '\u0000'}`);
+  return out.sort().join('\u0001');
 }
 
 /**
@@ -2769,7 +2792,6 @@ function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
     syntax.Walk(f, visit);
     return;
   }
-  if (callDepth === 0) callWalks = 0;
   const seenCalls = new Set<string>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const inline = (call: any): void => {
@@ -2778,7 +2800,7 @@ function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
     const list = words[0] ? bodies.get(words[0]) : undefined;
     if (!list || callDepth >= MAX_CALL_DEPTH) return;
     const args = words.slice(1);
-    const key = `${words[0]}\u0000${JSON.stringify(args)}`;
+    const key = `${words[0]}\u0000${JSON.stringify(args)}\u0000${tableBindings()}`;
     if (seenCalls.has(key)) return;
     seenCalls.add(key);
     const outerTable = assignmentTable;
@@ -2786,10 +2808,16 @@ function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
     for (const body of list) {
       if (callWalks >= MAX_CALL_WALKS) return;
       callWalks++;
-      const table = new Map(outerTable ?? []);
+      // The body runs at the call site: what is visible there is visible in
+      // the body, whatever the body's own position in the text. Entries the
+      // call site cannot see yet are dropped; the body's own assignments are
+      // recorded below with their positions.
+      const table = new Map<string, { value: string | null; at: number }>();
+      for (const [name, rec] of outerTable ?? [])
+        if (rec.at < outerOffset) table.set(name, { value: rec.value, at: -1 });
       for (const name of ['1', '2', '3', '4', '5', '6', '7', '8', '9', '@', '*', '#'])
         table.delete(name);
-      if (!usesShift(body)) {
+      if (!rebindsPositionals(body)) {
         args.slice(0, 9).forEach((value, i) => table.set(String(i + 1), { value, at: -1 }));
         // "$@" is one word here; it is exact only for a single argument.
         if (args.length === 1) {
@@ -2831,6 +2859,8 @@ function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
 function withAssignments<T>(f: any, body: () => T): T {
   const outerTable = assignmentTable;
   const outerOffset = currentStmtOffset;
+  const outerWalks = callWalks;
+  callWalks = 0;
   assignmentTable = new Map(
     [...(outerTable ?? [])].map(([k, r]) => [k, { value: r.value, at: -1 }])
   );
@@ -2841,6 +2871,7 @@ function withAssignments<T>(f: any, body: () => T): T {
   } finally {
     assignmentTable = outerTable;
     currentStmtOffset = outerOffset;
+    callWalks = outerWalks;
   }
 }
 
@@ -3412,6 +3443,8 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   if (depth === 0) {
     seenPayloads = new Set();
     payloadBudget = PAYLOAD_BUDGET;
+    // One function-call budget for the whole command, nested payloads included.
+    if (callDepth === 0) callWalks = 0;
   }
   // Inherited entries are rebased to -1: their offsets are positions in the
   // PARENT string and would be compared against the child's, which hid every

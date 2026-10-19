@@ -12,6 +12,8 @@ import {
   shellConsumesPipe,
   FS_READ_TOOLS,
   SHELL_INTERPRETERS,
+  functionBodies,
+  rebindsPositionals,
 } from './index';
 import { type FileAccess, type FileAccessContext } from '../files/paths';
 
@@ -599,8 +601,10 @@ export function collectShellFileAccesses(
     if (name === 'scp' || name === 'rsync') {
       // A copy whose destination is a remote (`host:` or `user@host:`) sends
       // its sources off the machine.
+      // Any operand after the first that names a remote: a trailing option
+      // value (`--exclude tmp`) is not the destination.
       const operands = strings.filter((s) => s && !s.startsWith('-'));
-      const remote = /^[^/\s]+:/.test(operands[operands.length - 1] ?? '');
+      const remote = operands.slice(1).some((o) => /^[^/\s]+:/.test(o));
       for (const p of copySourcePaths(words))
         add('read', locate(p), state, remote ? { upload: true } : {});
       return;
@@ -809,7 +813,9 @@ export function collectShellFileAccesses(
     const bodies = functions.get(head.value);
     if (!bodies || (state.callDepth ?? 0) >= MAX_CALL_DEPTH) return;
     const args = tokens.slice(1).map((a) => (a && !a.dynamic ? a.value : null));
-    const key = `${head.value}\u0000${JSON.stringify(args)}\u0000${state.cwd.join('\u0001')}`;
+    // The variables in force are part of the call's meaning: the body may read them.
+    const vars = JSON.stringify([...state.vars].sort(([a], [b]) => (a < b ? -1 : 1)));
+    const key = `${head.value}\u0000${JSON.stringify(args)}\u0000${state.cwd.join('\u0001')}\u0000${vars}`;
     if (seenCalls.has(key)) return;
     seenCalls.add(key);
     for (const body of bodies) {
@@ -817,7 +823,7 @@ export function collectShellFileAccesses(
       const local = clone(state);
       local.callDepth = (state.callDepth ?? 0) + 1;
       for (const name of POSITIONAL) local.vars.delete(name);
-      if (!usesShift(body)) {
+      if (!rebindsPositionals(body)) {
         args.slice(0, 9).forEach((v, i) => local.vars.set(String(i + 1), v === null ? null : [v]));
         const all = args.every((v) => v !== null) && args.length ? unique(args as string[]) : null;
         local.vars.set('@', all);
@@ -1005,27 +1011,8 @@ export function collectShellFileAccesses(
   const parsed = parseShared(command);
   const program = typeof parsed !== 'symbol' ? parsed : runnablePrefix(command);
   if (program) {
-    syntax.Walk(program, (node: any) => {
-      if (node && syntax.NodeType(node) === 'FuncDecl' && node.Name?.Value && node.Body) {
-        const list = functions.get(node.Name.Value) ?? [];
-        list.push(node.Body);
-        functions.set(node.Name.Value, list);
-      }
-      return true;
-    });
+    for (const [name, bodies] of functionBodies(program)) functions.set(name, bodies);
     statements(program.Stmts ?? [], initial, 0);
   }
   return out;
-}
-
-/** Does a function body call `shift`? Its $1 then names a later argument. */
-function usesShift(body: any): boolean {
-  let found = false;
-  syntax.Walk(body, (node: any) => {
-    if (found || !node) return false;
-    if (syntax.NodeType(node) === 'CallExpr' && resolveWordLiteral(node.Args?.[0]) === 'shift')
-      found = true;
-    return !found;
-  });
-  return found;
 }

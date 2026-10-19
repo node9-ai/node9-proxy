@@ -251,7 +251,11 @@ const ASSIGNED_SECRET_VALUE_RE =
 const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
 
 // `pass` comes after the longer words that start with it, so `password` is
-// read as `password`. The names added after node9Firewall#348 (consumer and
+// read as `password`. In the pattern itself `pass` must start a word or follow
+// an underscore and end the name part (`\bpass(?![A-Za-z0-9])`,
+// `_pass(?![A-Za-z0-9])`): a bare `pass` matched inside `PASSPORT_`, `bypass_`
+// or `COMPASS_`, and the rejected match hid the real keyword after it
+// (`PASSPORT_CLIENT_SECRET`), because a rejected match resumes after itself. The names added after node9Firewall#348 (consumer and
 // app keys, signing, encryption and master keys, a WeChat `jsapi_ticket`, a
 // `*_PASS` variable) are the shapes CredData's public split showed the gate
 // missing.
@@ -272,33 +276,19 @@ function keywordEndsAPart(name: string): boolean {
   return lastIsLower && /[A-Z]/.test(next);
 }
 
-/**
- * The short keyword `pass` must also START a part of the name: at the start,
- * after a character that is not a letter or digit (`_`, `-`, a quote, a
- * space), or as an uppercase letter after a lowercase one (`dbPass`). The
- * pattern is unanchored, so without this `bypass:` and `compass_version:`
- * would be read as a name `pass` with a prefix. The longer keywords keep
- * their current behaviour (`dbpassword` is still a password).
- */
-function keywordStartsAPart(name: string, before: string): boolean {
-  if (!/^pass(?![a-z])/i.test(name) || /^pass(?:word|phrase|wd)/i.test(name)) return true;
-  const prev = before.slice(-1);
-  if (prev === '' || !/[A-Za-z0-9]/.test(prev)) return true;
-  return /[a-z0-9]/.test(prev) && /^P/.test(name);
-}
-
 /** `arn:aws:secretsmanager:...:secret:prod/x`: an ARN segment, not an assignment. */
 const ARN_CONTEXT_RE = /\barn:[A-Za-z0-9-]*:[^\s"'`]*$/i;
 
 function validateAssignedSecret(raw: string, before = ''): boolean {
   const value = capturedValue(raw, ASSIGNED_SECRET_VALUE_RE);
-  const name = capturedValue(raw, ASSIGNED_SECRET_NAME_RE);
+  // `_pass` matches from its underscore (`JENKINS_PASS`): the name is what follows it.
+  const name = capturedValue(raw, ASSIGNED_SECRET_NAME_RE)?.replace(/^_+/, '') ?? null;
   if (value === null || name === null) return false;
-  if (!keywordEndsAPart(name) || !keywordStartsAPart(name, before)) return false;
+  if (!keywordEndsAPart(name)) return false;
   if (ARN_CONTEXT_RE.test(before)) return false;
   // The match starts at the keyword; the rest of the name (`FAKE_` in
   // `FAKE_TOKEN`, `mock` in `mockSecret`) is in the text just before it.
-  const prefix = before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '';
+  const prefix = (before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '') + (raw.startsWith('_') ? '_' : '');
   if (!nameHoldsCredential(prefix + name)) return false;
   return looksGenerated(value, 12, 3.5);
 }
@@ -916,7 +906,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
   {
     name: 'Assigned Secret',
     regex:
-      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|jsapi[_-]?ticket|pass)[A-Za-z0-9_]{0,40}\\?["'\]]?\\?["'\]]?[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
+      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|jsapi[_-]?ticket|\bpass(?![A-Za-z0-9])|_pass(?![A-Za-z0-9]))[A-Za-z0-9_]{0,40}\\?["'\]]?\\?["'\]]?[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
     severity: 'review',
     keywords: ['pass', 'pwd', 'secret', 'token', 'key', 'ticket'],
     validate: validateAssignedSecret,

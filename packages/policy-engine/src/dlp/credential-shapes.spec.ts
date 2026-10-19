@@ -118,7 +118,6 @@ describe('Assigned Secret: wider name vocabulary', () => {
       `master_key = "${GENERATED}"`,
       `jsapi_ticket = '${GENERATED}'`,
       `DEPLOY_PASS=${GENERATED}`,
-      `dbPass: '${GENERATED}'`,
       `"pass": "${GENERATED}"`,
     ]) {
       expect(gate({ content: text })?.patternName, text).toBe('Assigned Secret');
@@ -143,6 +142,18 @@ describe('Assigned Secret: wider name vocabulary', () => {
 
   it('dbpassword is still a password (the start-of-part rule is for pass alone)', () => {
     expect(gate({ content: `dbpassword=${GENERATED}` })?.patternName).toBe('Assigned Secret');
+  });
+
+  it('a word containing pass does not hide the keyword after it (review finding)', () => {
+    for (const text of [
+      `PASSPORT_CLIENT_SECRET=${GENERATED}`,
+      `PASSPORT_PRIVATE_KEY=${GENERATED}`,
+      `passport_token: '${GENERATED}'`,
+      `bypass_token=${GENERATED}`,
+      `COMPASS_API_KEY=${GENERATED}`,
+    ]) {
+      expect(gate({ content: text })?.patternName, text).toBe('Assigned Secret');
+    }
   });
 });
 

@@ -211,6 +211,7 @@ describe('upload rule: a system file sent in a request', () => {
     'scp /etc/os-release deploy@host.example.test:/tmp/',
     'rsync -a /var/log/app/ backup.example.test:/srv/logs',
     'nc collector.example.test 9000 < /var/log/app.log',
+    'rsync -a /var/log/app/ backup.example.test:/srv/logs --exclude tmp',
   ])('reviews %s', (command) => {
     expect(detect(command)).toMatchObject({
       decision: 'review',
