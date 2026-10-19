@@ -2292,7 +2292,16 @@ async function _authorizeHeadlessCore(
     channels: [
       'terminal',
       'monitor',
-      ...(approvers.native && !isManual && !options?.calledFromDaemon ? ['native'] : []),
+      // Only when the popup can show: a card listing a channel nobody can
+      // use is never abandoned when node9 tail closes, and waits unanswered.
+      ...(approvers.native &&
+      !isManual &&
+      !options?.calledFromDaemon &&
+      (process.platform === 'darwin' ||
+        process.platform === 'win32' ||
+        !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY))
+        ? ['native']
+        : []),
       ...(cloudEnforced && cloudRequestId && cloudMayVote ? ['cloud'] : []),
     ] as Channel[],
     timeoutMs: approvalTimeoutMs,
@@ -2536,8 +2545,11 @@ async function _authorizeHeadlessCore(
         if (
           downgradedBlock &&
           (!record || (legacy && record.decidedBy === 'policy' && record.decision === 'deny'))
-        )
-          return { ...downgradedBlock, blockedBy: 'local-config' } as AuthResult;
+        ) {
+          const softened = { ...downgradedBlock, blockedBy: 'local-config' } as AuthResult;
+          fromCard.add(softened);
+          return softened;
+        }
         if (!record) return approvalUnavailable(outcome.reason);
         // An older daemon's own check names no rule: the review's label does.
         if (legacy && record.decidedBy === 'policy') record.label = explainableLabel;

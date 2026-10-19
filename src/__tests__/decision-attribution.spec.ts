@@ -630,6 +630,36 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
       expect(msg).toContain('Run `npm test` first, then retry.');
     });
 
+    it('lists the native channel only where the popup can show', async () => {
+      if (process.platform !== 'linux') return;
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny', source: 'terminal' });
+      delete process.env.DISPLAY;
+      const savedWayland = process.env.WAYLAND_DISPLAY;
+      delete process.env.WAYLAND_DISPLAY;
+      try {
+        await authorizeHeadless('Bash', { command: 'git push' });
+      } finally {
+        if (savedWayland !== undefined) process.env.WAYLAND_DISPLAY = savedWayland;
+      }
+
+      // Before: native was listed on a headless machine, so the card was never
+      // abandoned when node9 tail closed and waited with nobody to answer.
+      const args = H.registerDaemonEntry.mock.calls[0];
+      expect(args[args.length - 1].channels).toEqual(['terminal', 'monitor']);
+    });
+
+    it('a softened block whose wait failed is not reported back to the card', async () => {
+      H.evaluatePolicy.mockResolvedValue(JAIL_BLOCK);
+      H.token = 'tok';
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny' });
+
+      const res = await authorizeHeadless('Bash', { command: 'echo hello' });
+
+      expect(res.blockedBy).toBe('local-config');
+      expect(H.resolveViaDaemon).not.toHaveBeenCalled();
+    });
+
     it('a protocol-2 card with no timer is waited on with no cap', async () => {
       H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
       H.registerDaemonEntry.mockResolvedValue({

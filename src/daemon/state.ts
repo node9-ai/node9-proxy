@@ -80,7 +80,9 @@ function onCardDecided(card: Card): void {
   });
   if (r.decidedBy !== 'person') return;
   const tool = card.request.toolName;
-  if (r.decision === 'allow' && r.standing !== 'always-allow') {
+  // An allow counts toward the "[a] creates a permanent rule" hint, except one
+  // that already set a standing decision on the tool (always allow, trust).
+  if (r.decision === 'allow' && r.standing !== 'always-allow' && r.standing !== 'trust') {
     insightCounts.set(tool, (insightCounts.get(tool) ?? 0) + 1);
     saveInsightCounts();
   } else if (r.decision === 'deny') {

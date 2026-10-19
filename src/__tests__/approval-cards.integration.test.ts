@@ -299,6 +299,20 @@ describe('approval cards on a real daemon', () => {
       channel: 'monitor',
       standing: 'trust',
     });
+    // A trust is a standing decision: it does not count toward the "[a]
+    // creates a permanent rule" hint, as before the card protocol.
+    const next = (await (
+      await fetch(`${d.base}/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          toolName: 'bash',
+          args: { command: 'echo monitor' },
+          fromCLI: true,
+        }),
+      })
+    ).json()) as { allowCount: number };
+    expect(next.allowCount).toBe(1);
   });
 
   it("a protocol-2 card's /wait needs the internal token", async () => {

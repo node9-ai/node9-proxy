@@ -5,6 +5,9 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 let server: http.Server;
 let port = 0;
@@ -101,5 +104,54 @@ describe('waitForDaemonDecision cap', () => {
     const err = await wait('headers-then-close', undefined, 0).catch((e: Error) => e);
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).name).not.toBe('AbortError');
+  });
+});
+
+// Approval-card review: protocol 2 makes a card's /wait need the internal
+// token, so the hook claims it only when it can read the token. A daemon
+// under another uid is "running" (its pid probe fails with EPERM) but its
+// token is unreadable: every wait would have got 403.
+describe('registerDaemonEntry claims protocol 2 only with the token', () => {
+  async function registerBody(home: string): Promise<Record<string, unknown>> {
+    let seen: Record<string, unknown> = {};
+    const srv = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', (c) => (b += c));
+      req.on('end', () => {
+        seen = JSON.parse(b) as Record<string, unknown>;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'c1', allowCount: 1 }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const savedHome = process.env.HOME;
+    try {
+      vi.resetModules();
+      process.env.NODE9_DAEMON_PORT = String((srv.address() as AddressInfo).port);
+      process.env.HOME = home;
+      const { registerDaemonEntry } = await import('../auth/daemon.js');
+      await registerDaemonEntry('bash', { command: 'x' });
+    } finally {
+      process.env.HOME = savedHome;
+      srv.close();
+    }
+    return seen;
+  }
+
+  it('with a readable token: protocol 2', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-reg-'));
+    fs.mkdirSync(path.join(home, '.node9'));
+    fs.writeFileSync(
+      path.join(home, '.node9', 'daemon.pid'),
+      JSON.stringify({ pid: process.pid, internalToken: 'tok' })
+    );
+    expect((await registerBody(home)).protocol).toBe(2);
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('without one: no protocol, the card stays readable', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-reg-'));
+    expect((await registerBody(home)).protocol).toBeUndefined();
+    fs.rmSync(home, { recursive: true, force: true });
   });
 });

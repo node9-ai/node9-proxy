@@ -329,7 +329,11 @@ function cardFields(card?: CardOptions): Record<string, unknown> {
     // A review card: the hook already decided this call needs a person; the
     // daemon never checks it again (approval-card design, defect 1).
     kind: 'review',
-    protocol: CARD_PROTOCOL,
+    // Protocol 2 makes the card's /wait require the internal token: claim it
+    // only when this process can read the token (a daemon under another uid
+    // is running but its pid file probe fails with EPERM), or every wait
+    // would get 403 and the review would be denied unseen.
+    ...(getInternalToken() && { protocol: CARD_PROTOCOL }),
     ...(card?.channels && { channels: card.channels }),
     ...(typeof card?.timeoutMs === 'number' && { timeoutMs: card.timeoutMs }),
   };
