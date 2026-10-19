@@ -124,15 +124,20 @@ describe('registerDaemonEntry claims protocol 2 only with the token', () => {
       });
     });
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
     const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
     try {
       vi.resetModules();
       process.env.NODE9_DAEMON_PORT = String((srv.address() as AddressInfo).port);
       process.env.HOME = home;
+      process.env.USERPROFILE = home;
       const { registerDaemonEntry } = await import('../auth/daemon.js');
       await registerDaemonEntry('bash', { command: 'x' });
     } finally {
       process.env.HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = savedProfile;
       srv.close();
     }
     return seen;
