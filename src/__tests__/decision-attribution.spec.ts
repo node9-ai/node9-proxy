@@ -27,6 +27,11 @@ const H = vi.hoisted(() => ({
   registerDaemonEntry: vi.fn(),
   waitForDaemonDecision: vi.fn(),
   askNativePopup: vi.fn(),
+  resolveViaDaemon: vi.fn(),
+  notifyDaemonViewer: vi.fn(),
+  resolveNode9SaaS: vi.fn(),
+  pollNode9SaaS: vi.fn(),
+  token: null as string | null,
 }));
 
 vi.mock('../policy', () => ({
@@ -66,11 +71,11 @@ vi.mock('../auth/daemon', () => ({
   DAEMON_HOST: '127.0.0.1',
   isDaemonRunning: () => true,
   daemonHasInteractiveApprover: () => Promise.resolve(false),
-  getInternalToken: () => null,
+  getInternalToken: () => H.token,
   registerDaemonEntry: (...a: unknown[]) => H.registerDaemonEntry(...a),
   waitForDaemonDecision: (...a: unknown[]) => H.waitForDaemonDecision(...a),
-  notifyDaemonViewer: vi.fn().mockResolvedValue(null),
-  resolveViaDaemon: vi.fn(),
+  notifyDaemonViewer: (...a: unknown[]) => H.notifyDaemonViewer(...a),
+  resolveViaDaemon: (...a: unknown[]) => H.resolveViaDaemon(...a),
   notifyTaint: vi.fn(),
   checkTaint: vi.fn().mockResolvedValue(null),
   checkSessionTaint: vi.fn().mockResolvedValue(null),
@@ -91,8 +96,8 @@ vi.mock('../audit', () => ({
 
 vi.mock('../auth/cloud', () => ({
   initNode9SaaS: (...a: unknown[]) => H.initSaaS(...a),
-  pollNode9SaaS: () => new Promise(() => {}),
-  resolveNode9SaaS: vi.fn(),
+  pollNode9SaaS: (...a: unknown[]) => H.pollNode9SaaS(...a),
+  resolveNode9SaaS: (...a: unknown[]) => H.resolveNode9SaaS(...a),
 }));
 
 vi.mock('../dlp', () => ({
@@ -111,7 +116,7 @@ vi.mock('../shields', () => ({
 
 import { authorizeHeadless, daemonWaitCapMs, type AuthResult } from '../auth/orchestrator';
 import { buildNegotiationMessage, isHumanDecision } from '../policy/negotiation';
-import { notifyDaemonViewer } from '../auth/daemon';
+import { personRecord } from '../auth/decision-record';
 
 // The verdict the engine returns for the builtin project-jail .env rule.
 const JAIL_BLOCK = {
@@ -165,6 +170,11 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
     H.waitForDaemonDecision.mockImplementation(() => new Promise(() => {}));
     // The popup is shown and nobody answers it.
     H.askNativePopup.mockImplementation(() => new Promise(() => {}));
+    H.token = null;
+    H.resolveViaDaemon.mockResolvedValue(null);
+    H.notifyDaemonViewer.mockResolvedValue(null);
+    H.resolveNode9SaaS.mockResolvedValue(undefined);
+    H.pollNode9SaaS.mockImplementation(() => new Promise(() => {}));
   });
 
   afterEach(() => {
@@ -279,7 +289,7 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
       // organisation's, and the hook shares the daemon viewer card.
       H.cloudEnabled.mockReturnValue(true);
       H.initSaaS.mockResolvedValue({ pending: true, requestId: 'req-2' });
-      vi.mocked(notifyDaemonViewer).mockResolvedValueOnce({ id: 'viewer-1', allowCount: 1 });
+      H.notifyDaemonViewer.mockResolvedValueOnce({ id: 'viewer-1', allowCount: 1 });
       H.evaluatePolicy.mockResolvedValue({
         decision: 'review',
         tier: 1,
@@ -464,6 +474,108 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
       const res = await authorizeHeadless('Bash', { command: 'echo hello' });
 
       expect(res.ruleDescription).toBe(JAIL_BLOCK.reason);
+    });
+  });
+
+  // Approval-card design, step 3: the hook reads who decided from the card's
+  // record, reports its own winners to the card, and adopts the card's
+  // decision when a person answered first.
+  describe('the card decides once (approval-card design)', () => {
+    it('registers the card with who may answer it and the hook timeout', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny', source: 'terminal' });
+
+      await authorizeHeadless('Bash', { command: 'git push' });
+
+      const args = H.registerDaemonEntry.mock.calls[0];
+      expect(args[args.length - 1]).toEqual({
+        channels: ['terminal', 'monitor', 'native'],
+        timeoutMs: 5000,
+      });
+    });
+
+    it('a protocol-2 record names who decided (node9 monitor is a person)', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({
+        decision: 'deny',
+        source: 'terminal',
+        record: personRecord('monitor', 'deny'),
+      });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.approved).toBe(false);
+      expect(res.decidedBy).toBe('person');
+      expect(res.channel).toBe('monitor');
+      expect(res.blockedByLabel).toBe('User Decision (node9 monitor)');
+    });
+
+    it("a native popup allow loses to a person's deny already on the card", async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.token = 'tok';
+      H.askNativePopup.mockResolvedValue('allow');
+      H.resolveViaDaemon.mockResolvedValue({
+        won: false,
+        record: personRecord('terminal', 'deny'),
+      });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      // Before: the hook kept its own allow and fired /resolve without reading
+      // the reply, so the call ran while the card and the audit said denied.
+      expect(res.approved).toBe(false);
+      expect(res.decidedBy).toBe('person');
+      expect(res.channel).toBe('terminal');
+      const sent = H.resolveViaDaemon.mock.calls[0][4];
+      expect(sent).toMatchObject({ decision: 'allow', decidedBy: 'person', channel: 'native' });
+    });
+
+    it('a cloud deny is not reported back to the cloud as a local decision', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.cloudEnabled.mockReturnValue(true);
+      H.pollNode9SaaS.mockResolvedValue({ approved: false, reason: 'no' });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.approved).toBe(false);
+      expect(res.decidedBy).toBe('cloud');
+      // Before: the deny had no checkedBy, so it was PATCHed back as "local".
+      expect(H.resolveNode9SaaS).not.toHaveBeenCalled();
+    });
+
+    it('the cloud-path card carries the cwd, the session and the recovery command', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.cloudEnabled.mockReturnValue(true);
+
+      void authorizeHeadless(
+        'Bash',
+        { command: 'git push' },
+        { sessionId: 'sess-1' },
+        { cwd: '/tmp/proj' }
+      );
+      await vi.waitFor(() => expect(H.notifyDaemonViewer).toHaveBeenCalled());
+
+      const extra = H.notifyDaemonViewer.mock.calls[0][6];
+      expect(extra).toMatchObject({
+        cwd: '/tmp/proj',
+        sessionId: 'sess-1',
+        card: { channels: ['terminal', 'monitor', 'native', 'cloud'] },
+      });
+    });
+
+    it('a protocol-2 card with no timer is waited on with no cap', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.registerDaemonEntry.mockResolvedValue({
+        id: 'entry-1',
+        allowCount: 1,
+        protocol: 2,
+        deadline: null,
+      });
+      H.waitForDaemonDecision.mockResolvedValue({ decision: 'deny', source: 'terminal' });
+
+      await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(H.waitForDaemonDecision.mock.calls[0][2]).toBe(0);
     });
   });
 });

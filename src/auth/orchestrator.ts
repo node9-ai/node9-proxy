@@ -82,7 +82,8 @@ import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
 import { asApprovalRequest } from '../policy/negotiation';
-import { HUMAN_DECISION_SOURCES, REDIRECT_SOURCE } from './decision-sources';
+import { recordFromLegacyWait, type Channel, type DecidedBy } from './decision-record';
+import { approvalUnavailable, authResultFromRecord, recordFromAuthResult } from './card-result';
 
 /** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
  *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
@@ -190,6 +191,13 @@ export interface AuthResult {
     'cloud' | 'daemon' | 'terminal' | 'local-policy' | 'persistent' | 'trust' | 'paused' | 'audit';
   /** Structured decision source from the winning racer — used for cloud audit reporting. */
   decisionSource?: 'terminal' | 'browser' | 'native' | 'cloud' | 'timeout' | 'local';
+  /** Who decided an approval (src/auth/decision-record.ts): a person, the
+   *  timer, the cloud, a rule, or nobody left. Set on every race result. */
+  decidedBy?: DecidedBy;
+  /** Where it was decided: node9 tail, node9 monitor, the native popup, the cloud. */
+  channel?: Channel;
+  /** A person's own instruction to the agent (node9 tail recovery choice [2]). */
+  redirect?: string;
   /** Name of the smart rule that fired (for HUD lastRuleHit tracking). */
   ruleHit?: string;
   /** fw#318: the keys an exposure review held, for the inline-ask marker. */
@@ -2270,6 +2278,7 @@ async function _authorizeHeadlessCore(
             reason: approvalTimeoutReason(approvalTimeoutMs),
             blockedBy: 'timeout',
             blockedByLabel: 'Approval Timeout',
+            decidedBy: 'timer',
           });
         }, approvalTimeoutMs);
         signal.addEventListener('abort', () => {
@@ -2292,6 +2301,21 @@ async function _authorizeHeadlessCore(
   // is now terminal-only.
   let daemonEntryId: string | null = null;
   let daemonAllowCount = 1;
+  /** The card's deadline from a protocol-2 daemon (null: no timer);
+   *  undefined when the daemon is older than the card protocol. */
+  let cardDeadline: number | null | undefined;
+  // Who may answer the card: the daemon's own UIs, and the hook's racers it
+  // cannot see. A card only the UIs can answer is the one abandoned when
+  // node9 tail closes.
+  const cardOptions = {
+    channels: [
+      'terminal',
+      'monitor',
+      ...(approvers.native && !isManual && !options?.calledFromDaemon ? ['native'] : []),
+      ...(cloudEnforced && cloudRequestId && cloudMayVote ? ['cloud'] : []),
+    ] as Channel[],
+    timeoutMs: approvalTimeoutMs,
+  };
   if (approvers.terminal && isDaemonRunning() && !options?.calledFromDaemon) {
     if (cloudEnforced && cloudRequestId) {
       // Cloud path: create a single card via notifyDaemonViewer so RACER 3
@@ -2306,11 +2330,20 @@ async function _authorizeHeadlessCore(
         meta,
         riskMetadata,
         options?.activityId,
-        options?.socketActivitySent
+        options?.socketActivitySent,
+        {
+          cwd: options?.cwd,
+          recoveryCommand: statefulRecoveryCommand,
+          sessionId: meta?.sessionId,
+          card: cardOptions,
+        }
       ).catch(() => null);
       viewerId = viewer?.id ?? null;
       daemonEntryId = viewerId;
-      if (viewer) daemonAllowCount = viewer.allowCount;
+      if (viewer) {
+        daemonAllowCount = viewer.allowCount;
+        cardDeadline = viewer.deadline;
+      }
     } else {
       try {
         const entry = await registerDaemonEntry(
@@ -2334,10 +2367,12 @@ async function _authorizeHeadlessCore(
           undefined,
           localSmartRuleMatched || options?.localSmartRuleMatched,
           options?.socketActivitySent,
-          meta?.sessionId
+          meta?.sessionId,
+          cardOptions
         );
         daemonEntryId = entry.id;
         daemonAllowCount = entry.allowCount;
+        cardDeadline = entry.deadline;
       } catch {
         // Daemon unreachable — skip both racers gracefully
       }
@@ -2362,6 +2397,8 @@ async function _authorizeHeadlessCore(
             checkedBy: cloudResult.approved ? 'cloud' : undefined,
             blockedBy: cloudResult.approved ? undefined : 'team-policy',
             blockedByLabel: 'Organization Policy (SaaS)',
+            decidedBy: 'cloud',
+            channel: 'cloud',
           } as AuthResult;
         } catch (err: unknown) {
           const error = err as Error;
@@ -2404,7 +2441,13 @@ async function _authorizeHeadlessCore(
           if (config.policySource !== 'workspace') {
             for (const d of exposureDestinations) addTrustedRecipient(d, 'approval');
           }
-          return { approved: true, checkedBy: 'daemon', decisionSource: 'native' } as AuthResult;
+          return {
+            approved: true,
+            checkedBy: 'daemon',
+            decisionSource: 'native',
+            decidedBy: 'person',
+            channel: 'native',
+          } as AuthResult;
         }
 
         if (decision === 'always_allow') {
@@ -2417,9 +2460,20 @@ async function _authorizeHeadlessCore(
           // the guard would ignore must not be written (/code-review, DLP-3).
           if (standingTrustApplies()) {
             writeTrustSession(toolName, 3600000, args);
-            return { approved: true, checkedBy: 'trust' } as AuthResult;
+            return {
+              approved: true,
+              checkedBy: 'trust',
+              decidedBy: 'person',
+              channel: 'native',
+            } as AuthResult;
           }
-          return { approved: true, checkedBy: 'daemon', decisionSource: 'native' } as AuthResult;
+          return {
+            approved: true,
+            checkedBy: 'daemon',
+            decisionSource: 'native',
+            decidedBy: 'person',
+            channel: 'native',
+          } as AuthResult;
         }
 
         const isApproved = decision === 'allow';
@@ -2432,10 +2486,18 @@ async function _authorizeHeadlessCore(
           blockedBy: isApproved ? undefined : 'local-decision',
           blockedByLabel: 'User Decision (Native)',
           decisionSource: 'native',
+          decidedBy: 'person',
+          channel: 'native',
         } as AuthResult;
       })()
     );
   }
+
+  /** Results that came from the card itself (the terminal racer): the card
+   *  already holds their decision. */
+  const fromCard = new WeakSet<AuthResult>();
+  const timeoutReason =
+    approvalTimeoutMs > 0 ? approvalTimeoutReason(approvalTimeoutMs) : undefined;
 
   // 🏁 RACER 3: node9 tail (interactive terminal)
   // Resolves via POST /decision/{id} — same waitForDaemonDecision poll.
@@ -2448,88 +2510,33 @@ async function _authorizeHeadlessCore(
   if (daemonEntryId && approvers.terminal) {
     racePromises.push(
       (async () => {
-        const {
-          decision: daemonDecision,
-          source: decisionSource,
-          reason: daemonReason,
-        } = await waitForDaemonDecision(
-          daemonEntryId!,
-          signal,
-          daemonWaitCapMs(config.settings.approvalTimeoutMs)
-        );
-        if (daemonDecision === 'abandoned') throw new Error('Abandoned');
-
-        const isApproved = daemonDecision === 'allow';
-        // 'terminal-redirect' = tail choice [2]: AI redirect with a custom reason string
-        const isRedirect = decisionSource === REDIRECT_SOURCE;
-        // ENG-2: a deny is a person's in node9 tail only with a human source.
-        // The daemon names its own deciders: its timer ('timeout'), and for a
-        // card its background pass resolved, the pass's cloud racer ('cloud')
-        // or a rule ('policy'). No source at all means /wait failed (the
-        // daemon died or the card was gone). None of those is a person
-        // refusing in the terminal, and the agent must not be told one did: it
-        // stops and asks instead of reading the block's reason.
+        // A protocol-2 daemon names the card's deadline: wait until a little
+        // after it (none for no timer). An older daemon: the old cap.
+        const cap =
+          cardDeadline === undefined
+            ? daemonWaitCapMs(config.settings.approvalTimeoutMs)
+            : cardDeadline === null
+              ? 0
+              : Math.max(cardDeadline - Date.now(), 0) + 5_000;
+        const outcome = await waitForDaemonDecision(daemonEntryId!, signal, cap);
+        // Who decided, from the card's record (an older daemon: from its
+        // one-word source). No decider at all: /wait failed.
+        const legacy = !outcome.record;
+        const record = outcome.record ?? recordFromLegacyWait(outcome);
+        // A softened block whose card gave no person's answer (the wait
+        // failed; an older daemon's own check blocked it) reports the rule's
+        // block, as the call would have been without the review.
         if (
-          !isApproved &&
-          !isRedirect &&
-          !(decisionSource && HUMAN_DECISION_SOURCES.has(decisionSource))
-        ) {
-          // The organisation decided, as when the hook's own cloud racer wins.
-          if (decisionSource === 'cloud')
-            return {
-              approved: false,
-              reason: daemonReason || 'Action rejected by organization administrator via Slack.',
-              blockedBy: 'team-policy',
-              blockedByLabel: 'Organization Policy (SaaS)',
-              decisionSource: 'cloud',
-            } as AuthResult;
-          const timedOut = decisionSource === 'timeout';
-          if (downgradedBlock)
-            return {
-              ...downgradedBlock,
-              blockedBy: timedOut ? 'timeout' : 'local-config',
-            } as AuthResult;
-          if (timedOut)
-            return {
-              approved: false,
-              reason: daemonReason || 'No response: auto-denied after the approval timeout.',
-              blockedBy: 'timeout',
-              blockedByLabel: 'Approval Timeout',
-            } as AuthResult;
-          if (decisionSource === 'policy')
-            return {
-              approved: false,
-              reason: daemonReason || 'Action blocked by policy.',
-              blockedBy: 'local-config',
-              blockedByLabel: explainableLabel,
-            } as AuthResult;
-          // /wait failed: no channel decided, so no rule is named either.
-          return {
-            approved: false,
-            reason: daemonReason || 'node9 could not get an approval decision for this call.',
-            blockedBy: 'no-approval-mechanism',
-            blockedByLabel: 'Approval Unavailable',
-          } as AuthResult;
-        }
-        // An allow the daemon's background pass made is its decider's, not a
-        // click in node9 tail: the organisation's (as the hook's own cloud
-        // racer reports one), or a rule's.
-        if (isApproved && decisionSource === 'cloud')
-          return { approved: true, checkedBy: 'cloud', decisionSource: 'cloud' } as AuthResult;
-        if (isApproved && decisionSource === 'policy')
-          return { approved: true, checkedBy: 'local-policy' } as AuthResult;
-        const via = 'Terminal (node9 tail)';
-        return {
-          approved: isApproved,
-          reason: isApproved
-            ? undefined
-            : (isRedirect && daemonReason) ||
-              `The human user rejected this action via the Node9 ${via}.`,
-          checkedBy: isApproved ? 'daemon' : undefined,
-          blockedBy: isApproved ? undefined : 'local-decision',
-          blockedByLabel: isRedirect ? 'Steered Redirect (Terminal)' : `User Decision (${via})`,
-          decisionSource: 'terminal',
-        } as AuthResult;
+          downgradedBlock &&
+          (!record || (legacy && record.decidedBy === 'policy' && record.decision === 'deny'))
+        )
+          return { ...downgradedBlock, blockedBy: 'local-config' } as AuthResult;
+        if (!record) return approvalUnavailable(outcome.reason);
+        // An older daemon's own check names no rule: the review's label does.
+        if (legacy && record.decidedBy === 'policy') record.label = explainableLabel;
+        const result = authResultFromRecord(record, { downgradedBlock, timeoutReason });
+        fromCard.add(result);
+        return result;
       })()
     );
   }
@@ -2568,7 +2575,7 @@ async function _authorizeHeadlessCore(
     };
   }
 
-  const finalResult = await new Promise<AuthResult>((resolve) => {
+  const raceResult = await new Promise<AuthResult>((resolve) => {
     let resolved = false;
     let failures = 0;
     const total = racePromises.length;
@@ -2577,19 +2584,6 @@ async function _authorizeHeadlessCore(
       if (!resolved) {
         resolved = true;
         abortController.abort(); // KILL THE LOSERS
-
-        // Event Bridge: notify the daemon whenever any channel wins the race.
-        // Covers native popup, cloud, and timeout — not just the cloud/Slack path.
-        // Browser and terminal racers already go through POST /decision/:id, so
-        // calling /resolve/:id afterwards is harmless (entry is gone → 404 ignored).
-        if (daemonEntryId && internalToken) {
-          resolveViaDaemon(
-            daemonEntryId,
-            res.approved ? 'allow' : 'deny',
-            internalToken,
-            res.decisionSource
-          ).catch(() => null);
-        }
 
         resolve(res);
       }
@@ -2603,25 +2597,31 @@ async function _authorizeHeadlessCore(
           err.message?.includes('Aborted')
         )
           return;
-        // 'Abandoned' means the browser dashboard closed without deciding.
-        // Don't silently swallow it — that would leave the race promise hanging
-        // forever when the browser racer is the only channel.
-        if (err.message === 'Abandoned') {
-          finish({
-            approved: false,
-            reason: 'Browser dashboard closed without making a decision.',
-            blockedBy: 'local-decision',
-            blockedByLabel: 'Browser Dashboard (Abandoned)',
-          });
-          return;
-        }
         failures++;
         if (failures === total && !resolved) {
-          finish({ approved: false, reason: 'All approval channels failed or disconnected.' });
+          finish(approvalUnavailable('All approval channels failed or disconnected.'));
         }
       });
     }
   });
+
+  // The card decides once (src/daemon/cards.ts). A winner the card does not
+  // know yet (native popup, cloud poller, the hook's timer) is reported to it,
+  // awaited: if a person decided in node9 tail a moment earlier, the card
+  // keeps theirs and the hook reports that one, so the agent, the audit row
+  // and the daemon always agree.
+  let finalResult = raceResult;
+  if (daemonEntryId && internalToken && !fromCard.has(raceResult)) {
+    const reply = await resolveViaDaemon(
+      daemonEntryId,
+      raceResult.approved ? 'allow' : 'deny',
+      internalToken,
+      raceResult.decisionSource,
+      recordFromAuthResult(raceResult)
+    ).catch(() => null);
+    if (reply && !reply.won)
+      finalResult = authResultFromRecord(reply.record, { downgradedBlock, timeoutReason });
+  }
 
   // If a LOCAL channel (native/browser/terminal) won while the cloud had a
   // pending request open, report the decision back to the SaaS so Mission
@@ -2640,7 +2640,14 @@ async function _authorizeHeadlessCore(
     await approveSessionExposure(meta.sessionId, exposureKeys);
   }
 
-  if (cloudRequestId && creds && finalResult.checkedBy !== 'cloud') {
+  // Not for a cloud decision: the cloud made it (a cloud deny has no
+  // checkedBy, and used to be PATCHed back as decidedBy "local").
+  if (
+    cloudRequestId &&
+    creds &&
+    finalResult.checkedBy !== 'cloud' &&
+    finalResult.decidedBy !== 'cloud'
+  ) {
     await resolveNode9SaaS(
       cloudRequestId,
       creds,

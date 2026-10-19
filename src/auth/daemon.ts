@@ -6,6 +6,13 @@ import net from 'net';
 import path from 'path';
 import os from 'os';
 import { type RiskMetadata } from '../context-sniper';
+import {
+  CARD_PROTOCOL,
+  legacyWaitFields,
+  parseDecisionRecord,
+  type Channel,
+  type DecisionRecord,
+} from './decision-record';
 
 const ACTIVITY_SOCKET_PATH =
   process.platform === 'win32'
@@ -259,8 +266,10 @@ export async function registerDaemonEntry(
   /** When false, the socket send of the activity event failed — daemon must emit it. */
   socketActivitySent?: boolean,
   /** The agent session, so a "trust this address" decision can clear its exposure (fw#318 P5). */
-  sessionId?: string
-): Promise<{ id: string; allowCount: number }> {
+  sessionId?: string,
+  /** The card: who may answer it, and the caller's approval timeout (0 = none). */
+  card?: CardOptions
+): Promise<RegisteredCard> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
@@ -287,15 +296,55 @@ export async function registerDaemonEntry(
         ...(viewOnly && { viewOnly: true }),
         ...(localSmartRuleMatched && { localSmartRuleMatched: true }),
         ...(sessionId && { sessionId }),
+        ...cardFields(card),
       }),
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error('Daemon fail');
-    const { id, allowCount } = (await res.json()) as { id: string; allowCount?: number };
-    return { id, allowCount: allowCount ?? 1 };
+    return registeredCard(await res.json());
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** What the hook tells the daemon about a card it registers. */
+export interface CardOptions {
+  channels?: Channel[];
+  /** The caller's approval timeout in ms (project-aware); 0 = no timer. */
+  timeoutMs?: number;
+}
+
+/** The daemon's answer to a registration. `protocol` and `deadline` are absent
+ *  on a daemon older than the card protocol. */
+export interface RegisteredCard {
+  id: string;
+  allowCount: number;
+  protocol?: number;
+  /** Epoch ms when the card's timer decides it, or null for none. */
+  deadline?: number | null;
+}
+
+function cardFields(card?: CardOptions): Record<string, unknown> {
+  return {
+    // A review card: the hook already decided this call needs a person; the
+    // daemon never checks it again (approval-card design, defect 1).
+    kind: 'review',
+    protocol: CARD_PROTOCOL,
+    ...(card?.channels && { channels: card.channels }),
+    ...(typeof card?.timeoutMs === 'number' && { timeoutMs: card.timeoutMs }),
+  };
+}
+
+function registeredCard(body: unknown): RegisteredCard {
+  const b = body as { id: string; allowCount?: number; protocol?: unknown; deadline?: unknown };
+  return {
+    id: b.id,
+    allowCount: b.allowCount ?? 1,
+    ...(b.protocol === CARD_PROTOCOL && {
+      protocol: CARD_PROTOCOL,
+      deadline: typeof b.deadline === 'number' ? b.deadline : null,
+    }),
+  };
 }
 
 /** Long-poll the daemon for a decision on an already-registered entry.
@@ -308,7 +357,7 @@ export async function waitForDaemonDecision(
   signal?: AbortSignal,
   /** Give up after this long; 0 waits for the daemon's answer however long it takes. */
   maxWaitMs = 120_000
-): Promise<{ decision: 'allow' | 'deny' | 'abandoned'; source?: string; reason?: string }> {
+): Promise<WaitResult> {
   const waitCtrl = new AbortController();
   let capped = false;
   const waitTimer =
@@ -332,12 +381,20 @@ export async function waitForDaemonDecision(
         throw err;
       }
     );
+    // The card was withdrawn (its asker gave up): no decision to report.
+    if (status === 409) throw new Error('node9 card was withdrawn');
     if (status !== 200) return { decision: 'deny' };
-    const { decision, source, reason } = JSON.parse(body) as {
+    const parsed = JSON.parse(body) as {
       decision: string;
       source?: string;
       reason?: string;
+      record?: unknown;
     };
+    // A protocol-2 daemon sends the whole DecisionRecord; the old fields are
+    // kept for hooks of earlier releases.
+    const record = parseDecisionRecord(parsed.record);
+    if (record) return { ...legacyWaitFields(record), record };
+    const { decision, source, reason } = parsed;
     if (decision === 'allow') return { decision: 'allow', source };
     if (decision === 'abandoned') return { decision: 'abandoned', source };
     return { decision: 'deny', source, reason };
@@ -347,16 +404,32 @@ export async function waitForDaemonDecision(
   }
 }
 
+export interface WaitResult {
+  decision: 'allow' | 'deny' | 'abandoned';
+  source?: string;
+  reason?: string;
+  /** Who decided, from a protocol-2 daemon. */
+  record?: DecisionRecord;
+}
+
 /** A GET on the daemon with no client-side timeout; only `signal` ends it.
  *  Its own socket (agent: false), so a long-held wait stays out of the
  *  keep-alive pool. */
 function daemonGet(
   urlPath: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  token: string | null = getInternalToken()
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = http.get(
-      { host: DAEMON_HOST, port: DAEMON_PORT, path: urlPath, signal, agent: false },
+      {
+        host: DAEMON_HOST,
+        port: DAEMON_PORT,
+        path: urlPath,
+        signal,
+        agent: false,
+        headers: token ? { 'X-Node9-Internal': token } : {},
+      },
       (res) => {
         let body = '';
         res.setEncoding('utf8');
@@ -384,8 +457,12 @@ export async function notifyDaemonViewer(
   riskMetadata?: RiskMetadata,
   activityId?: string,
   /** When false, the socket send of the activity event failed — daemon must emit it. */
-  socketActivitySent?: boolean
-): Promise<{ id: string; allowCount: number }> {
+  socketActivitySent?: boolean,
+  /** The same card fields as registerDaemonEntry: the viewer card used to send
+   *  none, so a recovery card lost its menu and "trust this address" could not
+   *  clear the session on the cloud path (approval-card design, defect 11). */
+  extra?: { cwd?: string; recoveryCommand?: string; sessionId?: string; card?: CardOptions }
+): Promise<RegisteredCard> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   const res = await fetch(`${base}/check`, {
     method: 'POST',
@@ -402,12 +479,15 @@ export async function notifyDaemonViewer(
       // it the daemon double-emits 'activity' for cloud-enforced flows.
       fromCLI: socketActivitySent !== false,
       activityId,
+      ...(extra?.cwd && { cwd: extra.cwd }),
+      ...(extra?.recoveryCommand && { recoveryCommand: extra.recoveryCommand }),
+      ...(extra?.sessionId && { sessionId: extra.sessionId }),
+      ...cardFields(extra?.card),
     }),
     signal: AbortSignal.timeout(3000),
   });
   if (!res.ok) throw new Error('Daemon unreachable');
-  const { id, allowCount } = (await res.json()) as { id: string; allowCount?: number };
-  return { id, allowCount: allowCount ?? 1 };
+  return registeredCard(await res.json());
 }
 
 /**
@@ -724,20 +804,27 @@ export async function clearSessionExposure(opts: {
   }
 }
 
-/** Clear a viewer-mode card from the daemon once Slack has decided.
- *  Also used by the Event Bridge to notify the daemon when native popup or
- *  cloud wins the race — so SuggestionTracker sees every human decision. */
+/** Report the hook's own winning racer (native popup, cloud poller, its
+ *  timer) to the card. First decision wins at the card: the reply says
+ *  whether this one won, and if not, which decision did (a person in node9
+ *  tail a moment earlier). Null from a daemon older than the card protocol,
+ *  or when the card is gone. */
 export async function resolveViaDaemon(
   id: string,
   decision: 'allow' | 'deny',
   internalToken: string,
-  source?: string
-): Promise<void> {
+  source?: string,
+  record?: DecisionRecord
+): Promise<{ won: boolean; record: DecisionRecord } | null> {
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
-  await fetch(`${base}/resolve/${id}`, {
+  const res = await fetch(`${base}/resolve/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': internalToken },
-    body: JSON.stringify({ decision, ...(source && { source }) }),
+    body: JSON.stringify({ decision, ...(source && { source }), ...(record && { record }) }),
     signal: AbortSignal.timeout(3000),
   });
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => null)) as { won?: unknown; record?: unknown } | null;
+  const winner = parseDecisionRecord(body?.record);
+  return winner && typeof body?.won === 'boolean' ? { won: body.won, record: winner } : null;
 }
