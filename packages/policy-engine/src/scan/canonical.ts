@@ -697,8 +697,23 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // canonical-v27 (node9Firewall#333 follow-up): the card detector also skips
 // a fraction written with a leading dot (".479...") or as a comma decimal
 // after a lone 0 ("0,479..."), so histories scanned under v26 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
+// canonical-v28 also covers scan/pii.ts (2026-10-19): the card detector's
+// leading-dot and comma-decimal exemptions now hold only at the start of the
+// text (and after ";" for a comma decimal), so "text=.<card>" is a finding.
+// canonical-v28 (2026-10-19): analyzeFsOperation binds shell function
+// arguments at each call (node9Firewall#361), so a jailed read through a
+// function argument (`show() { cat "$1"; }; show .env`) is now a finding in
+// history scans too. Every daemon re-scans once.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v28';
 
+// 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
+// SYSTEM_DIRS sets for the live file policy (files.system-dirs); the extractor
+// does not read them, so its output is identical.
+// 2026-10-18, hash bumped with NO version bump: dlp/index.ts gained three
+// argument-gate patterns (HTTP Basic, OTP constructor, escaped JSON and wider
+// names for Assigned Secret), all argumentsOnly, and the context validators
+// they share. scanArgs, which the extractor runs, skips argumentsOnly
+// patterns, so detector output is identical.
 // 2026-10-18, hash bumped with NO version bump: scan/pii.ts only moved the
 // card loop into validCardRuns and exported replaceValidCards for the
 // personal-data masking (fw#318 code review). detectPii output is identical:
@@ -736,7 +751,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '60cee75c7e2a5c7c';
+export const CANONICAL_EXTRACTOR_HASH = '11df698796585cbe';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

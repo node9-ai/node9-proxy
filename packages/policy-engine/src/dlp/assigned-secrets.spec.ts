@@ -40,9 +40,9 @@ describe('Credential in URL Query', () => {
 
   it('leaves fixtures, placeholders, slugs and short values alone', () => {
     const benign = [
-      'GET /user/{name}?token=ftoken123&id=1',
+      'GET /user/{name}?token=qtoken789&id=1',
       'https://api.example.test/repos?state=open&page=2&per_page=30&sort=updated',
-      'https://example.test/login?username=admin&password=958017',
+      'https://example.test/login?username=admin&password=473920',
       'https://example.test/cb?access_token=${ACCESS_TOKEN}&state=xyz',
       'https://example.test/cb?token=your_token_here',
       'https://example.test/search?q=how+to+fix+error&key=placeholder',
@@ -68,8 +68,8 @@ describe('Assigned Secret', () => {
       `  password: ${GENERATED}`,
       `"api_key": "${GENERATED}",`,
       `$config['client_secret'] = '${GENERATED}';`,
-      `MYSQL_ROOT_PASSWORD=${['gdki', '1450', '01Xq', 'Zt7'].join('')}`,
-      `aws_secret_access_key: ${['QDPLGJUZ', 'AINK4HVY', 'ZEBH7UHQ', 'QEVANQ1T', 'SA2TTAHT'].join('')}`,
+      `MYSQL_ROOT_PASSWORD=${['hqzr', '2860', '37Wm', 'Lp4'].join('')}`,
+      `aws_secret_access_key: ${['KWMRTXEB', 'UHVN3PSA', 'JDLC8FYQ', 'ZGEOKT5R', 'NB4WXHCM'].join('')}`,
       `'passphrase' => '${GENERATED}'`,
     ];
     for (const line of lines) {
@@ -86,26 +86,26 @@ describe('Assigned Secret', () => {
       "password = os.environ['DB_PASSWORD']",
       'c.Providers.Google.ClientSecret = c.ClientSecretLegacy',
       'newPassword: registerPasswordValidation',
-      'traefik-forward-auth-secret: base64-something-random',
+      'forward-auth-secret: long-random-phrase',
       'password: changeme-please-now',
       'API_KEY=your_api_key_here',
       'token = "${TOKEN}"',
       'PASSWORD=hunter2',
       'password: correcthorsebatterystaple',
-      'JENKINS_PASS=dzdvnffv',
-      '"password": "djabprxYdjpbbac",',
+      'DEPLOY_PASS=wqkrtzma',
+      '"password": "vbmtqhwKzrpafny",',
       'DATABASE_URL=postgres://user@host.test/db',
       'token_type=bearer&expires_in=3600',
       'secret: null',
       '# password: set in the vault, never here',
       'const secret = "0123456789abcdefghijklmnopqrstuv"',
-      '"id_token":"id_123456789"',
+      '"id_token":"id_234567890"',
       '$ MYSQL_USER=root MYSQL_PASSWORD= FILTER=integration npm test',
-      `![overview](https://cdn.example.test/s/541p0kbq3pwone6/status.png?dl=1&token_hash=${GENERATED})`,
+      `![overview](https://cdn.example.test/s/7z2mq0vhx4ktfe8/status.png?dl=1&token_hash=${GENERATED})`,
       `const FAKE_TOKEN = '${GENERATED}'`,
       `mockSecret: '${GENERATED}'`,
       `password_length: ${GENERATED}`,
-      "login, password = 'someone@example.test', 'mlbbmimevm'",
+      "login, password = 'someone@example.test', 'tqwzhrkpvd'",
     ];
     for (const text of benign) expect(gate({ content: text }), text).toBeNull();
   });
@@ -180,6 +180,6 @@ describe('Database Connection String with a driver suffix', () => {
 
   it('still ignores a user-only URL and an http basic-auth URL', () => {
     expect(gate({ content: 'mysql+pymysql://root@db.test/app' })).toBeNull();
-    expect(gate({ content: 'http://user:pass1234@peer1.test:8080/eureka/' })).toBeNull();
+    expect(gate({ content: 'http://user:pass1234@registry.test:8761/apps/' })).toBeNull();
   });
 });

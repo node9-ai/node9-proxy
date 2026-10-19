@@ -112,6 +112,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'review',
     legacy: ['review-password-hash-read'],
   },
+  {
+    id: 'files.system-dirs',
+    group: 'files',
+    title: 'System directories',
+    catches:
+      'Writes, new files and removals under /usr, /etc, /boot, /bin, /sbin, /lib and /var/log, and uploads of system files',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-system-dir-mutation', 'review-system-file-upload'],
+  },
   // ── Commands ────────────────────────────────────────────────────────────
   {
     id: 'commands.inline-exec',

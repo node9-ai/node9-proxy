@@ -10,6 +10,9 @@ import {
   STARTUP_NAMES,
   SYSTEM_AUTH_DIRS,
   SYSTEM_AUTH_FILES,
+  SYSTEM_DIRS,
+  SYSTEM_DIRS_EXEMPT,
+  UPLOAD_SYSTEM_DIRS,
   type FileAccess,
   type FileAccessContext,
 } from './paths';
@@ -144,6 +147,56 @@ function hits(
   return false;
 }
 
+const exempt = (p: string): boolean => SYSTEM_DIRS_EXEMPT.some((d) => within(p, d));
+
+/**
+ * A write, creation or removal under a system directory (files.system-dirs).
+ * The exemption holds only when every spelling of the target is exempt: a
+ * host-resolved candidate outside /usr/local (a symlink into /usr/lib) keeps
+ * the finding. A pattern whose literal directory lies inside an exempt
+ * directory cannot reach a system file, so the matcher's prefix rule (which
+ * would read /usr/local/* as selecting inside /usr) is not consulted for it.
+ */
+function hitsSystemDir(
+  access: FileAccess,
+  context: FileAccessContext,
+  dirs: readonly string[] = SYSTEM_DIRS
+): boolean {
+  const home = context.homeDirs?.[0] ?? '~';
+  const candidates = access.candidates ?? [
+    normalizeFilePath(access.path, access.cwd ?? context.cwd, home),
+  ];
+  for (const p of candidates) {
+    if (dirs.some((d) => within(p, d)) && !exempt(p)) return true;
+    if (access.recursive && dirs.some((d) => within(d, p))) return true;
+  }
+  if (!access.glob) return false;
+  const pattern = normalizeFilePath(access.glob, access.cwd ?? context.cwd, home);
+  const magic = pattern.search(/[*?[{]/);
+  const literal = magic < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', magic) + 1);
+  if (literal && exempt(literal.replace(/\/$/, '') || '/')) return false;
+  // Inside a system directory: the pattern's leading components select the
+  // directory and more follow (`/usr/*/x`, `/**/*.log`). The directory entry
+  // itself counts only for a recursive operation (`rm -rf /*`): a file moved
+  // into `/` is not a write under /usr.
+  const options = { dot: access.dotGlob === true, nonegate: true };
+  const components = pattern.split('/');
+  for (const root of dirs) {
+    const count = root.split('/').length;
+    if (components.length > count && picomatch(components.slice(0, count).join('/'), options)(root))
+      return true;
+    if (access.recursive && picomatch(pattern, options)(root)) return true;
+  }
+  return false;
+}
+
+/** The upload rule's directories; the root home only when it is not the user's own. */
+function uploadDirs(context: FileAccessContext): readonly string[] {
+  return context.homeDirs?.[0] === '/root'
+    ? UPLOAD_SYSTEM_DIRS.filter((d) => d !== '/root')
+    : UPLOAD_SYSTEM_DIRS;
+}
+
 const RANK = { allow: 0, review: 1, block: 2 } as const;
 
 export function evaluateProtectedFileAccess(
@@ -176,13 +229,25 @@ export function evaluateProtectedFileAccess(
                 'review-shell-startup-mutation',
                 'Changing shell startup files requires approval',
               ]
-            : !mutation && hits(access, PASSWORD_HASH_FILES, [], context)
+            : mutation && hitsSystemDir(access, context)
               ? [
-                  'files.password-hashes',
-                  'review-password-hash-read',
-                  'Reading system password hashes requires approval',
+                  'files.system-dirs',
+                  'review-system-dir-mutation',
+                  'Changing files in a system directory requires approval',
                 ]
-              : null;
+              : !mutation && access.upload && hitsSystemDir(access, context, uploadDirs(context))
+                ? [
+                    'files.system-dirs',
+                    'review-system-file-upload',
+                    'Uploading a system file requires approval',
+                  ]
+                : !mutation && hits(access, PASSWORD_HASH_FILES, [], context)
+                  ? [
+                      'files.password-hashes',
+                      'review-password-hash-read',
+                      'Reading system password hashes requires approval',
+                    ]
+                  : null;
     } catch {
       // picomatch refuses patterns beyond its input limit. An operand the
       // matcher cannot evaluate is not evidence that the target is harmless.

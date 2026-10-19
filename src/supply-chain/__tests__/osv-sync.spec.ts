@@ -152,3 +152,21 @@ describe('fullSync + incrementalSync', () => {
     expect(readMeta('PyPI')).toBeNull();
   });
 });
+
+describe('fullSync beyond npm and PyPI', () => {
+  it('builds a RubyGems index from its archive: a listed version hits, an unpinned lookup is unknown', async () => {
+    const zip = buildZip([
+      {
+        name: 'MAL-0000-0301.json',
+        data: JSON.stringify(
+          malRecord('MAL-0000-0301', 'RubyGems', 'example-mal-gem', { versions: ['1.0.0'] })
+        ),
+      },
+    ]);
+    routes[`${BUCKET}/RubyGems/all.zip`] = () => new Response(zip);
+    expect(await fullSync('RubyGems', BUCKET)).toBe(1);
+    const hit = lookupIndex('RubyGems', 'Example-Mal-Gem');
+    expect(hit.status).toBe('hit');
+    expect(readMeta('RubyGems')?.records).toBe(1);
+  });
+});

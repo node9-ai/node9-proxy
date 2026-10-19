@@ -21,7 +21,7 @@ const itCli = it.skipIf(!fs.existsSync(CLI));
 
 let home: string;
 
-function writeIndex(eco: 'npm' | 'PyPI', name: string, entries: object[]): void {
+function writeIndex(eco: string, name: string, entries: object[]): void {
   const dir = path.join(home, '.node9', 'osv', eco);
   const shard = createHash('sha1').update(name).digest('hex').slice(0, 2);
   fs.mkdirSync(path.join(dir, 'shards'), { recursive: true });
@@ -206,5 +206,34 @@ describe('node9 check package resolution regressions', () => {
     const r = check('npx node9-canary-local && npm install node9-canary-local');
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+
+  itCli(
+    'blocks a malicious RubyGems version and a malicious VS Code extension from the local index',
+    () => {
+      writeIndex('RubyGems', 'node9-canary-gem', [{ id: 'MAL-0000-0011', versions: ['1.0.0'] }]);
+      const gem = check('gem install node9-canary-gem -v 1.0.0');
+      expect(gem.status).toBe(2);
+      const g = JSON.parse(gem.stdout).hookSpecificOutput;
+      expect(g.permissionDecision).toBe('deny');
+      expect(g.permissionDecisionReason).toContain('RubyGems package "node9-canary-gem@1.0.0"');
+      expect(g.permissionDecisionReason).toContain('MAL-0000-0011');
+
+      writeIndex('VSCode', 'node9-canary.ext', [{ id: 'MAL-0000-0012', all: true }]);
+      const ext = check('codium --install-extension Node9-Canary.Ext');
+      expect(ext.status).toBe(2);
+      expect(JSON.parse(ext.stdout).hookSpecificOutput.permissionDecisionReason).toContain(
+        'MAL-0000-0012'
+      );
+    }
+  );
+
+  itCli('a gem the index does not list is allowed, and nothing asks a registry', () => {
+    writeIndex('RubyGems', 'node9-canary-other', [{ id: 'MAL-0000-0013', all: true }]);
+    const r = check('gem install node9-canary-clean -v 2.0.0');
+    expect(r.status).toBe(0);
+    const debug = path.join(home, '.node9', 'hook-debug.log');
+    const log = fs.existsSync(debug) ? fs.readFileSync(debug, 'utf8') : '';
+    expect(log).not.toContain('registry metadata unavailable');
   });
 });

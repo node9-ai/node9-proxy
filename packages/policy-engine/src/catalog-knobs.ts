@@ -324,6 +324,7 @@ export function checkToLegacyPolicy(policy: Obj, id: string, v: Verdict): boolea
 export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'files.shell-startup',
   'files.password-hashes',
+  'files.system-dirs',
   'commands.inline-exec',
   'commands.eval-dynamic',
   'commands.curl-pipe-shell',

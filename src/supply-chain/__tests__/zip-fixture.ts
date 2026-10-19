@@ -64,7 +64,8 @@ export function buildZip(
 /** A minimal OSV MAL record. Package names in tests are canaries, never real. */
 export function malRecord(
   id: string,
-  eco: 'npm' | 'PyPI',
+  /** An OSV ecosystem string; Open VSX records use `VSCode:https://open-vsx.org`. */
+  eco: string,
   name: string,
   shape: { versions?: string[]; all?: boolean; withdrawn?: boolean; modified?: string } = {}
 ): object {

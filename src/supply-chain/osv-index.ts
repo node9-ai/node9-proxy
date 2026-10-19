@@ -53,8 +53,34 @@ function ecoDir(eco: PackageEcosystem): string {
   return path.join(osvRoot(), eco);
 }
 
+/**
+ * The key a name is filed under, the same on the write side (an OSV record)
+ * and the read side (a parsed command). Each registry's own equivalence:
+ * PyPI per PEP 503; crates.io treats `-` and `_` as one name; Go module paths
+ * and Maven coordinates are case-sensitive; every other registry here
+ * ignores case.
+ */
 export function indexKey(eco: PackageEcosystem, name: string): string {
-  return eco === 'PyPI' ? normalizePyPiName(name) : name.toLowerCase();
+  switch (eco) {
+    case 'PyPI':
+      return normalizePyPiName(name);
+    case 'crates.io':
+      return name.toLowerCase().replace(/_/g, '-');
+    case 'Go':
+    case 'Maven':
+      return name;
+    default:
+      return name.toLowerCase();
+  }
+}
+
+/**
+ * Does an OSV `affected[].package.ecosystem` belong to this index? Exact, or a
+ * sub-ecosystem of it: OSV files Open VSX extensions as
+ * `VSCode:https://open-vsx.org` inside the `VSCode` archive.
+ */
+export function recordEcosystemMatches(eco: PackageEcosystem, recordEco: unknown): boolean {
+  return typeof recordEco === 'string' && (recordEco === eco || recordEco.startsWith(`${eco}:`));
 }
 
 export function shardOf(key: string): string {
@@ -128,7 +154,8 @@ export function entriesFromRecord(
   const modifiedMs = typeof r.modified === 'string' ? Date.parse(r.modified) || 0 : 0;
   const rows = new Map<string, OsvEntry>();
   for (const a of r.affected ?? []) {
-    if (a?.package?.ecosystem !== eco || typeof a.package.name !== 'string') continue;
+    if (!recordEcosystemMatches(eco, a?.package?.ecosystem) || typeof a?.package?.name !== 'string')
+      continue;
     const key = indexKey(eco, a.package.name);
     const entry: OsvEntry = rows.get(key) ?? { id: r.id };
     if (Array.isArray(a.versions)) {

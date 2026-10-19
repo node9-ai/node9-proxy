@@ -12,6 +12,8 @@ import {
   shellConsumesPipe,
   FS_READ_TOOLS,
   SHELL_INTERPRETERS,
+  functionBodies,
+  rebindsPositionals,
 } from './index';
 import { type FileAccess, type FileAccessContext } from '../files/paths';
 
@@ -43,12 +45,21 @@ interface State {
    * leaves the shell where it was.
    */
   onSuccess?: string[];
+  /** How many function calls deep this walk is (node9Firewall#361). */
+  callDepth?: number;
 }
 const MAX_ALTERNATIVES = 64;
+const MAX_CALL_DEPTH = 4;
+const MAX_CALL_WALKS = 256;
+const POSITIONAL = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '@', '*', '#'];
 const MAX_DEPTH = 64;
 const MAX_PAYLOAD_DEPTH = 24;
 const unique = (a: string[]): string[] => [...new Set(a)].slice(0, MAX_ALTERNATIVES);
-const clone = (s: State): State => ({ cwd: [...s.cwd], vars: new Map(s.vars) });
+const clone = (s: State): State => ({
+  cwd: [...s.cwd],
+  vars: new Map(s.vars),
+  ...(s.callDepth ? { callDepth: s.callDepth } : {}),
+});
 
 /**
  * bash executes the complete statements before a syntax error and stops at
@@ -68,6 +79,92 @@ function runnablePrefix(command: string): any | null {
       text = lines.slice(0, line - 1).join('\n');
     }
   }
+  return null;
+}
+
+/** Tools whose standard input goes to the network. */
+const SENDING_STDIN = new Set(['nc', 'ncat', 'netcat', 'socat', 'telnet', 'curl', 'wget']);
+
+/** Download tools: short flags that take a value (a bundle stops at the first). */
+const DOWNLOAD_SHORT_VALUE: Record<string, string> = {
+  curl: 'odDeEFHKmPrtTuUwxXyYzAbcCQ',
+  wget: 'OoaPiBetTwQlARDXIUY',
+  aria2c: 'odisx',
+};
+const DOWNLOAD_LONG_VALUE: Record<string, string[]> = {
+  curl: [
+    '--output',
+    '--output-dir',
+    '--dump-header',
+    '--cookie-jar',
+    '--data',
+    '--data-binary',
+    '--data-raw',
+    '--data-ascii',
+    '--data-urlencode',
+    '--form',
+    '--header',
+    '--request',
+    '--user',
+    '--user-agent',
+    '--referer',
+    '--cookie',
+    '--config',
+    '--json',
+    '--upload-file',
+    '--max-time',
+    '--proxy',
+    '--write-out',
+    '--url',
+  ],
+  wget: [
+    '--output-document',
+    '--output-file',
+    '--append-output',
+    '--directory-prefix',
+    '--input-file',
+    '--post-data',
+    '--post-file',
+    '--body-data',
+    '--body-file',
+    '--method',
+    '--header',
+    '--user-agent',
+    '--user',
+    '--password',
+    '--tries',
+    '--timeout',
+  ],
+  aria2c: ['--out', '--dir', '--input-file'],
+};
+const DOWNLOAD_OUTPUT_FLAGS: Record<string, string[]> = {
+  curl: ['-o', '--output', '-D', '--dump-header', '-c', '--cookie-jar'],
+  wget: ['-O', '--output-document', '-o', '--output-file', '-a', '--append-output'],
+  aria2c: ['-o', '--out'],
+};
+const DOWNLOAD_DIR_FLAGS: Record<string, string[]> = {
+  curl: ['--output-dir'],
+  wget: ['-P', '--directory-prefix'],
+  aria2c: ['-d', '--dir'],
+};
+/**
+ * The file a transfer flag sends, if any: curl's `-d @F` family, `-F name=@F`
+ * and `name=<F`, `--data-urlencode [name]@F`, `-T F`, `--json @F`; wget's
+ * `--post-file` and `--body-file`. `--data-raw` sends its text literally, and
+ * `@-`, `-` and `.` are standard input.
+ */
+function uploadedFile(tool: string, flag: string, value: Word): Word | null {
+  const v = value.value;
+  const file = (f: string | undefined): Word | null =>
+    f && f !== '-' && f !== '.' ? { value: f } : null;
+  if (tool === 'curl') {
+    if (['-d', '--data', '--data-ascii', '--data-binary', '--json'].includes(flag))
+      return v.startsWith('@') ? file(v.slice(1)) : null;
+    if (flag === '--data-urlencode') return file(/^[^=@]*@(.+)$/.exec(v)?.[1]);
+    if (flag === '-F' || flag === '--form') return file(/^[^=]*=[@<]([^;]+)/.exec(v)?.[1]);
+    if (flag === '-T' || flag === '--upload-file') return file(v);
+  }
+  if (tool === 'wget' && ['--post-file', '--body-file'].includes(flag)) return file(v);
   return null;
 }
 const base = (s: string | null): string => (s ?? '').replace(/\/+$/, '').split('/').pop() ?? '';
@@ -184,6 +281,11 @@ export function collectShellFileAccesses(
 ): FileAccess[] {
   const out: FileAccess[] = [];
   let payloads = 256;
+  // Functions defined in the script, by name; a call walks every definition
+  // with its arguments bound (node9Firewall#361, see shell/index.ts).
+  const functions = new Map<string, any[]>();
+  const seenCalls = new Set<string>();
+  let callWalks = MAX_CALL_WALKS;
   const initial: State = {
     cwd: [context.cwd ?? ''],
     vars: new Map([['HOME', [context.homeDirs?.[0] ?? '~']]]),
@@ -482,8 +584,127 @@ export function collectShellFileAccesses(
       }
       return;
     }
+    if (name === 'wget' || name === 'curl' || name === 'aria2c') {
+      downloadOutputs(name, args, state);
+      return;
+    }
+    if (['http', 'https', 'xh', 'xhs'].includes(name)) {
+      // HTTPie and xh: `@F` is the raw body, `field@F` a multipart file,
+      // `field=@F` a file's text as a field. URLs and headers are not files.
+      for (const token of args) {
+        if (!token || token.dynamic || /^[a-z][a-z0-9+.-]*:\/\//i.test(token.value)) continue;
+        const m = /^(?:@|[^=:@\s]+@|[^=:@\s]*=@)(.+)$/.exec(token.value);
+        if (m && m[1] !== '-') add('read', { value: m[1] }, state, { upload: true });
+      }
+      return;
+    }
+    if (name === 'scp' || name === 'rsync') {
+      // A copy whose destination is a remote (`host:` or `user@host:`) sends
+      // its sources off the machine.
+      // Any operand after the first that names a remote: a trailing option
+      // value (`--exclude tmp`) is not the destination.
+      const operands = strings.filter((s) => s && !s.startsWith('-'));
+      const remote = operands.slice(1).some((o) => /^[^/\s]+:/.test(o));
+      for (const p of copySourcePaths(words))
+        add('read', locate(p), state, remote ? { upload: true } : {});
+      return;
+    }
     // Copy/archive source vocabulary already belongs to the credential jail.
     for (const p of copySourcePaths(words)) add('read', locate(p), state);
+  }
+  /**
+   * The files a download writes. `-O F` / `-o F` name it; a server-chosen or
+   * templated name (`-OJ`, `-o "f_#1"`, `wget -r`, `wget -i list`) is any
+   * file under the directory (`D/*`, dotfiles included); otherwise the URL's
+   * basename in the output directory. `-` is standard output. Header and
+   * cookie dumps (`curl -D`, `-c`) and wget's logs (`-o`, `-a`) are writes too.
+   */
+  function downloadOutputs(name: string, args: Array<Word | null>, state: State): void {
+    const valueShort = DOWNLOAD_SHORT_VALUE[name];
+    const outputs: Word[] = [];
+    const urls: string[] = [];
+    // Assigned inside `take`; the cast keeps TypeScript from narrowing it to null.
+    let dir = null as Word | null;
+    let remoteName = false;
+    let document = false;
+    let serverNamed = false;
+    const take = (flag: string, value: Word | null): void => {
+      if (!value) return;
+      const sent = uploadedFile(name, flag, value);
+      if (sent) add('read', sent, state, { upload: true });
+      if (DOWNLOAD_OUTPUT_FLAGS[name].includes(flag)) {
+        // wget -O and aria2c -o name the downloaded file (stdout included), so
+        // no URL basename is written; a log or a header dump does not.
+        if (
+          ['-O', '--output-document', '--out'].includes(flag) ||
+          (name === 'aria2c' && flag === '-o')
+        )
+          document = true;
+        if (value.value !== '-' || value.pattern || value.dynamic) outputs.push(value);
+      } else if (DOWNLOAD_DIR_FLAGS[name].includes(flag)) dir = value;
+      else if (name === 'wget' && (flag === '-i' || flag === '--input-file')) serverNamed = true;
+    };
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (!token) continue;
+      const v = token.value;
+      if (v.startsWith('--')) {
+        const eq = v.indexOf('=');
+        const flag = eq < 0 ? v : v.slice(0, eq);
+        if (['--remote-name', '--remote-name-all'].includes(flag)) remoteName = true;
+        if (['--remote-header-name', '--recursive', '--mirror', '--page-requisites'].includes(flag))
+          serverNamed = true;
+        if (DOWNLOAD_LONG_VALUE[name].includes(flag))
+          take(flag, eq < 0 ? (args[++i] ?? null) : { ...token, value: v.slice(eq + 1) });
+        continue;
+      }
+      if (v.startsWith('-') && v.length > 1 && !token.dynamic) {
+        for (let j = 1; j < v.length; j++) {
+          const c = v[j];
+          // wget's -nc, -nd, -nH, -np, -nv: two letters, no value.
+          if (name === 'wget' && c === 'n') {
+            j++;
+            continue;
+          }
+          if (name === 'curl' && c === 'O') remoteName = true;
+          if (name === 'curl' && c === 'J') serverNamed = true;
+          if (name === 'wget' && (c === 'r' || c === 'm' || c === 'p')) serverNamed = true;
+          if (valueShort.includes(c)) {
+            const rest = v.slice(j + 1);
+            take(`-${c}`, rest ? { value: rest } : (args[++i] ?? null));
+            break;
+          }
+        }
+        continue;
+      }
+      if (/^(?:https?|ftps?):\/\//i.test(v)) urls.push(v);
+    }
+    for (const out of outputs) {
+      // aria2c's -o names a file inside its -d directory.
+      const spelled =
+        name === 'aria2c' && dir?.value && !out.value.startsWith('/')
+          ? { ...out, value: `${dir.value.replace(/\/+$/, '')}/${out.value}` }
+          : out;
+      // curl's -o "file_#1" names files from the URL glob: any file there.
+      if (name === 'curl' && /#\d/.test(spelled.value))
+        add('write', { value: '', pattern: spelled.value.replace(/#\d+/g, '*'), dot: true }, state);
+      else add('write', spelled, state);
+    }
+    const remote = name === 'curl' ? remoteName || serverNamed : !document || serverNamed;
+    if (!remote) return;
+    const into = dir?.value ? dir.value.replace(/\/+$/, '') : '.';
+    if (serverNamed || urls.length === 0) {
+      add('write', { value: '', pattern: `${quoteGlob(into)}/*`, dot: true }, state);
+      return;
+    }
+    for (const url of urls) {
+      const file = url
+        .replace(/[?#].*$/, '')
+        .replace(/^[a-z]+:\/\/[^/]*/i, '')
+        .split('/')
+        .pop();
+      add('write', { value: `${into}/${file || 'index.html'}` }, state);
+    }
   }
   function findActions(
     tokens: Array<Word | null>,
@@ -574,7 +795,43 @@ export function collectShellFileAccesses(
         .flatMap((prefix) => (words.length ? words : [null]).map((w) => [...prefix, w]))
         .slice(0, MAX_ALTERNATIVES);
     }
-    for (const tokens of alternatives) fromWords(tokens, state, nested, depth);
+    for (const tokens of alternatives) {
+      fromWords(tokens, state, nested, depth);
+      inlineCall(tokens, state, depth);
+    }
+  }
+  /**
+   * A call of a function defined in this script: walk its body again with $1..
+   * bound to the call's literal arguments ("$@" and $* hold every argument as
+   * alternatives). A dynamic argument is unknown; a body that uses `shift` gets
+   * no bindings. The builtin reading of the same words was already walked, so a
+   * function that shadows `rm` or `cat` hides nothing.
+   */
+  function inlineCall(tokens: Array<Word | null>, state: State, depth: number): void {
+    const head = tokens[0];
+    if (!head || head.dynamic || head.pattern) return;
+    const bodies = functions.get(head.value);
+    if (!bodies || (state.callDepth ?? 0) >= MAX_CALL_DEPTH) return;
+    const args = tokens.slice(1).map((a) => (a && !a.dynamic ? a.value : null));
+    // The variables in force are part of the call's meaning: the body may read them.
+    const vars = JSON.stringify([...state.vars].sort(([a], [b]) => (a < b ? -1 : 1)));
+    const key = `${head.value}\u0000${JSON.stringify(args)}\u0000${state.cwd.join('\u0001')}\u0000${vars}`;
+    if (seenCalls.has(key)) return;
+    seenCalls.add(key);
+    for (const body of bodies) {
+      if (callWalks-- <= 0) return;
+      const local = clone(state);
+      local.callDepth = (state.callDepth ?? 0) + 1;
+      for (const name of POSITIONAL) local.vars.delete(name);
+      if (!rebindsPositionals(body)) {
+        args.slice(0, 9).forEach((v, i) => local.vars.set(String(i + 1), v === null ? null : [v]));
+        const all = args.every((v) => v !== null) && args.length ? unique(args as string[]) : null;
+        local.vars.set('@', all);
+        local.vars.set('*', all);
+        local.vars.set('#', [String(args.length)]);
+      }
+      statement(body, local, depth + 1);
+    }
   }
   /** A shell with no script operand reads its program from stdin. */
   function readsScriptFromStdin(stmt: any): boolean {
@@ -615,11 +872,17 @@ export function collectShellFileAccesses(
     if (!stmt || depth > MAX_DEPTH) return;
     state.onSuccess = undefined;
     if (stmt.Background) state = clone(state);
+    // `nc host 9000 < F`: a network tool's standard input leaves the machine.
+    const headWord =
+      stmt.Cmd && syntax.NodeType(stmt.Cmd) === 'CallExpr'
+        ? base(resolveWordLiteral(stmt.Cmd.Args?.[0]))
+        : '';
+    const sends = SENDING_STDIN.has(headWord);
     for (const redir of stmt.Redirs ?? []) {
       substitutions(redir.Word, state, depth);
       for (const word of wordValues(redir.Word, state)) {
         if (WRITES.has(redir.Op)) add('write', word, state);
-        if (READS.has(redir.Op)) add('read', word, state);
+        if (READS.has(redir.Op)) add('read', word, state, sends ? { upload: true } : {});
         if (redir.Op === DUP_OUT && word.value && !/^\d+$/.test(word.value))
           add('write', word, state);
       }
@@ -747,6 +1010,9 @@ export function collectShellFileAccesses(
   }
   const parsed = parseShared(command);
   const program = typeof parsed !== 'symbol' ? parsed : runnablePrefix(command);
-  if (program) statements(program.Stmts ?? [], initial, 0);
+  if (program) {
+    for (const [name, bodies] of functionBodies(program)) functions.set(name, bodies);
+    statements(program.Stmts ?? [], initial, 0);
+  }
   return out;
 }

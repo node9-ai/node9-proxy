@@ -35,7 +35,21 @@ import {
 } from './osv-index';
 import { endpoints } from './net';
 
-export const ECOSYSTEMS: PackageEcosystem[] = ['npm', 'PyPI'];
+// Every ecosystem the install parser recognises (node9Firewall#360). One full
+// sync of the seven beyond npm and PyPI downloads about 46 MB more (Go, Maven
+// and Packagist archives hold every advisory, not only MAL- records); only the
+// MAL- entries are read and kept.
+export const ECOSYSTEMS: PackageEcosystem[] = [
+  'npm',
+  'PyPI',
+  'RubyGems',
+  'crates.io',
+  'Go',
+  'NuGet',
+  'Maven',
+  'Packagist',
+  'VSCode',
+];
 
 const SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FIRST_SYNC_DELAY_MS = 2 * 60 * 1000;

@@ -2706,6 +2706,185 @@ function expandPlainParam(p: any): string | null | undefined {
   return HOME_VARIABLES.has(p.Param?.Value) ? '~' : undefined;
 }
 
+// ── Shell functions: arguments bound at the call (node9Firewall#361) ─────────
+// A function body is walked where it is declared, with $1, $2, $@ unknown.
+// That hid every value a script passes through a function:
+// `function post { local url=$1; local body=$2; curl --data-binary @"$body" "$url"; }`
+// named no file and no destination. At each call of a function defined in
+// the same script the body is walked AGAIN, with the positional parameters
+// bound to the call's literal arguments and the body's own unconditional
+// top-level assignments (`local url=$1`) recorded in order, the same
+// stage-6 rule as the script's top level. A dynamic argument stays unknown.
+// Bash binds a function name when it runs, so a call binds to every
+// definition of that name in the script. A body that uses `shift` gets no
+// bindings (its $1 is a different argument after the shift). No execution,
+// no condition evaluation; bounded by call depth and the number of walks,
+// and a finding already made is never undone when a bound is reached.
+
+const MAX_CALL_DEPTH = 4;
+const MAX_CALL_WALKS = 256;
+let callDepth = 0;
+let callWalks = 0;
+
+/** Every function body defined in the script, by name (all definitions). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function functionBodies(f: any): Map<string, any[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = new Map<string, any[]>();
+  syntax.Walk(f, (node: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n && syntax.NodeType(n) === 'FuncDecl' && n.Name?.Value && n.Body) {
+      const list = out.get(n.Name.Value) ?? [];
+      list.push(n.Body);
+      out.set(n.Name.Value, list);
+    }
+    return true;
+  });
+  return out;
+}
+
+/**
+ * Does a function body give $1.. a new meaning? `shift` moves them; `set --`
+ * and `set` with operands replace them. Such a body gets no bindings: its $1
+ * is not the call's first argument.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function rebindsPositionals(body: any): boolean {
+  let found = false;
+  syntax.Walk(body, (node: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (found || !n) return false;
+    if (syntax.NodeType(n) === 'CallExpr') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words = ((n.Args as any[]) || []).map((a) => resolveWordLiteral(a));
+      if (words[0] === 'shift') found = true;
+      else if (
+        words[0] === 'set' &&
+        words.slice(1).some((w) => w === null || w === '--' || !/^[-+]/.test(w))
+      )
+        found = true;
+    }
+    return !found;
+  });
+  return found;
+}
+
+/** The bindings in force, so one call is walked once per distinct meaning. */
+function tableBindings(): string {
+  if (!assignmentTable) return '';
+  const out: string[] = [];
+  for (const [name, rec] of assignmentTable)
+    if (rec.at < currentStmtOffset) out.push(`${name}=${rec.value ?? '\u0000'}`);
+  return out.sort().join('\u0001');
+}
+
+/**
+ * `syntax.Walk(f, visit)`, plus a second walk of each called function's body
+ * with its arguments bound (see above). Runs inside an assignment table: the
+ * caller sets `assignmentTable` (a body walk needs somewhere to bind).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
+  const bodies = functionBodies(f);
+  if (bodies.size === 0) {
+    syntax.Walk(f, visit);
+    return;
+  }
+  const seenCalls = new Set<string>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inline = (call: any): void => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = ((call.Args as any[]) || []).map((a) => resolveWordLiteral(a));
+    const list = words[0] ? bodies.get(words[0]) : undefined;
+    if (!list || callDepth >= MAX_CALL_DEPTH) return;
+    const args = words.slice(1);
+    const key = `${words[0]}\u0000${JSON.stringify(args)}\u0000${tableBindings()}`;
+    if (seenCalls.has(key)) return;
+    seenCalls.add(key);
+    const outerTable = assignmentTable;
+    const outerOffset = currentStmtOffset;
+    for (const body of list) {
+      if (callWalks >= MAX_CALL_WALKS) return;
+      callWalks++;
+      // The body runs at the call site: what is visible there is visible in
+      // the body, whatever the body's own position in the text. Entries the
+      // call site cannot see yet are dropped; the body's own assignments are
+      // recorded below with their positions.
+      const table = new Map<string, { value: string | null; at: number }>();
+      for (const [name, rec] of outerTable ?? [])
+        if (rec.at < outerOffset) table.set(name, { value: rec.value, at: -1 });
+      for (const name of ['1', '2', '3', '4', '5', '6', '7', '8', '9', '@', '*', '#'])
+        table.delete(name);
+      if (!rebindsPositionals(body)) {
+        args.slice(0, 9).forEach((value, i) => table.set(String(i + 1), { value, at: -1 }));
+        // "$@" is one word here; it is exact only for a single argument.
+        if (args.length === 1) {
+          table.set('@', { value: args[0], at: -1 });
+          table.set('*', { value: args[0], at: -1 });
+        }
+        table.set('#', { value: String(args.length), at: -1 });
+      }
+      assignmentTable = table;
+      currentStmtOffset = Number.MAX_SAFE_INTEGER;
+      callDepth++;
+      try {
+        if (body.Cmd && syntax.NodeType(body.Cmd) === 'Block') recordTopLevelAssignments(body.Cmd);
+        syntax.Walk(body, step);
+      } finally {
+        callDepth--;
+        assignmentTable = outerTable;
+        currentStmtOffset = outerOffset;
+      }
+    }
+  };
+  const step = (node: unknown): boolean => {
+    if (!node) return false;
+    const go = visit(node);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (go !== false && syntax.NodeType(node as any) === 'CallExpr') inline(node);
+    return go;
+  };
+  syntax.Walk(f, step);
+}
+
+/**
+ * Run `body` with an assignment table filled from the script's unconditional
+ * top-level assignments, as the credential jail does, and restore the outer
+ * state afterwards. The destination extractors use it so `u=https://x; curl "$u"`
+ * and a URL passed to a function name their host.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function withAssignments<T>(f: any, body: () => T): T {
+  const outerTable = assignmentTable;
+  const outerOffset = currentStmtOffset;
+  const outerWalks = callWalks;
+  callWalks = 0;
+  assignmentTable = new Map(
+    [...(outerTable ?? [])].map(([k, r]) => [k, { value: r.value, at: -1 }])
+  );
+  currentStmtOffset = Number.MAX_SAFE_INTEGER;
+  try {
+    recordTopLevelAssignments(f);
+    return body();
+  } finally {
+    assignmentTable = outerTable;
+    currentStmtOffset = outerOffset;
+    callWalks = outerWalks;
+  }
+}
+
+/** The statement offset a visitor sets on each Stmt, so a later assignment stays invisible. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function trackStatement(n: any): void {
+  try {
+    currentStmtOffset = n.Pos().Offset();
+  } catch {
+    currentStmtOffset = Number.MAX_SAFE_INTEGER;
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function resolveWordLiteral(w: any): string | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2898,31 +3077,37 @@ export function extractShellDestinations(command: string): ShellDestination[] {
   const out: ShellDestination[] = [];
   const seen = new Set<string>();
   try {
-    syntax.Walk(f, (node: unknown) => {
-      if (!node) return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const callArgs: any[] = n.Args || [];
-      if (callArgs.length === 0) return true;
-      // `sudo curl`, `env X=1 curl`, `timeout 5 curl`: the network binary is
-      // the head after the wrappers (fw#318 P1.1), as everywhere else.
-      const words = callArgs.map((a) => resolveWordLiteral(a));
-      const at = unwrapCommandHead(words);
-      const name = (words[at] || '').toLowerCase().split('/').pop() ?? '';
-      if (!NET_BINARIES.has(name)) return true;
-      const rest = words.slice(at + 1);
-      for (const raw of destTokensForBinary(name, rest)) {
-        const host = parseDestHost(raw);
-        if (!host) continue;
-        const key = `${name}:${host}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ host, binary: name, raw });
-      }
-      return true;
-    });
+    // Literal assignments and function arguments resolve (node9Firewall#361):
+    // `u=https://x; curl "$u"` and `fetch https://x` with `fetch() { curl "$1"; }`
+    // name the host.
+    withAssignments(f, () =>
+      walkWithCalls(f, (node: unknown) => {
+        if (!node) return false;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const n = node as any;
+        if (syntax.NodeType(n) === 'Stmt') trackStatement(n);
+        if (syntax.NodeType(n) !== 'CallExpr') return true;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const callArgs: any[] = n.Args || [];
+        if (callArgs.length === 0) return true;
+        // `sudo curl`, `env X=1 curl`, `timeout 5 curl`: the network binary is
+        // the head after the wrappers (fw#318 P1.1), as everywhere else.
+        const words = callArgs.map((a) => resolveWordLiteral(a));
+        const at = unwrapCommandHead(words);
+        const name = (words[at] || '').toLowerCase().split('/').pop() ?? '';
+        if (!NET_BINARIES.has(name)) return true;
+        const rest = words.slice(at + 1);
+        for (const raw of destTokensForBinary(name, rest)) {
+          const host = parseDestHost(raw);
+          if (!host) continue;
+          const key = `${name}:${host}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ host, binary: name, raw });
+        }
+        return true;
+      })
+    );
   } catch {
     return out; // partial result on walker error — fail open
   }
@@ -2954,58 +3139,66 @@ export function extractShellDestTokens(command: string): ShellDestToken[] {
   const out: ShellDestToken[] = [];
   const seen = new Set<string>();
   try {
-    syntax.Walk(f, (node: unknown) => {
-      if (!node) return false;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const callArgs: any[] = n.Args || [];
-      if (callArgs.length === 0) return true;
-      const name = (resolveWordLiteral(callArgs[0]) || '').toLowerCase();
-      if (!NET_BINARIES.has(name)) return true;
-      const rest = callArgs.slice(1).map((a) => resolveWordLiteral(a));
-      for (const raw of destTokensForBinary(name, rest)) {
-        if (!raw) continue;
-        // Reduce the token to the authority, in the order RFC 3986 defines it.
-        // ORDER IS LOAD-BEARING and three bypasses came from getting it wrong:
-        //   - the authority must be cut BEFORE userinfo, because '@' is legal
-        //     in a path or query and `…/meta-data/?a=@` otherwise ate the host
-        //   - a bracketed IPv6 literal must have its port dropped AFTER the
-        //     closing ']', or `[fd00:ec2::254]:80` never classifies
-        //   - an unbracketed token ends at the first ':', which covers both
-        //     host:port and scp's host:path form
-        let tok = raw.trim();
-        const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(tok);
-        const hasScheme = scheme !== null;
-        if (hasScheme) tok = tok.slice(scheme![0].length);
-        tok = tok.split(/[/?#]/)[0];
-        const at = tok.lastIndexOf('@');
-        if (at >= 0) tok = tok.slice(at + 1);
-        if (tok.startsWith('[')) {
-          // Keep the brackets; normalizeIpLiteral strips them itself.
-          const close = tok.indexOf(']');
-          if (close > 0) tok = tok.slice(0, close + 1);
-        } else {
-          tok = tok.split(':')[0];
+    // The same resolution and the same head unwrapping as
+    // extractShellDestinations, so the two agree on `sudo curl` and on a URL
+    // held in a variable or passed to a function.
+    withAssignments(f, () =>
+      walkWithCalls(f, (node: unknown) => {
+        if (!node) return false;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const n = node as any;
+        if (syntax.NodeType(n) === 'Stmt') trackStatement(n);
+        if (syntax.NodeType(n) !== 'CallExpr') return true;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const callArgs: any[] = n.Args || [];
+        if (callArgs.length === 0) return true;
+        const words = callArgs.map((a) => resolveWordLiteral(a));
+        const head = unwrapCommandHead(words);
+        const name = (words[head] || '').toLowerCase().split('/').pop() ?? '';
+        if (!NET_BINARIES.has(name)) return true;
+        const rest = words.slice(head + 1);
+        for (const raw of destTokensForBinary(name, rest)) {
+          if (!raw) continue;
+          // Reduce the token to the authority, in the order RFC 3986 defines it.
+          // ORDER IS LOAD-BEARING and three bypasses came from getting it wrong:
+          //   - the authority must be cut BEFORE userinfo, because '@' is legal
+          //     in a path or query and `…/meta-data/?a=@` otherwise ate the host
+          //   - a bracketed IPv6 literal must have its port dropped AFTER the
+          //     closing ']', or `[fd00:ec2::254]:80` never classifies
+          //   - an unbracketed token ends at the first ':', which covers both
+          //     host:port and scp's host:path form
+          let tok = raw.trim();
+          const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(tok);
+          const hasScheme = scheme !== null;
+          if (hasScheme) tok = tok.slice(scheme![0].length);
+          tok = tok.split(/[/?#]/)[0];
+          const at = tok.lastIndexOf('@');
+          if (at >= 0) tok = tok.slice(at + 1);
+          if (tok.startsWith('[')) {
+            // Keep the brackets; normalizeIpLiteral strips them itself.
+            const close = tok.indexOf(']');
+            if (close > 0) tok = tok.slice(0, close + 1);
+          } else {
+            tok = tok.split(':')[0];
+          }
+          if (!tok) continue;
+          // A bare decimal with no scheme is nearly always a numeric flag value
+          // that VALUE_FLAGS does not happen to cover (`--max-redirs 0`, `-w 0`),
+          // and `0` parses as the packed address 0.0.0.0, which is a
+          // non-overridable tier. Below 2^24 the packed form denotes 0.0.0.0/8:
+          // not routable, and not something anyone types as a destination. So
+          // requiring the full 32-bit range here loses no real destination and
+          // removes the whole false-positive class. With an explicit scheme the
+          // caller clearly means a host, so the rule does not apply.
+          if (!hasScheme && /^\d+$/.test(tok) && Number(tok) < 0x1000000) continue;
+          const key = `${name}:${tok}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ token: tok, binary: name });
         }
-        if (!tok) continue;
-        // A bare decimal with no scheme is nearly always a numeric flag value
-        // that VALUE_FLAGS does not happen to cover (`--max-redirs 0`, `-w 0`),
-        // and `0` parses as the packed address 0.0.0.0, which is a
-        // non-overridable tier. Below 2^24 the packed form denotes 0.0.0.0/8:
-        // not routable, and not something anyone types as a destination. So
-        // requiring the full 32-bit range here loses no real destination and
-        // removes the whole false-positive class. With an explicit scheme the
-        // caller clearly means a host, so the rule does not apply.
-        if (!hasScheme && /^\d+$/.test(tok) && Number(tok) < 0x1000000) continue;
-        const key = `${name}:${tok}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ token: tok, binary: name });
-      }
-      return true;
-    });
+        return true;
+      })
+    );
   } catch {
     return out; // partial result on walker error — fail open
   }
@@ -3250,6 +3443,8 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   if (depth === 0) {
     seenPayloads = new Set();
     payloadBudget = PAYLOAD_BUDGET;
+    // One function-call budget for the whole command, nested payloads included.
+    if (callDepth === 0) callWalks = 0;
   }
   // Inherited entries are rebased to -1: their offsets are positions in the
   // PARENT string and would be compared against the child's, which hid every
@@ -3269,7 +3464,7 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
   // today's behaviour; honouring one the shell skips fails OPEN.
   try {
     recordTopLevelAssignments(f);
-    syntax.Walk(f, (node: unknown) => {
+    walkWithCalls(f, (node: unknown) => {
       if (!node || result?.verdict === 'block') return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;

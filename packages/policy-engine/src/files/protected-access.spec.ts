@@ -141,7 +141,13 @@ describe('system file operations through the shell', () => {
     'cat "$P"; P=/etc/shadow',
     '(cd /etc); rm passwd',
   ])('does not invent a protected operation for %s', (command) =>
-    expect(detect(command)).toBeNull()
+    // The #341 contract: no system-auth, startup or hash finding. Writes under
+    // /etc are files.system-dirs' business and are pinned in system-dirs.spec.
+    expect(
+      evaluateProtectedFileAccess(collectFileAccesses('Bash', { command }, context), context, {
+        checks: { 'files.system-dirs': 'off' },
+      })
+    ).toBeNull()
   );
 });
 

@@ -13,6 +13,33 @@ export const PASSWORD_HASH_FILES = ['/etc/shadow', '/etc/gshadow'] as const;
 export const STARTUP_NAMES = ['.bashrc', '.zshrc', '.profile', '.bash_profile'] as const;
 
 /**
+ * System directories: a write, a new file or a removal under one of them asks
+ * for approval (files.system-dirs). /usr/local is where `make install` and
+ * manual installs go; /usr/src/app is the working directory of the official
+ * Node and Python container images, so a relative write there is ordinary
+ * project work. /proc, /sys and /dev are kernel interfaces, not files an agent
+ * installs into, and are left out of the mutation set.
+ */
+export const SYSTEM_DIRS = [
+  '/usr',
+  '/etc',
+  '/boot',
+  '/bin',
+  '/sbin',
+  '/lib',
+  '/lib64',
+  '/var/log',
+] as const;
+export const SYSTEM_DIRS_EXEMPT = ['/usr/local', '/usr/src'] as const;
+/**
+ * Where a file sent in a request is a system file (the upload rule of
+ * files.system-dirs): the system directories, and the kernel's views and the
+ * root home, which an agent may read but has no reason to send. `/root` does
+ * not count when it is the user's own home.
+ */
+export const UPLOAD_SYSTEM_DIRS = [...SYSTEM_DIRS, '/proc', '/sys', '/root'] as const;
+
+/**
  * Files inside a project that run code or instruct the agent (fw#318 P4,
  * design 6). A write there after the session read outside content is held:
  * it is how an injected instruction persists past the session. Relative to
@@ -79,6 +106,8 @@ export interface FileAccess {
   operation: 'read' | 'write' | 'remove' | 'create';
   path: string;
   cwd?: string;
+  /** A read whose content leaves the machine as a request body or an upload. */
+  upload?: true;
   /** Unquoted shell pattern. Quoted metacharacters are escaped in this value. */
   glob?: string;
   /** The pattern is find's, not the shell's: `*` also selects dotfiles. */

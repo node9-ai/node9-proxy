@@ -10,19 +10,32 @@
 // Things that are NOT registry packages are skipped on purpose: local paths,
 // tarballs, git/URL specs, `-r requirements.txt` operands. A bare `npm install`
 // (install from the lockfile) yields nothing; the lockfile is out of scope here.
+//
+// Beyond npm and PyPI (node9Firewall#360): RubyGems (gem, bundle add), crates.io
+// (cargo add / install), Go (go get / install / run), NuGet (dotnet add package,
+// dotnet tool install, nuget install), Maven (mvn dependency:get), Packagist
+// (composer require / create-project) and VS Code extensions from either
+// marketplace (code, codium and their siblings, --install-extension).
 import mvdanSh from 'mvdan-sh';
 import { COMMAND_WRAPPERS, parseShared, resolveWordLiteral } from './index';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
 
-export type PackageEcosystem = 'npm' | 'PyPI';
+/**
+ * The OSV ecosystem name, verbatim: it is the index directory, the bucket path
+ * of the OSV archive and the `ecosystem` of the online query at once. `VSCode`
+ * covers both marketplaces (OSV files Open VSX records as
+ * `VSCode:https://open-vsx.org` inside the same archive).
+ */
+export type PackageEcosystem =
+  'npm' | 'PyPI' | 'RubyGems' | 'crates.io' | 'Go' | 'NuGet' | 'Maven' | 'Packagist' | 'VSCode';
 
 export interface PackageInstallRequest {
   ecosystem: PackageEcosystem;
   /** The front-end that would install it: npm, pnpm, yarn, bun, npx, pip, uv, poetry … */
   manager: string;
-  /** Registry name, normalised: npm as written (scope kept); PyPI per PEP 503. */
+  /** Registry name: npm as written (scope kept); PyPI per PEP 503; the others as written. */
   name: string;
   /** Exact pinned version when the spec names one; otherwise undefined. */
   version?: string;
@@ -341,6 +354,407 @@ function parsePySpec(raw: string): { name: string; version?: string } | null {
   return { name, version: exact ? exact[1] : undefined };
 }
 
+// ── Other ecosystems (node9Firewall#360) ───────────────────────────────────
+// Each tool gets its own value-flag set, under the rule written above: list
+// only flags that take a separate value in THAT tool. A boolean flag listed
+// here would swallow the next package (a bypass); a value flag left out only
+// costs one extra lookup of its value.
+
+/**
+ * A version the command pins exactly: dot-separated numbers, an optional
+ * `-pre` or `+build` tail, an optional leading `v` or `=`. Anything else (a
+ * range, `1.x`, `~> 1.0`, RubyGems' `1.0.pre`) is left undefined on purpose:
+ * an undefined version is checked against every malicious version of the
+ * name, a wrongly "exact" one against none of them.
+ */
+const EXACT_VERSION_RE = /^=?v?(\d+(?:\.\d+)*(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]*)?)$/;
+function exactVersion(v: string | undefined): string | undefined {
+  if (!v) return undefined;
+  const m = EXACT_VERSION_RE.exec(v.trim());
+  return m ? m[1] : undefined;
+}
+
+function push(
+  out: PackageInstallRequest[],
+  ecosystem: PackageEcosystem,
+  manager: string,
+  name: string,
+  version: string | undefined,
+  raw: string
+): void {
+  out.push({ ecosystem, manager, name, ...(version ? { version } : {}), raw });
+}
+
+// Name shapes accept any Unicode letter or digit on purpose: OSV lists
+// malicious NuGet packages whose ids swap Latin letters for Cyrillic look-alikes,
+// and an ASCII-only shape would skip exactly those. Rejecting a name is the
+// unsafe direction here; an unusual name only costs one lookup.
+const GEM_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u;
+const GEM_VALUE_FLAGS = new Set([
+  '-v',
+  '--version',
+  '-i',
+  '--install-dir',
+  '-n',
+  '--bindir',
+  '--document',
+  '--build-root',
+  '-P',
+  '--trust-policy',
+  '-s',
+  '--source',
+  '-p',
+  '--http-proxy',
+  '--platform',
+  '-g',
+  '--file',
+  '--without',
+]);
+const BUNDLE_VALUE_FLAGS = new Set([
+  '-v',
+  '--version',
+  '-g',
+  '--group',
+  '-s',
+  '--source',
+  '-r',
+  '--require',
+  '--path',
+  '--git',
+  '--github',
+  '--branch',
+  '--ref',
+  '--glob',
+]);
+
+/** `gem install a b -v 1.0`, `gem install a:1.0`: -v applies to every name. */
+function gemInstall(words: (string | null)[], from: number, out: PackageInstallRequest[]): void {
+  // After `--` gem passes build flags to the extension, not more gems.
+  const dash = words.indexOf('--', from);
+  const own = dash < 0 ? words : words.slice(0, dash);
+  const pinned = exactVersion(flagValues(own, from, ['-v', '--version'])[0]);
+  for (const raw of operands(own, from, GEM_VALUE_FLAGS)) {
+    if (NON_REGISTRY_RE.test(raw) || /\.gem$/i.test(raw)) continue;
+    const colon = raw.indexOf(':');
+    const name = colon < 0 ? raw : raw.slice(0, colon);
+    if (!GEM_NAME_RE.test(name)) continue;
+    push(
+      out,
+      'RubyGems',
+      'gem',
+      name,
+      colon < 0 ? pinned : exactVersion(raw.slice(colon + 1)),
+      raw
+    );
+  }
+}
+
+const CRATE_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u;
+const CARGO_ADD_VALUE_FLAGS = new Set([
+  '-F',
+  '--features',
+  '--rename',
+  '--registry',
+  '--manifest-path',
+  '-p',
+  '--package',
+  '--git',
+  '--branch',
+  '--tag',
+  '--rev',
+  '--path',
+  '--base',
+  '--target',
+  '--color',
+  '--config',
+  '-Z',
+  '--lockfile-path',
+]);
+const CARGO_INSTALL_VALUE_FLAGS = new Set([
+  '--version',
+  '--vers',
+  '--git',
+  '--branch',
+  '--tag',
+  '--rev',
+  '--path',
+  '--root',
+  '--index',
+  '--registry',
+  '-F',
+  '--features',
+  '--profile',
+  '--target',
+  '--target-dir',
+  '-j',
+  '--jobs',
+  '--bin',
+  '--example',
+  '--color',
+  '--config',
+  '-Z',
+]);
+
+/** `cargo add name[@req]…`, `cargo install name[@ver] [--version V]`. A crate
+ *  from git, a path or another registry is not a crates.io package. */
+function cargoCrates(
+  words: (string | null)[],
+  from: number,
+  manager: 'cargo add' | 'cargo install',
+  out: PackageInstallRequest[]
+): void {
+  const flags = manager === 'cargo add' ? CARGO_ADD_VALUE_FLAGS : CARGO_INSTALL_VALUE_FLAGS;
+  if (flagValues(words, from, ['--git', '--path', '--registry', '--index']).length > 0) return;
+  if (words.some((w) => w === '--git' || w === '--path')) return;
+  const flagVersion =
+    manager === 'cargo install'
+      ? exactVersion(flagValues(words, from, ['--version', '--vers'])[0])
+      : undefined;
+  for (const raw of operands(words, from, flags)) {
+    const at = raw.indexOf('@');
+    const name = at < 0 ? raw : raw.slice(0, at);
+    if (!CRATE_NAME_RE.test(name)) continue;
+    push(
+      out,
+      'crates.io',
+      manager,
+      name,
+      at < 0 ? flagVersion : exactVersion(raw.slice(at + 1)),
+      raw
+    );
+  }
+}
+
+const GO_VALUE_FLAGS = new Set([
+  '-C',
+  '-tags',
+  '-ldflags',
+  '-gcflags',
+  '-asmflags',
+  '-mod',
+  '-modfile',
+  '-o',
+  '-p',
+  '-pkgdir',
+  '-toolexec',
+  '-exec',
+  '-overlay',
+  '-pgo',
+  '-buildmode',
+  '-compiler',
+  '-gccgoflags',
+  '-installsuffix',
+  '-covermode',
+  '-coverpkg',
+]);
+/** A remote import path: its first element is a host name (has a dot). */
+const GO_PATH_RE = /^[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+(?:\/[\p{L}\p{N}_.~+-]+)*$/u;
+
+/**
+ * `go get` / `go install` / `go run` operands: `path[@version]`. A local path,
+ * a pattern (`./...`), a standard-library name and `@none` (a removal) are not
+ * downloads. `go run` treats only its first operand as the package, and
+ * downloads it only with an explicit `@version` (otherwise it builds inside the
+ * current module). `@latest` and branch names leave the version unknown.
+ */
+function goModules(
+  words: (string | null)[],
+  from: number,
+  manager: 'go get' | 'go install' | 'go run',
+  out: PackageInstallRequest[]
+): void {
+  let specs = operands(words, from, GO_VALUE_FLAGS);
+  if (manager === 'go run') specs = specs.slice(0, 1).filter((s) => s.includes('@'));
+  for (const raw of specs) {
+    const at = raw.indexOf('@');
+    const pathPart = (at < 0 ? raw : raw.slice(0, at)).replace(/\/\.\.\.$/, '');
+    const ver = at < 0 ? undefined : raw.slice(at + 1);
+    if (ver === 'none') continue;
+    if (!GO_PATH_RE.test(pathPart) || /\.go$/i.test(pathPart)) continue;
+    // OSV writes Go versions without the leading v.
+    const exact = ver && /^v\d/.test(ver) ? exactVersion(ver) : undefined;
+    push(out, 'Go', manager, pathPart, exact, raw);
+  }
+}
+
+const NUGET_NAME_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_.-]*$/u;
+const DOTNET_ADD_VALUE_FLAGS = new Set([
+  '-v',
+  '--version',
+  '-s',
+  '--source',
+  '-f',
+  '--framework',
+  '--package-directory',
+]);
+const DOTNET_TOOL_VALUE_FLAGS = new Set([
+  '--version',
+  '--add-source',
+  '--configfile',
+  '--framework',
+  '--tool-path',
+  '-a',
+  '--arch',
+  '--tool-manifest',
+  '-v',
+  '--verbosity',
+]);
+// Lower case: nuget.exe flags are case-insensitive and nugetInstall lowers them.
+const NUGET_VALUE_FLAGS = new Set([
+  '-version',
+  '-outputdirectory',
+  '-o',
+  '-source',
+  '-configfile',
+  '-fallbacksource',
+  '-framework',
+  '-packagesavemode',
+  '-dependencyversion',
+  '-solutiondirectory',
+  '-verbosity',
+]);
+
+/** `dotnet add [PROJECT] package NAME [--version V]`. */
+function dotnetAdd(words: (string | null)[], from: number, out: PackageInstallRequest[]): void {
+  // The project argument is optional: `package` is the next word or the one after.
+  let k = -1;
+  for (let i = from; i < Math.min(words.length, from + 2); i++) {
+    if (lower(words[i]) === 'package') {
+      k = i;
+      break;
+    }
+  }
+  if (k < 0) return;
+  const name = operands(words, k + 1, DOTNET_ADD_VALUE_FLAGS)[0];
+  if (!name || !NUGET_NAME_RE.test(name)) return;
+  const version = exactVersion(flagValues(words, k + 1, ['-v', '--version'])[0]);
+  push(out, 'NuGet', 'dotnet add package', name, version, name);
+}
+
+/** `dotnet tool install|update [-g] NAME [--version V]`: a tool is a NuGet package. */
+function dotnetTool(words: (string | null)[], from: number, out: PackageInstallRequest[]): void {
+  const name = operands(words, from, DOTNET_TOOL_VALUE_FLAGS)[0];
+  if (!name || !NUGET_NAME_RE.test(name)) return;
+  const version = exactVersion(flagValues(words, from, ['--version'])[0]);
+  push(out, 'NuGet', 'dotnet tool', name, version, name);
+}
+
+/** `nuget install NAME [-Version V]`: Windows-style flags, any case. */
+function nugetInstall(words: (string | null)[], from: number, out: PackageInstallRequest[]): void {
+  const lowered = words.map((w) => (w !== null && w.startsWith('-') ? w.toLowerCase() : w));
+  const name = operands(lowered, from, NUGET_VALUE_FLAGS)[0];
+  if (!name || !NUGET_NAME_RE.test(name) || /\.config$/i.test(name)) return;
+  const version = exactVersion(flagValues(lowered, from, ['-version'])[0]);
+  push(out, 'NuGet', 'nuget install', name, version, name);
+}
+
+const MAVEN_COORD_RE = /^[\p{L}\p{N}_.-]+:[\p{L}\p{N}_.-]+$/u;
+
+/**
+ * `mvn dependency:get -Dartifact=g:a:v[:packaging[:classifier]]` or the
+ * `-DgroupId= -DartifactId= -Dversion=` form, also through the Maven wrapper
+ * and the plugin's full name. `LATEST` and `RELEASE` leave the version unknown.
+ */
+function mavenGet(words: (string | null)[], from: number, out: PackageInstallRequest[]): void {
+  const goal = words
+    .slice(from)
+    .some(
+      (w) =>
+        w !== null &&
+        /(?:^|:)dependency:get$|^org\.apache\.maven\.plugins:maven-dependency-plugin:(?:[\w.-]+:)?get$/.test(
+          w
+        )
+    );
+  if (!goal) return;
+  const prop = (key: string): string | undefined => {
+    for (let i = from; i < words.length; i++) {
+      const w = words[i];
+      if (w === null) continue;
+      if (w.startsWith(`-D${key}=`)) return w.slice(key.length + 3);
+      if (w === '-D' && words[i + 1]?.startsWith(`${key}=`))
+        return (words[i + 1] as string).slice(key.length + 1);
+    }
+    return undefined;
+  };
+  const artifact = prop('artifact');
+  let coord: string | undefined;
+  let ver: string | undefined;
+  if (artifact) {
+    const parts = artifact.split(':');
+    if (parts.length < 2) return;
+    coord = `${parts[0]}:${parts[1]}`;
+    ver = parts[2];
+  } else {
+    const g = prop('groupId');
+    const a = prop('artifactId');
+    if (!g || !a) return;
+    coord = `${g}:${a}`;
+    ver = prop('version');
+  }
+  if (!MAVEN_COORD_RE.test(coord)) return;
+  const exact = ver && !/^(?:LATEST|RELEASE)$/i.test(ver) ? exactVersion(ver) : undefined;
+  push(out, 'Maven', 'mvn dependency:get', coord, exact, artifact ?? coord);
+}
+
+// One class per side, no nested quantifier: a shape with optional separators
+// inside a repeated group backtracks exponentially on a long non-matching word.
+const COMPOSER_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}_.-]*\/[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u;
+const COMPOSER_VALUE_FLAGS = new Set([
+  '-d',
+  '--working-dir',
+  '--stability',
+  '--repository',
+  '--add-repository',
+]);
+
+/** `composer require vendor/name[:constraint]…`, `vendor/name=constraint`,
+ *  `composer create-project vendor/name [dir] [version]`. Platform packages
+ *  (`php`, `ext-*`) have no vendor and are not registry packages. */
+function composerPackages(
+  words: (string | null)[],
+  from: number,
+  manager: 'composer require' | 'composer create-project',
+  out: PackageInstallRequest[]
+): void {
+  const ops = operands(words, from, COMPOSER_VALUE_FLAGS);
+  const specs = manager === 'composer create-project' ? ops.slice(0, 1) : ops;
+  for (const raw of specs) {
+    const sep = raw.search(/[:=]/);
+    const name = sep < 0 ? raw : raw.slice(0, sep);
+    if (!COMPOSER_NAME_RE.test(name)) continue;
+    let ver = sep < 0 ? undefined : raw.slice(sep + 1);
+    if (manager === 'composer create-project' && ver === undefined) ver = ops[2] ?? undefined;
+    push(out, 'Packagist', manager, name.toLowerCase(), exactVersion(ver), raw);
+  }
+}
+
+/** Editors that take `--install-extension` (VS Code and the forks on Open VSX). */
+const EDITOR_HEADS = ['code', 'code-insiders', 'codium', 'vscodium', 'cursor'];
+const EXTENSION_ID_RE = /^[\p{L}\p{N}][\p{L}\p{N}_-]*\.[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u;
+
+/** `code --install-extension publisher.name[@version]`, repeatable; a `.vsix`
+ *  file is a local package, not a marketplace name. */
+function editorExtensions(
+  words: (string | null)[],
+  from: number,
+  out: PackageInstallRequest[]
+): void {
+  for (const raw of flagValues(words, from, ['--install-extension'])) {
+    if (/\.vsix$/i.test(raw) || NON_REGISTRY_RE.test(raw)) continue;
+    const at = raw.lastIndexOf('@');
+    const name = at <= 0 ? raw : raw.slice(0, at);
+    if (!EXTENSION_ID_RE.test(name)) continue;
+    push(
+      out,
+      'VSCode',
+      'code --install-extension',
+      name,
+      at <= 0 ? undefined : exactVersion(raw.slice(at + 1)),
+      raw
+    );
+  }
+}
+
 // ── Command walk ────────────────────────────────────────────────────────────
 
 function basename(w: string | null): string {
@@ -348,6 +762,16 @@ function basename(w: string | null): string {
 }
 
 const MANAGER_HEADS = new Set([
+  'gem',
+  'bundle',
+  'cargo',
+  'go',
+  'dotnet',
+  'nuget',
+  'mvn',
+  'mvnw',
+  'composer',
+  ...EDITOR_HEADS,
   'npm',
   'npx',
   'pnpm',
@@ -642,7 +1066,64 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
         pushPy(out, 'pipenv', operands(words, v + 1, PIPENV_VALUE_FLAGS));
       return;
     }
+    case 'gem': {
+      const v = verbIndex(words, start + 1, GEM_VALUE_FLAGS);
+      if (v >= 0 && ['install', 'i'].includes(lower(words[v]))) gemInstall(words, v + 1, out);
+      return;
+    }
+    case 'bundle': {
+      const v = verbIndex(words, start + 1, BUNDLE_VALUE_FLAGS);
+      if (v < 0 || lower(words[v]) !== 'add') return;
+      if (flagValues(words, v + 1, ['--git', '--github', '--path']).length > 0) return;
+      const version = exactVersion(flagValues(words, v + 1, ['-v', '--version'])[0]);
+      for (const raw of operands(words, v + 1, BUNDLE_VALUE_FLAGS))
+        if (GEM_NAME_RE.test(raw)) push(out, 'RubyGems', 'bundle add', raw, version, raw);
+      return;
+    }
+    case 'cargo': {
+      // `cargo +nightly add x`: a toolchain override comes before the verb.
+      const from = words[start + 1]?.startsWith('+') ? start + 2 : start + 1;
+      const v = verbIndex(words, from, CARGO_ADD_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (verb === 'add') cargoCrates(words, v + 1, 'cargo add', out);
+      else if (verb === 'install') cargoCrates(words, v + 1, 'cargo install', out);
+      return;
+    }
+    case 'go': {
+      const v = verbIndex(words, start + 1, GO_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (verb === 'get' || verb === 'install' || verb === 'run')
+        goModules(words, v + 1, `go ${verb}`, out);
+      return;
+    }
+    case 'dotnet': {
+      const v = verbIndex(words, start + 1, DOTNET_ADD_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (verb === 'add') dotnetAdd(words, v + 1, out);
+      else if (verb === 'tool' && ['install', 'update'].includes(lower(words[v + 1])))
+        dotnetTool(words, v + 2, out);
+      return;
+    }
+    case 'nuget': {
+      if (lower(words[start + 1]) === 'install') nugetInstall(words, start + 2, out);
+      return;
+    }
+    case 'mvn':
+    case 'mvnw':
+      mavenGet(words, start + 1, out);
+      return;
+    case 'composer': {
+      let v = verbIndex(words, start + 1, COMPOSER_VALUE_FLAGS);
+      if (v >= 0 && lower(words[v]) === 'global') v = verbIndex(words, v + 1, COMPOSER_VALUE_FLAGS);
+      const verb = lower(words[v]);
+      if (verb === 'require' || verb === 'req' || verb === 'r')
+        composerPackages(words, v + 1, 'composer require', out);
+      else if (verb === 'create-project')
+        composerPackages(words, v + 1, 'composer create-project', out);
+      return;
+    }
     default:
+      if (EDITOR_HEADS.includes(family)) editorExtensions(words, start + 1, out);
       return;
   }
 }
