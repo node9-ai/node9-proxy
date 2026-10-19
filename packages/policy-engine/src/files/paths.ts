@@ -31,6 +31,13 @@ export const SYSTEM_DIRS = [
   '/var/log',
 ] as const;
 export const SYSTEM_DIRS_EXEMPT = ['/usr/local', '/usr/src'] as const;
+/**
+ * Where a file sent in a request is a system file (the upload rule of
+ * files.system-dirs): the system directories, and the kernel's views and the
+ * root home, which an agent may read but has no reason to send. `/root` does
+ * not count when it is the user's own home.
+ */
+export const UPLOAD_SYSTEM_DIRS = [...SYSTEM_DIRS, '/proc', '/sys', '/root'] as const;
 
 /**
  * Files inside a project that run code or instruct the agent (fw#318 P4,
@@ -99,6 +106,8 @@ export interface FileAccess {
   operation: 'read' | 'write' | 'remove' | 'create';
   path: string;
   cwd?: string;
+  /** A read whose content leaves the machine as a request body or an upload. */
+  upload?: true;
   /** Unquoted shell pattern. Quoted metacharacters are escaped in this value. */
   glob?: string;
   /** The pattern is find's, not the shell's: `*` also selects dotfiles. */

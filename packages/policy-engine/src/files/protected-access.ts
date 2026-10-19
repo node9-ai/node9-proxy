@@ -12,6 +12,7 @@ import {
   SYSTEM_AUTH_FILES,
   SYSTEM_DIRS,
   SYSTEM_DIRS_EXEMPT,
+  UPLOAD_SYSTEM_DIRS,
   type FileAccess,
   type FileAccessContext,
 } from './paths';
@@ -156,14 +157,18 @@ const exempt = (p: string): boolean => SYSTEM_DIRS_EXEMPT.some((d) => within(p, 
  * directory cannot reach a system file, so the matcher's prefix rule (which
  * would read /usr/local/* as selecting inside /usr) is not consulted for it.
  */
-function hitsSystemDir(access: FileAccess, context: FileAccessContext): boolean {
+function hitsSystemDir(
+  access: FileAccess,
+  context: FileAccessContext,
+  dirs: readonly string[] = SYSTEM_DIRS
+): boolean {
   const home = context.homeDirs?.[0] ?? '~';
   const candidates = access.candidates ?? [
     normalizeFilePath(access.path, access.cwd ?? context.cwd, home),
   ];
   for (const p of candidates) {
-    if (SYSTEM_DIRS.some((d) => within(p, d)) && !exempt(p)) return true;
-    if (access.recursive && SYSTEM_DIRS.some((d) => within(d, p))) return true;
+    if (dirs.some((d) => within(p, d)) && !exempt(p)) return true;
+    if (access.recursive && dirs.some((d) => within(d, p))) return true;
   }
   if (!access.glob) return false;
   const pattern = normalizeFilePath(access.glob, access.cwd ?? context.cwd, home);
@@ -176,13 +181,20 @@ function hitsSystemDir(access: FileAccess, context: FileAccessContext): boolean 
   // into `/` is not a write under /usr.
   const options = { dot: access.dotGlob === true, nonegate: true };
   const components = pattern.split('/');
-  for (const root of SYSTEM_DIRS) {
+  for (const root of dirs) {
     const count = root.split('/').length;
     if (components.length > count && picomatch(components.slice(0, count).join('/'), options)(root))
       return true;
     if (access.recursive && picomatch(pattern, options)(root)) return true;
   }
   return false;
+}
+
+/** The upload rule's directories; the root home only when it is not the user's own. */
+function uploadDirs(context: FileAccessContext): readonly string[] {
+  return context.homeDirs?.[0] === '/root'
+    ? UPLOAD_SYSTEM_DIRS.filter((d) => d !== '/root')
+    : UPLOAD_SYSTEM_DIRS;
 }
 
 const RANK = { allow: 0, review: 1, block: 2 } as const;
@@ -223,13 +235,19 @@ export function evaluateProtectedFileAccess(
                   'review-system-dir-mutation',
                   'Changing files in a system directory requires approval',
                 ]
-              : !mutation && hits(access, PASSWORD_HASH_FILES, [], context)
+              : !mutation && access.upload && hitsSystemDir(access, context, uploadDirs(context))
                 ? [
-                    'files.password-hashes',
-                    'review-password-hash-read',
-                    'Reading system password hashes requires approval',
+                    'files.system-dirs',
+                    'review-system-file-upload',
+                    'Uploading a system file requires approval',
                   ]
-                : null;
+                : !mutation && hits(access, PASSWORD_HASH_FILES, [], context)
+                  ? [
+                      'files.password-hashes',
+                      'review-password-hash-read',
+                      'Reading system password hashes requires approval',
+                    ]
+                  : null;
     } catch {
       // picomatch refuses patterns beyond its input limit. An operand the
       // matcher cannot evaluate is not evidence that the target is harmless.

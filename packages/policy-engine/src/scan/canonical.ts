@@ -697,7 +697,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // canonical-v27 (node9Firewall#333 follow-up): the card detector also skips
 // a fraction written with a leading dot (".479...") or as a comma decimal
 // after a lone 0 ("0,479..."), so histories scanned under v26 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
+// canonical-v28 (2026-10-19): analyzeFsOperation binds shell function
+// arguments at each call (node9Firewall#361), so a jailed read through a
+// function argument (`show() { cat "$1"; }; show .env`) is now a finding in
+// history scans too. Every daemon re-scans once.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v28';
 
 // 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
 // SYSTEM_DIRS sets for the live file policy (files.system-dirs); the extractor
@@ -744,7 +748,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v27';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '21b7b7e7477fc955';
+export const CANONICAL_EXTRACTOR_HASH = '2474db0be375f01c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

