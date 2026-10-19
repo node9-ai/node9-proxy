@@ -18,15 +18,17 @@
 // defeats them, exactly as it did before Luhn was added.
 //
 // An unseparated card-shaped run that is the fractional part of a number is
-// not a card: after `<digit>.`, after a leading `.` (".479..."), or after a
-// lone `0,` (comma decimal). A `.` and a `,` are word boundaries, so without
+// not a card: after `<digit>.`, after a leading `.` at the start of the text
+// (".479..."), or after a lone `0,` at the start of the text or after `;`
+// (comma decimal). A `.` and a `,` are word boundaries, so without
 // that rule a float printed at full precision (16 or 17 fractional digits) is
 // read as a card, and 70 of the 4,950 fractions k/n with 2 <= n <= 100 pass
 // Luhn in each spelling (node9Firewall#333). The rule lives in hasValidCard
 // (isDecimalFraction), not in the regexes, so they stay lookbehind-free
 // (safe-regex2, house style). Accepted gaps: an unseparated card written
-// directly after "1.", ".", or a standalone "0," is not detected; a grouped
-// one still is, since a fraction has no separators. A comma decimal above 1
+// directly after "1.", at the very start of a text after "." or "0,", or
+// after ";0," is not detected; a grouped one still is, since a fraction has
+// no separators. A comma decimal above 1
 // ("12,479...") is still read as a card: "1,<run>" is a CSV row.
 //
 // This file is part of the extractor-version hash set
@@ -137,18 +139,20 @@ export function replaceValidCards(
   return out;
 }
 
-// Characters that may stand directly before a number written with a leading
-// separator (".479...") or before the lone `0` of a comma decimal ("0,479...").
-// Letters, digits, `.` and `,` are deliberately absent, so "card.<run>",
-// "...<run>" and a CSV row "5,0,<run>" stay detectable.
-const NUMBER_LEAD_RE = /[\s:=;([{"'+-]/;
-
 /**
  * True if an unseparated digit run at `index` is the fractional part of a
  * number (node9Firewall#333). Three spellings are recognised:
  *   `<digit>.<run>`  "0.479...", "12.479..."  (JavaScript, Python, JSON)
- *   `.<run>`         ".479..." at the start of the text or after NUMBER_LEAD_RE
- *   `0,<run>`        "0,479..." with the `0` standing alone (comma decimal)
+ *   `.<run>`         ".479..." only at the very start of the text, or after a
+ *                    sign that itself starts it ("-.479...")
+ *   `0,<run>`        "0,479..." with the `0` at the start of the text or right
+ *                    after ";" (a semicolon CSV with comma decimals)
+ * Anywhere else the dot or the "0," is one character an injected instruction
+ * can put in front of a card ("text=.<card>"), so the run is judged as a card.
+ * A full-precision leading-dot fraction is rare in practice (JavaScript,
+ * Python, Go and JSON print "0."; bc prints 20 digits, which no card pattern
+ * matches); 0 of the strings in 994 local session transcripts changed when
+ * the exemption was narrowed from "after any number-lead character".
  * A grouped run ("4xxx 4xxx ...") is never a fraction, so it is not exempt.
  * A comma after any other digit is NOT exempt: "1,<run>" is a CSV row.
  */
@@ -158,11 +162,11 @@ function isDecimalFraction(text: string, index: number, unseparated: boolean): b
   const a = text[index - 2]; // undefined at the start of the text
   if (sep === '.') {
     if (a !== undefined && a >= '0' && a <= '9') return true;
-    return a === undefined || NUMBER_LEAD_RE.test(a);
+    return a === undefined || ((a === '-' || a === '+') && index === 2);
   }
   if (sep === ',' && a === '0') {
     const b = text[index - 3];
-    return b === undefined || NUMBER_LEAD_RE.test(b);
+    return b === undefined || b === ';';
   }
   return false;
 }

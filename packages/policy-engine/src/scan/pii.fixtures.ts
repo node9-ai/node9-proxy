@@ -294,8 +294,26 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
     {
       id: 'leading-dot-after-colon',
       build: () => ['rate: .', asm(V1)].join(''),
-      expectCard: false,
-      proves: 'NUMBER_LEAD_RE: a leading dot after ": " is a fraction',
+      expectCard: true,
+      proves: 'a leading dot exempts only at the start of the text: after ": " it is a card',
+    },
+    {
+      id: 'leading-dot-after-equals',
+      build: () => ['text=.', asm(V1)].join(''),
+      expectCard: true,
+      proves: 'a dot placed after "=" does not hide a card (the evasion)',
+    },
+    {
+      id: 'leading-dot-after-space',
+      build: () => ['card .', asm(V1)].join(''),
+      expectCard: true,
+      proves: 'a dot placed after a space does not hide a card',
+    },
+    {
+      id: 'leading-dot-in-quotes',
+      build: () => ['"', '.', asm(V1), '"'].join(''),
+      expectCard: true,
+      proves: 'a dot placed after a quote does not hide a card',
     },
     {
       id: 'amex-leading-dot-signed',
@@ -312,8 +330,15 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
     {
       id: 'comma-decimal',
       build: () => ['rate 0,', asm(V1)].join(''),
-      expectCard: false,
-      proves: 'a lone 0 then a comma is a comma decimal',
+      expectCard: true,
+      proves:
+        'a comma decimal exempts only at the start of the text or after ";": after a space it is a card',
+    },
+    {
+      id: 'comma-decimal-after-equals',
+      build: () => ['text=0,', asm(V1)].join(''),
+      expectCard: true,
+      proves: 'a "0," placed after "=" does not hide a card (the evasion)',
     },
     {
       id: 'comma-decimal-at-text-start',
@@ -381,5 +406,5 @@ export const ROW_COUNTS = {
   INVALID_16: 5,
   INVALID_15: 1,
   NON_CARD_16: 5,
-  COMPOSITE: 38,
+  COMPOSITE: 42,
 } as const;

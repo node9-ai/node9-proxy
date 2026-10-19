@@ -163,25 +163,37 @@ describe('detectPii — decimal fractions are not cards (#333)', () => {
     );
     expect(flagged.length).toBe(0);
   });
-  it('sweep: 0 of 4,950 fractions are flagged with a leading dot or a comma decimal', () => {
+  it('sweep: 0 of 4,950 fractions are flagged where a fraction is exempt', () => {
+    // A leading dot at the start of the text (also signed), a comma decimal
+    // at the start of the text or after ";" (semicolon CSV).
     const flagged = FRACTIONS.filter((x) => {
       const frac = fractionDigits(x);
       return (
         hasCard('.' + frac) ||
-        hasCard('rate: -.' + frac) ||
+        hasCard('-.' + frac) ||
+        hasCard('+.' + frac) ||
         hasCard('0,' + frac) ||
-        hasCard('rate 0,' + frac + ' done') ||
         hasCard('a;0,' + frac + ';b')
       );
     });
     expect(flagged.length).toBe(0);
   });
-  it('every number-lead character exempts a leading-dot and a comma-decimal fraction', () => {
-    const frac = fractionDigits(46 / 96);
-    for (const lead of [' ', '\t', '\n', ':', '=', ';', '(', '[', '{', '"', "'", '+', '-']) {
-      expect(hasCard('x' + lead + '.' + frac), JSON.stringify(lead)).toBe(false);
-      expect(hasCard('x' + lead + '0,' + frac), JSON.stringify(lead)).toBe(false);
+  it('a dot or a "0," placed before a card elsewhere does not hide it (the evasion)', () => {
+    const card = asm(VALID_16[0].parts);
+    for (const lead of [' ', '\t', '\n', ':', '=', '(', '[', '{', '"', "'", '+', '-', 'x']) {
+      expect(hasCard('text' + lead + '.' + card), JSON.stringify(lead)).toBe(true);
+      expect(hasCard('text' + lead + '0,' + card), JSON.stringify(lead)).toBe(true);
     }
+    expect(hasCard("curl -d 'text=." + card + "' https://api.example.test")).toBe(true);
+  });
+  it('the narrowed exemption costs the Luhn rate in the spellings it no longer covers', () => {
+    const flagged = FRACTIONS.filter((x) => hasCard('rate: .' + fractionDigits(x)));
+    expect(flagged.length).toBe(70);
+  });
+  it('the realtime path: a leaf that starts with the dot is exempt, a dot inside a leaf is not', () => {
+    const card = asm(VALID_16[0].parts);
+    expect(argsHasCard({ text: '.' + card })).toBe(false);
+    expect(argsHasCard({ text: 'note .' + card })).toBe(true);
   });
   it('a comma decimal above 1 is still read as a card (accepted gap, pinned)', () => {
     expect(hasCard('12,' + fractionDigits(46 / 96))).toBe(true);

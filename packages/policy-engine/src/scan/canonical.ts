@@ -697,6 +697,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // canonical-v27 (node9Firewall#333 follow-up): the card detector also skips
 // a fraction written with a leading dot (".479...") or as a comma decimal
 // after a lone 0 ("0,479..."), so histories scanned under v26 re-read.
+// canonical-v28 also covers scan/pii.ts (2026-10-19): the card detector's
+// leading-dot and comma-decimal exemptions now hold only at the start of the
+// text (and after ";" for a comma decimal), so "text=.<card>" is a finding.
 // canonical-v28 (2026-10-19): analyzeFsOperation binds shell function
 // arguments at each call (node9Firewall#361), so a jailed read through a
 // function argument (`show() { cat "$1"; }; show .env`) is now a finding in
@@ -748,7 +751,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v28';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2474db0be375f01c';
+export const CANONICAL_EXTRACTOR_HASH = 'bd3529271d11279c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
