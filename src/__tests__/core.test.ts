@@ -324,11 +324,16 @@ describe('Bash tool — shell command interception', () => {
     expect(result.ruleName).toBe('review-sudo');
   });
 
-  it('sudo rm of a tree holding a system directory is still a review, owned by files.system-dirs', async () => {
-    const result = await evaluatePolicy('Bash', { command: 'sudo rm -rf /var' });
-    expect(result.decision).toBe('review');
-    expect(result.ruleName).toBe('review-system-dir-mutation');
-  });
+  // The file policy is POSIX-only (prepareFileAccesses returns no accesses on
+  // win32), so on Windows the same command is review-sudo, still a review.
+  it.skipIf(process.platform === 'win32')(
+    'sudo rm of a tree holding a system directory is still a review, owned by files.system-dirs',
+    async () => {
+      const result = await evaluatePolicy('Bash', { command: 'sudo rm -rf /var' });
+      expect(result.decision).toBe('review');
+      expect(result.ruleName).toBe('review-system-dir-mutation');
+    }
+  );
 
   // ── Smart rule: review-curl-pipe-shell ────────────────────────────────────
   it.each([
