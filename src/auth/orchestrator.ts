@@ -2680,6 +2680,11 @@ async function _authorizeHeadlessCore(
         ...ownRowMeta(finalResult.approved),
         ...(cloudRequestId && { cloudRequestId }),
         ...(appPermReview && { ruleName: `app-permission:${appPermReviewTool}` }),
+        // Who decided, from the decision record, and the card: the daemon
+        // writes its own row for the same card, and the report counts one.
+        ...(finalResult.decidedBy && { decidedBy: finalResult.decidedBy }),
+        ...(finalResult.channel && { channel: finalResult.channel }),
+        ...(daemonEntryId && { cardId: daemonEntryId }),
       },
       hashAuditArgs
     );

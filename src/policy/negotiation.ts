@@ -8,6 +8,9 @@
 export interface BlockContext {
   kind?: 'protected-path';
   path?: string;
+  /** A person stopped the call and gave the agent an instruction instead
+   *  (node9 tail recovery choice [2]); humanReason is that instruction. */
+  redirect?: boolean;
 }
 
 export function buildNegotiationMessage(
@@ -17,6 +20,14 @@ export function buildNegotiationMessage(
   recoveryCommand?: string,
   context?: BlockContext
 ): string {
+  if (isHumanDecision && context?.redirect && humanReason) {
+    return `NODE9: The user stopped this action and gave you an instruction.
+INSTRUCTION FROM THE USER: ${humanReason}
+INSTRUCTIONS:
+- Follow the user's instruction above.
+- Retry the original action only if the instruction says you may.`;
+  }
+
   if (isHumanDecision) {
     return `NODE9: The human user rejected this action.
 REASON: ${humanReason || 'No specific reason provided.'}
@@ -162,7 +173,11 @@ export function buildReviewMessage(
  *  rejection. The label words remain the signal for a person's own decision
  *  (`User Decision (...)`, blockedBy `local-decision`) and for callers that
  *  pass a bare label. */
-export function isHumanDecision(label: string, blockedBy?: string): boolean {
+export function isHumanDecision(label: string, blockedBy?: string, decidedBy?: string): boolean {
+  // The decision record says who decided (approval-card design): only a
+  // person is a human decision. The words below are read only for a result
+  // without one (a caller that passes a bare label, an older peer).
+  if (decidedBy !== undefined) return decidedBy === 'person';
   if (blockedBy !== undefined && blockedBy !== 'local-decision') return false;
   const l = label.toLowerCase();
   return l.includes('user') || l.includes('daemon') || l.includes('decision');

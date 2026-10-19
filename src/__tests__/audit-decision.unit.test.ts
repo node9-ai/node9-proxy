@@ -194,3 +194,19 @@ describe('row form — attribution comes from checkedBy OR source', () => {
     expect(classifyDecision('allow').label).toBe('Auto-allowed');
   });
 });
+
+// Approval-card design: a row that says who decided is classified by it.
+// Before, every daemon row was a person's: a timeout read as "Denied".
+describe('a row with decidedBy is classified by who decided', () => {
+  it.each([
+    [{ decision: 'auto-deny', source: 'daemon', decidedBy: 'timer' }, 'Timed out'],
+    [{ decision: 'deny', source: 'daemon', decidedBy: 'abandoned' }, 'Timed out'],
+    [{ decision: 'deny', source: 'daemon', decidedBy: 'person' }, 'Denied'],
+    [{ decision: 'allow', checkedBy: 'daemon', decidedBy: 'person' }, 'Approved'],
+    [{ decision: 'trust:30m', source: 'daemon', decidedBy: 'person' }, 'Approved'],
+    [{ decision: 'deny', source: 'daemon', decidedBy: 'policy' }, 'Blocked'],
+    [{ decision: 'allow', source: 'daemon', decidedBy: 'cloud' }, 'Auto-allowed'],
+  ])('%j is %s', (row, label) => {
+    expect(classifyDecision(row).label).toBe(label);
+  });
+});

@@ -80,6 +80,9 @@ export interface AuditRowLike {
   checkedBy?: unknown;
   /** The gate writes `checkedBy`; the PostToolUse hook writes `source`. */
   source?: unknown;
+  /** Who decided an approval (src/auth/decision-record.ts), on rows written
+   *  since the approval-card protocol. */
+  decidedBy?: unknown;
 }
 
 /**
@@ -128,6 +131,25 @@ export function classifyDecision(a: unknown, b?: unknown): DecisionView {
   // them as refusals (the CLI's old behaviour) invents denials that never were.
   if (d === 'dlp') return { outcome: 'info', label: 'Finding', raw };
   if (d === 'mcp-discovered') return { outcome: 'info', label: 'Info', raw };
+
+  // Who decided, from the decision record, before the attribution words: a
+  // daemon row used to read as a person's even when its timer decided.
+  const decidedBy = isRow ? (a as AuditRowLike).decidedBy : undefined;
+  if (typeof decidedBy === 'string') {
+    const allowed = d === 'allow' || d === 'allowed' || d.startsWith('trust:');
+    const denied = d === 'deny' || d === 'auto-deny' || d === 'block';
+    if (allowed || denied) {
+      if (decidedBy === 'person')
+        return allowed
+          ? { outcome: 'allow', label: 'Approved', raw }
+          : { outcome: 'deny', label: 'Denied', raw };
+      if (decidedBy === 'timer' || decidedBy === 'abandoned')
+        return { outcome: 'deny', label: 'Timed out', raw };
+      return allowed
+        ? { outcome: 'allow', label: 'Auto-allowed', raw }
+        : { outcome: 'deny', label: 'Blocked', raw };
+    }
+  }
 
   if (d === 'allow' || d === 'allowed') {
     // The PostToolUse hook records that a tool RAN. It isn't a verdict — the

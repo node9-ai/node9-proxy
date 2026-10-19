@@ -91,7 +91,7 @@ export async function runProxy(targetCommand: string) {
 
           // 2. Talk to the AI with a context-specific negotiation message
           const blockedByLabel = result.blockedByLabel ?? result.reason ?? 'Security Policy';
-          const isHuman = isHumanDecision(blockedByLabel, result.blockedBy);
+          const isHuman = isHumanDecision(blockedByLabel, result.blockedBy, result.decidedBy);
           const aiInstruction = buildNegotiationMessage(
             blockedByLabel,
             isHuman,
@@ -100,6 +100,7 @@ export async function runProxy(targetCommand: string) {
             {
               kind: result.blockKind,
               path: result.blockedPath,
+              redirect: !!result.redirect,
             }
           );
 

@@ -38,6 +38,9 @@ interface AuditLine {
   args?: Record<string, unknown>;
   testRun?: boolean;
   testResult?: 'pass' | 'fail';
+  decidedBy?: string;
+  channel?: string;
+  cardId?: string;
   dlpPattern?: string;
   dlpSample?: string;
   argsHash?: string;
@@ -723,6 +726,87 @@ describe('aggregateReportFromAudit', () => {
       const result = aggregateReportFromAudit('7d', makeOpts());
       expect(result.data.userDenied).toBe(2);
       expect(result.data.hardBlocked).toBe(0);
+    });
+
+    // Approval-card design: the hook and the daemon both write a row for one
+    // card. Before, a person's deny counted twice and a timeout counted as
+    // both a user deny (the daemon's row) and a timeout (the hook's).
+    it('counts a card once, by who decided', () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'local-decision',
+          decidedBy: 'person',
+          channel: 'terminal',
+          cardId: 'c1',
+        },
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          source: 'daemon',
+          decidedBy: 'person',
+          channel: 'terminal',
+          cardId: 'c1',
+        },
+        {
+          ts: '2026-05-08T12:01:00Z',
+          tool: 'Bash',
+          decision: 'deny',
+          checkedBy: 'timeout',
+          decidedBy: 'timer',
+          cardId: 'c2',
+        },
+        {
+          ts: '2026-05-08T12:01:00Z',
+          tool: 'Bash',
+          decision: 'auto-deny',
+          source: 'daemon',
+          decidedBy: 'timer',
+          cardId: 'c2',
+        },
+        {
+          ts: '2026-05-08T12:02:00Z',
+          tool: 'Bash',
+          decision: 'allow',
+          checkedBy: 'daemon',
+          decidedBy: 'person',
+          channel: 'monitor',
+          cardId: 'c3',
+        },
+        {
+          ts: '2026-05-08T12:02:00Z',
+          tool: 'Bash',
+          decision: 'allow',
+          source: 'daemon',
+          decidedBy: 'person',
+          channel: 'monitor',
+          cardId: 'c3',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.userDenied).toBe(1);
+      expect(result.data.timedOut).toBe(1);
+      expect(result.data.userApproved).toBe(1);
+      expect(result.data.hardBlocked).toBe(0);
+    });
+
+    it("an SDK card's daemon row counts by who decided", () => {
+      writeLog([
+        {
+          ts: '2026-05-08T12:00:00Z',
+          tool: 'bash',
+          decision: 'deny',
+          source: 'daemon',
+          decidedBy: 'policy',
+          cardId: 's1',
+        },
+      ]);
+      const result = aggregateReportFromAudit('7d', makeOpts());
+      expect(result.data.userDenied).toBe(0);
+      expect(result.data.hardBlocked).toBe(1);
     });
 
     it('keeps smart-rule-block (no override) in hardBlocked', () => {

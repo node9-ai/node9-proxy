@@ -140,10 +140,11 @@ const PUSH_REVIEW = {
  *  build, each deciding "human" with isHumanDecision. */
 function agentMessage(res: AuthResult): string {
   const label = res.blockedByLabel ?? res.blockedBy ?? 'Local Security Policy';
-  const isHuman = isHumanDecision(label, res.blockedBy);
+  const isHuman = isHumanDecision(label, res.blockedBy, res.decidedBy);
   return buildNegotiationMessage(label, isHuman, res.reason, res.recoveryCommand, {
     kind: res.blockKind,
     path: res.blockedPath,
+    redirect: !!res.redirect,
   });
 }
 
@@ -608,6 +609,25 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
 
       expect(res.decidedBy).toBe('timer');
       expect(res.blockedBy).toBe('timeout');
+    });
+
+    it("a person's redirect in node9 tail reaches the agent as their instruction", async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.waitForDaemonDecision.mockResolvedValue({
+        decision: 'deny',
+        source: 'terminal-redirect',
+        reason: 'Run `npm test` first, then retry.',
+        record: personRecord('terminal', 'deny', { redirect: 'Run `npm test` first, then retry.' }),
+      });
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      // Before: "Steered Redirect (Terminal)" failed the label test and the
+      // agent got a generic "blocked by security policy" with no instruction.
+      expect(res.decidedBy).toBe('person');
+      const msg = agentMessage(res);
+      expect(msg).toMatch(/gave you an instruction/);
+      expect(msg).toContain('Run `npm test` first, then retry.');
     });
 
     it('a protocol-2 card with no timer is waited on with no cap', async () => {

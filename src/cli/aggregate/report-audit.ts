@@ -64,6 +64,13 @@ export interface AuditEntry {
   /** Agent session id — scoped pairing key alongside argsHash so two
    *  unrelated sessions running the same exact command don't collide. */
   sessionId?: string;
+  /** Who decided an approval (src/auth/decision-record.ts): person, timer,
+   *  cloud, policy or abandoned. Rows written before the field have none. */
+  decidedBy?: string;
+  channel?: string;
+  /** The daemon card the approval was decided on. The hook and the daemon
+   *  both write a row for it; the report counts the hook's. */
+  cardId?: string;
 }
 
 interface JournalEntry {
@@ -1118,7 +1125,15 @@ export function aggregateReportFromAudit(
   let dimPinMismatch = 0;
   let dimInjectionBlocked = 0;
 
+  // A card decided on the daemon has two rows, the hook's and the daemon's:
+  // count it once, from the hook's (approval-card design). A daemon row with
+  // no hook row (a card of the Python SDK) still counts.
+  const hookCardIds = new Set(
+    entries.filter((e) => e.source !== 'daemon' && e.cardId).map((e) => e.cardId!)
+  );
+
   for (const e of entries) {
+    if (e.source === 'daemon' && e.cardId && hookCardIds.has(e.cardId)) continue;
     // Skip intermediate `smart-rule-block-override` rows that were
     // resolved by a later daemon allow. The user-approval row carries
     // the authoritative outcome — counting both inflates buckets and
@@ -1127,7 +1142,10 @@ export function aggregateReportFromAudit(
 
     const view = viewOf(e);
     const dateKey = e.ts.slice(0, 10);
-    const userInteracted = e.source === 'daemon';
+    // Who decided, from the decision record when the row has one: only a
+    // person is a user decision (a daemon row used to count as one even when
+    // its timer or a rule decided).
+    const userInteracted = e.decidedBy ? e.decidedBy === 'person' : e.source === 'daemon';
 
     // Shadow mode is neither an approval nor a refusal: node9 flagged the
     // action and it ran anyway. It gets its own counter and is kept out of
@@ -1142,7 +1160,8 @@ export function aggregateReportFromAudit(
       if (view.ran) userApproved++;
       else userDenied++;
     } else if (view.blocked) {
-      if (e.checkedBy === 'timeout') timedOut++;
+      if (e.checkedBy === 'timeout' || e.decidedBy === 'timer' || e.decidedBy === 'abandoned')
+        timedOut++;
       else if (isDlp(e.checkedBy)) dlpBlocked++;
       // A native-OS popup deny — the user clicked Block. Same intent
       // as a SaaS-approver deny (source=daemon), just a different

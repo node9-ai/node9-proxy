@@ -238,6 +238,11 @@ export function appendLocalAudit(
     /** fw#318 2b: on a send held after exposure, the eid of the read it
      *  followed (the session graph's edge, like taintFromEid). */
     exposureFromEid?: string;
+    /** Who decided an approval and where (src/auth/decision-record.ts), and
+     *  the daemon card it was decided on: the report counts a card once. */
+    decidedBy?: string;
+    channel?: string;
+    cardId?: string;
   },
   auditHashArgsEnabled?: boolean
 ): string {
@@ -338,6 +343,9 @@ export function appendLocalAudit(
     ...transcriptPathField,
     ...taintFields,
     ...exposureFields,
+    ...(meta?.decidedBy && { decidedBy: meta.decidedBy }),
+    ...(meta?.channel && { channel: meta.channel }),
+    ...(meta?.cardId && { cardId: meta.cardId }),
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,
