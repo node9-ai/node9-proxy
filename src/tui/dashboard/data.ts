@@ -993,6 +993,18 @@ function normalizeTs(ts: unknown): string {
  * Returns success on HTTP 200 OR 409 (race-loser conflict — another
  * approver got there first, which is still a resolved state).
  */
+
+/** The /decision body node9 monitor sends. Monitor is a person's channel.
+ *  Its trust key is node9 tail's "Trust 30m": it used to send persist with no
+ *  duration, which the daemon turned into a PERMANENT deny of the whole tool. */
+export function monitorDecisionBody(decision: 'allow' | 'deny' | 'trust'): Record<string, unknown> {
+  return {
+    decision,
+    source: 'monitor',
+    ...(decision === 'trust' && { trustDuration: '30m' }),
+  };
+}
+
 export function submitDecision(
   id: string,
   decision: 'allow' | 'deny' | 'trust'
@@ -1003,9 +1015,7 @@ export function submitDecision(
       resolve({ ok: false, error: 'daemon not running' });
       return;
     }
-    const bodyObj: Record<string, unknown> = { decision, source: 'dashboard' };
-    if (decision === 'trust') bodyObj.persist = true;
-    const body = JSON.stringify(bodyObj);
+    const body = JSON.stringify(monitorDecisionBody(decision));
     const req = http.request(
       {
         hostname: DAEMON_HOST,

@@ -563,6 +563,53 @@ describe('decision attribution (ENG-2, MSG-5)', () => {
       });
     });
 
+    it('one timer: with a protocol-2 card the hook arms none; the card times out', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.approvalTimeoutMs = 60;
+      H.registerDaemonEntry.mockResolvedValue({
+        id: 'entry-1',
+        allowCount: 1,
+        protocol: 2,
+        deadline: Date.now() + 60,
+      });
+      let daemonAnswered = false;
+      H.waitForDaemonDecision.mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => {
+              daemonAnswered = true;
+              resolve({
+                decision: 'deny',
+                source: 'timeout',
+                record: {
+                  decision: 'deny',
+                  decidedBy: 'timer',
+                  label: 'Approval Timeout',
+                  decidedAt: Date.now(),
+                },
+              });
+            }, 300)
+          )
+      );
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      // Before: the hook's own 60 ms timer ended the race first.
+      expect(daemonAnswered).toBe(true);
+      expect(res.decidedBy).toBe('timer');
+      expect(res.blockedBy).toBe('timeout');
+    });
+
+    it('an older daemon (no protocol): the hook keeps its own timer', async () => {
+      H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
+      H.approvalTimeoutMs = 60;
+
+      const res = await authorizeHeadless('Bash', { command: 'git push' });
+
+      expect(res.decidedBy).toBe('timer');
+      expect(res.blockedBy).toBe('timeout');
+    });
+
     it('a protocol-2 card with no timer is waited on with no cap', async () => {
       H.evaluatePolicy.mockResolvedValue(PUSH_REVIEW);
       H.registerDaemonEntry.mockResolvedValue({

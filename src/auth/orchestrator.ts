@@ -2267,27 +2267,8 @@ async function _authorizeHeadlessCore(
   const { signal } = abortController;
   const racePromises: Promise<AuthResult>[] = [];
 
-  // ⏱️ RACER 0: Approval Timeout
+  // ⏱️ RACER 0 (the approval timeout) is armed after the card below.
   const approvalTimeoutMs = config.settings.approvalTimeoutMs ?? 0;
-  if (approvalTimeoutMs > 0) {
-    racePromises.push(
-      new Promise<AuthResult>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          resolve({
-            approved: false,
-            reason: approvalTimeoutReason(approvalTimeoutMs),
-            blockedBy: 'timeout',
-            blockedByLabel: 'Approval Timeout',
-            decidedBy: 'timer',
-          });
-        }, approvalTimeoutMs);
-        signal.addEventListener('abort', () => {
-          clearTimeout(timer);
-          reject(new Error('Aborted'));
-        });
-      })
-    );
-  }
 
   let viewerId: string | null = null;
   const internalToken = getInternalToken();
@@ -2377,6 +2358,32 @@ async function _authorizeHeadlessCore(
         // Daemon unreachable — skip both racers gracefully
       }
     }
+  }
+
+  // ⏱️ RACER 0: Approval Timeout
+  // One timer per approval (approval-card design): a protocol-2 card carries
+  // its own deadline, set from this timeout, and the daemon decides it there
+  // (decidedBy 'timer'). The hook arms its own timer only without such a
+  // card: no daemon, no terminal approver, or a daemon older than the card
+  // protocol.
+  if (approvalTimeoutMs > 0 && cardDeadline === undefined) {
+    racePromises.push(
+      new Promise<AuthResult>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve({
+            approved: false,
+            reason: approvalTimeoutReason(approvalTimeoutMs),
+            blockedBy: 'timeout',
+            blockedByLabel: 'Approval Timeout',
+            decidedBy: 'timer',
+          });
+        }, approvalTimeoutMs);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Aborted'));
+        });
+      })
+    );
   }
 
   // 🏁 RACER 1: Cloud SaaS Channel (The Poller)
