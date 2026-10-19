@@ -9,10 +9,17 @@ import os from 'os';
 import { randomUUID } from 'crypto';
 import { addTrustedRecipient } from '../auth/trusted-recipients';
 import {
-  backgroundPassSource,
-  DECISION_ROUTE_SOURCES,
-  HUMAN_DECISION_SOURCES,
-} from '../auth/decision-sources';
+  CARD_PROTOCOL,
+  CHANNELS,
+  channelFromDecisionSource,
+  legacyWaitFields,
+  parseDecisionRecord,
+  personRecord,
+  recordFromLegacyResolve,
+  recordFromVerdict,
+  type Channel,
+} from '../auth/decision-record';
+import type { Card, CardKind, CardRequest } from './cards';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
@@ -37,7 +44,7 @@ import {
   TRUST_DURATIONS,
   autoStarted,
   activityRing,
-  pending,
+  cards,
   sseClients,
   setDaemonServer,
   getAbandonTimer,
@@ -59,15 +66,12 @@ import {
   broadcast,
   abandonPending,
   startActivitySocket,
-  type PendingEntry,
   type SseClient,
-  type Decision,
   taintStore,
   sessionTaintStore,
   sessionExposureStore,
   insightCounts,
   loadInsightCounts,
-  saveInsightCounts,
   sessionCounters,
   sessionHistory,
   type HudStatus,
@@ -212,20 +216,54 @@ export function buildDaemonReport(
   };
 }
 
-/** How long a card waits before the daemon denies it, or null for no timer.
- *  0 means "no timer", as it does to the hook: read with `??` it armed a 0 ms
- *  timer that denied every card the moment it opened. Unset takes the default.
- *  The tail's countdown and the timer read this one value. */
-function autoDenyMs(): number | null {
-  const ms = getConfig().settings.approvalTimeoutMs;
-  if (ms === 0) return null;
+/** The approval timeout for a card whose caller sent none (an older hook,
+ *  the Python SDK), from the caller's project config. 0 means no timer; unset
+ *  takes the default. */
+function configTimeoutMs(config: ReturnType<typeof getConfig>): number {
+  const ms = config.settings.approvalTimeoutMs;
   return ms ?? AUTO_DENY_MS;
 }
 
-/** The card's auto-deny timer, or none when the timeout is 0. */
-function armAutoDeny(fire: () => void): ReturnType<typeof setTimeout> | undefined {
-  const ms = autoDenyMs();
-  return ms === null ? undefined : setTimeout(fire, ms);
+/** The channels a /check request names, or null when it names none. */
+function parseChannels(v: unknown): Channel[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.filter((c): c is Channel => (CHANNELS as readonly unknown[]).includes(c));
+  return out.length > 0 ? [...new Set(out)] : null;
+}
+
+/** Channels for a request that names none (older callers). A review card of
+ *  an older hook may also be answered by its native popup or its cloud poller,
+ *  which the daemon cannot see; listing them keeps such a card from being
+ *  abandoned when node9 tail closes. */
+function inferChannels(kind: CardKind, slackDelegated: boolean): Channel[] {
+  if (kind === 'evaluate') return ['terminal', 'monitor'];
+  return slackDelegated
+    ? ['terminal', 'monitor', 'cloud']
+    : ['terminal', 'monitor', 'native', 'cloud'];
+}
+
+/** A card as node9 tail and node9 monitor see it (SSE init and add). */
+function cardView(card: Card): Record<string, unknown> {
+  const r = card.request;
+  return {
+    id: card.id,
+    toolName: r.toolName,
+    args: r.args,
+    riskMetadata: r.riskMetadata,
+    ...(r.recoveryCommand && { recoveryCommand: r.recoveryCommand }),
+    ...(r.viewOnly && { viewOnly: true }),
+    slackDelegated: card.channels.includes('cloud') && !card.channels.includes('native'),
+    timestamp: card.createdAt,
+    deadline: card.deadline,
+    agent: r.agent,
+    mcpServer: r.mcpServer,
+    ...(card.kind === 'discovery' && {
+      type: 'mcp-discovery',
+      serverKey: r.serverKey,
+      mcpTools: r.mcpTools,
+    }),
+    allowCount: (insightCounts.get(r.toolName) ?? 0) + 1,
+  };
 }
 
 export function startDaemon(): void {
@@ -272,7 +310,7 @@ export function startDaemon(): void {
   const internalToken = randomUUID();
 
   /** The "Allow + trust" half of a decision on an exposure card (fw#318 P5). */
-  const applyTrustRecipients = (entry: PendingEntry): void => {
+  const applyTrustRecipients = (entry: CardRequest): void => {
     const dests = entry.riskMetadata?.exposureDestinations ?? [];
     if (dests.length === 0) return;
     let policySource: string | undefined;
@@ -324,6 +362,10 @@ export function startDaemon(): void {
     idleTimer.unref(); // Don't hold the process open just for the timer
   }
   resetIdleTimer(); // Start the clock
+
+  // Approval cards: drop decided cards nobody read, withdraw cards whose asker
+  // never waited (src/daemon/cards.ts sweep).
+  setInterval(() => cards.sweep(), 10_000).unref();
 
   // Allowed Host header values — DNS rebinding guard.
   // A malicious website that DNS-rebinds attacker.com → 127.0.0.1 would send
@@ -377,21 +419,8 @@ export function startDaemon(): void {
       sseClients.add(sseClient);
       res.write(
         `event: init\ndata: ${JSON.stringify({
-          requests: Array.from(pending.values()).map((e) => ({
-            id: e.id,
-            toolName: e.toolName,
-            args: e.args,
-            riskMetadata: e.riskMetadata,
-            ...(e.recoveryCommand && { recoveryCommand: e.recoveryCommand }),
-            ...(e.viewOnly && { viewOnly: true }),
-            slackDelegated: e.slackDelegated,
-            timestamp: e.timestamp,
-            agent: e.agent,
-            mcpServer: e.mcpServer,
-            allowCount: (insightCounts.get(e.toolName) ?? 0) + 1,
-          })),
+          requests: cards.open().map(cardView),
           orgName: getOrgName(),
-          autoDenyMs: autoDenyMs(),
         })}\n\n`
       );
       // event: decisions / shields-status / csrf removed in v3 sprint.
@@ -412,7 +441,7 @@ export function startDaemon(): void {
       }
       return req.on('close', () => {
         sseClients.delete(sseClient);
-        if (sseClients.size === 0 && pending.size > 0) {
+        if (sseClients.size === 0 && cards.open().length > 0) {
           // Give 10s if browser was already open (page reload / brief disconnect),
           // 15s on cold-start (browser needs time to open and connect SSE).
           setAbandonTimer(setTimeout(abandonPending, getHadBrowserClient() ? 10_000 : 15_000));
@@ -427,187 +456,122 @@ export function startDaemon(): void {
 
         const body = await readBody(req);
         if (body.length > 65_536) return res.writeHead(413).end();
-        const {
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+        const { toolName, args, agent, mcpServer, riskMetadata, recoveryCommand, activityId, cwd } =
+          parsed;
+        if (typeof toolName !== 'string' || !toolName) return res.writeHead(400).end();
+        const fromCLI = parsed.fromCLI === true;
+        // review: node9's own callers, which already decided this call needs a
+        // person; the daemon never checks it again (it used to, with the wrong
+        // config, and allowed project rules: approval-card design, defect 1).
+        // Every hook, gateway and proxy sends the fromCLI key. evaluate: an
+        // external caller (the Python SDK sends neither), which the daemon checks.
+        const kind: CardKind =
+          parsed.kind === 'review' || parsed.kind === 'evaluate'
+            ? parsed.kind
+            : 'fromCLI' in parsed
+              ? 'review'
+              : 'evaluate';
+        const projectCwd = typeof cwd === 'string' && path.isAbsolute(cwd) ? cwd : undefined;
+        const projectConfig = getConfig(projectCwd);
+        const timeoutMs =
+          typeof parsed.timeoutMs === 'number' &&
+          Number.isFinite(parsed.timeoutMs) &&
+          parsed.timeoutMs >= 0
+            ? parsed.timeoutMs
+            : configTimeoutMs(projectConfig);
+        const sessionId = parsed.sessionId;
+        const request: CardRequest = {
           toolName,
           args,
-          slackDelegated = false,
-          agent,
-          mcpServer,
-          riskMetadata,
-          recoveryCommand,
-          skipBackgroundAuth = false,
-          viewOnly = false,
-          fromCLI = false,
-          activityId,
-          cwd,
-          localSmartRuleMatched = false,
-          sessionId,
-        } = JSON.parse(body);
+          ...(riskMetadata && typeof riskMetadata === 'object'
+            ? { riskMetadata: riskMetadata as CardRequest['riskMetadata'] }
+            : {}),
+          ...(typeof recoveryCommand === 'string' && recoveryCommand && { recoveryCommand }),
+          ...(parsed.viewOnly === true && { viewOnly: true }),
+          ...(typeof agent === 'string' && { agent }),
+          ...(typeof mcpServer === 'string' && { mcpServer }),
+          ...(typeof sessionId === 'string' && sessionId.length <= 256 && { sessionId }),
+          ...(projectCwd && { cwd: projectCwd }),
+          ...(parsed.protocol === CARD_PROTOCOL && { protocol: CARD_PROTOCOL }),
+        };
         // When fromCLI is true the CLI already sent an 'activity' event with
         // activityId via the Unix socket. Reuse that ID so the daemon's
         // 'activity-result' broadcast matches what tail.ts has in its pending map.
-        const id = (fromCLI && typeof activityId === 'string' && activityId) || randomUUID();
-        const entry: PendingEntry = {
-          id,
-          toolName,
-          args,
-          riskMetadata: riskMetadata ?? undefined,
-          ...(typeof sessionId === 'string' && sessionId.length <= 256 && { sessionId }),
-          ...(typeof recoveryCommand === 'string' && recoveryCommand && { recoveryCommand }),
-          ...(viewOnly && { viewOnly: true }),
-          agent: typeof agent === 'string' ? agent : undefined,
-          mcpServer: typeof mcpServer === 'string' ? mcpServer : undefined,
-          slackDelegated: !!slackDelegated,
-          timestamp: Date.now(),
-          earlyDecision: null,
-          waiter: null,
-          timer: armAutoDeny(() => {
-            if (pending.has(id)) {
-              const e = pending.get(id)!;
-              appendAuditLog({
-                toolName: e.toolName,
-                args: e.args,
-                decision: 'auto-deny',
-              });
-              // ENG-2: say no one answered, so the hook does not report a
-              // human rejection.
-              e.decisionSource = 'timeout';
-              if (e.waiter) e.waiter('deny', 'No response — auto-denied after timeout');
-              else {
-                e.earlyDecision = 'deny';
-                e.earlyReason = 'No response — auto-denied after timeout';
-              }
-              pending.delete(id);
-              broadcast('remove', { id, decision: 'deny' });
-            }
-          }),
-        };
-        pending.set(id, entry);
+        const card = cards.register(request, {
+          id: fromCLI && typeof activityId === 'string' && activityId ? activityId : undefined,
+          kind,
+          channels:
+            parseChannels(parsed.channels) ?? inferChannels(kind, parsed.slackDelegated === true),
+          timeoutMs,
+        });
 
         // Flight recorder: CLI callers already sent 'activity' via the Unix socket
         // (notifyActivity), so skip it here to avoid duplicate entries. External
         // callers (non-CLI integrations) set fromCLI=false and need the broadcast.
         if (!fromCLI) {
           broadcast('activity', {
-            id,
-            ts: entry.timestamp,
+            id: card.id,
+            ts: card.createdAt,
             tool: toolName,
             args: redactArgs(args),
             status: 'pending',
-            agent: entry.agent,
-            mcpServer: entry.mcpServer,
+            agent: request.agent,
+            mcpServer: request.mcpServer,
           });
         }
 
-        const projectCwd = typeof cwd === 'string' && path.isAbsolute(cwd) ? cwd : undefined;
-        const projectConfig = getConfig(projectCwd);
         const browserEnabled = projectConfig.settings.approvers?.browser !== false;
         const terminalEnabled = projectConfig.settings.approvers?.terminal !== false;
         // Broadcast 'add' when the browser dashboard is on OR terminal approver is
         // enabled. Tail may connect after the event fires and will see pending entries
         // via the SSE stream's initial state — don't gate on hasInteractiveClient().
         if (browserEnabled || terminalEnabled) {
-          broadcast('add', {
-            id,
-            toolName,
-            args,
-            riskMetadata: entry.riskMetadata,
-            ...(entry.recoveryCommand && { recoveryCommand: entry.recoveryCommand }),
-            ...(entry.viewOnly && { viewOnly: true }),
-            slackDelegated: entry.slackDelegated,
-            agent: entry.agent,
-            mcpServer: entry.mcpServer,
-            interactive: terminalEnabled,
-            // allowCount = what this count will be if the user allows.
-            // Terminal uses this to show the 💡 insight line on the Nth consecutive approval.
-            allowCount: (insightCounts.get(toolName) ?? 0) + 1,
-          });
-          // Browser auto-open removed: approvals route through terminal popup
-          // and native popup; the local browser UI is opt-in via
-          // `node9 daemon start --openui`. Users who want the browser
-          // dashboard can open localhost:7391 manually.
+          broadcast('add', { ...cardView(card), interactive: terminalEnabled });
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ id, allowCount: (insightCounts.get(toolName) ?? 0) + 1 }));
+        res.end(
+          JSON.stringify({
+            id: card.id,
+            allowCount: (insightCounts.get(toolName) ?? 0) + 1,
+            protocol: CARD_PROTOCOL,
+            deadline: card.deadline,
+          })
+        );
 
-        // Run the full policy + cloud + native pipeline in the background.
-        // Browser and terminal racers are skipped (no TTY, browser card already exists via SSE).
-        // Skip when slackDelegated: the hook process already owns the cloud race for this
-        // request — running a second initNode9SaaS here would create a duplicate pending
-        // cloud request that never gets resolved.
-        // Skip when skipBackgroundAuth: check.ts owns the recovery menu decision and will
-        // resolve the entry via /resolve/ after the tty menu completes.
-        if (slackDelegated || skipBackgroundAuth) return;
+        if (kind !== 'evaluate') return;
+        // The external caller's check, with ITS working directory. A rule
+        // verdict decides the card; a review leaves it for a person, the timer
+        // or the cloud; a crash leaves it open (no invented deny).
         authorizeHeadless(
           toolName,
           args,
+          { agent: request.agent, mcpServer: request.mcpServer },
           {
-            agent: typeof agent === 'string' ? agent : undefined,
-            mcpServer: typeof mcpServer === 'string' ? mcpServer : undefined,
-          },
-          { calledFromDaemon: true, localSmartRuleMatched: !!localSmartRuleMatched }
+            calledFromDaemon: true,
+            ...(projectCwd && { cwd: projectCwd }),
+            localSmartRuleMatched: parsed.localSmartRuleMatched === true,
+          }
         )
           .then((result) => {
-            const e = pending.get(id);
-            if (!e) return; // Already resolved (browser click or auto-deny timer)
-
-            // If no background channels were available (no cloud, no native),
-            // leave the entry alive so the browser dashboard can decide.
-            if (result.noApprovalMechanism) return;
-
-            // In audit mode the hook auto-approves without blocking the tool.
-            // The daemon entry is for display only — leave it for browser/tail
-            // to resolve interactively (or for the auto-deny timer).
-            if (result.checkedBy === 'audit') return;
-
-            // First write wins — POST /decision (browser or tail) may have already
-            // resolved this entry while authorizeHeadless was running in the background.
-            if (e.earlyDecision !== null) return;
-
-            // ── Flight Recorder: update the feed item with the final verdict ──
+            if (cards.get(card.id)?.state !== 'open') return;
+            if (result.noApprovalMechanism || result.checkedBy === 'audit') return;
             broadcast('activity-result', {
-              id,
+              id: card.id,
               status: result.approved
                 ? 'allow'
                 : result.blockedByLabel?.includes('DLP')
                   ? 'dlp'
                   : 'block',
               label: result.blockedByLabel,
-              agent: e.agent,
-              mcpServer: e.mcpServer,
+              agent: request.agent,
+              mcpServer: request.mcpServer,
             });
-
-            clearTimeout(e.timer);
-            const decision: Decision = result.approved ? 'allow' : 'deny';
-            appendAuditLog({ toolName: e.toolName, args: e.args, decision });
-            // fw#304 review: say who decided. Without a source the hook could
-            // not tell an administrator's deny in Slack (this pass runs the
-            // cloud racer) from a rule, and credited the rule.
-            e.decisionSource = backgroundPassSource(result);
-            if (e.waiter) {
-              e.waiter(decision, result.reason);
-              pending.delete(id);
-              broadcast('remove', { id, decision });
-            } else {
-              e.earlyDecision = decision;
-              e.earlyReason = result.reason;
-            }
+            cards.decide(card.id, recordFromVerdict(result));
           })
-          .catch((err) => {
-            const e = pending.get(id);
-            if (!e) return;
-            clearTimeout(e.timer);
-            const reason =
-              (err as { reason?: string })?.reason || 'No response — request timed out';
-            if (e.waiter) e.waiter('deny', reason);
-            else {
-              e.earlyDecision = 'deny';
-              e.earlyReason = reason;
-            }
-            pending.delete(id);
-            broadcast('remove', { id, decision: 'deny' });
+          .catch((err: unknown) => {
+            console.error(chalk.red('[node9 daemon] check of an evaluate card failed:'), err);
           });
-
         return;
       } catch {
         res.writeHead(400).end();
@@ -616,41 +580,37 @@ export function startDaemon(): void {
 
     if (req.method === 'GET' && pathname.startsWith('/wait/')) {
       const id = pathname.split('/').pop()!;
-      const entry = pending.get(id);
-      if (!entry) return res.writeHead(404).end();
-      if (entry.earlyDecision) {
-        clearTimeout(entry.timer);
-        const source = entry.decisionSource;
-        pending.delete(id);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        const body: { decision: Decision; reason?: string; source?: string } = {
-          decision: entry.earlyDecision,
-        };
-        if (entry.earlyReason) body.reason = entry.earlyReason;
-        if (source) body.source = source;
-        return res.end(JSON.stringify(body));
-      }
-      entry.waiter = (d, reason?) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        const body: { decision: Decision; reason?: string; source?: string } = { decision: d };
-        if (reason) body.reason = reason;
-        if (entry.decisionSource) body.source = entry.decisionSource;
-        res.end(JSON.stringify(body));
-      };
-      // When the CLI aborts the long-poll (e.g. native popup won the race),
-      // clean up the entry and dismiss the tail card.
-      // Delay 200ms so the Event Bridge POST /resolve/ (fired in finish() just
-      // after abort()) arrives first and carries the real decision.
-      // If /resolve/ arrives first it deletes the entry — the timeout is a no-op.
-      req.on('close', () => {
-        setTimeout(() => {
-          const e = pending.get(id);
-          if (e && e.waiter && e.earlyDecision === null) {
-            clearTimeout(e.timer);
-            pending.delete(id);
-            broadcast('remove', { id }); // no decision — preserves tail count
-          }
-        }, 200);
+      const card = cards.get(id);
+      if (!card) return res.writeHead(404).end();
+      // A protocol-2 caller registered this card with the internal token; a
+      // card from an older caller (or the Python SDK) is read without one.
+      if (card.request.protocol === CARD_PROTOCOL && !validToken(req))
+        return res.writeHead(403).end();
+      const ctrl = new AbortController();
+      let answered = false;
+      // The asker closed its long-poll: if it was the last one, the store
+      // withdraws the open card (no timing guess, no early delete).
+      res.on('close', () => {
+        if (!answered) ctrl.abort();
+      });
+      void cards.wait(id, ctrl.signal).then((outcome) => {
+        answered = true;
+        if (res.writableEnded || res.destroyed) return;
+        if (outcome.kind === 'decided') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              protocol: CARD_PROTOCOL,
+              record: outcome.record,
+              ...legacyWaitFields(outcome.record),
+            })
+          );
+        } else if (outcome.kind === 'withdrawn') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ protocol: CARD_PROTOCOL, withdrawn: true }));
+        } else {
+          res.writeHead(404).end();
+        }
       });
       return;
     }
@@ -659,93 +619,90 @@ export function startDaemon(): void {
       if (!validToken(req)) return res.writeHead(403).end();
       try {
         const id = pathname.split('/').pop()!;
-        const entry = pending.get(id);
-        if (!entry) return res.writeHead(404).end();
-        // Idempotency: first write wins.
-        if (entry.earlyDecision !== null) {
+        const card = cards.get(id);
+        if (!card) return res.writeHead(404).end();
+        // Idempotency: first write wins. The loser learns what won.
+        if (card.state === 'decided') {
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ conflict: true, decision: entry.earlyDecision }));
+          return res.end(
+            JSON.stringify({ conflict: true, decision: card.record!.decision, record: card.record })
+          );
         }
+        if (card.request.viewOnly) return res.writeHead(409).end();
         const { decision, persist, trustDuration, reason, source, trustRecipients } = JSON.parse(
           await readBody(req)
         ) as {
-          decision: string;
-          persist?: boolean;
-          trustDuration?: string;
-          reason?: string;
-          source?: string;
-          trustRecipients?: boolean;
+          decision?: unknown;
+          persist?: unknown;
+          trustDuration?: unknown;
+          reason?: unknown;
+          source?: unknown;
+          trustRecipients?: unknown;
         };
 
-        // fw#318 P5: "Allow + trust this address". Only an exposure card
-        // carries destinations; the list is written locally unless the
-        // workspace owns the policy, and the session's exposure is cleared for
-        // those destinations either way.
-        if (decision === 'allow' && trustRecipients === true) {
-          applyTrustRecipients(entry);
-        }
-
-        // Trust session
-        if (decision === 'trust' && trustDuration) {
-          const ms = TRUST_DURATIONS[trustDuration] ?? 60 * 60_000;
-          const commandPattern = extractCommandPattern(entry.toolName, entry.args);
-          writeTrustEntry(entry.toolName, ms, commandPattern);
-          appendAuditLog({
-            toolName: entry.toolName,
-            args: entry.args,
-            decision: `trust:${trustDuration}`,
-          });
-          clearTimeout(entry.timer);
-          if (entry.waiter) {
-            entry.waiter('allow');
-            pending.delete(id);
-            broadcast('remove', { id, decision: 'allow' });
-          } else {
-            entry.earlyDecision = 'allow';
-            broadcast('remove', { id, decision: 'allow' });
-            entry.timer = setTimeout(() => pending.delete(id), 30_000);
-          }
-          res.writeHead(200);
-          return res.end(JSON.stringify({ ok: true }));
-        }
-
-        const resolvedDecision = decision === 'allow' || decision === 'deny' ? decision : 'deny';
-        if (persist) writePersistentDecision(entry.toolName, resolvedDecision);
-        appendAuditLog({
-          toolName: entry.toolName,
-          args: entry.args,
-          decision: resolvedDecision,
+        // One schema. A request the daemon cannot read exactly is refused:
+        // node9 monitor's trust key used to omit the duration and fall
+        // through to a PERMANENT deny of the whole tool (defect 2).
+        const via = channelFromDecisionSource(source);
+        if (!via) return res.writeHead(400).end();
+        const isTrust = decision === 'trust';
+        if (decision !== 'allow' && decision !== 'deny' && !isTrust)
+          return res.writeHead(400).end();
+        if (isTrust && (typeof trustDuration !== 'string' || !(trustDuration in TRUST_DURATIONS)))
+          return res.writeHead(400).end();
+        if (persist === true && isTrust) return res.writeHead(400).end();
+        const verdict: 'allow' | 'deny' = isTrust ? 'allow' : (decision as 'allow' | 'deny');
+        const redirect =
+          via.redirect && typeof reason === 'string' && reason ? reason.slice(0, 2000) : undefined;
+        const record = personRecord(via.channel, verdict, {
+          ...(redirect && { redirect }),
+          ...(isTrust
+            ? { standing: 'trust' as const, trustDuration: trustDuration as string }
+            : persist === true
+              ? {
+                  standing:
+                    verdict === 'allow' ? ('always-allow' as const) : ('always-deny' as const),
+                }
+              : verdict === 'allow' && trustRecipients === true
+                ? { standing: 'trust-recipients' as const }
+                : {}),
         });
-        clearTimeout(entry.timer);
 
-        // ── Smart Rule Suggestions ────────────────────────────────────────────
-        // Track human allow decisions. The browser dashboard's
-        // suggestion-card surface is gone (v3 sprint), so the
-        // suggestion tracker no longer fires. insightCounts still
-        // drives the 💡 hint in `node9 tail` after N consecutive allows.
-        if (resolvedDecision === 'allow' && !persist) {
-          insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
-          saveInsightCounts();
-        } else if (resolvedDecision === 'deny') {
-          insightCounts.delete(entry.toolName);
-          saveInsightCounts();
+        const outcome = cards.decide(id, record);
+        if (!outcome) return res.writeHead(404).end();
+        if (!outcome.won) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          return res.end(
+            JSON.stringify({
+              conflict: true,
+              decision: outcome.record.decision,
+              record: outcome.record,
+            })
+          );
         }
 
-        // source is validated against an allowlist AFTER appendAuditLog so the
-        // raw user-supplied value never reaches any log string — no log injection.
-        if (source && DECISION_ROUTE_SOURCES.has(source)) entry.decisionSource = source;
-        if (entry.waiter) {
-          entry.waiter(resolvedDecision, reason);
-          pending.delete(id!);
-          broadcast('remove', { id, decision: resolvedDecision });
-        } else {
-          entry.earlyDecision = resolvedDecision;
-          entry.earlyReason = reason;
-          broadcast('remove', { id, decision: resolvedDecision });
-          entry.timer = setTimeout(() => pending.delete(id!), 30_000);
+        // Standing decisions only once this answer won the card.
+        if (isTrust) {
+          const ms = TRUST_DURATIONS[trustDuration as string];
+          writeTrustEntry(
+            card.request.toolName,
+            ms,
+            extractCommandPattern(card.request.toolName, card.request.args)
+          );
+        } else if (persist === true) {
+          writePersistentDecision(card.request.toolName, verdict);
+        } else if (verdict === 'allow' && trustRecipients === true) {
+          // fw#318 P5: "Allow + trust this address". Only an exposure card
+          // carries destinations; the list is written locally unless the
+          // workspace owns the policy, and the session's exposure is cleared for
+          // those destinations either way.
+          applyTrustRecipients(card.request);
         }
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
+        if (card.kind === 'discovery' && verdict === 'allow' && card.request.serverKey) {
+          approveServer(card.request.serverKey, []);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true, record: outcome.record }));
       } catch {
         res.writeHead(400).end();
       }
@@ -897,44 +854,27 @@ export function startDaemon(): void {
     // moves to the new `node9 decisions list / clear` CLI in step 7.
 
     if (req.method === 'POST' && pathname.startsWith('/resolve/')) {
-      const internalAuth = req.headers['x-node9-internal'];
-      if (internalAuth !== internalToken) return res.writeHead(403).end();
+      // The hook reports the winner of its own racers (native popup, cloud
+      // poller). First decision wins at the card; the reply carries the
+      // winning record, which the hook adopts when it lost.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const id = pathname.split('/').pop()!;
-        const entry = pending.get(id);
-        if (!entry) return res.writeHead(404).end();
-        const { decision, source } = JSON.parse(await readBody(req)) as {
-          decision: string;
-          source?: string;
+        if (!cards.get(id)) return res.writeHead(404).end();
+        const body = JSON.parse(await readBody(req)) as {
+          decision?: unknown;
+          source?: unknown;
+          record?: unknown;
         };
-        const resolvedResolveDecision: Decision = decision === 'allow' ? 'allow' : 'deny';
-        appendAuditLog({
-          toolName: entry.toolName,
-          args: entry.args,
-          decision: resolvedResolveDecision,
-        });
-        clearTimeout(entry.timer);
-
-        // insightCounts tracks all human approvals so the 💡 insight
-        // line appears consistently across all approval channels (tail).
-        // The Smart Rule Suggestions surface (browser-only) was removed
-        // in v3 sprint; suggestionTracker is no longer driven from here.
-        if (resolvedResolveDecision === 'allow') {
-          insightCounts.set(entry.toolName, (insightCounts.get(entry.toolName) ?? 0) + 1);
-          saveInsightCounts();
-        } else {
-          insightCounts.delete(entry.toolName);
-          saveInsightCounts();
-        }
-
-        if (source && HUMAN_DECISION_SOURCES.has(source)) entry.decisionSource = source;
-
-        if (entry.waiter) entry.waiter(resolvedResolveDecision);
-        else entry.earlyDecision = resolvedResolveDecision;
-        pending.delete(id);
-        broadcast('remove', { id, decision: resolvedResolveDecision });
-        res.writeHead(200);
-        return res.end(JSON.stringify({ ok: true }));
+        const record =
+          parseDecisionRecord(body.record) ??
+          recordFromLegacyResolve(body.decision === 'allow' ? 'allow' : 'deny', body.source);
+        const outcome = cards.decide(id, record);
+        if (!outcome) return res.writeHead(404).end();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(
+          JSON.stringify({ protocol: CARD_PROTOCOL, won: outcome.won, record: outcome.record })
+        );
       } catch {
         res.writeHead(400).end();
       }
@@ -1406,35 +1346,17 @@ export function startDaemon(): void {
             args: { toolCount: tools.length, status },
             decision: 'mcp-discovered',
           });
-          // Trigger interactive approval flow
-          const id = randomUUID();
-          const entry: PendingEntry = {
-            id,
-            type: 'mcp-discovery',
-            serverKey,
-            mcpTools: tools,
-            toolName: 'mcp-discovery',
-            args: { serverKey, tools: tools.length },
-            timestamp: Date.now(),
-            slackDelegated: false,
-            timer: setTimeout(() => {
-              if (pending.has(id)) {
-                pending.delete(id);
-                broadcast('remove', { id, decision: 'deny' });
-              }
-            }, 60_000), // 60s timeout for discovery
-            waiter: null,
-            earlyDecision: null,
-          };
-          pending.set(id, entry);
-          broadcast('add', {
-            id,
-            type: 'mcp-discovery',
-            serverKey,
-            mcpTools: tools,
-            toolName: 'mcp-discovery',
-            args: { serverKey, toolCount: tools.length },
-          });
+          // A card for a person to approve the server's tools in node9 tail.
+          const card = cards.register(
+            {
+              toolName: 'mcp-discovery',
+              args: { serverKey, toolCount: tools.length },
+              serverKey,
+              mcpTools: tools,
+            },
+            { kind: 'discovery', channels: ['terminal', 'monitor'], timeoutMs: 60_000 }
+          );
+          broadcast('add', cardView(card));
         }
 
         res.writeHead(200).end();
@@ -1474,21 +1396,22 @@ export function startDaemon(): void {
       if (!validToken(req)) return res.writeHead(403).end();
       try {
         const { id, serverKey, disabledTools } = JSON.parse(await readBody(req));
-        const entry = pending.get(id);
-        if (!entry || entry.type !== 'mcp-discovery' || entry.serverKey !== serverKey) {
+        const card = typeof id === 'string' ? cards.get(id) : undefined;
+        if (!card || card.kind !== 'discovery' || card.request.serverKey !== serverKey) {
           res.writeHead(404).end();
           return;
         }
-
-        clearTimeout(entry.timer);
+        const outcome = cards.decide(card.id, personRecord('terminal', 'allow'));
+        if (!outcome?.won) {
+          res.writeHead(409).end();
+          return;
+        }
         approveServer(serverKey, disabledTools);
         appendAuditLog({
           toolName: `mcp-server:${serverKey}`,
           args: { disabledTools },
           decision: 'allow',
         });
-        pending.delete(id);
-        broadcast('remove', { id, decision: 'allow' });
         res.writeHead(200).end();
         return;
       } catch {

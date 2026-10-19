@@ -237,3 +237,89 @@ export function recordFromLegacyWait(
       return null;
   }
 }
+
+// ── Building records from what callers send ────────────────────────────────
+
+/** The parts of a verdict (AuthResult) a record is built from. */
+export interface VerdictLike {
+  approved: boolean;
+  checkedBy?: string;
+  blockedBy?: string;
+  blockedByLabel?: string;
+  reason?: string;
+  ruleHit?: string;
+}
+
+/** The record for a verdict of the daemon's own check (evaluate cards). */
+export function recordFromVerdict(v: VerdictLike, now = Date.now()): DecisionRecord {
+  const decidedBy: DecidedBy =
+    v.checkedBy === 'cloud' || v.blockedBy === 'team-policy'
+      ? 'cloud'
+      : v.blockedBy === 'timeout'
+        ? 'timer'
+        : 'policy';
+  return {
+    decision: v.approved ? 'allow' : 'deny',
+    decidedBy,
+    label:
+      v.blockedByLabel ||
+      (decidedBy === 'cloud'
+        ? CLOUD_LABEL
+        : v.approved
+          ? 'Allowed by policy'
+          : 'Blocked by policy'),
+    ...(v.reason && { reason: v.reason }),
+    ...(v.ruleHit && { ruleName: v.ruleHit }),
+    decidedAt: now,
+  };
+}
+
+/**
+ * The channel a /decision request names, as node9 tail and node9 monitor send
+ * it. Older clients: tail sends 'terminal' or 'terminal-redirect', monitor
+ * sends 'dashboard', and 'browser' is the retired browser dashboard. Null for
+ * anything else.
+ */
+export function channelFromDecisionSource(
+  source: unknown
+): { channel: Exclude<Channel, 'cloud'>; redirect: boolean } | null {
+  switch (source) {
+    case undefined:
+    case 'terminal':
+    case 'browser':
+      return { channel: 'terminal', redirect: false };
+    case 'terminal-redirect':
+      return { channel: 'terminal', redirect: true };
+    case 'monitor':
+    case 'dashboard':
+      return { channel: 'monitor', redirect: false };
+    case 'native':
+      return { channel: 'native', redirect: false };
+    default:
+      return null;
+  }
+}
+
+/**
+ * The record for an older hook's POST /resolve, which sends only a decision
+ * and, for a person, a source. With no source the winner was one of the old
+ * hook's own racers that name nobody: its cloud poller (the only one that can
+ * allow without a source) or, for a deny, its timer or the cloud.
+ */
+export function recordFromLegacyResolve(
+  decision: 'allow' | 'deny',
+  source: unknown,
+  now = Date.now()
+): DecisionRecord {
+  const person = source === undefined ? null : channelFromDecisionSource(source);
+  if (person) return personRecord(person.channel, decision, {}, now);
+  if (decision === 'allow')
+    return { decision, decidedBy: 'cloud', label: CLOUD_LABEL, decidedAt: now };
+  return {
+    decision,
+    decidedBy: 'timer',
+    label: 'Resolved by the hook',
+    reason: 'An older node9 hook ended the approval without naming who decided.',
+    decidedAt: now,
+  };
+}

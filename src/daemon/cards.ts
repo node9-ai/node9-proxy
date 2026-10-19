@@ -43,6 +43,8 @@ export interface CardRequest {
   mcpServer?: string;
   sessionId?: string;
   cwd?: string;
+  /** CARD_PROTOCOL when the caller speaks it: its /wait must carry the token. */
+  protocol?: number;
   /** discovery cards */
   serverKey?: string;
   mcpTools?: Array<{ name: string; description?: string }>;

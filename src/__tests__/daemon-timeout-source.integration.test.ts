@@ -234,8 +234,13 @@ describe('daemon with approvalTimeoutMs 0 has no timer', () => {
     expect(body.source).toBe('terminal');
   });
 
-  it('the tail is told there is no countdown', async () => {
+  it('the card carries no deadline, so the tail shows no countdown', async () => {
+    const id = await d.register('echo timeout-zero-deadline');
     const init = await readInitEvent(d.port, d.internalToken());
-    expect(init.autoDenyMs).toBeNull();
+    const card = (init.requests as Array<{ id: string; deadline?: unknown }>).find(
+      (r) => r.id === id
+    );
+    expect(card).toBeDefined();
+    expect(card!.deadline).toBeNull();
   });
 });
