@@ -92,6 +92,11 @@ export interface CardStoreDeps {
  *  long an asked card may stay open with no one ever waiting on it. */
 export const CARD_RETENTION_MS = 60_000;
 
+/** The longest timer a card arms. The timeout comes from the caller (any local
+ *  process can POST /check), and Node fires a timer longer than 2^31-1 ms at
+ *  once: an oversized timeout would deny the card the moment it opened. */
+export const MAX_CARD_TIMEOUT_MS = 24 * 60 * 60_000;
+
 interface Slot {
   card: Card;
   waiters: Set<(o: WaitOutcome) => void>;
@@ -122,7 +127,8 @@ export class CardStore {
   register(request: CardRequest, opts: RegisterOptions): Card {
     const id = opts.id && !this.slots.has(opts.id) ? opts.id : randomUUID();
     const createdAt = this.now();
-    const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : null;
+    const timeoutMs =
+      opts.timeoutMs && opts.timeoutMs > 0 ? Math.min(opts.timeoutMs, MAX_CARD_TIMEOUT_MS) : null;
     const card: Card = {
       id,
       kind: opts.kind,

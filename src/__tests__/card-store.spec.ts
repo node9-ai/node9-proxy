@@ -2,7 +2,13 @@
 // the guard for the whole approval seam: every decider, in every order, on
 // one card. A new channel or decider must add its row here.
 import { describe, it, expect, beforeEach } from 'vitest';
-import { CardStore, CARD_RETENTION_MS, type Card, type WaitOutcome } from '../daemon/cards';
+import {
+  CardStore,
+  CARD_RETENTION_MS,
+  MAX_CARD_TIMEOUT_MS,
+  type Card,
+  type WaitOutcome,
+} from '../daemon/cards';
 import { personRecord, type Channel, type DecisionRecord } from '../auth/decision-record';
 
 /** A store on a fake clock with manual timers. */
@@ -246,6 +252,16 @@ describe('CardStore: the timer', () => {
     expect(o.kind).toBe('decided');
     expect(o.kind === 'decided' && o.record.decidedBy).toBe('timer');
     expect(o.kind === 'decided' && o.record.decision).toBe('deny');
+  });
+
+  it('an oversized timeout is capped, never a timer that fires at once', () => {
+    // Node fires a timer longer than 2^31-1 ms immediately; the timeout comes
+    // from the caller, so the store caps it.
+    const h = harness();
+    const card = h.register(2 ** 32);
+    expect(card.deadline).toBe(h.now() + MAX_CARD_TIMEOUT_MS);
+    h.advance(1);
+    expect(h.store.get(card.id)?.state).toBe('open');
   });
 
   it('timeout 0 or null: no timer, the card stays open', () => {
