@@ -154,6 +154,26 @@ describe('buildWireRows', () => {
     expect(rows[2].exposure).toBeUndefined();
   });
 
+  // Approval cards: who decided reaches the dashboard. Only the known values:
+  // the ingest's schema is a closed vocabulary and rejects the whole batch.
+  it('forwards decidedBy and channel; drops a value outside the vocabulary', () => {
+    const content =
+      row({
+        checkedBy: 'local-decision',
+        decision: 'deny',
+        decidedBy: 'person',
+        channel: 'monitor',
+      }) +
+      row({ checkedBy: 'timeout', decision: 'deny', decidedBy: 'timer' }) +
+      row({ decidedBy: 'someone', channel: 'email' });
+    const { rows } = buildWireRows(Buffer.from(content));
+    expect(rows[0]).toMatchObject({ decidedBy: 'person', channel: 'monitor' });
+    expect(rows[1]).toMatchObject({ decidedBy: 'timer' });
+    expect(rows[1].channel).toBeUndefined();
+    expect(rows[2].decidedBy).toBeUndefined();
+    expect(rows[2].channel).toBeUndefined();
+  });
+
   // fw#318 review P1: rows written before the audit writer masked personal
   // data are masked on the way out.
   it('fw#318: masks personal data in args and previews already in the log', () => {

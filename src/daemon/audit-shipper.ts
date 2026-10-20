@@ -23,6 +23,15 @@ import {
   appendToLog,
   truncateAuditPreview,
 } from '../audit/index.js';
+import { CHANNELS, type Channel, type DecidedBy } from '../auth/decision-record.js';
+
+const DECIDED_BY_VALUES: ReadonlySet<string> = new Set<DecidedBy>([
+  'person',
+  'timer',
+  'cloud',
+  'policy',
+  'abandoned',
+]);
 import { getConfig } from '../config/index.js';
 import { readCredentials } from './sync.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
@@ -118,6 +127,9 @@ export interface WireRow {
   /** fw#318 2b — exposure rows (counts only) and the read-to-send edge. */
   exposure?: { kind: 'source' | 'logged'; destinations: number };
   exposureFromEid?: string;
+  /** Approval cards: who decided an approval, and where (DecisionRecord). */
+  decidedBy?: DecidedBy;
+  channel?: Channel;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -226,6 +238,15 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(exposureOf(parsed.exposure) ? { exposure: exposureOf(parsed.exposure)! } : {}),
       ...(typeof parsed.exposureFromEid === 'string'
         ? { exposureFromEid: parsed.exposureFromEid }
+        : {}),
+      // Approval cards. Only the known values: the ingest's schema is a
+      // closed vocabulary and rejects the whole batch for anything else.
+      ...(typeof parsed.decidedBy === 'string' && DECIDED_BY_VALUES.has(parsed.decidedBy)
+        ? { decidedBy: parsed.decidedBy as DecidedBy }
+        : {}),
+      ...(typeof parsed.channel === 'string' &&
+      (CHANNELS as readonly string[]).includes(parsed.channel)
+        ? { channel: parsed.channel as Channel }
         : {}),
     });
   }
