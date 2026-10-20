@@ -102,6 +102,9 @@ interface ApprovalRequest {
   };
   /** When set, shows the [1]/[2]/[3] recovery menu instead of the standard [y/n/a/t] prompt. */
   recoveryCommand?: string;
+  /** Epoch ms when the card's timer denies it; null for no timer; absent
+   *  from a daemon older than the card protocol. */
+  deadline?: number | null;
   /**
    * When true, the card is informational only — the tty menu in the hook process is the
    * decision maker. Tail shows context + "awaiting tty" message, no keypress.
@@ -429,7 +432,7 @@ function postDecisionHttp(
     source?: string;
     trustRecipients?: boolean;
   }
-): Promise<void> {
+): Promise<{ decision: string; label: string } | null> {
   return new Promise((resolve, reject) => {
     const bodyObj: Record<string, unknown> = { decision, source: opts?.source ?? 'terminal' };
     if (opts?.persist) bodyObj.persist = true;
@@ -453,10 +456,26 @@ function postDecisionHttp(
         },
       },
       (res) => {
-        res.resume();
-        // 200 = success, 409 = idempotent conflict (another racer already decided) — both ok
-        if (res.statusCode === 200 || res.statusCode === 409) resolve();
-        else reject(new Error(`POST /decision returned ${res.statusCode}`));
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => (text += c));
+        res.on('end', () => {
+          // 200 = this answer won. 409 = the card was already decided (the
+          // timer, Slack, the native popup): resolve with what won, so the
+          // card can say so instead of showing this answer.
+          if (res.statusCode === 200) return resolve(null);
+          if (res.statusCode === 409) {
+            try {
+              const r = (JSON.parse(text) as { record?: { decision?: string; label?: string } })
+                .record;
+              if (r?.decision && r.label) return resolve({ decision: r.decision, label: r.label });
+            } catch {
+              /* an older daemon's 409 has no record */
+            }
+            return resolve(null);
+          }
+          reject(new Error(`POST /decision returned ${res.statusCode}`));
+        });
       }
     );
     req.on('error', reject);
@@ -504,6 +523,17 @@ function cleanBlockedBy(raw: string): string {
   const smartMatch = raw.match(/^Smart Rule:\s*(.+)$/i);
   if (smartMatch) return smartMatch[1];
   return raw;
+}
+
+/** How long the card waits, from its deadline, for the line under the card. */
+export function deadlineLine(deadline: number | null | undefined, now = Date.now()): string | null {
+  if (deadline === undefined) return null;
+  if (deadline === null) return 'No timeout: waits for your answer';
+  const left = Math.max(0, Math.round((deadline - now) / 1000));
+  const m = Math.floor(left / 60);
+  const sec = left % 60;
+  const at = new Date(deadline).toLocaleTimeString([], { hour12: false });
+  return `Auto-denies in ${m > 0 ? `${m}m ` : ''}${sec}s (at ${at}) if nobody answers`;
 }
 
 function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] {
@@ -564,8 +594,10 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
 
   // An exposure card offers "allow + trust this address" and no tool-wide
   // standing allow: "Always Allow" answers the wrong question there (fw#343).
+  const timing = deadlineLine(req.deadline);
   lines.push(
     `${CYAN}╚${RESET}`,
+    ...(timing ? [`  ${GRAY}${timing}${RESET}`] : []),
     ``,
     exposure.length > 0
       ? `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${CYAN}[s]${RESET} Allow + trust ${exposure.length === 1 ? 'this address' : 'these addresses'}`
@@ -595,7 +627,7 @@ function buildRecoveryCardLines(req: ApprovalRequest): string[] {
         `  ${BOLD}${YELLOW}[2]${RESET} Redirect AI: "Run '${recoveryCommand}' first, then retry"`,
         `  ${BOLD}${RED}[3]${RESET} Deny & stop  ${GRAY}(hard block)${RESET}`,
         ``,
-        `  ${GRAY}[Timeout: auto-deny]${RESET}`,
+        `  ${GRAY}${deadlineLine(req.deadline) ?? 'Auto-denies at the approval timeout if nobody answers'}${RESET}`,
         `  Select [1-3]: `,
       ];
 
@@ -909,16 +941,23 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
       }
 
       // POST decision best-effort; 409 = another racer already won
-      postDecisionHttp(req.id, httpDecision, authToken, port, httpOpts).catch((err) => {
-        try {
-          fs.appendFileSync(
-            path.join(os.homedir(), '.node9', 'hook-debug.log'),
-            `[tail] POST /decision failed: ${String(err)}\n`
-          );
-        } catch {
-          /* ignore */
-        }
-      });
+      postDecisionHttp(req.id, httpDecision, authToken, port, httpOpts)
+        .then((won) => {
+          if (won && !cardActive)
+            process.stdout.write(
+              `  ${YELLOW}↳ Already decided before your answer: ${won.decision.toUpperCase()} (${safeMessage(won.label, 120)})${RESET}\n`
+            );
+        })
+        .catch((err) => {
+          try {
+            fs.appendFileSync(
+              path.join(os.homedir(), '.node9', 'hook-debug.log'),
+              `[tail] POST /decision failed: ${String(err)}\n`
+            );
+          } catch {
+            /* ignore */
+          }
+        });
 
       // Decision is already stamped on the card above — no separate activity line needed.
 

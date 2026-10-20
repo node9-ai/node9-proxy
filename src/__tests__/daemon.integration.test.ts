@@ -497,7 +497,13 @@ describe('daemon POST /decision — source tracking', () => {
     const res = await fetch(`http://127.0.0.1:${DAEMON_PORT}/check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ toolName: 'bash', args: { command: `echo register-${label}` } }),
+      // fromCLI: a review card, as node9's own hook registers it (the daemon
+      // never checks it itself).
+      body: JSON.stringify({
+        toolName: 'bash',
+        args: { command: `echo register-${label}` },
+        fromCLI: false,
+      }),
     });
     const { id } = (await res.json()) as { id: string };
     return id;
@@ -525,9 +531,7 @@ describe('daemon POST /decision — source tracking', () => {
     expect(body.source).toBe('terminal');
   });
 
-  it('GET /wait returns source=browser when POST /decision included source:browser', async ({
-    skip,
-  }) => {
+  it('a retired browser source is a person in node9 tail', async ({ skip }) => {
     if (!portWasFree) skip();
 
     const id = await registerEntry('source-browser');
@@ -539,12 +543,17 @@ describe('daemon POST /decision — source tracking', () => {
     });
 
     const waitRes = await fetch(`http://127.0.0.1:${DAEMON_PORT}/wait/${id}`);
-    const body = (await waitRes.json()) as { decision: string; source?: string };
+    const body = (await waitRes.json()) as {
+      decision: string;
+      source?: string;
+      record?: { decidedBy: string; channel?: string };
+    };
     expect(body.decision).toBe('allow');
-    expect(body.source).toBe('browser');
+    expect(body.source).toBe('terminal');
+    expect(body.record).toMatchObject({ decidedBy: 'person', channel: 'terminal' });
   });
 
-  it('GET /wait returns no source field when POST /decision omits source', async ({ skip }) => {
+  it('a decision with no source is node9 tail, the client that sends it', async ({ skip }) => {
     if (!portWasFree) skip();
 
     const id = await registerEntry('source-omitted');
@@ -556,52 +565,44 @@ describe('daemon POST /decision — source tracking', () => {
     });
 
     const waitRes = await fetch(`http://127.0.0.1:${DAEMON_PORT}/wait/${id}`);
-    const body = (await waitRes.json()) as { decision: string; source?: string };
+    const body = (await waitRes.json()) as {
+      decision: string;
+      source?: string;
+      record?: { decidedBy: string };
+    };
     expect(body.decision).toBe('deny');
-    expect(body.source).toBeUndefined();
+    expect(body.source).toBe('terminal');
+    expect(body.record?.decidedBy).toBe('person');
   });
 
-  it('POST /decision with invalid source value is ignored (source not stored)', async ({
-    skip,
-  }) => {
-    if (!portWasFree) skip();
-
-    const id = await registerEntry('source-invalid');
-
-    await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
-      body: JSON.stringify({ decision: 'allow', source: 'injected-value' }),
-    });
-
-    const waitRes = await fetch(`http://127.0.0.1:${DAEMON_PORT}/wait/${id}`);
-    const body = (await waitRes.json()) as { decision: string; source?: string };
-    expect(body.decision).toBe('allow');
-    expect(body.source).toBeUndefined(); // invalid source silently dropped
-  });
-
-  // source field injection boundary: non-string and prototype-pollution attempts
-  // must be rejected — the implementation uses a VALID_SOURCES allowlist Set,
-  // these tests make the boundary explicit.
+  // The source names who decided, so a value the daemon cannot read is
+  // refused, and the card stays open for a real answer.
   it.each([
+    ['an unknown string', 'injected-value'],
     ['null', null],
-    ['number', 123],
-    ['object', { __proto__: { polluted: true } }],
-  ])('POST /decision with source:%s does not store a source value', async (label, sourceValue) => {
+    ['a number', 123],
+    ['an object', { __proto__: { polluted: true } }],
+  ])('POST /decision with %s as source is refused (400)', async (label, sourceValue) => {
     if (!portWasFree) return; // port busy — daemon describe skips entirely
 
-    const id = await registerEntry(`source-type-${label}`);
+    const id = await registerEntry(`source-type-${label.replace(/\W+/g, '-')}`);
 
-    await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
+    const refused = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
       body: JSON.stringify({ decision: 'allow', source: sourceValue }),
     });
+    expect(refused.status).toBe(400);
 
+    const answered = await fetch(`http://127.0.0.1:${DAEMON_PORT}/decision/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Node9-Internal': csrfToken },
+      body: JSON.stringify({ decision: 'deny', source: 'terminal' }),
+    });
+    expect(answered.status).toBe(200);
     const waitRes = await fetch(`http://127.0.0.1:${DAEMON_PORT}/wait/${id}`);
-    const body = (await waitRes.json()) as { decision: string; source?: string };
-    expect(body.decision).toBe('allow');
-    expect(body.source).toBeUndefined();
+    const body = (await waitRes.json()) as { decision: string };
+    expect(body.decision).toBe('deny');
   });
 
   it('POST /decision without CSRF token returns 403', async ({ skip }) => {

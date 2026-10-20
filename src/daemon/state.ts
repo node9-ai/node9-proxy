@@ -9,7 +9,6 @@ import path from 'path';
 import os from 'os';
 // `spawn` import removed — only consumer was openBrowser() (deleted).
 import { randomUUID } from 'crypto';
-import { RiskMetadata } from '../context-sniper';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 import { maskPersonalValue, scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
@@ -18,6 +17,7 @@ import { SessionExposureStore } from './exposure-store.js';
 import { sessionCounters } from './session-counters.js';
 import { sessionHistory } from './session-history.js';
 import { atomicWriteSync } from '../utils/atomic-write';
+import { CardStore, type Card } from './cards.js';
 export { sessionCounters, sessionHistory };
 export type { HudStatus } from './session-counters.js';
 
@@ -43,38 +43,9 @@ export interface AuditEntry {
   args: unknown;
   decision: string;
   source: string;
-}
-
-export type Decision = 'allow' | 'deny' | 'abandoned';
-
-export interface PendingEntry {
-  id: string;
-  toolName: string;
-  args: unknown;
-  riskMetadata?: RiskMetadata;
-  /** Recovery command to display in the tail/browser recovery menu (e.g. "npm test"). */
-  recoveryCommand?: string;
-  /**
-   * When true, the tail shows the card for context but does NOT enable keypress.
-   * Used for recovery menu entries where the tty menu in check.ts is the sole decision maker.
-   */
-  viewOnly?: boolean;
-  agent?: string;
-  mcpServer?: string;
-  timestamp: number;
-  slackDelegated: boolean;
-  /** The auto-deny timer; none when approvalTimeoutMs is 0 ("no timer"). */
-  timer: ReturnType<typeof setTimeout> | undefined;
-  waiter: ((d: Decision, reason?: string) => void) | null;
-  earlyDecision: Decision | null;
-  earlyReason?: string;
-  decisionSource?: string; // 'browser', 'terminal', 'native', 'timeout' (the auto-deny timer), or undefined (cloud/auto)
-  /** The agent session the call belongs to (fw#318 P5: trust-this-address clears its exposure). */
-  sessionId?: string;
-  /** New fields for MCP discovery */
-  type?: 'tool-call' | 'mcp-discovery';
-  mcpTools?: Array<{ name: string; description?: string }>;
-  serverKey?: string;
+  decidedBy?: string;
+  channel?: string;
+  cardId?: string;
 }
 
 export interface SseClient {
@@ -83,8 +54,48 @@ export interface SseClient {
 }
 
 // ── Shared mutable state ──────────────────────────────────────────────────────
-export const pending = new Map<string, PendingEntry>();
 export const sseClients = new Set<SseClient>();
+
+/**
+ * Every approval card's one decision (src/daemon/cards.ts): the tail is told,
+ * the daemon's audit row is written with who decided, and a person's answer
+ * moves the insight count. Fires exactly once per card.
+ */
+function onCardDecided(card: Card): void {
+  const r = card.record!;
+  broadcast('remove', { id: card.id, decision: r.decision, decidedBy: r.decidedBy });
+  if (card.kind === 'discovery') return;
+  appendAuditLog({
+    toolName: card.request.toolName,
+    args: card.request.args,
+    decision:
+      r.decidedBy === 'timer'
+        ? 'auto-deny'
+        : r.standing === 'trust' && r.trustDuration
+          ? `trust:${r.trustDuration}`
+          : r.decision,
+    decidedBy: r.decidedBy,
+    ...(r.channel && { channel: r.channel }),
+    cardId: card.id,
+  });
+  if (r.decidedBy !== 'person') return;
+  const tool = card.request.toolName;
+  // An allow counts toward the "[a] creates a permanent rule" hint, except one
+  // that already set a standing decision on the tool (always allow, trust).
+  if (r.decision === 'allow' && r.standing !== 'always-allow' && r.standing !== 'trust') {
+    insightCounts.set(tool, (insightCounts.get(tool) ?? 0) + 1);
+    saveInsightCounts();
+  } else if (r.decision === 'deny') {
+    insightCounts.delete(tool);
+    saveInsightCounts();
+  }
+}
+
+/** The daemon's approval cards. The only place a card is decided. */
+export const cards = new CardStore({
+  onDecided: onCardDecided,
+  onWithdrawn: (card) => broadcast('remove', { id: card.id }),
+});
 export const suggestionTracker = new SuggestionTracker(3);
 export const suggestions = new Map<string, Suggestion>();
 export const taintStore = new TaintStore();
@@ -239,7 +250,15 @@ function redactArgFields(value: unknown): unknown {
   return Object.setPrototypeOf(copy, null) as Record<string, unknown>;
 }
 
-export function appendAuditLog(data: { toolName: string; args: unknown; decision: string }): void {
+export function appendAuditLog(data: {
+  toolName: string;
+  args: unknown;
+  decision: string;
+  /** Who ended an approval card, and where (DecisionRecord). */
+  decidedBy?: string;
+  channel?: string;
+  cardId?: string;
+}): void {
   try {
     const entry: AuditEntry = {
       ts: new Date().toISOString(),
@@ -247,6 +266,9 @@ export function appendAuditLog(data: { toolName: string; args: unknown; decision
       args: maskPersonalArgs(redactArgs(data.args)),
       decision: data.decision,
       source: 'daemon',
+      ...(data.decidedBy && { decidedBy: data.decidedBy }),
+      ...(data.channel && { channel: data.channel }),
+      ...(data.cardId && { cardId: data.cardId }),
     };
     const dir = path.dirname(AUDIT_LOG_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -473,17 +495,16 @@ export function broadcastForensic(finding: ScanFinding): void {
   broadcast('forensic', event);
 }
 
+/**
+ * The daemon's local UIs all went away (node9 tail and node9 monitor). Cards
+ * that only they could answer are abandoned; a card that Slack or the native
+ * popup can still answer stays open (the store decides which). An
+ * auto-started daemon exits once no card is left open.
+ */
 export function abandonPending(): void {
   setAbandonTimer(null);
-  pending.forEach((entry, id) => {
-    clearTimeout(entry.timer);
-    if (entry.waiter) entry.waiter('abandoned');
-    else entry.earlyDecision = 'abandoned';
-    pending.delete(id);
-    broadcast('remove', { id });
-  });
-
-  if (autoStarted) {
+  cards.abandonLocalOnly();
+  if (autoStarted && cards.open().length === 0) {
     try {
       fs.unlinkSync(DAEMON_PID_FILE);
     } catch {}

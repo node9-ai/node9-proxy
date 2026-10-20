@@ -597,6 +597,10 @@ export function registerCheckCommand(program: Command): void {
               ruleDescription?: string;
               blockKind?: 'protected-path';
               blockedPath?: string;
+              /** Who decided (DecisionRecord): only 'person' is a human decision. */
+              decidedBy?: string;
+              /** A person's instruction to the agent instead of the call. */
+              redirect?: string;
             }
           ) => {
             // 1. Determine the context (User vs Policy). I6: the fallback
@@ -608,7 +612,11 @@ export function registerCheckCommand(program: Command): void {
               (isKeyedForPolicy() ? 'Workspace Policy' : 'Local Security Policy');
 
             // 2. Identify if it was a human decision or an automated rule
-            const humanDecision = isHumanDecision(blockedByContext, result?.blockedBy);
+            const humanDecision = isHumanDecision(
+              blockedByContext,
+              result?.blockedBy,
+              result?.decidedBy
+            );
 
             // 3. Print to the human terminal for visibility.
             // MUST NOT use stderr (console.error) — Claude Code treats any stderr
@@ -663,7 +671,7 @@ export function registerCheckCommand(program: Command): void {
               humanDecision,
               msg,
               result?.recoveryCommand,
-              { kind: result?.blockKind, path: result?.blockedPath }
+              { kind: result?.blockKind, path: result?.blockedPath, redirect: !!result?.redirect }
             );
 
             // 5. Send the structured JSON back to the LLM agent

@@ -321,7 +321,7 @@ function renderApproval(event: ActivityEvent, status: ApprovalStatus): React.Rea
           <Text color={COL.liveOff}>[d]</Text>
           <Text dimColor>eny </Text>
           <Text color={COL.panelHigh}>[t]</Text>
-          <Text dimColor>rust </Text>
+          <Text dimColor>rust 30m </Text>
           <Text dimColor>[Esc]</Text>
         </Text>
       );

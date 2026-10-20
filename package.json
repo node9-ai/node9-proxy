@@ -110,7 +110,7 @@
     "mvdan-sh"
   ],
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.133.0",
+    "@anthropic-ai/sdk": "^0.135.0",
     "@octokit/rest": "^22.0.1",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/git": "^10.0.1",
@@ -126,7 +126,7 @@
     "ink-testing-library": "^4.0.0",
     "prettier": "^3.4.2",
     "semantic-release": "^25.0.3",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.20.0",

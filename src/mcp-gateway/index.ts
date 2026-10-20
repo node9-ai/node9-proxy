@@ -518,14 +518,14 @@ export async function runMcpGateway(
           console.error(chalk.gray(`   Reason: ${result.reason ?? 'Security Policy'}\n`));
 
           const blockedByLabel = result.blockedByLabel ?? result.reason ?? 'Security Policy';
-          const humanDecision = isHumanDecision(blockedByLabel, result.blockedBy);
+          const humanDecision = isHumanDecision(blockedByLabel, result.blockedBy, result.decidedBy);
 
           const aiInstruction = buildNegotiationMessage(
             blockedByLabel,
             humanDecision,
             result.reason,
             undefined,
-            { kind: result.blockKind, path: result.blockedPath }
+            { kind: result.blockKind, path: result.blockedPath, redirect: !!result.redirect }
           );
 
           const errorResponse = {
