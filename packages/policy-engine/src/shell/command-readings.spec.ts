@@ -117,3 +117,28 @@ describe('commandReadings — the primitive', () => {
     expect(readings.some((r) => r.includes('.aws'))).toBe(true);
   });
 });
+
+describe('commandReadings — command words spelt with look-alike letters (fw#372 A8)', () => {
+  const FW_RM = '\uFF52\uFF4D'; // fullwidth r m
+  it('fullwidth and Cyrillic spellings of a command word fold to the ASCII word', () => {
+    expect(commandReadings(`${FW_RM} -rf /tmp/x`)).toContain('rm -rf /tmp/x');
+    expect(commandReadings('\u0441at ~/.ssh/id_rsa')).toContain('cat ~/.ssh/id_rsa');
+  });
+  it('a wrapper spelt the same way is seen through, and both words fold', () => {
+    expect(commandReadings(`\uFF53\uFF55\uFF44\uFF4F ${FW_RM} -rf /tmp/x`)).toContain(
+      'sudo rm -rf /tmp/x'
+    );
+    expect(commandReadings(`sudo ${FW_RM} -rf /tmp/x`)).toContain('sudo rm -rf /tmp/x');
+  });
+  it('a data word is left as written: folding it could only invent a match', () => {
+    for (const r of commandReadings(`echo ${FW_RM} -rf /`)) expect(r).toContain(FW_RM);
+    for (const r of commandReadings(`git commit -m "${FW_RM} -rf /"`))
+      expect(r).not.toContain('rm -rf');
+  });
+  it('ASCII text keeps exactly one reading', () => {
+    expect(commandReadings('rm -rf /tmp/x')).toEqual(['rm -rf /tmp/x']);
+  });
+  it('the rule written for rm fires on the folded reading', () => {
+    expect(fires(`${FW_RM} -rf ~/.aws`)).toBe(true);
+  });
+});

@@ -200,3 +200,25 @@ describe('detectors follow their check', () => {
     expect(v.decision).toBe('block');
   });
 });
+
+describe('a disguised internal address is reviewed at the gate (fw#372 A9)', () => {
+  it('hex loopback reviews under the internal-address check while 127.0.0.1 passes', async () => {
+    const hex = await bash(cfg({}), 'curl http://0x7f000001:8080/admin');
+    expect(hex.decision).toBe('review');
+    expect(hex.checkId).toBe('network.internal-addresses');
+    expect(hex.ruleName).toMatch(/^ssrf:private:curl:/);
+    const plain = await bash(cfg({}), 'curl http://127.0.0.1:8080/admin');
+    expect(plain.ruleName ?? '').not.toMatch(/^ssrf:/);
+    expect(plain.decision).toBe('allow');
+  });
+});
+
+describe('a command word spelt with look-alike letters meets the same rule (fw#372 A8)', () => {
+  it('fullwidth rm is judged like rm', async () => {
+    const plain = await bash(cfg({}), 'rm -rf /tmp/x');
+    const folded = await bash(cfg({}), '\uFF52\uFF4D -rf /tmp/x');
+    expect(plain.ruleName).toBe('review-rm');
+    expect(folded.ruleName).toBe(plain.ruleName);
+    expect(folded.decision).toBe(plain.decision);
+  });
+});

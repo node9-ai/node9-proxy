@@ -26,6 +26,33 @@ export interface RegistryInfo {
 
 const TIMEOUT_MS = 1500;
 const MAX_BYTES = 2 * 1024 * 1024;
+/** A version document (`/<name>/latest`) is one manifest: nx's is about 13 KB. */
+const VERSION_DOC_MAX_BYTES = 256 * 1024;
+const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
+
+/**
+ * The version document of one tag or version, read when the abbreviated
+ * document is over MAX_BYTES (nx, typescript-eslint's largest packages): it
+ * still names the resolved version and its scripts, so the package is not
+ * left with no version at all, which read as "has known malicious versions"
+ * whenever the record covered any version (fw#372 A10). It carries no publish
+ * time, so the age signal is unavailable and recorded as a miss.
+ */
+async function npmVersionDocument(url: string, selector: string): Promise<RegistryInfo | null> {
+  const doc = (await fetchJson(`${url}/${encodeURIComponent(selector)}`, {
+    timeoutMs: TIMEOUT_MS,
+    maxBytes: VERSION_DOC_MAX_BYTES,
+  })) as { version?: string; scripts?: Record<string, unknown> } | null;
+  if (!doc?.version) return null;
+  const scripts = doc.scripts ?? {};
+  return {
+    version: doc.version,
+    hasInstallScript: INSTALL_SCRIPTS.some(
+      (k) => typeof scripts[k] === 'string' && (scripts[k] as string).length > 0
+    ),
+    ageFallback: `abbreviated document over the size cap; version read from /${selector}, which has no publish time`,
+  };
+}
 
 /**
  * The abbreviated npm document carries one package-level `modified` time and
@@ -46,22 +73,31 @@ async function npmInfo(
   // Every slash, not the first: a valid scoped name has one, and a name with
   // more must not reach another registry path (CodeQL js/incomplete-sanitization).
   const url = `${base}/${name.replaceAll('/', '%2F')}`;
-  const doc = (await fetchJson(url, {
-    timeoutMs: TIMEOUT_MS,
-    maxBytes: MAX_BYTES,
-    headers: { Accept: 'application/vnd.npm.install-v1+json' },
-  })) as {
-    modified?: string;
-    'dist-tags'?: Record<string, string>;
-    versions?: Record<string, { hasInstallScript?: boolean }>;
-  } | null;
-  if (!doc) return null;
-  const latest = doc['dist-tags']?.latest;
   // Preserve the requested tag/range: latest is only the default for a bare name.
   const aliasStart = raw?.indexOf('@npm:') ?? -1;
   const target = aliasStart > 0 ? raw!.slice(aliasStart + 5) : raw?.replace(/^npm:/, '');
   const specStart = target?.indexOf('@', 1) ?? -1;
   const spec = specStart > 0 ? target!.slice(specStart + 1) : '';
+  let doc: {
+    modified?: string;
+    'dist-tags'?: Record<string, string>;
+    versions?: Record<string, { hasInstallScript?: boolean }>;
+  } | null;
+  try {
+    doc = (await fetchJson(url, {
+      timeoutMs: TIMEOUT_MS,
+      maxBytes: MAX_BYTES,
+      headers: { Accept: 'application/vnd.npm.install-v1+json' },
+    })) as typeof doc;
+  } catch (err) {
+    if (!/too large/.test((err as Error).message)) throw err;
+    // A pinned version or a dist-tag has its own document; a range cannot be
+    // resolved without the version list, so `latest` stands in for it.
+    const selector = version ?? (spec && !validRange(spec) ? spec : 'latest');
+    return npmVersionDocument(url, selector);
+  }
+  if (!doc) return null;
+  const latest = doc['dist-tags']?.latest;
   let resolved = version;
   if (!resolved) {
     if (!spec) resolved = latest;

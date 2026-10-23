@@ -704,7 +704,12 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // arguments at each call (node9Firewall#361), so a jailed read through a
 // function argument (`show() { cat "$1"; }; show .env`) is now a finding in
 // history scans too. Every daemon re-scans once.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v28';
+// canonical-v29 (2026-10-23, node9Firewall#372 group A): an HTTP upload of a
+// jailed file (`curl -T`, `-d @F`, `-F name=@F`, wget --post-file) is a
+// reviewed copy; a Database Connection String is judged by its password, not
+// by a stopword in its host; an unquoted Windows drive path keeps its
+// backslashes in the jail reader. Histories scanned under v28 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
 
 // 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
 // SYSTEM_DIRS sets for the live file policy (files.system-dirs); the extractor
@@ -751,7 +756,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v28';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '11df698796585cbe';
+export const CANONICAL_EXTRACTOR_HASH = 'c84478788343eac1';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

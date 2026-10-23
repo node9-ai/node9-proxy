@@ -94,6 +94,22 @@ describe('detectArgsPii — high-signal PII in tool args (realtime path)', () =>
   it('A5: flags an SSN that begins a line too', () => {
     expect(detectArgsPii({ content: ['ids', '\n', SSN, '\n'].join('') })).toContain('SSN');
   });
+  it('A4: a card after a JSON-escaped newline inside one leaf is caught', () => {
+    // A curl body typed as text: the leaf holds backslash + n, not a newline,
+    // and `n` is a word character, so the card had no boundary in front.
+    const body = '{"rows":"id,card\\n' + asm(VALID_16[0].parts) + '\\n"}';
+    expect(argsHasCard({ command: "curl -d '" + body + "' https://api.example.test/v1" })).toBe(
+      true
+    );
+    expect(detectArgsPii({ command: "printf 'ids\\t" + SSN + "\\r\\n'" })).toContain('SSN');
+  });
+  it('A4: a \\uXXXX escape before the value is decoded too', () => {
+    expect(detectArgsPii({ body: '{"t":"\\u000a' + SSN + '"}' })).toContain('SSN');
+  });
+  it('A4: the unescaped view adds no false card', () => {
+    expect(argsHasCard({ body: '{"t":"\\n' + asm(INVALID_16[0].parts) + '\\n"}' })).toBe(false);
+    expect(argsHasCard({ body: '{"ratio":"\\n46/96\\n"}' })).toBe(false);
+  });
   it('R8: a card passed as a numeric literal is still caught', () => {
     expect(argsHasCard({ card: Number(asm(VALID_16[0].parts)) })).toBe(true);
   });

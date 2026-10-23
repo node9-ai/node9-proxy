@@ -34,6 +34,7 @@ import {
   unwrapCommandHead,
   parseDestHost,
   destTokensForBinary,
+  devNetRedirectHost,
   VALUE_FLAGS,
 } from '../shell';
 import { gitRepoPath } from './destinations';
@@ -590,6 +591,18 @@ function walkCalls(command: string, out: ShellExposure, depth: number, state: Wa
     if (type === 'DeclClause') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const a of (node as any).Args || []) if (a?.Name?.Value) state.env.add(a.Name.Value);
+      return true;
+    }
+    // A redirect into bash's /dev/tcp or /dev/udp pseudo-file sends whatever
+    // the statement writes to that host (fw#372 A1).
+    if (type === 'Stmt') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      for (const r of (node as any).Redirs || []) {
+        const h = devNetRedirectHost(r?.Word ? resolveWordLiteral(r.Word) : null);
+        if (!h) continue;
+        out.sends = true;
+        out.destinations.push(`host:${h}`);
+      }
       return true;
     }
     if (type !== 'CallExpr') return true;

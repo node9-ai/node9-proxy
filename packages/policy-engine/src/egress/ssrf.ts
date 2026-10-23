@@ -290,6 +290,37 @@ export interface SsrfVerdict extends SsrfMatch {
   host: string;
   binary: string;
   reason: string;
+  /** 'review' for a default-reachable address written in a disguised form
+   *  (`0x7f000001`, `127.1`, `[::ffff:127.0.0.1]`) while the strict tier is
+   *  off; 'block' everywhere else, as before. */
+  decision: 'block' | 'review';
+}
+
+/**
+ * Is `asWritten` a disguised spelling of `normalized`? Brackets around an IPv6
+ * literal and a trailing root dot are spelling, not disguise, and so is the
+ * dotted-decimal shorthand a developer types at a prompt (`127.1`, `10.1`;
+ * pinned reachable in ssrf-pins E3). What remains is what nobody types by
+ * hand: hex or octal components (`0x7f000001`, `0177.0.0.1`), a bare integer
+ * (`2130706433`), an IPv4-mapped or uncompressed IPv6 form.
+ */
+export function isDisguisedSpelling(asWritten: string, normalized: string): boolean {
+  let s = asWritten.trim().toLowerCase().replace(/\.$/, '');
+  if (s.startsWith('[') && s.endsWith(']')) s = s.slice(1, -1);
+  if (s === normalized) return false;
+  const parts = s.split('.');
+  const shorthand =
+    parts.length >= 2 && parts.length <= 3 && parts.every((p) => /^(?:0|[1-9][0-9]*)$/.test(p));
+  return !shorthand;
+}
+
+/** The sentence for a disguised spelling of an address reachable by default. */
+export function ssrfDisguisedReason(m: SsrfMatch, asWritten: string): string {
+  return (
+    `${asWritten} is ${TIER_REASON[m.tier]} written in a disguised form` +
+    (m.normalized ? ` (${m.normalized})` : '') +
+    '. Plain spellings of it are allowed; this one needs a look.'
+  );
 }
 
 export interface SsrfFloorOptions {
@@ -299,6 +330,10 @@ export interface SsrfFloorOptions {
   /** Opt-in tier 3: loopback and RFC1918. Off by default: a developer talks to
    *  those constantly (72 of 308 destinations on measured real history). */
   ssrfStrict?: boolean;
+  /** The egress policy's allowPrivate, when egress is enabled: an operator who
+   *  let private destinations through on purpose is not asked about a
+   *  disguised spelling of one (ssrf-pins V3). */
+  allowPrivate?: boolean;
 }
 
 /**
@@ -400,16 +435,30 @@ export function ssrfFloor(
   for (const { token, binary } of tokens) {
     const m = classifySsrf(token);
     if (!m) continue;
-    // Tiers the strict knob governs: reachable by default, blocked when a user
-    // or an org turns the strict tier on. Everything not listed here blocks on
-    // every machine, always.
-    if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) continue;
     // An exemption applies to overridable tiers only. Tier 1 has no allow
     // path, which is also what keeps a RANGE entry safe: the guard is per
     // address, so exempting 100.64.0.0/10 leaves the Alibaba IMDS address
     // inside it blocked.
     if (m.overridable && ssrfExemptMatches(opts.ssrfAllow, m.normalized)) continue;
-    return { ...m, host: token, binary, reason: ssrfReason(m, token) };
+    // Tiers the strict knob governs: reachable by default, blocked when a user
+    // or an org turns the strict tier on. Everything not listed here blocks on
+    // every machine, always. A default-reachable address written in a form
+    // nobody types by hand (`0x7f000001`, `2130706433`, `127.1`,
+    // `[::ffff:127.0.0.1]`) is the classic filter evasion and is reviewed
+    // even with the strict tier off; `127.0.0.1` itself stays reachable for
+    // the dev server (fw#372 A9).
+    if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) {
+      if (opts.allowPrivate || m.kind !== 'address' || !m.normalized) continue;
+      if (!isDisguisedSpelling(token, m.normalized)) continue;
+      return {
+        ...m,
+        host: token,
+        binary,
+        decision: 'review',
+        reason: ssrfDisguisedReason(m, token),
+      };
+    }
+    return { ...m, host: token, binary, decision: 'block', reason: ssrfReason(m, token) };
   }
   return null;
 }

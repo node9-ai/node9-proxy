@@ -907,10 +907,13 @@ async function evaluatePolicyCore(
       const ssrf = ssrfFloor(extractShellDestTokens(shellCommand), {
         ssrfAllow: config.policy.egress?.ssrfAllow,
         ssrfStrict: config.policy.egress?.ssrfStrict,
+        // Only an ENABLED egress policy speaks for the operator here: the
+        // shipped default carries allowPrivate without anyone having chosen it.
+        allowPrivate: config.policy.egress?.enabled ? config.policy.egress.allowPrivate : undefined,
       });
       if (ssrf) {
         return {
-          decision: 'block',
+          decision: ssrf.decision,
           blockedByLabel: '🌐 Node9 Egress (Protected Address)',
           reason: ssrf.reason,
           ruleName: `ssrf:${ssrf.tier}:${ssrf.binary}:${ssrf.host}`,

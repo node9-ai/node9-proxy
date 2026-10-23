@@ -502,9 +502,10 @@ describe('AST tier — Windows path blindness (known gap)', () => {
     ['.env', 'cat C:\\proj\\.env'],
   ];
   for (const [label, cmd] of WIN_CASES) {
-    // Body = what SHOULD happen. Marker = it does not yet. Delete the marker
-    // when the parse is fixed; never touch the expectation.
-    it.fails(`a Windows backslash path should be detected: ${label}`, () => {
+    // Closed by fw#372 A7: the jail reads an unquoted drive path as written
+    // (windowsDrivePathSpelling). Marker deleted, expectation untouched, as
+    // the note above prescribes.
+    it(`a Windows backslash path is detected: ${label}`, () => {
       expect(analyzeFsOperation(cmd)?.verdict).toBe('block');
     });
   }

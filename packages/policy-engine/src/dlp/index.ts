@@ -326,6 +326,22 @@ function validateBasicCredential(raw: string): boolean {
 
 const OTP_CAPTURE_RE = /["']([A-Z2-7]{16,128}=*)["']$/i;
 
+const DB_URL_PASSWORD_RE = /:\/\/[^:/\s@]*:([^@\s]{4,})@/;
+
+/**
+ * A connection string is a placeholder when its PASSWORD is one, not when its
+ * host is: `postgres://app:<real>@db.example-corp.internal` was suppressed by
+ * the stopword `example` in the host (fw#372 A6). The entropy floor stays on
+ * the whole match, as it was.
+ */
+function validateDbConnectionString(raw: string): boolean {
+  const password = capturedValue(raw, DB_URL_PASSWORD_RE);
+  if (password === null) return false;
+  const lower = password.toLowerCase();
+  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
+  return shannonEntropy(raw) >= 3.0;
+}
+
 /** A base32 constructor secret: not a documentation secret, not a run, generated. */
 function validateOtpSecret(raw: string): boolean {
   const secret = capturedValue(raw, OTP_CAPTURE_RE);
@@ -859,7 +875,7 @@ export const DLP_PATTERNS: DlpPattern[] = [
       'clickhouse',
       'cassandra',
     ],
-    minEntropy: 3.0,
+    validate: validateDbConnectionString,
   },
 
   // ── Credential in a URL query value ───────────────────────────────────────
