@@ -81,7 +81,12 @@ const SIGNALS: Signal[] = [
     any: [
       // exfil verb + to/at/with/into + a url / email / domain. "email" after a
       // possessive ("your email", "my email") is the noun, not the verb (X4).
-      /\b(send|sent|post(?:ed)?|upload(?:ed)?|exfiltrate[sd]?|forward(?:ed|s)?|transmit(?:ted|s)?|share[sd]?|submit(?:ted|s)?|log(?:ged|s)?|report(?:ed|s)?|curl|wget|leak(?:ed|s)?|(?<!\b(?:your|my|the|an|a|this|that|our|their|his|her)\s+)email(?:ed|s)?)\b[^\n!?]{0,40}\b(to|at|with|into)\b[^\n!?]{0,24}(https?:\/\/|[\w.-]+@[\w.-]+\.[a-z]{2,}|[\w-]+\.[a-z]{2,})/i,
+      // "log in to", "report issues at", "share feedback with" and "submit
+      // your form at" are how ordinary pages talk, so log, report, share and
+      // submit count only in the past tense ("logged to", "shared with").
+      // A dot inside a word (a host, a file name) does not end the window; a
+      // dot that ends a sentence does.
+      /\b(send|sent|post(?:ed)?|upload(?:ed)?|exfiltrate[sd]?|forward(?:ed|s)?|transmit(?:ted|s)?|shared|submitted|logged|reported|curl|wget|leak(?:ed|s)?|(?<!\b(?:your|my|the|an|a|this|that|our|their|his|her)\s+)email(?:ed|s)?)\b(?:[^.\n!?]|\.(?=\S)){0,40}\b(to|at|with|into)\b(?:[^.\n!?]|\.(?=\S)){0,24}(https?:\/\/|[\w.-]+@[\w.-]+\.[a-z]{2,}|[\w-]+\.[a-z]{2,})/i,
       /\brun (the )?following (command|code|script)\b/i,
       /\bexecute (this|the following)\b/i,
       /\bdecode\b[^.!?\n]{0,40}\b(and|then)\b[^.!?\n]{0,12}\b(execute|run|eval)\b/i,

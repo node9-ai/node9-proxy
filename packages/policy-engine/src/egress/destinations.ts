@@ -26,8 +26,8 @@
 //    hostname.
 import {
   classifySsrf,
-  isStrictGatedTier,
-  ssrfExemptMatches,
+  ssrfDisguisedReason,
+  ssrfFloorDecision,
   ssrfReason,
   type SsrfMatch,
 } from './ssrf';
@@ -161,6 +161,15 @@ export interface DestinationHit extends SsrfMatch {
   argPath: string;
   host: string;
   reason: string;
+  /** 'review' for a disguised spelling of a default-reachable address. */
+  decision: 'block' | 'review';
+}
+
+/** The host as WRITTEN in a URL: the URL parser folds `0x7f000001` to
+ *  `127.0.0.1`, which would hide the disguise the floor asks about. */
+function writtenAuthority(value: string): string | null {
+  const m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]]*\]|[^:/?#]*)/i.exec(value);
+  return m && m[1] ? m[1] : null;
 }
 
 /**
@@ -171,7 +180,7 @@ export interface DestinationHit extends SsrfMatch {
 export function ssrfDestinationFloor(
   toolName: string,
   args: unknown,
-  opts: { ssrfStrict?: boolean; ssrfAllow?: readonly string[] } = {}
+  opts: { ssrfStrict?: boolean; ssrfAllow?: readonly string[]; allowPrivate?: boolean } = {}
 ): DestinationHit | null {
   try {
     const paths = DESTINATION_ARGS.get(bareToolName(toolName));
@@ -182,12 +191,15 @@ export function ssrfDestinationFloor(
         if (!host) continue;
         const m = classifySsrf(host);
         if (!m) continue;
-        // The same two questions the shell floor asks, asked of the same
-        // functions rather than re-expressed here. Two spellings of one rule is
+        // The same questions the shell floor asks, asked of the same
+        // function rather than re-expressed here. Two spellings of one rule is
         // how the parts of this feature drifted apart all day.
-        if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) continue;
-        if (m.overridable && ssrfExemptMatches(opts.ssrfAllow, m.normalized)) continue;
-        return { ...m, argPath: path, host, reason: ssrfReason(m, host) };
+        const written = writtenAuthority(value) ?? host;
+        const decision = ssrfFloorDecision(m, written, opts);
+        if (decision === null) continue;
+        const reason =
+          decision === 'review' ? ssrfDisguisedReason(m, written) : ssrfReason(m, host);
+        return { ...m, argPath: path, host, reason, decision };
       }
     }
     return null;

@@ -1,5 +1,9 @@
 // src/daemon/written-store.ts
-// Files an agent session wrote, by absolute path. The hook records a write
+// Files agent sessions on this machine wrote, by absolute path (one record for
+// the machine, not per session: a script one session wrote and another runs is
+// still the agent's). The record is made before the call is decided, so a
+// denied write leaves one; the cost is one extra read and judgement of that
+// file if a script by that name is ever run. The hook records a write
 // (Write, Edit, a shell redirect, tee, cp) before it happens and asks, when a
 // later command runs a script by path, whether the session wrote that file;
 // if so the script's content is judged by the same shell checks as a typed

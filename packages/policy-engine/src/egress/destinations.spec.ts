@@ -255,3 +255,20 @@ describe('D. an MCP argument named as a destination feeds the egress policy (fw#
     ).toBeNull();
   });
 });
+
+describe('E. a disguised internal address through a URL tool (review of fw#372 A9)', () => {
+  it('E1 is reviewed like the shell form; the plain spelling stays reachable', () => {
+    const r = hit('WebFetch', { url: 'http://0x7f000001:8080/admin' });
+    expect(r?.decision).toBe('review');
+    expect(r?.reason).toContain('disguised');
+    expect(hit('WebFetch', { url: 'http://[::ffff:127.0.0.1]:8080/' })?.decision).toBe('review');
+    expect(hit('WebFetch', { url: 'http://127.0.0.1:8080/admin' })).toBeNull();
+  });
+  it('E2 strict blocks it, an enabled allowPrivate releases it, the locked tiers still block', () => {
+    expect(hit('WebFetch', { url: 'http://0x7f000001/' }, { ssrfStrict: true })?.decision).toBe(
+      'block'
+    );
+    expect(hit('WebFetch', { url: 'http://0x7f000001/' }, { allowPrivate: true })).toBeNull();
+    expect(hit('WebFetch', { url: 'http://2852039166/' })?.decision).toBe('block');
+  });
+});

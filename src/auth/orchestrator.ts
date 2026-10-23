@@ -28,7 +28,7 @@ import {
 } from '@node9/policy-engine';
 import { prepareFileAccesses, type PreparedFileAccess } from '../policy/file-access';
 import { resolveSessionScript, recordSessionWrites, type SessionScript } from './session-script';
-import { scanInjection } from '@node9/policy-engine';
+import { scanInjection, argumentLeavesText } from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -227,28 +227,6 @@ const WRITE_TOOLS = new Set([
   'notebook_edit',
   'notebookedit',
 ]);
-
-/** Every string leaf of a tool call's arguments, joined, bounded like the scanners' input. */
-function argumentLeavesText(args: unknown, limit = 100_000): string {
-  const parts: string[] = [];
-  let size = 0;
-  const walk = (v: unknown, depth: number): void => {
-    if (size >= limit || depth > 8 || v === null || v === undefined) return;
-    if (typeof v === 'string') {
-      parts.push(v);
-      size += v.length;
-      return;
-    }
-    if (Array.isArray(v)) {
-      for (const x of v) walk(x, depth + 1);
-      return;
-    }
-    if (typeof v === 'object')
-      for (const x of Object.values(v as Record<string, unknown>)) walk(x, depth + 1);
-  };
-  walk(args, 0);
-  return parts.join('\n').slice(0, limit);
-}
 
 const VERDICT_RANK = { allow: 0, review: 1, block: 2 } as const;
 /** A verdict reached through a script the session wrote: its sentences name the script. */

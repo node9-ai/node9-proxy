@@ -1080,6 +1080,10 @@ export function startDaemon(): void {
     // whether a script about to run is one of them. Local hook subprocesses
     // only, like /taint; bodies carry paths, never content.
     if (req.method === 'POST' && (pathname === '/written' || pathname === '/written/check')) {
+      // Whether a script is judged from its content depends on this record, so
+      // only a holder of the internal token may write or read it, as for the
+      // session-taint routes: a local process must not be able to flush it.
+      if (!validToken(req)) return res.writeHead(403).end();
       try {
         const body = JSON.parse(await readBody(req)) as { paths?: unknown };
         if (

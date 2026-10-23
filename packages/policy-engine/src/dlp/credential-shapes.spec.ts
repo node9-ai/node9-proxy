@@ -203,6 +203,12 @@ describe('shapes from the CredData review (fw#372 B4, node9Firewall#385)', () =>
     expect(gate({ content: `publicKey = "${aes128}"` })).toBeNull();
     expect(gate({ content: `cipherKey = "${'a'.repeat(22)}=="` })).toBeNull();
     expect(gate({ content: `testKey = "${aes128}"` })).toBeNull();
+    for (const name of ['cacheKey', 'idempotencyKey', 'requestKey', 'monkey']) {
+      expect(gate({ content: `${name} = "${aes128}"` }), name).toBeNull();
+    }
+    expect(gate({ content: `rememberMeCipherKey = "${aes128}"` })?.patternName).toBe(
+      'Cipher Key Literal'
+    );
   });
 
   it('Laravel APP_KEY, a Mailgun key, a kubeadm token and a SQL account password are reviews', () => {

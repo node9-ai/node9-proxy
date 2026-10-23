@@ -616,7 +616,7 @@ export async function notifyWritten(paths: readonly string[]): Promise<void> {
   try {
     await fetch(`${base}/written`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: exposureHeaders(),
       body: JSON.stringify({ paths: paths.slice(0, 64) }),
       signal: AbortSignal.timeout(1000),
     });
@@ -639,7 +639,7 @@ export async function checkWritten(paths: readonly string[]): Promise<WrittenChe
   try {
     const res = await fetch(`${base}/written/check`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: exposureHeaders(),
       body: JSON.stringify({ paths: paths.slice(0, 64) }),
       signal: AbortSignal.timeout(2000),
     });

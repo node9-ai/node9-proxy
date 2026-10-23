@@ -301,6 +301,24 @@ function validateAssignedSecret(raw: string, before = ''): boolean {
 }
 
 const CIPHER_KEY_NAME_RE = /^([A-Za-z_][\w.]{0,40})/;
+const CIPHER_NAME_PARTS = new Set([
+  'cipher',
+  'aes',
+  'enc',
+  'encrypt',
+  'encryption',
+  'crypt',
+  'crypto',
+  'secret',
+  'remember',
+  'rememberme',
+  'shiro',
+  'signing',
+  'hmac',
+  'master',
+  'private',
+  'des',
+]);
 const CIPHER_KEY_VALUE_RE = /([A-Za-z0-9+/]{22}==)$/;
 
 /**
@@ -315,6 +333,13 @@ function validateCipherKeyLiteral(raw: string): boolean {
   const value = capturedValue(raw, CIPHER_KEY_VALUE_RE);
   if (name === null || value === null) return false;
   if (/pub/i.test(name) || !nameHoldsCredential(name)) return false;
+  // The name must say cipher: `cacheKey`, `idempotencyKey`, `requestKey` hold
+  // random ids of the same shape (review finding).
+  const parts = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .split(/[_.-]+/);
+  if (!parts.some((p) => CIPHER_NAME_PARTS.has(p))) return false;
   if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value)) return false;
   const bytes = Buffer.from(value, 'base64');
   return bytes.length === 16 && bytes.toString('base64') === value;
@@ -1438,6 +1463,8 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
   return null;
 }
 
+const ENCODED_RUN_RE = /[A-Za-z0-9+/_-]{24,}|(?:%[0-9a-fA-F]{2}){4,}/;
+
 /** The raw scanners' patterns over one text, as written. */
 function scanTextOnce(t: string, redactedSample?: string): DlpMatch | null {
   const tLower = t.toLowerCase();
@@ -1469,6 +1496,9 @@ export function scanText(text: string): DlpMatch | null {
   const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
   const direct = scanTextOnce(t);
   if (direct) return direct;
+  // A credential encoded in base64, hex or percent-encoding leaves a long run
+  // of its alphabet; text without one has nothing to decode (most outputs).
+  if (!ENCODED_RUN_RE.test(t)) return null;
   try {
     for (const view of secretViews(t, newSecretViewBudget())) {
       const m = scanTextOnce(view.text, '[encoded secret]');

@@ -110,14 +110,17 @@ const NATIONAL_ID_SHAPES: readonly NationalIdShape[] = [
     regex: /\b[12] ?\d{2} ?(?:0[1-9]|1[0-2]|[2-9]\d) ?(?:\d{2}|2[AB]) ?\d{3} ?\d{3} ?\d{2}\b/,
     validate: validateNir,
   },
-  { regex: /\b\d{11}\b/, validate: validatePesel },
-  { regex: /\b[1-9]\d{12}\b/, validate: validateCnp },
+  // PESEL and CNP are bare 11- and 13-digit runs: a millisecond timestamp
+  // passes the CNP rules about 1 time in 400 and a random 11-digit id passes
+  // PESEL about 1 in 50 (measured), so both need their name nearby.
+  { regex: /\b\d{11}\b/, validate: validatePesel, labelled: true },
+  { regex: /\b[1-9]\d{12}\b/, validate: validateCnp, labelled: true },
   { regex: /\b\d{6}[-+]\d{4}\b/, validate: validateSwedishPersonnummer, labelled: true },
   { regex: /\b\d{11}\b/, validate: validateNorwegianFnr, labelled: true },
   { regex: /\b\d{6}[-+A-FU-Y]\d{3}[0-9A-Y]\b/, validate: validateFinnishHetu, labelled: true },
 ];
 const NATIONAL_ID_LABEL_RE =
-  /\b(?:personnummer|personal identity number|f[øo]dselsnummer|hetu|henkil[öo]tunnus)\b/i;
+  /\b(?:personnummer|personal identity number|f[øo]dselsnummer|hetu|henkil[öo]tunnus|pesel|cnp|cod numeric personal|codul numeric personal|national id(?:entification)?(?: number)?)\b/i;
 const NATIONAL_ID_LABEL_WINDOW = 32;
 // Cheap guard: every shape carries a run of three digits, or a codice fiscale's letters.
 const NATIONAL_ID_GUARD_RE = /\d{3}|[A-Z]{6}\d{2}/;
@@ -357,6 +360,18 @@ function* stringLeaves(
     return;
   }
   for (const [k, x] of Object.entries(v)) yield* stringLeaves(x, depth + 1, k);
+}
+
+/** Every string leaf of a tool call's arguments, joined by newlines, bounded. */
+export function argumentLeavesText(args: unknown, limit = MAX_PII_SCAN_BYTES): string {
+  const parts: string[] = [];
+  let size = 0;
+  for (const [leaf] of stringLeaves(args)) {
+    if (size >= limit) break;
+    parts.push(leaf);
+    size += leaf.length + 1;
+  }
+  return parts.join('\n').slice(0, limit);
 }
 
 // Argument keys under which an IBAN is WHERE the money goes, not personal

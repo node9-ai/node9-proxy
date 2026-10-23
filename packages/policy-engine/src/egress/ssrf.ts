@@ -435,30 +435,44 @@ export function ssrfFloor(
   for (const { token, binary } of tokens) {
     const m = classifySsrf(token);
     if (!m) continue;
-    // An exemption applies to overridable tiers only. Tier 1 has no allow
-    // path, which is also what keeps a RANGE entry safe: the guard is per
-    // address, so exempting 100.64.0.0/10 leaves the Alibaba IMDS address
-    // inside it blocked.
-    if (m.overridable && ssrfExemptMatches(opts.ssrfAllow, m.normalized)) continue;
-    // Tiers the strict knob governs: reachable by default, blocked when a user
-    // or an org turns the strict tier on. Everything not listed here blocks on
-    // every machine, always. A default-reachable address written in a form
-    // nobody types by hand (`0x7f000001`, `2130706433`, `127.1`,
-    // `[::ffff:127.0.0.1]`) is the classic filter evasion and is reviewed
-    // even with the strict tier off; `127.0.0.1` itself stays reachable for
-    // the dev server (fw#372 A9).
-    if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) {
-      if (opts.allowPrivate || m.kind !== 'address' || !m.normalized) continue;
-      if (!isDisguisedSpelling(token, m.normalized)) continue;
-      return {
-        ...m,
-        host: token,
-        binary,
-        decision: 'review',
-        reason: ssrfDisguisedReason(m, token),
-      };
-    }
-    return { ...m, host: token, binary, decision: 'block', reason: ssrfReason(m, token) };
+    const decision = ssrfFloorDecision(m, token, opts);
+    if (decision === null) continue;
+    return {
+      ...m,
+      host: token,
+      binary,
+      decision,
+      reason: decision === 'review' ? ssrfDisguisedReason(m, token) : ssrfReason(m, token),
+    };
   }
   return null;
+}
+
+/**
+ * The floor's answer for one protected address, as written: block, review,
+ * or null (reachable). ONE function for the shell floor and the declared-URL
+ * floor, so `curl http://0x7f000001/` and the same URL through WebFetch get
+ * the same verdict.
+ *
+ * An exemption applies to overridable tiers only. Tier 1 has no allow path,
+ * which is also what keeps a RANGE entry safe: the guard is per address, so
+ * exempting 100.64.0.0/10 leaves the Alibaba IMDS address inside it blocked.
+ * Tiers the strict knob governs are reachable by default and blocked when a
+ * user or an org turns the strict tier on. A default-reachable address
+ * written in a form nobody types by hand (`0x7f000001`, `2130706433`,
+ * `[::ffff:127.0.0.1]`) is the classic filter evasion and is reviewed even
+ * with the strict tier off; `127.0.0.1` itself stays reachable for the dev
+ * server (fw#372 A9).
+ */
+export function ssrfFloorDecision(
+  m: SsrfMatch,
+  asWritten: string,
+  opts: SsrfFloorOptions
+): 'block' | 'review' | null {
+  if (m.overridable && ssrfExemptMatches(opts.ssrfAllow, m.normalized)) return null;
+  if (isStrictGatedTier(m.tier) && !opts.ssrfStrict) {
+    if (opts.allowPrivate || m.kind !== 'address' || !m.normalized) return null;
+    return isDisguisedSpelling(asWritten, m.normalized) ? 'review' : null;
+  }
+  return 'block';
 }

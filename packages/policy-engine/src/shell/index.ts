@@ -266,7 +266,44 @@ export function normalizeCommandForPolicy(command: string): string {
  */
 export function commandReadings(command: string): string[] {
   const r = commandReadingsImpl(command);
-  return [...new Set([r.posix, r.separator, r.folded])];
+  const out = new Set([r.posix, r.separator, r.folded]);
+  // What a shell's literal `-c` payload (or `eval "..."`) runs is a command of
+  // its own, and a rule written for it must meet it there: since the
+  // inline-exec review no longer asks on every `sh -c` (fw#372 X2),
+  // `bash -c 'git push --force'` would otherwise pass review-force-push. The
+  // payloads are read from the POSIX reading, after the message-flag strip,
+  // so a payload quoted inside a commit message is not resurrected.
+  for (const payload of literalPayloadsOf(r.posix, 0)) {
+    for (const reading of commandReadings(payload)) out.add(reading);
+  }
+  return [...out];
+}
+
+const MAX_READING_PAYLOADS = 8;
+
+/** Every literal shell payload a command runs, one nesting level per call. */
+function literalPayloadsOf(command: string, depth: number): string[] {
+  if (depth > 0 || !/\b(?:sh|bash|zsh|dash|ksh|eval)\b/.test(command)) return [];
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return [];
+  const out: string[] = [];
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node || out.length >= MAX_READING_PAYLOADS) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words: (string | null)[] = (n.Args || []).map((a: any) => resolveWordLiteral(a));
+      if (words.length === 0) return true;
+      const payload = literalShellPayload(words, baseWord(words[0]));
+      if (payload !== null && payload !== command) out.push(payload);
+      return true;
+    });
+  } catch {
+    return out;
+  }
+  return out;
 }
 
 /**

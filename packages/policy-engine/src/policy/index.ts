@@ -514,10 +514,11 @@ async function evaluatePolicyCore(
     const dest = ssrfDestinationFloor(toolName, args, {
       ssrfAllow: config.policy.egress?.ssrfAllow,
       ssrfStrict: config.policy.egress?.ssrfStrict,
+      allowPrivate: config.policy.egress?.enabled ? config.policy.egress.allowPrivate : undefined,
     });
     if (dest) {
       return {
-        decision: 'block',
+        decision: dest.decision,
         blockedByLabel: '🌐 Node9 Egress (Protected Address)',
         reason: dest.reason,
         ruleName: `ssrf:${dest.tier}:${toolName}:${dest.host}`,

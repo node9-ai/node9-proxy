@@ -653,6 +653,19 @@ describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10
     expect(r.verdict).toBe('review');
     expect(r.findings.map((f) => f.kind)).toContain('install-script');
   });
+  it('a range that latest does not satisfy claims no version, so a record keeps its review (review finding)', async () => {
+    indexWith('npm', 'node9-canary-big', [{ id: 'MAL-0000-0003', versions: ['1.4.1'] }]);
+    routes['http://registry.test/node9-canary-big'] = tooLarge;
+    routes['http://registry.test/node9-canary-big/latest'] = () =>
+      json({ name: 'node9-canary-big', version: '3.0.0', scripts: {} });
+    const r = await runPackageCheck(...bash('npm i node9-canary-big@^1.2.0'), {
+      ...CFG,
+      newPackage: 'off',
+      installScript: 'off',
+    });
+    expect(r.verdict).toBe('review');
+    expect(r.findings[0].kind).toBe('malicious-unpinned');
+  });
   it('a pinned version reads its own document', async () => {
     routes['http://registry.test/node9-canary-big'] = tooLarge;
     routes['http://registry.test/node9-canary-big/1.5.0'] = () =>

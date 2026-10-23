@@ -91,10 +91,15 @@ async function npmInfo(
     })) as typeof doc;
   } catch (err) {
     if (!/too large/.test((err as Error).message)) throw err;
-    // A pinned version or a dist-tag has its own document; a range cannot be
-    // resolved without the version list, so `latest` stands in for it.
-    const selector = version ?? (spec && !validRange(spec) ? spec : 'latest');
-    return npmVersionDocument(url, selector);
+    // A pinned version or a dist-tag has its own document. A range cannot be
+    // resolved without the version list: `latest` stands in only when it
+    // satisfies the range (npm's own preference); otherwise no version is
+    // claimed, and the caller treats the install as unpinned.
+    const range = !version && spec && validRange(spec) ? spec : null;
+    const selector = version ?? (spec && !range ? spec : 'latest');
+    const info = await npmVersionDocument(url, selector);
+    if (info && range && !satisfies(info.version, range)) return null;
+    return info;
   }
   if (!doc) return null;
   const latest = doc['dist-tags']?.latest;

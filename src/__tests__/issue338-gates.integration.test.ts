@@ -206,8 +206,10 @@ describe('Issue 338 review 3: MCP shell routing through the built hook', () => {
   });
   it('analyses the program and its argv as one command', () => {
     expect(check('mcp__srv__exec', { command: 'bash', args: ['-c', 'rm -rf ~/'] }).status).toBe(2);
+    // The payload meets review-curl-pipe-shell itself (fw#372 X2 review fix),
+    // the block the bare `curl ... | sh` gets, not only the inline-exec ask.
     expect(decision(check('mcp__srv__exec', { command: 'sh', args: ['-c', curlPipe] }))).toBe(
-      'ask'
+      'deny'
     );
     expect(decision(check('mcp__srv__exec', { cmd: 'bash', argv: ['-c', 'sudo whoami'] }))).toBe(
       'ask'

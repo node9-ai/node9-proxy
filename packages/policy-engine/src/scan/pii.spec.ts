@@ -381,10 +381,6 @@ describe('national identifiers with a check digit (fw#372 B2)', () => {
     ['codice fiscale', 'RSSMRA85T10A562S'],
     ['DNI', '12345678Z'],
     ['NIE', 'X1234567L'],
-    ['PESEL 1990', '90041501239'],
-    ['PESEL 2002', '02212804566'],
-    ['CNP', '1860415123457'],
-    ['CNP county 23', '2980507234563'],
     ['NIR', '185057512345673'],
     ['NIR spaced', '1 85 05 75 123 456 73'],
     ['NIR abroad', '290019900011194'],
@@ -395,13 +391,17 @@ describe('national identifiers with a check digit (fw#372 B2)', () => {
     expect(detectPii(`id: ${value} end`)).toContain('National ID');
     expect(detectArgsPii({ customer: { id: value } })).toContain('National ID');
   });
-  it('the Nordic numbers need their name within 32 characters before them', () => {
+  it('the Nordic numbers, PESEL and CNP need their name within 32 characters before them', () => {
     const rows: Array<[string, string]> = [
       ['personnummer', '811218-9876'],
       ['fødselsnummer', '15067545602'],
       ['fodselsnummer', '15067545602'],
       ['hetu', '131052-308T'],
       ['henkilötunnus', '010100A123D'],
+      ['PESEL', '90041501239'],
+      ['numer PESEL', '02212804566'],
+      ['CNP', '1860415123457'],
+      ['cod numeric personal', '2980507234563'],
     ];
     for (const [label, value] of rows) {
       expect(detectPii(`${label}: ${value}`), label).toContain('National ID');
@@ -413,10 +413,10 @@ describe('national identifiers with a check digit (fw#372 B2)', () => {
     for (const bad of [
       'RSSMRA85T10A562T', // check letter off by one
       '12345678A', // DNI letter does not match
-      '90041501238', // PESEL check digit off
-      '90131501239', // PESEL month 13
-      '1860415123458', // CNP check off
-      '1860415993457', // CNP county 99
+      'PESEL 90041501238', // PESEL check digit off
+      'PESEL 90131501239', // PESEL month 13
+      'CNP 1860415123458', // CNP check off
+      'CNP 1860415993457', // CNP county 99
       '185057512345674', // NIR key off
       '756.1234.5678.98', // AHV check off
       'CHE-109.671.515', // UID check off
@@ -441,6 +441,12 @@ describe('national identifiers with a check digit (fw#372 B2)', () => {
   });
   it('is realtime-gated', () => {
     expect(REALTIME_PII_PATTERNS).toContain('National ID');
+  });
+  it('millisecond timestamps and 11-digit ids with no label are not IDs (review finding)', () => {
+    // Values that pass the CNP and PESEL rules by chance, as a JSON body carries them.
+    expect(detectPii('{"createdAt":1860415123457,"order":90041501239}')).not.toContain(
+      'National ID'
+    );
   });
 });
 
