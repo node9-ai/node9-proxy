@@ -119,11 +119,24 @@ function hostOf(value: string): string | null {
  */
 export function extractToolDestinations(toolName: string, args: unknown): Destination[] {
   try {
-    const paths = DESTINATION_ARGS.get(bareToolName(toolName));
-    if (!paths) return [];
     const out: Destination[] = [];
+    const paths = DESTINATION_ARGS.get(bareToolName(toolName)) ?? [];
     for (const path of paths) {
       for (const value of valuesAt(args, path)) {
+        const host = hostOf(value);
+        if (host) out.push({ host, binary: toolName, raw: value });
+      }
+    }
+    // An MCP tool whose argument is NAMED as a place data goes (`destination`,
+    // `endpoint`, `webhook`, `callback_url`) and holds a URL names where it
+    // sends (`send_report(destination=...)`, fw#372 B8). This feeds the opt-in
+    // egress policy only; the floor above keeps its closed list, and so does a
+    // plain `url`: on `notes.save` it is the page being saved, not a
+    // destination (founder call 2026-09-08, pinned by the carriers corpus).
+    if (paths.length === 0 && /^mcp__/i.test(toolName) && args && typeof args === 'object') {
+      for (const key of MCP_DESTINATION_KEYS) {
+        const value = (args as Record<string, unknown>)[key];
+        if (typeof value !== 'string') continue;
         const host = hostOf(value);
         if (host) out.push({ host, binary: toolName, raw: value });
       }
@@ -133,6 +146,15 @@ export function extractToolDestinations(toolName: string, args: unknown): Destin
     return [];
   }
 }
+
+/** Top-level argument names that declare a destination on an MCP tool. */
+const MCP_DESTINATION_KEYS = [
+  'destination',
+  'endpoint',
+  'webhook',
+  'webhook_url',
+  'callback_url',
+] as const;
 
 export interface DestinationHit extends SsrfMatch {
   /** The path that carried it, for the message and the audit row. */

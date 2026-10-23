@@ -9,6 +9,7 @@
 
 import safeRegex from 'safe-regex2';
 import { findMnemonic, type MnemonicBudget } from './mnemonic';
+import { secretViews, newSecretViewBudget } from './secret-views';
 import { isLegacySystemPath, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
@@ -210,7 +211,8 @@ function looksGenerated(
  * (`FAKE_TOKEN`, `mockSecret`) or that names a derivative (`token_hash`,
  * `password_length`, `secret_id`) is not holding a credential.
  */
-const FIXTURE_NAME_RE = /(?:fake|dummy|example|sample|mock|stub|placeholder|test)/i;
+// `PUBLIC_KEY`, `publicToken`: a name that says public holds no credential (fw#372 B4).
+const FIXTURE_NAME_RE = /(?:fake|dummy|example|sample|mock|stub|placeholder|test)|^public/i;
 const DERIVATIVE_NAME_RE =
   /(?:hash|digest|fingerprint|thumbprint|checksum|id|type|name|url|uri|path|file|len|length|count|size|ttl|expires?|expiry|age|date|time|format|field|header|param)$/i;
 
@@ -246,7 +248,7 @@ function validateQueryCredential(raw: string): boolean {
 }
 
 const ASSIGNED_SECRET_VALUE_RE =
-  /(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})$/;
+  /(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?((?:[A-Za-z0-9+/_.!@#$%^*~|-]|\\\/){12,512}={0,2})$/;
 
 const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
 
@@ -260,7 +262,7 @@ const ASSIGNED_SECRET_NAME_RE = /^([A-Za-z0-9_]+)/;
 // `*_PASS` variable) are the shapes CredData's public split showed the gate
 // missing.
 const NAME_KEYWORD_RE =
-  /^(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|jsapi[_-]?ticket|pass)/i;
+  /^(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|aes[_-]?key|cipher[_-]?key|subscription[_-]?key|jsapi[_-]?ticket|pass)/i;
 
 /**
  * The keyword must end the name or be followed by a new part of it: `_`,
@@ -290,7 +292,65 @@ function validateAssignedSecret(raw: string, before = ''): boolean {
   // `FAKE_TOKEN`, `mock` in `mockSecret`) is in the text just before it.
   const prefix = (before.match(/[A-Za-z0-9_]*$/)?.[0] ?? '') + (raw.startsWith('_') ? '_' : '');
   if (!nameHoldsCredential(prefix + name)) return false;
-  return looksGenerated(value, 12, 3.5);
+  // A value that mixes letters and digits is already unlike a word; 3.0 bits
+  // per character is the floor the URL-query rule uses for the same reason.
+  // Letters alone keep the 3.5 floor (fw#372 B4).
+  if (isOtpDocSecret(value)) return false;
+  const mixed = /[0-9]/.test(value) && /[A-Za-z]/.test(value);
+  return looksGenerated(value, 12, mixed ? 3.0 : 3.5);
+}
+
+const CIPHER_KEY_NAME_RE = /^([A-Za-z_][\w.]{0,40})/;
+const CIPHER_KEY_VALUE_RE = /([A-Za-z0-9+/]{22}==)$/;
+
+/**
+ * `cipherKey = "kPH+bIxk5D2deZiIxcaaaA=="`: a base64 literal that decodes to
+ * exactly 16 bytes, assigned under a name ending in `key`. That is an AES-128
+ * key written into code (the Shiro rememberMe class of leaks). The name must
+ * not say public, and the literal must mix cases and carry a digit, as a
+ * random key does (fw#372 B4).
+ */
+function validateCipherKeyLiteral(raw: string): boolean {
+  const name = capturedValue(raw, CIPHER_KEY_NAME_RE);
+  const value = capturedValue(raw, CIPHER_KEY_VALUE_RE);
+  if (name === null || value === null) return false;
+  if (/pub/i.test(name) || !nameHoldsCredential(name)) return false;
+  if (!/[a-z]/.test(value) || !/[A-Z]/.test(value) || !/[0-9]/.test(value)) return false;
+  const bytes = Buffer.from(value, 'base64');
+  return bytes.length === 16 && bytes.toString('base64') === value;
+}
+
+const LARAVEL_KEY_VALUE_RE = /base64:([A-Za-z0-9+/]{43}=)$/;
+
+/** Laravel `APP_KEY=base64:<32 bytes>`: the application key, whose leak is remote code execution. */
+function validateLaravelAppKey(raw: string): boolean {
+  const value = capturedValue(raw, LARAVEL_KEY_VALUE_RE);
+  if (value === null) return false;
+  const bytes = Buffer.from(value, 'base64');
+  return bytes.length === 32 && bytes.toString('base64') === value && shannonEntropy(value) >= 3.0;
+}
+
+const SQL_PASSWORD_VALUE_RE = /['"]([^'"\s]{8,128})['"]$/;
+
+/** `IDENTIFIED BY 'x'`, `WITH PASSWORD 'x'`: the password of a database account, unless a placeholder. */
+function validateSqlPassword(raw: string): boolean {
+  const value = capturedValue(raw, SQL_PASSWORD_VALUE_RE);
+  if (value === null) return false;
+  const lower = value.toLowerCase();
+  if (DLP_STOPWORDS.some((sw) => lower.includes(sw)) || REFERENCE_VALUE_RE.test(value))
+    return false;
+  if (/^[a-z]+$/i.test(value) && value.length < 12) return false; // a word
+  return shannonEntropy(value) >= 2.5 && !hasSequentialRun(value);
+}
+
+const GRAFANA_KEY_VALUE_RE = /(eyJrIjoi[A-Za-z0-9+/]{20,}={0,2})$/;
+
+/** A Grafana API key: base64 of `{"k":"...","n":"...","id":N}`. */
+function validateGrafanaApiKey(raw: string): boolean {
+  const value = capturedValue(raw, GRAFANA_KEY_VALUE_RE);
+  if (value === null) return false;
+  const text = Buffer.from(value, 'base64').toString('utf8');
+  return /^\{"k":"[A-Za-z0-9]{16,}"/.test(text);
 }
 
 const BASIC_VALUE_RE = /([A-Za-z0-9+/]{8,512}={0,2})$/;
@@ -564,7 +624,8 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // ── Private keys (PEM) ────────────────────────────────────────────────────
   {
     name: 'Private Key (PEM)',
-    regex: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+    // DSA and ENCRYPTED headers, and a PGP private key block (node9Firewall#385).
+    regex: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----/,
     severity: 'block',
     keywords: ['-----begin'],
   },
@@ -909,6 +970,64 @@ export const DLP_PATTERNS: DlpPattern[] = [
     argumentsOnly: true,
   },
 
+  // ── Shapes from the CredData review (fw#372 B4, node9Firewall#385) ────────
+  // All review and argumentsOnly, like Assigned Secret: the live gate asks,
+  // the raw scanners stay as they were.
+  {
+    name: 'Cipher Key Literal',
+    regex:
+      /\b([A-Za-z_][\w.]{0,40}key)[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/]{22}==)/i,
+    severity: 'review',
+    keywords: ['key'],
+    validate: validateCipherKeyLiteral,
+    redactGroup: 2,
+    argumentsOnly: true,
+  },
+  {
+    name: 'Laravel App Key',
+    regex: /\bAPP_KEY[ \t]{0,8}=[ \t]{0,8}["']?(base64:[A-Za-z0-9+/]{43}=)/,
+    severity: 'review',
+    keywords: ['app_key'],
+    validate: validateLaravelAppKey,
+    redactGroup: 1,
+    argumentsOnly: true,
+  },
+  {
+    // `key-` plus 32 hex characters, Mailgun's legacy private key shape.
+    name: 'Mailgun API Key',
+    regex: /\bkey-[0-9a-f]{32}\b/,
+    severity: 'review',
+    keywords: ['key-'],
+    argumentsOnly: true,
+  },
+  {
+    // A kubeadm bootstrap token, named as one by its flag or key.
+    name: 'Kubeadm Bootstrap Token',
+    regex: /(?:--token[= ]|\btoken:[ \t]{0,8}|--discovery-token[= ])([a-z0-9]{6}\.[a-z0-9]{16})\b/,
+    severity: 'review',
+    keywords: ['token'],
+    redactGroup: 1,
+    argumentsOnly: true,
+  },
+  {
+    // `CREATE USER ... IDENTIFIED BY 'x'` (MySQL, Oracle), `WITH PASSWORD 'x'` (Postgres).
+    name: 'SQL Account Password',
+    regex: /\b(?:IDENTIFIED\s+BY|WITH\s+PASSWORD)\s*['"]([^'"\s]{8,128})['"]/i,
+    severity: 'review',
+    keywords: ['identified by', 'with password'],
+    validate: validateSqlPassword,
+    redactGroup: 1,
+    argumentsOnly: true,
+  },
+  {
+    // The provisioned (legacy) Grafana API key: base64 of a JSON object with k, n and id.
+    name: 'Grafana API Key',
+    regex: /\b(eyJrIjoi[A-Za-z0-9+/]{20,}={0,2})/,
+    severity: 'block',
+    keywords: ['eyjrijoi'],
+    validate: validateGrafanaApiKey,
+    redactGroup: 1,
+  },
   // ── Secret assigned to a telling name ─────────────────────────────────────
   // `password: ...`, `JWT_SECRET=...`, `api_key = "..."`. The name alone is
   // not a finding: most such lines hold a reference (`process.env.X`), a
@@ -921,8 +1040,11 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // name are written out, not as a counted group, to keep star height 1.
   {
     name: 'Assigned Secret',
+    // fw#372 B4: `aes_key`, `cipher_key`, `subscription_key` join the names; a
+    // backtick may close the name; `|` and `\` may occur in the value
+    // (`\/` is how JSON escapes a slash).
     regex:
-      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|jsapi[_-]?ticket|\bpass(?![A-Za-z0-9])|_pass(?![A-Za-z0-9]))[A-Za-z0-9_]{0,40}\\?["'\]]?\\?["'\]]?[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9+/_.!@#$%^*~-]{12,512}={0,2})/i,
+      /(?:password|passphrase|passwd|pwd|secret|token|api[_-]?key|auth[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|consumer[_-]?key|app[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|aes[_-]?key|cipher[_-]?key|subscription[_-]?key|jsapi[_-]?ticket|\bpass(?![A-Za-z0-9])|_pass(?![A-Za-z0-9]))[A-Za-z0-9_]{0,40}\\?["'\]`]?\\?["'\]`]?[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?((?:[A-Za-z0-9+/_.!@#$%^*~|-]|\\\/){12,512}={0,2})/i,
     severity: 'review',
     keywords: ['pass', 'pwd', 'secret', 'token', 'key', 'ticket'],
     validate: validateAssignedSecret,
@@ -1316,9 +1438,8 @@ export function scanArgs(args: unknown, depth = 0, fieldPath = 'args'): DlpMatch
   return null;
 }
 
-/** Scan a plain text string (e.g. Claude response prose) for DLP patterns. */
-export function scanText(text: string): DlpMatch | null {
-  const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
+/** The raw scanners' patterns over one text, as written. */
+function scanTextOnce(t: string, redactedSample?: string): DlpMatch | null {
   const tLower = t.toLowerCase();
   for (const pattern of DLP_PATTERNS) {
     if (pattern.argumentsOnly) continue;
@@ -1330,9 +1451,31 @@ export function scanText(text: string): DlpMatch | null {
     return {
       patternName: pattern.name,
       fieldPath: 'response-text',
-      redactedSample: maskSecret(raw, pattern.regex),
+      redactedSample: redactedSample ?? maskSecret(raw, pattern.regex),
       severity: pattern.severity,
     };
+  }
+  return null;
+}
+
+/**
+ * Scan a plain text string (tool output, Claude response prose) for DLP
+ * patterns. The text as written first; then its decoded views (base64, hex,
+ * percent, the bounded set the argument gate reads), so a credential a tool
+ * returns encoded is still a finding (fw#372 B7). The first-level decoding is
+ * proportional to the text and nested layers are budgeted, as in the gate.
+ */
+export function scanText(text: string): DlpMatch | null {
+  const t = text.length > MAX_STRING_BYTES ? text.slice(0, MAX_STRING_BYTES) : text;
+  const direct = scanTextOnce(t);
+  if (direct) return direct;
+  try {
+    for (const view of secretViews(t, newSecretViewBudget())) {
+      const m = scanTextOnce(view.text, '[encoded secret]');
+      if (m) return m;
+    }
+  } catch {
+    /* a decoding failure must not turn a clean scan into an error */
   }
   return null;
 }

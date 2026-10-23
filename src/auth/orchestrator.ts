@@ -28,6 +28,7 @@ import {
 } from '@node9/policy-engine';
 import { prepareFileAccesses, type PreparedFileAccess } from '../policy/file-access';
 import { resolveSessionScript, recordSessionWrites, type SessionScript } from './session-script';
+import { scanInjection } from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -226,6 +227,28 @@ const WRITE_TOOLS = new Set([
   'notebook_edit',
   'notebookedit',
 ]);
+
+/** Every string leaf of a tool call's arguments, joined, bounded like the scanners' input. */
+function argumentLeavesText(args: unknown, limit = 100_000): string {
+  const parts: string[] = [];
+  let size = 0;
+  const walk = (v: unknown, depth: number): void => {
+    if (size >= limit || depth > 8 || v === null || v === undefined) return;
+    if (typeof v === 'string') {
+      parts.push(v);
+      size += v.length;
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+      return;
+    }
+    if (typeof v === 'object')
+      for (const x of Object.values(v as Record<string, unknown>)) walk(x, depth + 1);
+  };
+  walk(args, 0);
+  return parts.join('\n').slice(0, limit);
+}
 
 const VERDICT_RANK = { allow: 0, review: 1, block: 2 } as const;
 /** A verdict reached through a script the session wrote: its sentences name the script. */
@@ -851,6 +874,27 @@ async function _authorizeHeadlessCore(
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
         `Approve this ${kind} action before it proceeds.`;
+    }
+  }
+
+  // ── INJECTED INSTRUCTIONS WRITTEN OR SENT (fw#372 B6) ────────────────────
+  // The injection scan reads tool OUTPUT; an injected instruction that the
+  // agent then writes into a note or a file, or sends on, persists past the
+  // session unseen. With the scan on (injectionScan.enabled, off by default,
+  // as the output scan is), the content a write tool or an MCP tool with a
+  // destination carries is scanned too, and medium confidence (two signals;
+  // arguments have no origin booster) routes the call to review the way a
+  // session taint does. Measured: 0 of about 3,500 pre-stage benign rows
+  // reach medium.
+  if (!taintWarning && config.policy.injectionScan?.enabled && !isManual) {
+    const sends = isMcpToolName(toolName) && extractArgDestinations(args).length > 0;
+    if (isWriteTool(toolName) || sends) {
+      const m = scanInjection(argumentLeavesText(args), { untrusted: false });
+      if (m && (m.confidence === 'medium' || m.confidence === 'high')) {
+        taintWarning =
+          `⚠️ node9: the content this call ${isWriteTool(toolName) ? 'writes' : 'sends'} carries ` +
+          `instructions aimed at an AI model (${m.signals.join(', ')}). Approve only if that is what you meant.`;
+      }
     }
   }
 

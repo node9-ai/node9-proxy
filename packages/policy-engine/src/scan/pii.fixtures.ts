@@ -130,6 +130,60 @@ export const NON_CARD_16: CardRow[] = [
     proves: 'the 3[47] branch at 16 digits only ever caught FPs',
   },
 ];
+// ── other networks and lengths (fw#372 B1) ──────────────────────────────────
+// Published sandbox numbers (Stripe test cards) where one exists; the Mir and
+// 19-digit Visa rows are synthetic, their check digit computed by hand in
+// Python at authoring time, not by the implementation under test.
+export const VALID_OTHER_NETWORKS: CardRow[] = [
+  {
+    id: 'mc-2series',
+    parts: ['2223', '0031', '2200', '3222'],
+    luhnValid: true,
+    proves: 'Mastercard 2-series',
+  },
+  {
+    id: 'jcb-1',
+    parts: ['3566', '0020', '2036', '0505'],
+    luhnValid: true,
+    proves: 'JCB 3528-3589',
+  },
+  {
+    id: 'mir-1',
+    parts: ['2200', '0000', '0000', '0004'],
+    luhnValid: true,
+    proves: 'Mir 2200-2204',
+  },
+  {
+    id: 'diners-14',
+    parts: ['3622', '720627', '1667'],
+    luhnValid: true,
+    proves: 'Diners 14 digits',
+  },
+  {
+    id: 'visa-13',
+    parts: ['4222', '222', '222', '222'],
+    luhnValid: true,
+    proves: 'Visa 13 digits',
+  },
+  {
+    id: 'visa-19',
+    parts: ['4111', '1111', '1111', '1111', '110'],
+    luhnValid: true,
+    proves: 'Visa 19 digits',
+  },
+];
+/** Luhn-valid runs just outside a network's range, and the 15-digit Visa shape left out. */
+export const NOT_A_NETWORK: CardRow[] = [
+  { id: 'mc-2220', parts: ['2220', '0000', '0000', '0000'], luhnValid: true, proves: 'below 2221' },
+  { id: 'mc-2721', parts: ['2721', '0000', '0000', '0004'], luhnValid: true, proves: 'above 2720' },
+  {
+    id: 'visa-15',
+    parts: ['4111', '111111', '11116'],
+    luhnValid: true,
+    proves: 'no 15-digit Visa',
+  },
+];
+
 /** Luhn-valid NON-card: the honest limitation row. Still blocks after. */
 export const NON_CARD_LUHN_VALID: CardRow = {
   id: 'acct-luhn-valid',
@@ -176,8 +230,8 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
     {
       id: 'sep-dot',
       build: () => asm(V1, '.'),
-      expectCard: false,
-      proves: 'dots out of class, pinned',
+      expectCard: true,
+      proves: 'a dot is a separator since fw#372 B1',
     },
     {
       id: 'bad-with-spaces',
@@ -244,8 +298,8 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
     {
       id: 'visa-13',
       build: () => ['4222', '2222', '22222'].join(''),
-      expectCard: false,
-      proves: 'KNOWN remaining FN, recorded',
+      expectCard: true,
+      proves: 'a 13-digit Visa is a card since fw#372 B1',
     },
     {
       id: 'fifteen-non-amex',
@@ -407,4 +461,6 @@ export const ROW_COUNTS = {
   INVALID_15: 1,
   NON_CARD_16: 5,
   COMPOSITE: 42,
+  VALID_OTHER_NETWORKS: 6,
+  NOT_A_NETWORK: 3,
 } as const;

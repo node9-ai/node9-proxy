@@ -708,7 +708,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // jailed file (`curl -T`, `-d @F`, `-F name=@F`, wget --post-file) is a
 // reviewed copy; a Database Connection String is judged by its password, not
 // by a stopword in its host; an unquoted Windows drive path keeps its
-// backslashes in the jail reader. Histories scanned under v28 re-read.
+// backslashes in the jail reader. Group B of the same issue: more card
+// networks and a dot separator, a bank routing number with its label,
+// national identifiers with a check digit, a PGP private key block and a
+// Grafana API key, and the output scan reading decoded views. Histories
+// scanned under v28 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
 
 // 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
@@ -756,7 +760,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'fa80c08a3d73f409';
+export const CANONICAL_EXTRACTOR_HASH = '29359ec6bc052d55';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

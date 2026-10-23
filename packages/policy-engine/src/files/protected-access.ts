@@ -190,6 +190,17 @@ function hitsSystemDir(
   return false;
 }
 
+/**
+ * A read or a listing under /root by an account whose home is not /root
+ * (fw#372 B9): another account's files, which an agent working in a project
+ * has no reason to open. The credential rules keep their stronger verdicts
+ * for the keys inside it.
+ */
+function hitsRootHome(access: FileAccess, context: FileAccessContext): boolean {
+  if (context.homeDirs?.[0] === '/root') return false;
+  return hitsSystemDir(access, context, ['/root']);
+}
+
 /** The upload rule's directories; the root home only when it is not the user's own. */
 function uploadDirs(context: FileAccessContext): readonly string[] {
   return context.homeDirs?.[0] === '/root'
@@ -241,13 +252,19 @@ export function evaluateProtectedFileAccess(
                     'review-system-file-upload',
                     'Uploading a system file requires approval',
                   ]
-                : !mutation && hits(access, PASSWORD_HASH_FILES, [], context)
+                : !mutation && !access.listing && hits(access, PASSWORD_HASH_FILES, [], context)
                   ? [
                       'files.password-hashes',
                       'review-password-hash-read',
                       'Reading system password hashes requires approval',
                     ]
-                  : null;
+                  : !mutation && !access.upload && hitsRootHome(access, context)
+                    ? [
+                        'files.system-dirs',
+                        'review-root-home-read',
+                        "Reading the root account's home requires approval",
+                      ]
+                    : null;
     } catch {
       // picomatch refuses patterns beyond its input limit. An operand the
       // matcher cannot evaluate is not evidence that the target is harmless.

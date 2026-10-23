@@ -43,6 +43,27 @@ export function validateLuhn(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+/**
+ * ABA routing transit number (US bank): nine digits, weights 3-7-1 repeating,
+ * sum 0 mod 10, and a first pair in a range the Federal Reserve assigns
+ * (00-12 banks, 21-32 thrifts, 61-72 electronic, 80 traveller's cheques).
+ * Digits only, like validateLuhn.
+ */
+export function validateAbaRouting(digits: string): boolean {
+  if (!/^\d{9}$/.test(digits)) return false;
+  const prefix = Number(digits.slice(0, 2));
+  const assigned =
+    prefix <= 12 ||
+    (prefix >= 21 && prefix <= 32) ||
+    (prefix >= 61 && prefix <= 72) ||
+    prefix === 80;
+  if (!assigned) return false;
+  const weights = [3, 7, 1, 3, 7, 1, 3, 7, 1];
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += (digits.charCodeAt(i) - 48) * weights[i];
+  return sum % 10 === 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // IBAN — ISO 13616. Country code -> required total length, from the SWIFT
 // IBAN Registry (Release 101, Dec 2025), https://www.swift.com/resource/iban-registry-pdf.
@@ -335,4 +356,158 @@ export function validateCask(raw: string): boolean {
   const minute = b64urlIndex(s[tsAt + 4]);
   const second = b64urlIndex(s[tsAt + 5]);
   return month <= 11 && day <= 30 && hour <= 23 && minute <= 59 && second <= 59;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// National identifiers with a check digit (fw#372 B2). Each validator takes
+// the identifier as written (separators allowed where the format has them)
+// and answers only "does its own check digit hold", plus the date and range
+// rules the issuing authority publishes. The regex in pii.ts chooses the
+// shape; nothing here guesses.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A plausible calendar day: month 1-12, day 1-31. Two-digit fields. */
+function plausibleDate(mm: string, dd: string): boolean {
+  const m = Number(mm);
+  const d = Number(dd);
+  return m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+const CF_ODD: Record<string, number> = {};
+const CF_EVEN: Record<string, number> = {};
+{
+  const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const odd = [
+    1, 0, 5, 7, 9, 13, 15, 17, 19, 21, 1, 0, 5, 7, 9, 13, 15, 17, 19, 21, 2, 4, 18, 20, 11, 3, 6, 8,
+    12, 14, 16, 10, 22, 25, 24, 23,
+  ];
+  for (let i = 0; i < alphabet.length; i++) {
+    const c = alphabet[i];
+    CF_ODD[c] = odd[i];
+    CF_EVEN[c] = i < 10 ? i : i - 10;
+  }
+}
+
+/** Italian codice fiscale: 15 characters and a check letter (odd/even tables, mod 26). */
+export function validateCodiceFiscale(raw: string): boolean {
+  const s = raw.toUpperCase();
+  if (!/^[A-Z]{6}\d{2}[A-EHLMPRST]\d{2}[A-Z]\d{3}[A-Z]$/.test(s)) return false;
+  let sum = 0;
+  for (let i = 0; i < 15; i++) sum += (i % 2 === 0 ? CF_ODD : CF_EVEN)[s[i]];
+  return s[15] === String.fromCharCode(65 + (sum % 26));
+}
+
+const SPANISH_LETTERS = 'TRWAGMYFPDXBNJZSQVHLCKE';
+
+/** Spanish DNI (8 digits + letter) or NIE (X/Y/Z + 7 digits + letter), mod 23. */
+export function validateSpanishId(raw: string): boolean {
+  const s = raw.toUpperCase();
+  const m = /^([XYZ]?)(\d{7,8})([A-Z])$/.exec(s);
+  if (!m) return false;
+  if ((m[1] === '' && m[2].length !== 8) || (m[1] !== '' && m[2].length !== 7)) return false;
+  const digits = (m[1] === '' ? '' : String('XYZ'.indexOf(m[1]))) + m[2];
+  return SPANISH_LETTERS[Number(digits) % 23] === m[3];
+}
+
+/** Polish PESEL: 11 digits, a coded birth date, weights 1-3-7-9. */
+export function validatePesel(raw: string): boolean {
+  if (!/^\d{11}$/.test(raw)) return false;
+  // The month carries the century: 01-12 1900s, 21-32 2000s, 41-52 2100s,
+  // 61-72 2200s, 81-92 1800s.
+  const month = Number(raw.slice(2, 4)) % 20;
+  if (!plausibleDate(String(month).padStart(2, '0'), raw.slice(4, 6))) return false;
+  const weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
+  let sum = 0;
+  for (let i = 0; i < 10; i++) sum += (raw.charCodeAt(i) - 48) * weights[i];
+  return (10 - (sum % 10)) % 10 === raw.charCodeAt(10) - 48;
+}
+
+/** Romanian CNP: S YYMMDD JJ NNN C, county 01-52 (or 70/71 for records abroad), key 279146358279. */
+export function validateCnp(raw: string): boolean {
+  if (!/^[1-9]\d{12}$/.test(raw)) return false;
+  if (!plausibleDate(raw.slice(3, 5), raw.slice(5, 7))) return false;
+  const county = Number(raw.slice(7, 9));
+  if (!((county >= 1 && county <= 52) || county === 70 || county === 71)) return false;
+  const key = '279146358279';
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += (raw.charCodeAt(i) - 48) * (key.charCodeAt(i) - 48);
+  const r = sum % 11;
+  return (r === 10 ? 1 : r) === raw.charCodeAt(12) - 48;
+}
+
+/** French NIR (numéro de sécurité sociale): 13 digits (Corsica 2A/2B) and a 2-digit key, 97 - n mod 97. */
+export function validateNir(raw: string): boolean {
+  const s = raw.replace(/\s+/g, '').toUpperCase();
+  const m = /^([12]\d{2}(0[1-9]|1[0-2]|[2-9]\d)(\d{2}|2A|2B)\d{6})(\d{2})$/.exec(s);
+  if (!m) return false;
+  const body = m[1].replace('2A', '19').replace('2B', '18');
+  const key = Number(m[4]);
+  return key >= 1 && key <= 97 && 97 - (Number(body) % 97) === key;
+}
+
+/** Swiss AHV number 756.XXXX.XXXX.XX: an EAN-13 check digit. */
+export function validateSwissAhv(raw: string): boolean {
+  const m = /^756\.(\d{4})\.(\d{4})\.(\d{2})$/.exec(raw);
+  if (!m) return false;
+  const digits = '756' + m[1] + m[2] + m[3];
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += (digits.charCodeAt(i) - 48) * (i % 2 === 0 ? 1 : 3);
+  return (10 - (sum % 10)) % 10 === digits.charCodeAt(12) - 48;
+}
+
+/** Swiss enterprise identifier CHE-XXX.XXX.XXX: mod 11 with weights 5-4-3-2-7-6-5-4. */
+export function validateSwissUid(raw: string): boolean {
+  const m = /^CHE-(\d{3})\.(\d{3})\.(\d{3})$/i.exec(raw);
+  if (!m) return false;
+  const digits = m[1] + m[2] + m[3];
+  const weights = [5, 4, 3, 2, 7, 6, 5, 4];
+  let sum = 0;
+  for (let i = 0; i < 8; i++) sum += (digits.charCodeAt(i) - 48) * weights[i];
+  const check = 11 - (sum % 11);
+  if (check === 10) return false;
+  return (check === 11 ? 0 : check) === digits.charCodeAt(8) - 48;
+}
+
+/** Swedish personnummer YYMMDD-XXXX (or +): Luhn over the ten digits. */
+export function validateSwedishPersonnummer(raw: string): boolean {
+  const m = /^(\d{2})(\d{2})(\d{2})[-+](\d{4})$/.exec(raw);
+  if (!m) return false;
+  if (!plausibleDate(m[2], m[3])) return false;
+  const digits = m[1] + m[2] + m[3] + m[4];
+  let sum = 0;
+  for (let i = 0; i < 10; i++) {
+    let d = digits.charCodeAt(i) - 48;
+    if (i % 2 === 0) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
+
+/** Norwegian fødselsnummer: DDMMYY, three digits, two mod-11 control digits. */
+export function validateNorwegianFnr(raw: string): boolean {
+  if (!/^\d{11}$/.test(raw)) return false;
+  if (!plausibleDate(raw.slice(2, 4), raw.slice(0, 2))) return false;
+  const control = (weights: number[], upto: number): number => {
+    let sum = 0;
+    for (let i = 0; i < upto; i++) sum += (raw.charCodeAt(i) - 48) * weights[i];
+    const k = 11 - (sum % 11);
+    return k === 11 ? 0 : k;
+  };
+  const k1 = control([3, 7, 6, 1, 8, 9, 4, 5, 2], 9);
+  const k2 = control([5, 4, 3, 2, 7, 6, 5, 4, 3, 2], 10);
+  return k1 < 10 && k2 < 10 && k1 === raw.charCodeAt(9) - 48 && k2 === raw.charCodeAt(10) - 48;
+}
+
+const HETU_CHARS = '0123456789ABCDEFHJKLMNPRSTUVWXY';
+
+/** Finnish henkilötunnus DDMMYYCZZZQ: the control character is (DDMMYYZZZ mod 31) in a 31-character alphabet. */
+export function validateFinnishHetu(raw: string): boolean {
+  const m = /^(\d{2})(\d{2})(\d{2})[-+A-FU-Y](\d{3})([0-9A-Y])$/.exec(raw.toUpperCase());
+  if (!m) return false;
+  if (!plausibleDate(m[2], m[1])) return false;
+  const n = Number(m[1] + m[2] + m[3] + m[4]);
+  return HETU_CHARS[n % 31] === m[5];
 }

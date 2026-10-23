@@ -253,6 +253,53 @@ describe('upload rule: a system file sent in a request', () => {
   });
 });
 
+describe("reads and listings of the root account's home by another account (fw#372 B9)", () => {
+  it.each([
+    'cat /root/notes.txt',
+    'less /root/.bash_history',
+    'ls -la /root',
+    'ls /root/.config',
+    'tree /root',
+    "find /root -name '*.conf'",
+    'head -n 5 /root/todo.md',
+  ])('reviews %s', (command) => {
+    expect(detect(command)).toMatchObject({
+      decision: 'review',
+      checkId: 'files.system-dirs',
+      ruleName: 'review-root-home-read',
+    });
+  });
+
+  it.each([
+    'cat /home/u/notes.txt',
+    'ls -la /etc',
+    'ls -l /etc/shadow',
+    'tree .',
+    'find . -name x',
+    'ls /rootfs',
+  ])('leaves %s alone', (command) => {
+    expect(detect(command)).toBeNull();
+  });
+
+  it('the root account reads its own home freely', () => {
+    const asRoot = { cwd: '/root/project', homeDirs: ['/root'] };
+    for (const cmd of ['cat /root/notes.txt', 'ls -la /root']) {
+      expect(
+        evaluateProtectedFileAccess(
+          collectFileAccesses('Bash', { command: cmd }, asRoot),
+          asRoot,
+          {}
+        )
+      ).toBeNull();
+    }
+  });
+
+  it('a listing is not a read of file content: ls of a hash file stays quiet, cat of it reviews', () => {
+    expect(detect('ls -l /etc/shadow')).toBeNull();
+    expect(detect('cat /etc/shadow')?.ruleName).toBe('review-password-hash-read');
+  });
+});
+
 describe('catalog row', () => {
   it('offers every value; off, log and block do what they say', () => {
     expect(configurableValues('files.system-dirs')).toEqual(['off', 'log', 'review', 'block']);
