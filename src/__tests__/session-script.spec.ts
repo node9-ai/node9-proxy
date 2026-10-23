@@ -29,6 +29,10 @@ import { resolveSessionScript, sessionWriteTargets } from '../auth/session-scrip
 import { prepareFileAccesses } from '../policy/file-access.js';
 
 const LAYERS = { trusted: { bash: 'command' } };
+// Every expected path is built the way the code builds it, so the helper rows
+// hold on Windows too (path.resolve('/proj') is D:\proj there).
+const PROJ = path.resolve('/proj');
+const inProj = (...parts: string[]) => path.join(PROJ, ...parts);
 
 describe('resolveSessionScript (helper)', () => {
   const deps = (written: string[], files: Record<string, string>) => ({
@@ -40,36 +44,34 @@ describe('resolveSessionScript (helper)', () => {
     const r = await resolveSessionScript(
       'Bash',
       { command: 'bash scripts/run.sh' },
-      '/proj',
+      PROJ,
       LAYERS,
-      deps(['/proj/scripts/run.sh'], { '/proj/scripts/run.sh': 'echo hi\n' })
+      deps([inProj('scripts', 'run.sh')], { [inProj('scripts', 'run.sh')]: 'echo hi\n' })
     );
     expect(r?.path).toBe('scripts/run.sh');
-    expect(r?.resolved).toBe('/proj/scripts/run.sh');
+    expect(r?.resolved).toBe(inProj('scripts', 'run.sh'));
     expect(r?.args.command).toBe('echo hi\n');
   });
 
   it('nothing when the session did not write it, when the file is unreadable, or for a non-shell tool', async () => {
     const d = deps([], {});
     expect(
-      await resolveSessionScript('Bash', { command: 'bash run.sh' }, '/proj', LAYERS, d)
+      await resolveSessionScript('Bash', { command: 'bash run.sh' }, PROJ, LAYERS, d)
     ).toBeNull();
     expect(
       await resolveSessionScript(
         'Bash',
         { command: 'bash run.sh' },
-        '/proj',
+        PROJ,
         LAYERS,
-        deps(['/proj/run.sh'], {})
+        deps([inProj('run.sh')], {})
       )
     ).toBeNull();
-    expect(
-      await resolveSessionScript('Read', { file_path: 'run.sh' }, '/proj', LAYERS, d)
-    ).toBeNull();
+    expect(await resolveSessionScript('Read', { file_path: 'run.sh' }, PROJ, LAYERS, d)).toBeNull();
   });
 
   it('a daemon failure or a reader throw fails open', async () => {
-    const r = await resolveSessionScript('Bash', { command: 'bash run.sh' }, '/proj', LAYERS, {
+    const r = await resolveSessionScript('Bash', { command: 'bash run.sh' }, PROJ, LAYERS, {
       checkWritten: async () => {
         throw new Error('down');
       },
@@ -82,19 +84,21 @@ describe('resolveSessionScript (helper)', () => {
 describe('sessionWriteTargets (helper)', () => {
   it('a file tool names its path; a shell command its write targets; reads are not writes', () => {
     expect(
-      sessionWriteTargets('Write', { file_path: 'x.sh', content: '' }, undefined, '/proj')
-    ).toEqual(['/proj/x.sh']);
-    expect(sessionWriteTargets('Read', { file_path: 'x.sh' }, undefined, '/proj')).toEqual([]);
+      sessionWriteTargets('Write', { file_path: 'x.sh', content: '' }, undefined, PROJ)
+    ).toEqual([inProj('x.sh')]);
+    expect(sessionWriteTargets('Read', { file_path: 'x.sh' }, undefined, PROJ)).toEqual([]);
+    // The shell half reads the file policy's accesses, which are POSIX-only.
+    if (process.platform === 'win32') return;
     const fa = prepareFileAccesses(
       'Bash',
       { command: 'echo a > out.sh && cat in.txt' },
-      '/proj',
+      PROJ,
       LAYERS,
       '/home/u'
     );
     expect(
-      sessionWriteTargets('Bash', { command: 'echo a > out.sh && cat in.txt' }, fa, '/proj')
-    ).toEqual(['/proj/out.sh']);
+      sessionWriteTargets('Bash', { command: 'echo a > out.sh && cat in.txt' }, fa, PROJ)
+    ).toEqual([inProj('out.sh')]);
   });
 });
 
@@ -158,22 +162,27 @@ describe('the gate judges a script the session wrote from its content', () => {
     expect((await bash('bash run.sh')).approved).toBe(true);
   });
 
-  it('a system-directory change inside the script is reviewed, naming the script', async () => {
-    written('run.sh', '#!/bin/bash\nset -e\nrm /var/log/app.log\n');
-    const held = await bash('bash run.sh');
-    expect(held.approved).toBe(false);
-    expect(held.blockedBy).toBe('timeout'); // reached the approver race
-    // The inline-ask path hands the reason to the agent's own prompt.
-    const asked = await authorizeHeadless('Bash', { command: 'bash run.sh' }, META, {
-      cwd: proj,
-      deferReview: true,
-    });
-    expect(asked.review).toBe(true);
-    // The label names the check; the description says it came from the script.
-    expect(asked.reason).toMatch(/system directory/);
-    expect(asked.ruleDescription).toMatch(/In run\.sh, a script written this session/);
-    expect(mockCheckWritten).toHaveBeenCalledWith([path.join(proj, 'run.sh')]);
-  });
+  // The file policy (files.system-dirs) is POSIX-only: prepareFileAccesses
+  // returns no accesses on win32, so this row has nothing to see there.
+  it.skipIf(process.platform === 'win32')(
+    'a system-directory change inside the script is reviewed, naming the script',
+    async () => {
+      written('run.sh', '#!/bin/bash\nset -e\nrm /var/log/app.log\n');
+      const held = await bash('bash run.sh');
+      expect(held.approved).toBe(false);
+      expect(held.blockedBy).toBe('timeout'); // reached the approver race
+      // The inline-ask path hands the reason to the agent's own prompt.
+      const asked = await authorizeHeadless('Bash', { command: 'bash run.sh' }, META, {
+        cwd: proj,
+        deferReview: true,
+      });
+      expect(asked.review).toBe(true);
+      // The label names the check; the description says it came from the script.
+      expect(asked.reason).toMatch(/system directory/);
+      expect(asked.ruleDescription).toMatch(/In run\.sh, a script written this session/);
+      expect(mockCheckWritten).toHaveBeenCalledWith([path.join(proj, 'run.sh')]);
+    }
+  );
 
   it('an engine block inside the script blocks the run, through ./ and through sh', async () => {
     written('clean.sh', 'rm -rf /\n');
@@ -185,10 +194,13 @@ describe('the gate judges a script the session wrote from its content', () => {
     }
   });
 
-  it('the command itself is still judged first: a review on the command line stands', async () => {
-    written('ok.sh', 'echo fine\n');
-    const r = await bash('rm /var/log/app.log && bash ok.sh');
-    expect(r.approved).toBe(false);
-    expect(r.reason ?? '').not.toMatch(/written this session/);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'the command itself is still judged first: a review on the command line stands',
+    async () => {
+      written('ok.sh', 'echo fine\n');
+      const r = await bash('rm /var/log/app.log && bash ok.sh');
+      expect(r.approved).toBe(false);
+      expect(r.reason ?? '').not.toMatch(/written this session/);
+    }
+  );
 });
