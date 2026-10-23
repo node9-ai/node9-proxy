@@ -69,6 +69,7 @@ import {
   type SseClient,
   taintStore,
   sessionTaintStore,
+  sessionWriteStore,
   sessionExposureStore,
   insightCounts,
   loadInsightCounts,
@@ -1069,6 +1070,37 @@ export function startDaemon(): void {
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ tainted: false }));
+      } catch {
+        res.writeHead(400).end();
+        return;
+      }
+    }
+
+    // ── Session writes (fw#372 A3) — files an agent wrote, and the question
+    // whether a script about to run is one of them. Local hook subprocesses
+    // only, like /taint; bodies carry paths, never content.
+    if (req.method === 'POST' && (pathname === '/written' || pathname === '/written/check')) {
+      // Whether a script is judged from its content depends on this record, so
+      // only a holder of the internal token may write or read it, as for the
+      // session-taint routes: a local process must not be able to flush it.
+      if (!validToken(req)) return res.writeHead(403).end();
+      try {
+        const body = JSON.parse(await readBody(req)) as { paths?: unknown };
+        if (
+          !Array.isArray(body.paths) ||
+          body.paths.length > 64 ||
+          (body.paths as unknown[]).some((p) => typeof p !== 'string')
+        ) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'paths must be an array of up to 64 strings' }));
+        }
+        const paths = body.paths as string[];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (pathname === '/written') {
+          sessionWriteStore.record(paths);
+          return res.end(JSON.stringify({ ok: true }));
+        }
+        return res.end(JSON.stringify({ written: sessionWriteStore.check(paths) }));
       } catch {
         res.writeHead(400).end();
         return;

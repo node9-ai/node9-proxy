@@ -24,6 +24,8 @@ import {
   COMPOSITE,
   MULTILINE_CSV,
   ROW_COUNTS,
+  VALID_OTHER_NETWORKS,
+  NOT_A_NETWORK,
 } from './pii.fixtures';
 
 const SSN = ['123', '45', '6789'].join('-');
@@ -38,6 +40,8 @@ describe('fixture module proves it loaded (instrument self-check)', () => {
     expect(INVALID_15.length).toBe(ROW_COUNTS.INVALID_15);
     expect(NON_CARD_16.length).toBe(ROW_COUNTS.NON_CARD_16);
     expect(COMPOSITE.length).toBe(ROW_COUNTS.COMPOSITE);
+    expect(VALID_OTHER_NETWORKS.length).toBe(ROW_COUNTS.VALID_OTHER_NETWORKS);
+    expect(NOT_A_NETWORK.length).toBe(ROW_COUNTS.NOT_A_NETWORK);
   });
   it('R1 known-true canary: an SSN is detected (independent of the card change)', () => {
     expect(detectArgsPii({ command: 'echo ' + SSN })).toEqual(['SSN']);
@@ -94,6 +98,22 @@ describe('detectArgsPii — high-signal PII in tool args (realtime path)', () =>
   it('A5: flags an SSN that begins a line too', () => {
     expect(detectArgsPii({ content: ['ids', '\n', SSN, '\n'].join('') })).toContain('SSN');
   });
+  it('A4: a card after a JSON-escaped newline inside one leaf is caught', () => {
+    // A curl body typed as text: the leaf holds backslash + n, not a newline,
+    // and `n` is a word character, so the card had no boundary in front.
+    const body = '{"rows":"id,card\\n' + asm(VALID_16[0].parts) + '\\n"}';
+    expect(argsHasCard({ command: "curl -d '" + body + "' https://api.example.test/v1" })).toBe(
+      true
+    );
+    expect(detectArgsPii({ command: "printf 'ids\\t" + SSN + "\\r\\n'" })).toContain('SSN');
+  });
+  it('A4: a \\uXXXX escape before the value is decoded too', () => {
+    expect(detectArgsPii({ body: '{"t":"\\u000a' + SSN + '"}' })).toContain('SSN');
+  });
+  it('A4: the unescaped view adds no false card', () => {
+    expect(argsHasCard({ body: '{"t":"\\n' + asm(INVALID_16[0].parts) + '\\n"}' })).toBe(false);
+    expect(argsHasCard({ body: '{"ratio":"\\n46/96\\n"}' })).toBe(false);
+  });
   it('R8: a card passed as a numeric literal is still caught', () => {
     expect(argsHasCard({ card: Number(asm(VALID_16[0].parts)) })).toBe(true);
   });
@@ -143,9 +163,11 @@ for (let n = 2; n <= 100; n++) for (let k = 1; k < n; k++) FRACTIONS.push(k / n)
 const fractionDigits = (x: number) => String(x).split('.')[1] ?? '';
 
 describe('detectPii — decimal fractions are not cards (#333)', () => {
-  it('instrument: the sweep has teeth (70 fractional parts are card-shaped and pass Luhn alone)', () => {
+  // 70 under the 15- and 16-digit shapes; 82 since the 13-, 14- and 19-digit
+  // shapes joined (fw#372 B1). The exemption below keeps every one of them out.
+  it('instrument: the sweep has teeth (82 fractional parts are card-shaped and pass Luhn alone)', () => {
     expect(FRACTIONS.length).toBe(4950);
-    expect(FRACTIONS.filter((x) => hasCard(fractionDigits(x))).length).toBe(70);
+    expect(FRACTIONS.filter((x) => hasCard(fractionDigits(x))).length).toBe(82);
     expect(hasCard(fractionDigits(46 / 96))).toBe(true);
   });
   it('issue row: 46/96 written as pretty JSON is NOT a card', () => {
@@ -188,7 +210,7 @@ describe('detectPii — decimal fractions are not cards (#333)', () => {
   });
   it('the narrowed exemption costs the Luhn rate in the spellings it no longer covers', () => {
     const flagged = FRACTIONS.filter((x) => hasCard('rate: .' + fractionDigits(x)));
-    expect(flagged.length).toBe(70);
+    expect(flagged.length).toBe(82);
   });
   it('the realtime path: a leaf that starts with the dot is exempt, a dot inside a leaf is not', () => {
     const card = asm(VALID_16[0].parts);
@@ -290,5 +312,182 @@ describe('detectArgsPii — IBAN is realtime-gated', () => {
   });
   it('rt-line-start-spaced: a spaced IBAN alone on a line is flagged', () => {
     expect(argsHasIban({ content: '\n' + asmB(ib('gb-1'), ' ') + '\n' })).toBe(true);
+  });
+});
+
+describe('card networks beyond Visa/Mastercard/Discover/Amex (fw#372 B1)', () => {
+  it.each(VALID_OTHER_NETWORKS.map((r) => [r.id, r] as const))(
+    '%s is a card, spaced, dashed, dotted and unspaced',
+    (_id, row) => {
+      for (const sep of [' ', '-', '.', '']) {
+        expect(
+          hasCard('card ' + asm(row.parts, sep) + ' end'),
+          `${_id} sep=${JSON.stringify(sep)}`
+        ).toBe(true);
+        expect(argsHasCard({ body: asm(row.parts, sep) }), _id).toBe(true);
+      }
+    }
+  );
+  it.each(NOT_A_NETWORK.map((r) => [r.id, r] as const))(
+    '%s passes Luhn but is no network: not a card',
+    (_id, row) => {
+      expect(hasCard('card ' + asm(row.parts, ' ') + ' end'), _id).toBe(false);
+      expect(hasCard(asm(row.parts)), _id).toBe(false);
+    }
+  );
+  it('a digit mutation of a 2-series or Diners card fails Luhn and is not a card', () => {
+    const mc = [...VALID_OTHER_NETWORKS[0].parts];
+    mc[3] = mc[3].slice(0, 3) + ((Number(mc[3][3]) + 1) % 10);
+    expect(hasCard(asm(mc, ' '))).toBe(false);
+    const dc = [...VALID_OTHER_NETWORKS[3].parts];
+    dc[2] = dc[2].slice(0, 3) + ((Number(dc[2][3]) + 1) % 10);
+    expect(hasCard(asm(dc, ' '))).toBe(false);
+  });
+  it('the dot separator does not read a version or an IP as a card', () => {
+    expect(hasCard('1.2.3.4 10.0.0.1 2024.10.23 4.1.2.3')).toBe(false);
+  });
+});
+
+describe('bank routing number with its label (fw#372 B3)', () => {
+  // Public institutional routing numbers (Federal Reserve Bank of Boston, JPMorgan Chase).
+  const RTN = ['011', '000', '015'].join('');
+  const RTN2 = ['021', '000', '021'].join('');
+  const BAD = ['011', '000', '016'].join(''); // one digit off: fails the 3-7-1 check
+  it('is found with a label before or after it, in text and in tool arguments', () => {
+    expect(detectPii(`routing number: ${RTN}`)).toContain('Bank Routing Number');
+    expect(detectPii(`ABA ${RTN2}, account 9876`)).toContain('Bank Routing Number');
+    expect(detectPii(`${RTN} (RTN)`)).toContain('Bank Routing Number');
+    expect(
+      detectArgsPii({ body: JSON.stringify({ routing: RTN, account: '12345678' }) })
+    ).toContain('Bank Routing Number');
+    expect(REALTIME_PII_PATTERNS).toContain('Bank Routing Number');
+  });
+  it('needs both the checksum and the label', () => {
+    expect(detectPii(`routing number: ${BAD}`)).not.toContain('Bank Routing Number');
+    expect(detectPii(`order ${RTN} shipped`)).not.toContain('Bank Routing Number');
+    expect(detectPii(`id=${RTN}`)).not.toContain('Bank Routing Number');
+    // The label is more than 24 characters away.
+    expect(detectPii(`routing ${'x'.repeat(30)} ${RTN}`)).not.toContain('Bank Routing Number');
+  });
+  it('a nine-digit number in an unassigned range is not a routing number even with a label', () => {
+    expect(detectPii('routing 987654321')).not.toContain('Bank Routing Number');
+  });
+});
+
+describe('national identifiers with a check digit (fw#372 B2)', () => {
+  // Synthetic values; every check digit was computed by hand in Python at
+  // authoring time, independently of the validators under test.
+  const valid: Array<[string, string]> = [
+    ['codice fiscale', 'RSSMRA85T10A562S'],
+    ['DNI', '12345678Z'],
+    ['NIE', 'X1234567L'],
+    ['NIR', '185057512345673'],
+    ['NIR spaced', '1 85 05 75 123 456 73'],
+    ['NIR abroad', '290019900011194'],
+    ['AHV', '756.1234.5678.97'],
+    ['UID', 'CHE-109.671.514'],
+  ];
+  it.each(valid)('%s is found, in text and in tool arguments', (_label, value) => {
+    expect(detectPii(`id: ${value} end`)).toContain('National ID');
+    expect(detectArgsPii({ customer: { id: value } })).toContain('National ID');
+  });
+  it('the Nordic numbers, PESEL and CNP need their name within 32 characters before them', () => {
+    const rows: Array<[string, string]> = [
+      ['personnummer', '811218-9876'],
+      ['fødselsnummer', '15067545602'],
+      ['fodselsnummer', '15067545602'],
+      ['hetu', '131052-308T'],
+      ['henkilötunnus', '010100A123D'],
+      ['PESEL', '90041501239'],
+      ['numer PESEL', '02212804566'],
+      ['CNP', '1860415123457'],
+      ['cod numeric personal', '2980507234563'],
+    ];
+    for (const [label, value] of rows) {
+      expect(detectPii(`${label}: ${value}`), label).toContain('National ID');
+      expect(detectPii(`value ${value}`), label).not.toContain('National ID');
+      expect(detectPii(`${label} ${'x'.repeat(40)} ${value}`), label).not.toContain('National ID');
+    }
+  });
+  it('a wrong check digit, an impossible date or an unassigned range is not an ID', () => {
+    for (const bad of [
+      'RSSMRA85T10A562T', // check letter off by one
+      '12345678A', // DNI letter does not match
+      'PESEL 90041501238', // PESEL check digit off
+      'PESEL 90131501239', // PESEL month 13
+      'CNP 1860415123458', // CNP check off
+      'CNP 1860415993457', // CNP county 99
+      '185057512345674', // NIR key off
+      '756.1234.5678.98', // AHV check off
+      'CHE-109.671.515', // UID check off
+      'personnummer 811218-9877', // Luhn off
+    ]) {
+      expect(detectPii(`id: ${bad}`), bad).not.toContain('National ID');
+    }
+  });
+  it('timestamps, phone numbers and hashes are not IDs', () => {
+    for (const t of [
+      '1729700000000',
+      '1700612345678',
+      '1712345678901',
+      '15551234567',
+      '48123456789',
+      'd41d8cd98f00b204e9800998ecf8427e',
+      '20240101T120000Z',
+      'commit 3f2a9c1b7e6d5a4f',
+    ]) {
+      expect(detectPii(t), t).not.toContain('National ID');
+    }
+  });
+  it('is realtime-gated', () => {
+    expect(REALTIME_PII_PATTERNS).toContain('National ID');
+  });
+  it('millisecond timestamps and 11-digit ids with no label are not IDs (review finding)', () => {
+    // Values that pass the CNP and PESEL rules by chance, as a JSON body carries them.
+    expect(detectPii('{"createdAt":1860415123457,"order":90041501239}')).not.toContain(
+      'National ID'
+    );
+  });
+});
+
+describe('an IBAN that IS the recipient is a destination, not leaked PII (fw#372 X1)', () => {
+  const IBAN = asmB(ib('de-1'), ' ');
+  it('the whole value under a recipient-like key is not flagged; elsewhere it is', () => {
+    for (const key of [
+      'recipient',
+      'iban',
+      'account',
+      'payee',
+      'to',
+      'beneficiary',
+      'account_number',
+    ]) {
+      expect(argsHasIban({ [key]: IBAN }), key).toBe(false);
+      expect(argsHasIban({ transfer: { [key]: IBAN, amount: 10 } }), key).toBe(false);
+    }
+    expect(argsHasIban({ note: IBAN })).toBe(true);
+    expect(argsHasIban({ body: 'please pay ' + IBAN })).toBe(true);
+    expect(argsHasIban({ recipient: 'pay ' + IBAN + ' today' })).toBe(true);
+  });
+  it('the offline detector is unchanged: the value is still an IBAN in text', () => {
+    expect(hasIban('recipient: ' + IBAN)).toBe(true);
+  });
+});
+
+describe('IBAN: the country fixes the BBAN shape (fw#372 X5)', () => {
+  // Every value here passes mod-97; the check digits were computed in Python.
+  it('letters inside a German BBAN are not an IBAN', () => {
+    expect(hasIban('DE24370400440532ABCD00')).toBe(false);
+    expect(hasIban('DE24 3704 0044 0532 ABCD 00')).toBe(false);
+  });
+  it.each([
+    'NL91ABNA0417164300',
+    'ES9121000418450200051332',
+    'IT60X0542811101000000123456',
+    'CH9300762011623852957',
+    'PL61109010140000071219812874',
+    'IL620108000000099999999',
+  ])('%s keeps its country shape and is an IBAN', (iban) => {
+    expect(hasIban('acct ' + iban)).toBe(true);
   });
 });

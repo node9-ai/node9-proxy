@@ -108,6 +108,8 @@ export interface FileAccess {
   cwd?: string;
   /** A read whose content leaves the machine as a request body or an upload. */
   upload?: true;
+  /** A directory listing (`ls`, `tree`, find's start points): the entry names, not a file's content. */
+  listing?: true;
   /** Unquoted shell pattern. Quoted metacharacters are escaped in this value. */
   glob?: string;
   /** The pattern is find's, not the shell's: `*` also selects dotfiles. */

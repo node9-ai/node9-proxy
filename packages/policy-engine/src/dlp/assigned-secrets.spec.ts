@@ -178,6 +178,25 @@ describe('Database Connection String with a driver suffix', () => {
     }
   });
 
+  it('judges a placeholder by the password, not the host (fw#372 A6)', () => {
+    const pw = ['Vq8', 'mT2', 'xp9', 'Lk'].join('');
+    for (const host of ['db.example-corp.internal', 'pg.sample-app.test', 'redis.here.test']) {
+      expect(
+        scanArgs({ content: `postgres://app:${pw}@${host}:5432/app` })?.patternName,
+        host
+      ).toBe('Database Connection String');
+    }
+    for (const p of [
+      'your_password',
+      'changeme1234',
+      '${DB_PASSWORD}',
+      'password_here',
+      'example1',
+    ]) {
+      expect(scanArgs({ content: `postgres://app:${p}@db.test/app` }), p).toBeNull();
+    }
+  });
+
   it('still ignores a user-only URL and an http basic-auth URL', () => {
     expect(gate({ content: 'mysql+pymysql://root@db.test/app' })).toBeNull();
     expect(gate({ content: 'http://user:pass1234@registry.test:8761/apps/' })).toBeNull();

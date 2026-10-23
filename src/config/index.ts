@@ -541,9 +541,11 @@ export const DEFAULT_CONFIG: Config = {
             // Downloader and sink groups mirror the engine's DOWNLOAD_CMDS and
             // SHELL_INTERPRETERS; pipe-to-shell-vocabulary-drift.spec.ts fails if
             // either list gains a name this regex does not. The PowerShell sinks
-            // carry \b so `iex` cannot match inside e.g. `iexplore`.
+            // carry \b so `iex` cannot match inside e.g. `iexplore`, and so does
+            // `sh`, so a quoted body containing `| Shipment` is not a shell
+            // (fw#372 X3, node9Firewall#332).
             value:
-              '(^|&&|\\|\\||;)\\s*(curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)[^|]*\\|\\s*(?:(ba|z|da|fi|c|k)?sh|(?:iex|invoke-expression|powershell|pwsh)\\b)',
+              '(^|&&|\\|\\||;)\\s*(curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)[^|]*\\|\\s*(?:(ba|z|da|fi|c|k)?sh\\b|(?:iex|invoke-expression|powershell|pwsh)\\b)',
             flags: 'i',
           },
         ],

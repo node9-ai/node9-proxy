@@ -70,7 +70,13 @@ export function findMnemonic(
   };
   for (const word of text.matchAll(/[a-zA-Z]+/g)) {
     const index = indices.get(word[0]);
-    if (index === undefined || (run.length && !/^\s+$/.test(text.slice(previousEnd, word.index)))) {
+    // Words separated by whitespace, or by `+`: a query string spells a space
+    // that way (`?seed=abandon+ability+...`), where the percent view sees
+    // `%20` but not `+` (fw#372 A5).
+    if (
+      index === undefined ||
+      (run.length && !/^[\s+]+$/.test(text.slice(previousEnd, word.index)))
+    ) {
       if (inspect()) return true;
       if (budget.reasons.has('mnemonic-budget')) return false;
       run = [];

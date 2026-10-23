@@ -131,9 +131,9 @@ export const IBAN_REGISTRY: Row[] = [
   {
     id: 'reg-known-limit',
     parts: ['DE16', 'ABCD', 'EF01', '2345', '6789', 'AB'],
-    expect: true,
+    expect: false,
     proves:
-      'HONEST LIMIT: hex-looking, DE=22, mod-97=1; a length-only registry cannot know German BBAN is 18!n',
+      'hex-looking, DE=22, mod-97=1: was the honest limit of a length-only registry; closed by the per-country BBAN shape (German BBAN is 18 digits, fw#372 X5)',
   },
 ];
 

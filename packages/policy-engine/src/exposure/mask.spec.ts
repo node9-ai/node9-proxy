@@ -194,7 +194,7 @@ describe('maskPersonalData: stricter than the detector', () => {
   });
   it('in text, a Luhn-valid fractional part is masked too (pinned trade-off)', () => {
     const changed = FRACTIONS.filter((x) => maskPersonalData(`rate ${x}`) !== `rate ${x}`);
-    expect(changed.length).toBe(70);
+    expect(changed.length).toBe(82); // 70 before the 13-, 14- and 19-digit card shapes (fw#372 B1)
   });
   it('as a value, every fraction k/n (n <= 100) stays the same number', () => {
     const changed = FRACTIONS.filter(

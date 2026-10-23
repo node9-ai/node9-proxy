@@ -27,6 +27,8 @@ import {
   type ProtectedFileVerdict,
 } from '@node9/policy-engine';
 import { prepareFileAccesses, type PreparedFileAccess } from '../policy/file-access';
+import { resolveSessionScript, recordSessionWrites, type SessionScript } from './session-script';
+import { scanInjection, argumentLeavesText } from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -225,6 +227,21 @@ const WRITE_TOOLS = new Set([
   'notebook_edit',
   'notebookedit',
 ]);
+
+const VERDICT_RANK = { allow: 0, review: 1, block: 2 } as const;
+/** A verdict reached through a script the session wrote: its sentences name the script. */
+function fromScript<T extends { reason?: string; ruleDescription?: string }>(
+  v: T,
+  script: string
+): T {
+  const inScript = (text: string | undefined): string =>
+    `In ${script}, a script written this session: ${text ?? 'the shell checks asked for a review'}`;
+  return {
+    ...v,
+    reason: inScript(v.reason),
+    ruleDescription: inScript(v.ruleDescription ?? v.reason),
+  };
+}
 
 function isWriteTool(toolName: string): boolean {
   const t = toolName.toLowerCase().replace(/[^a-z_]/g, '_');
@@ -633,6 +650,33 @@ async function _authorizeHeadlessCore(
     fileFinding = isManual ? null : incompleteFileVerdict();
   }
   const shellInput = resolveShellInput(toolName, args, inspectionLayers(config.policy));
+  // ── A SCRIPT WRITTEN THIS SESSION (fw#372 A3) ─────────────────────────────
+  // The files this call writes are recorded with the daemon; a shell command
+  // that runs a script the session wrote is judged from the script's content
+  // as well, by the file policy here and by the engine in evaluateCurrentPolicy
+  // below, the stricter verdict winning. Without it every shell check could be
+  // stepped around by writing the command into a file first. Fails open: no
+  // daemon, no record, no second judgement.
+  if (!isManual) await recordSessionWrites(toolName, args, fileAccess, options?.cwd);
+  const sessionScript: SessionScript | null = isManual
+    ? null
+    : await resolveSessionScript(toolName, args, options?.cwd, inspectionLayers(config.policy));
+  if (sessionScript) {
+    try {
+      const inner = evaluateProtectedFileAccess(
+        sessionScript.fileAccess.accesses,
+        sessionScript.fileAccess,
+        catalogSettingsFromConfig(config.settings, config.policy)
+      );
+      if (
+        inner &&
+        (!fileFinding || VERDICT_RANK[inner.decision] > VERDICT_RANK[fileFinding.decision])
+      )
+        fileFinding = fromScript(inner, sessionScript.path);
+    } catch {
+      /* An operand the matcher cannot evaluate in the script: the command's own verdict stands. */
+    }
+  }
   const networkShell = shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command);
   const shellReview = !isManual && shellInput.kind === 'uninspectable';
   if (shellReview) {
@@ -643,13 +687,24 @@ async function _authorizeHeadlessCore(
   }
   const fileReview =
     !isObserveMode && config.settings.mode !== 'audit' && fileFinding?.decision === 'review';
-  const evaluateCurrentPolicy = (skipIgnoredFastPath = false) =>
-    evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
+  const evaluateCurrentPolicy = async (skipIgnoredFastPath = false) => {
+    const own = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
       fileAccess,
       config,
       skipIgnoredFastPath,
       argumentScan: argScan,
     });
+    if (!sessionScript || own.decision === 'block') return own;
+    // The script's content, judged as a Bash command of its own; its verdict
+    // replaces the command's only when it is stricter.
+    const inner = await evaluatePolicy('Bash', sessionScript.args, meta?.agent, options?.cwd, {
+      fileAccess: sessionScript.fileAccess,
+      config,
+      skipIgnoredFastPath,
+    });
+    if (VERDICT_RANK[inner.decision] <= VERDICT_RANK[own.decision]) return own;
+    return fromScript(inner, sessionScript.path);
+  };
   if (fileFinding) {
     meta = { ...meta, ruleName: fileFinding.ruleName };
     // The command or edit content may contain credentials; do not log it before DLP runs.
@@ -797,6 +852,27 @@ async function _authorizeHeadlessCore(
       taintWarning =
         `⚠️ node9 flagged this session — earlier tool output contained ${sessionTaint.record.source}. ` +
         `Approve this ${kind} action before it proceeds.`;
+    }
+  }
+
+  // ── INJECTED INSTRUCTIONS WRITTEN OR SENT (fw#372 B6) ────────────────────
+  // The injection scan reads tool OUTPUT; an injected instruction that the
+  // agent then writes into a note or a file, or sends on, persists past the
+  // session unseen. With the scan on (injectionScan.enabled, off by default,
+  // as the output scan is), the content a write tool or an MCP tool with a
+  // destination carries is scanned too, and medium confidence (two signals;
+  // arguments have no origin booster) routes the call to review the way a
+  // session taint does. Measured: 0 of about 3,500 pre-stage benign rows
+  // reach medium.
+  if (!taintWarning && config.policy.injectionScan?.enabled && !isManual) {
+    const sends = isMcpToolName(toolName) && extractArgDestinations(args).length > 0;
+    if (isWriteTool(toolName) || sends) {
+      const m = scanInjection(argumentLeavesText(args), { untrusted: false });
+      if (m && (m.confidence === 'medium' || m.confidence === 'high')) {
+        taintWarning =
+          `⚠️ node9: the content this call ${isWriteTool(toolName) ? 'writes' : 'sends'} carries ` +
+          `instructions aimed at an AI model (${m.signals.join(', ')}). Approve only if that is what you meant.`;
+      }
     }
   }
 

@@ -27,6 +27,7 @@ jobs:
       - uses: ./
         with:
           fail-on: high
+          telemetry: false # our own runs are not usage
   report:
     if: github.event_name == 'push'
     permissions:
@@ -38,3 +39,4 @@ jobs:
       - uses: ./
         with:
           node9-upload-key: ${{ secrets.NODE9_REPO_UPLOAD_KEY }}
+          telemetry: false # our own runs are not usage

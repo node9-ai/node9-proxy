@@ -607,6 +607,54 @@ export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
 }
 
 /**
+ * Record files this call writes, so a script among them that is run later is
+ * judged from its content (fw#372 A3). Best-effort, like notifyTaint.
+ */
+export async function notifyWritten(paths: readonly string[]): Promise<void> {
+  if (paths.length === 0 || !isDaemonRunning()) return;
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    await fetch(`${base}/written`, {
+      method: 'POST',
+      headers: exposureHeaders(),
+      body: JSON.stringify({ paths: paths.slice(0, 64) }),
+      signal: AbortSignal.timeout(1000),
+    });
+  } catch {
+    // Best-effort: a daemon blip leaves the script unexamined, as before.
+  }
+}
+
+export interface WrittenCheckResult {
+  /** The paths among those asked that an agent session wrote (absolute). */
+  written: string[];
+  daemonUnavailable?: boolean;
+}
+
+/** Which of these paths an agent session wrote. Fail-open: no daemon, none. */
+export async function checkWritten(paths: readonly string[]): Promise<WrittenCheckResult> {
+  if (paths.length === 0) return { written: [] };
+  if (!isDaemonRunning()) return { written: [], daemonUnavailable: true };
+  const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
+  try {
+    const res = await fetch(`${base}/written/check`, {
+      method: 'POST',
+      headers: exposureHeaders(),
+      body: JSON.stringify({ paths: paths.slice(0, 64) }),
+      signal: AbortSignal.timeout(2000),
+    });
+    const body = (await res.json()) as { written?: unknown };
+    return {
+      written: Array.isArray(body.written)
+        ? body.written.filter((p): p is string => typeof p === 'string')
+        : [],
+    };
+  } catch {
+    return { written: [], daemonUnavailable: true };
+  }
+}
+
+/**
  * Taint a session after its tool output was flagged (gap1). Best-effort, must be
  * awaited before the PostToolUse hook exits (same reason as notifyTaint).
  */

@@ -618,3 +618,63 @@ describe('runPackageCheck — beyond npm and PyPI (node9Firewall#360)', () => {
     expect(calls).toEqual(['http://osv.test/v1/querybatch']);
   });
 });
+
+describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10)', () => {
+  const tooLarge = () =>
+    new Response('{}', {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-length': String(3 * 1024 * 1024) },
+    });
+  it('resolves the version from the version document, so a record for other versions is not a block', async () => {
+    indexWith('npm', 'node9-canary-big', [{ id: 'MAL-0000-0002', versions: ['1.0.0'] }]);
+    routes['http://registry.test/node9-canary-big'] = tooLarge;
+    routes['http://registry.test/node9-canary-big/latest'] = () =>
+      json({ name: 'node9-canary-big', version: '2.0.0', scripts: { test: 'vitest' } });
+    const r = await runPackageCheck(...bash('npm i node9-canary-big'), {
+      ...CFG,
+      newPackage: 'off',
+    });
+    expect(r.verdict).toBe('allow');
+    expect(r.misses.join('\n')).toMatch(/size cap/);
+    expect(calls).toContain('http://registry.test/node9-canary-big/latest');
+  });
+  it('an install script in the version document is still a finding', async () => {
+    routes['http://registry.test/node9-canary-big'] = tooLarge;
+    routes['http://registry.test/node9-canary-big/latest'] = () =>
+      json({
+        name: 'node9-canary-big',
+        version: '2.0.0',
+        scripts: { postinstall: 'node setup.js' },
+      });
+    const r = await runPackageCheck(...bash('npm i node9-canary-big'), {
+      ...CFG,
+      newPackage: 'off',
+    });
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toContain('install-script');
+  });
+  it('a range that latest does not satisfy claims no version, so a record keeps its review (review finding)', async () => {
+    indexWith('npm', 'node9-canary-big', [{ id: 'MAL-0000-0003', versions: ['1.4.1'] }]);
+    routes['http://registry.test/node9-canary-big'] = tooLarge;
+    routes['http://registry.test/node9-canary-big/latest'] = () =>
+      json({ name: 'node9-canary-big', version: '3.0.0', scripts: {} });
+    const r = await runPackageCheck(...bash('npm i node9-canary-big@^1.2.0'), {
+      ...CFG,
+      newPackage: 'off',
+      installScript: 'off',
+    });
+    expect(r.verdict).toBe('review');
+    expect(r.findings[0].kind).toBe('malicious-unpinned');
+  });
+  it('a pinned version reads its own document', async () => {
+    routes['http://registry.test/node9-canary-big'] = tooLarge;
+    routes['http://registry.test/node9-canary-big/1.5.0'] = () =>
+      json({ name: 'node9-canary-big', version: '1.5.0', scripts: {} });
+    const r = await runPackageCheck(...bash('npm i node9-canary-big@1.5.0'), {
+      ...CFG,
+      newPackage: 'off',
+    });
+    expect(r.verdict).toBe('allow');
+    expect(calls).toContain('http://registry.test/node9-canary-big/1.5.0');
+  });
+});

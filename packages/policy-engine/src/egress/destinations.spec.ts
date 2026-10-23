@@ -12,7 +12,7 @@
 //   2. only a tool on the closed list is judged at all, because there is no
 //      placement that reaches WebFetch without also reaching Grep
 import { describe, it, expect } from 'vitest';
-import { ssrfDestinationFloor } from './destinations';
+import { ssrfDestinationFloor, extractToolDestinations } from './destinations';
 
 const META = '169.254.169.254';
 const hit = (tool: string, args: unknown, opts = {}) => ssrfDestinationFloor(tool, args, opts);
@@ -211,5 +211,64 @@ describe('E. placement', () => {
     );
     expect(r.decision, 'the ignored-tool fast path must not swallow this').toBe('block');
     expect(r.blockedByLabel).toMatch(/Protected Address/);
+  });
+});
+
+describe('D. an MCP argument named as a destination feeds the egress policy (fw#372 B8)', () => {
+  const dests = (tool: string, args: unknown) =>
+    extractToolDestinations(tool, args)
+      .map((d) => d.host)
+      .sort();
+  it('D1 destination, endpoint and webhook names on an MCP tool yield their host', () => {
+    expect(
+      dests('mcp__reports__send_report', {
+        destination: 'https://collect.example.net/u',
+        body: 'x',
+      })
+    ).toEqual(['collect.example.net']);
+    expect(
+      dests('mcp__hooks__notify', {
+        webhook: 'https://hooks.example.io/abc',
+        endpoint: 'http://api.example.org/v1',
+      })
+    ).toEqual(['api.example.org', 'hooks.example.io']);
+  });
+  it('D2 a value that is not a URL, a nested or differently named argument, and a non-MCP tool yield nothing', () => {
+    expect(
+      dests('mcp__reports__send_report', { destination: 'ops team', endpoint: 'not a url' })
+    ).toEqual([]);
+    // A plain `url` names the page a tool works on, not where it sends (founder call 2026-09-08).
+    expect(dests('mcp__notes__save', { url: 'https://evil.example.com/x', title: 'x' })).toEqual(
+      []
+    );
+    expect(
+      dests('mcp__reports__send_report', {
+        options: { url: 'https://x.example/' },
+        text: 'see https://y.example/',
+      })
+    ).toEqual([]);
+    expect(dests('Write', { url: 'https://x.example/', file_path: 'a' })).toEqual([]);
+  });
+  it('D3 the floor keeps its closed list: a named destination on an unlisted MCP tool is not judged there', () => {
+    expect(
+      hit('mcp__reports__send_report', { destination: `http://${META}/latest/meta-data/` })
+    ).toBeNull();
+  });
+});
+
+describe('E. a disguised internal address through a URL tool (review of fw#372 A9)', () => {
+  it('E1 is reviewed like the shell form; the plain spelling stays reachable', () => {
+    const r = hit('WebFetch', { url: 'http://0x7f000001:8080/admin' });
+    expect(r?.decision).toBe('review');
+    expect(r?.reason).toContain('disguised');
+    expect(hit('WebFetch', { url: 'http://[::ffff:127.0.0.1]:8080/' })?.decision).toBe('review');
+    expect(hit('WebFetch', { url: 'http://127.0.0.1:8080/admin' })).toBeNull();
+  });
+  it('E2 strict blocks it, an enabled allowPrivate releases it, the locked tiers still block', () => {
+    expect(hit('WebFetch', { url: 'http://0x7f000001/' }, { ssrfStrict: true })?.decision).toBe(
+      'block'
+    );
+    expect(hit('WebFetch', { url: 'http://0x7f000001/' }, { allowPrivate: true })).toBeNull();
+    expect(hit('WebFetch', { url: 'http://2852039166/' })?.decision).toBe('block');
   });
 });

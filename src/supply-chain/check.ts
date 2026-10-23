@@ -241,7 +241,11 @@ async function checkOne(
       if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
       else if (info.ageFallback)
         misses.push(
-          `${label(p, info.version)}: age from the package modified time (${info.ageFallback})`
+          `${label(p, info.version)}: ${
+            info.publishedAtMs === undefined
+              ? 'publish time unavailable'
+              : 'age from the package modified time'
+          } (${info.ageFallback})`
         );
     } catch (err) {
       misses.push(`${label(p, p.version)}: registry ${(err as Error).message}`);

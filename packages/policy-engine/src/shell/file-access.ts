@@ -449,6 +449,15 @@ export function collectShellFileAccesses(
     if (FS_READ_TOOLS.has(name) && name !== 'dd') {
       for (const p of readerPaths(words, head)) add('read', locate(p), state);
     }
+    // A listing names a directory's entries without opening a file: its own
+    // flag, so the rules about file content (password hashes, uploads) leave
+    // it alone and the rule about another account's home sees it (fw#372 B9).
+    if (['ls', 'tree', 'dir', 'vdir'].includes(name)) {
+      for (const token of args) {
+        if (!token || token.value.startsWith('-')) continue;
+        add('read', token, state, { listing: true });
+      }
+    }
     if (name === 'dd') {
       for (const token of args)
         if (token && /^(?:if|of)=/.test(token.value)) {
@@ -716,6 +725,8 @@ export function collectShellFileAccesses(
   ): void {
     const starts = findStartPoints(words, head).starts;
     const roots = (starts.length ? starts : ['.']).slice(0, MAX_ALTERNATIVES);
+    for (const start of starts.slice(0, MAX_ALTERNATIVES))
+      add('read', { value: start }, state, { listing: true });
     // Literal -name/-path tests and -maxdepth narrow what an action can reach.
     // Without them every entry below the start points is a candidate.
     let nameFilter: string | null = null;

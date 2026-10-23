@@ -250,3 +250,52 @@ describe('F. addresses that must be reachable by default', () => {
     }
   });
 });
+
+describe('G. a disguised spelling of a default-reachable address is reviewed (fw#372 A9)', () => {
+  const floor = (token: string, opts: Parameters<typeof ssrfFloor>[1] = {}) =>
+    ssrfFloor([{ token, binary: 'curl' }], opts);
+
+  it('G1 hex, decimal, octal, IPv4-mapped and uncompressed spellings are reviews with strict off', () => {
+    for (const t of [
+      '0x7f000001',
+      '2130706433',
+      '0177.0.0.1',
+      '0x7f.0.0.1',
+      '[::ffff:127.0.0.1]',
+    ]) {
+      const v = floor(t);
+      expect(v?.decision, t).toBe('review');
+      expect(v?.tier, t).toBe('private');
+      expect(v?.normalized, t).toBe('127.0.0.1');
+      expect(v?.reason, t).toContain('disguised');
+    }
+    expect(floor('0x0a000005')?.decision).toBe('review'); // 10.0.0.5
+    expect(floor('[0:0:0:0:0:0:0:1]')?.decision).toBe('review');
+  });
+
+  it('G2 the plain spellings and the typed shorthand stay reachable, as F1 and ssrf-pins E3 promise', () => {
+    const plain = [
+      '127.0.0.1',
+      '10.0.0.5',
+      '192.168.1.20',
+      '172.16.0.3',
+      '[::1]',
+      '::1',
+      '0.0.0.0',
+    ];
+    for (const t of [...plain, 'localhost', '127.0.0.1.', '127.1', '10.1', '127.0.1']) {
+      expect(floor(t), t).toBeNull();
+    }
+  });
+
+  it('G3 with the strict tier on the same spellings block; an exemption or an enabled allowPrivate releases them', () => {
+    expect(floor('0x7f000001', { ssrfStrict: true })?.decision).toBe('block');
+    expect(floor('0x7f000001', { ssrfAllow: ['127.0.0.1'] })).toBeNull();
+    expect(floor('[::ffff:127.0.0.1]', { allowPrivate: true })).toBeNull();
+  });
+
+  it('G4 the locked tiers block whatever the spelling', () => {
+    expect(floor('2852039166')?.decision).toBe('block');
+    expect(floor('169.254.169.254')?.decision).toBe('block');
+  });
+});

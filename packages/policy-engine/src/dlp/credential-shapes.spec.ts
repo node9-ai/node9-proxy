@@ -180,3 +180,116 @@ describe('the new shapes are gate-only and stay linear', () => {
     }
   });
 });
+
+describe('shapes from the CredData review (fw#372 B4, node9Firewall#385)', () => {
+  // All synthetic. The cipher key and the Laravel key are random bytes
+  // base64-encoded at test time, so no key-shaped literal lives in the source.
+  const aes128 = Buffer.from(Array.from({ length: 16 }, (_, i) => (i * 37 + 11) % 251)).toString(
+    'base64'
+  );
+  const aes256 = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 53 + 7) % 241)).toString(
+    'base64'
+  );
+  const MIXED12 = ['x7', 'Kq', '2m', 'Zp', '9r', 'Tw'].join(''); // letters and digits, 12 long
+  const GRAFANA = Buffer.from(
+    '{"k":"' + ['Zm1', 'Qa9', 'kL3', 'pR7', 'vB2', 'nX8'].join('') + '","n":"ci","id":1}'
+  ).toString('base64');
+
+  it('a 16-byte base64 literal under a key name is a cipher key; a public key or a word is not', () => {
+    expect(gate({ content: `cipherKey = "${aes128}"` })?.patternName).toBe('Cipher Key Literal');
+    expect(
+      gate({ content: `private static final String ENC_KEY = "${aes128}";` })?.patternName
+    ).toBe('Cipher Key Literal');
+    expect(gate({ content: `publicKey = "${aes128}"` })).toBeNull();
+    expect(gate({ content: `cipherKey = "${'a'.repeat(22)}=="` })).toBeNull();
+    expect(gate({ content: `testKey = "${aes128}"` })).toBeNull();
+    for (const name of ['cacheKey', 'idempotencyKey', 'requestKey', 'monkey']) {
+      expect(gate({ content: `${name} = "${aes128}"` }), name).toBeNull();
+    }
+    expect(gate({ content: `rememberMeCipherKey = "${aes128}"` })?.patternName).toBe(
+      'Cipher Key Literal'
+    );
+  });
+
+  it('Laravel APP_KEY, a Mailgun key, a kubeadm token and a SQL account password are reviews', () => {
+    expect(gate({ content: `APP_KEY=base64:${aes256}` })?.patternName).toBe('Laravel App Key');
+    expect(gate({ content: 'APP_KEY=base64:' + 'A'.repeat(43) + '=' })).toBeNull();
+    expect(gate({ content: `MAILGUN_KEY=key-${'3f9a'.repeat(8)}` })?.patternName).toBe(
+      'Mailgun API Key'
+    );
+    expect(
+      gate({ content: 'kubeadm join 10.0.0.1:6443 --token abcdef.0123456789abcdef' })?.patternName
+    ).toBe('Kubeadm Bootstrap Token');
+    expect(gate({ content: 'the file abcdef.0123456789abcdef is a cache entry' })).toBeNull();
+    expect(
+      gate({ content: `CREATE USER 'app'@'%' IDENTIFIED BY '${MIXED12}!'` })?.patternName
+    ).toBe('SQL Account Password');
+    expect(gate({ content: `CREATE ROLE app WITH PASSWORD '${MIXED12}'` })?.patternName).toBe(
+      'SQL Account Password'
+    );
+    expect(gate({ content: "CREATE USER 'app'@'%' IDENTIFIED BY 'changeme'" })).toBeNull();
+    expect(gate({ content: "CREATE USER 'app'@'%' IDENTIFIED BY 'password'" })).toBeNull();
+    expect(gate({ content: "IDENTIFIED BY '${DB_PASSWORD}'" })).toBeNull();
+  });
+
+  it('a Grafana API key blocks, in arguments and in text', () => {
+    expect(gate({ content: `Authorization: Bearer ${GRAFANA}` })?.patternName).toBe(
+      'Grafana API Key'
+    );
+    expect(scanText(`GF_KEY=${GRAFANA}`)?.patternName).toBe('Grafana API Key');
+    const notGrafana = Buffer.from('{"k":"short","n":"x"}').toString('base64');
+    expect(scanText(`x=${notGrafana}`)).toBeNull();
+  });
+
+  it('a PGP private key block and a DSA or encrypted PEM header block', () => {
+    for (const header of [
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----',
+      '-----BEGIN DSA PRIVATE KEY-----',
+      '-----BEGIN ENCRYPTED PRIVATE KEY-----',
+    ]) {
+      expect(scanText(header + '\nabc\n')?.patternName, header).toBe('Private Key (PEM)');
+    }
+    expect(scanText('-----BEGIN PGP PUBLIC KEY BLOCK-----')).toBeNull();
+  });
+
+  it('Assigned Secret: aes/cipher/subscription key names, a backtick, a pipe, an escaped slash, and the mixed-value floor', () => {
+    for (const text of [
+      `AES_KEY=${GENERATED}`,
+      `cipher_key: '${GENERATED}'`,
+      `subscriptionKey = "${GENERATED}"`,
+      '`password`: "' + GENERATED + '"',
+      `password = "${GENERATED}|${MIXED12}"`,
+      `"token":"ab12\\/${GENERATED}"`,
+      // Letters and digits at 3.0 bits per character: a 12-character token of
+      // the shape many services issue, which the 3.5 floor rejected.
+      `secret = "${MIXED12}"`,
+    ]) {
+      expect(gate({ content: text })?.patternName, text).toBe('Assigned Secret');
+    }
+    expect(gate({ content: `PUBLIC_KEY=${GENERATED}` })).toBeNull();
+    expect(gate({ content: 'secret = "abcdefghijkl"' })).toBeNull(); // letters only keep the 3.5 floor
+  });
+});
+
+describe('the output scan reads decoded views (fw#372 B7)', () => {
+  const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n';
+  it('a PEM header encoded in base64 or hex in tool output is a finding', () => {
+    expect(scanText('blob: ' + Buffer.from(pem).toString('base64'))?.patternName).toBe(
+      'Private Key (PEM)'
+    );
+    expect(scanText('hex: ' + Buffer.from(pem).toString('hex'))?.patternName).toBe(
+      'Private Key (PEM)'
+    );
+    expect(scanText('blob: ' + Buffer.from(pem).toString('base64'))?.redactedSample).toBe(
+      '[encoded secret]'
+    );
+  });
+  it('ordinary encoded text is not', () => {
+    expect(
+      scanText(
+        'blob: ' + Buffer.from('hello world, this is a plain paragraph of text').toString('base64')
+      )
+    ).toBeNull();
+    expect(scanText('sha256: ' + 'ab'.repeat(32))).toBeNull();
+  });
+});

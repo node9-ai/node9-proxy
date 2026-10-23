@@ -42,16 +42,26 @@ interface Signal {
   any: RegExp[];
 }
 
+// The general vocabulary of real indirect injections (fw#372 B5), each
+// phrasing measured on benign documentation and web pages before it joined:
+// prior commands or tasks, "OVERRIDE:", "new directive", a request to reveal
+// the system prompt, "SYSTEM NOTE", "[SYSTEM]", "decode ... and execute",
+// "call X with url", and the exfiltration verbs forward, transmit, share
+// with, log to, submit, whose destination window may run through dots.
 const SIGNALS: Signal[] = [
   {
     name: 'override-instructions',
     any: [
-      // "ignore/disregard/forget ... (previous|all|the|your) ... instructions/prompt/rules"
-      /\b(ignore|disregard|forget)\b[^.!?\n]{0,40}\b(previous|prior|earlier|above|all|the|your)\b[^.!?\n]{0,24}\b(instruction|instructions|prompt|context|rules?|directives?)\b/i,
+      // "ignore/disregard/forget ... (previous|all|the|your) ... instructions/prompt/rules/commands/tasks"
+      /\b(ignore|disregard|forget|discard)\b[^.!?\n]{0,40}\b(previous|prior|earlier|above|all|the|your)\b[^.!?\n]{0,24}\b(instruction|instructions|prompt|context|rules?|directives?|commands?|tasks?|guidelines?)\b/i,
       /\byou are now\b/i,
-      /\bnew instructions?\s*:/i,
+      /\bnew (instructions?|directives?)\s*:/i,
+      /\bnew directive\b/i,
+      /\boverride\s*:/i,
+      /\bsystem note\s*:/i,
       /\bdeveloper mode\b/i,
       /\bignore (the )?system prompt\b/i,
+      /\b(reveal|print|show|output|repeat|display|dump)\b[^.!?\n]{0,30}\b(system prompt|hidden instructions|initial instructions|your instructions)\b/i,
       /\b(do not|don'?t|never)\b[^.!?\n]{0,20}\btell the (user|human)\b/i,
       /\boverride (your|the)\b[^.!?\n]{0,20}\b(instruction|instructions|programming|rules?|guardrails?)\b/i,
     ],
@@ -61,6 +71,7 @@ const SIGNALS: Signal[] = [
     any: [
       /^\s*(system|assistant)\s*:/im, // a line impersonating a conversation turn
       /<\/?system>/i,
+      /\[\s*system\s*\]/i,
       /\[\/?INST\]/i,
       /<\|im_(start|end)\|>/i,
     ],
@@ -68,13 +79,49 @@ const SIGNALS: Signal[] = [
   {
     name: 'action-to-destination',
     any: [
-      // exfil verb + to/at + a url / email / domain
-      /\b(send|post|upload|exfiltrate|email|curl|wget|leak)\b[^.\n]{0,40}\b(to|at)\b[^.\n]{0,24}(https?:\/\/|[\w.-]+@[\w.-]+|[\w-]+\.[a-z]{2,})/i,
+      // exfil verb + to/at/with/into + a url / email / domain. "email" after a
+      // possessive ("your email", "my email") is the noun, not the verb (X4).
+      // "log in to", "report issues at", "share feedback with" and "submit
+      // your form at" are how ordinary pages talk, so log, report, share and
+      // submit count only in the past tense ("logged to", "shared with").
+      // A dot inside a word (a host, a file name) does not end the window; a
+      // dot that ends a sentence does.
+      /\b(send|sent|post(?:ed)?|upload(?:ed)?|exfiltrate[sd]?|forward(?:ed|s)?|transmit(?:ted|s)?|shared|submitted|logged|reported|curl|wget|leak(?:ed|s)?|(?<!\b(?:your|my|the|an|a|this|that|our|their|his|her)\s+)email(?:ed|s)?)\b(?:[^.\n!?]|\.(?=\S)){0,40}\b(to|at|with|into)\b(?:[^.\n!?]|\.(?=\S)){0,24}(https?:\/\/|[\w.-]+@[\w.-]+\.[a-z]{2,}|[\w-]+\.[a-z]{2,})/i,
       /\brun (the )?following (command|code|script)\b/i,
       /\bexecute (this|the following)\b/i,
+      /\bdecode\b[^.!?\n]{0,40}\b(and|then)\b[^.!?\n]{0,12}\b(execute|run|eval)\b/i,
+      /\bcall\b[^.!?\n]{0,30}\b(tool|function|endpoint)\b[^.!?\n]{0,30}\b(url|link|address)\b/i,
     ],
   },
 ];
+
+/**
+ * A phrase that is quoted as an example is a mention, not an instruction
+ * (fw#372 X4): "filters match phrases such as 'ignore previous instructions'",
+ * 'the pattern "you are now"'. The quote has to be there and a word of
+ * quoting or classifying has to precede it, so a quoted injection standing on
+ * its own still counts.
+ */
+const MENTION_QUOTE_RE = /["'`“‘(]\s*$/;
+const MENTION_WORD_RE =
+  /\b(?:say|says|saying|said|such as|like|pattern|patterns|phrase|phrases|string|strings|text|e\.g\.|example|examples|contains?|containing|detects?|filters?|flags?|blocks?|matches|keywords?|wording|marker|markers)\b/i;
+
+/** Does `re` match `text` somewhere other than inside a quoted mention? */
+function matchesOutsideMention(re: RegExp, text: string): boolean {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+  let m: RegExpExecArray | null;
+  while ((m = g.exec(text)) !== null) {
+    if (m[0].length === 0) {
+      g.lastIndex = m.index + 1;
+      continue;
+    }
+    // A mention: the phrase opens with a quote, and a word of quoting or
+    // classifying stands within the 48 characters before it.
+    const before = text.slice(Math.max(0, m.index - 48), m.index);
+    if (!(MENTION_QUOTE_RE.test(before) && MENTION_WORD_RE.test(before))) return true;
+  }
+  return false;
+}
 
 /**
  * Scan tool output for indirect prompt injection. Returns the matched signals +
@@ -97,7 +144,11 @@ export function scanInjection(text: string, ctx: InjectionContext = {}): Injecti
   for (const view of scanViews(t)) {
     for (const sig of SIGNALS) {
       if (matched.includes(sig.name)) continue;
-      if (sig.any.some((re) => re.test(view.text))) matched.push(sig.name);
+      const hit =
+        sig.name === 'override-instructions'
+          ? sig.any.some((re) => matchesOutsideMention(re, view.text))
+          : sig.any.some((re) => re.test(view.text));
+      if (hit) matched.push(sig.name);
     }
   }
   if (matched.length === 0) return null;

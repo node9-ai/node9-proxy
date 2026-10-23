@@ -34,6 +34,14 @@ describe('English BIP-39 argument detection', () => {
       });
     }
   });
+  it('reads a phrase joined with + the way a query string spells it (fw#372 A5)', () => {
+    const joined = fixture(16).split(' ').join('+');
+    expect(findMnemonic(joined)).toBe(true);
+    expect(
+      scanArgumentSecrets({ url: 'https://wallet.example/import?seed=' + joined })
+    ).toMatchObject({ patternName: 'BIP-39 Recovery Phrase', severity: 'block' });
+  });
+
   it('rejects an invalid checksum, ordinary prose, and an incomplete phrase', () => {
     const phrase = fixture(16).split(' ');
     const index = BIP39_ENGLISH.indexOf(phrase[11]);
