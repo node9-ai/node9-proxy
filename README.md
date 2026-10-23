@@ -121,7 +121,8 @@ that file. `node9 egress protect` gates destinations as well, and it covers shel
 
 ## Verify it yourself
 
-Nothing below needs an account, and nothing uploads.
+Nothing below needs an account or uploads your code. `scan-repo` sends an anonymous usage count
+(no repository name, no code); set `NODE9_NO_TELEMETRY=1` to turn it off.
 
 ```bash
 npx node9-ai scan                                        # every past agent session on this machine
@@ -177,7 +178,7 @@ Background reading, written to stand on its own. Each page says what node9 does 
 ## Related projects
 
 - **[node9-python](https://github.com/node9-ai/node9-python)**: Python SDK
-- **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**: the GitHub Action, `uses: node9-ai/node9-proxy@v2`, gates every PR with the same engine
+- **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**: the GitHub Action, `uses: node9-ai/node9-proxy@v2`, gates every PR with the same engine (it sends the same anonymous usage count; `telemetry: false` turns it off)
 
 ## Enterprise
 

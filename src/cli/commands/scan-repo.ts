@@ -18,6 +18,12 @@ import {
   exitCodeForSeverity,
 } from '../../ci-check/render';
 import type { ScanDiff } from '../../ci-check/types';
+import {
+  buildScanRepoPing,
+  sendScanRepoPing,
+  telemetryDisabled,
+  SCAN_REPO_TELEMETRY_NOTICE,
+} from '../../ci-check/usage-ping';
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -130,6 +136,16 @@ export function registerScanRepoCommand(program: Command): void {
           opts.failOnIntroduced && diff
             ? exitCodeForSeverity(diff.worstIntroduced, diff.incomplete)
             : exitCodeFor(res);
+
+        // fw#388: the anonymous usage count, after the output so it can never delay or
+        // change it. `res` is the result as the user saw it. The notice goes to stderr
+        // in terminal mode only, so --json, --markdown and redirected output stay clean.
+        if (!telemetryDisabled()) {
+          await sendScanRepoPing(buildScanRepoPing(res, target));
+          if (!opts.json && !opts.markdown && process.stderr.isTTY) {
+            process.stderr.write(chalk.dim(SCAN_REPO_TELEMETRY_NOTICE) + '\n');
+          }
+        }
       }
     );
 }

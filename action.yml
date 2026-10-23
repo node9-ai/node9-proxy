@@ -46,6 +46,15 @@ inputs:
     description: "node9 API for uploads. Only https://api.node9.ai (the default) or node9's test deployment are accepted."
     required: false
     default: 'https://api.node9.ai'
+  telemetry:
+    description: >-
+      Send node9 an anonymous usage count for each run: the scanner version, the
+      operating system, that it ran from the Action, the worst severity, whether the scan
+      finished, and a hash of the repository's numeric GitHub id that node9 keeps only
+      inside a count. Never the repository name, a path, a finding or any code. Set to
+      false (or NODE9_NO_TELEMETRY=1 on the job) to turn it off.
+    required: false
+    default: 'true'
 
 runs:
   using: 'composite'
@@ -97,8 +106,14 @@ runs:
         NODE9_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         NODE9_VERSION_INPUT: ${{ inputs.node9-version }}
         NODE9_WILL_UPLOAD: ${{ github.event_name == 'push' && inputs.node9-upload-key != '' }}
+        # The anonymous usage count (fw#388): tells the CLI this run is the Action. The
+        # opt-out is decided in the script, so a NODE9_NO_TELEMETRY or DO_NOT_TRACK the
+        # caller set on the job is never overwritten by this step.
+        NODE9_USAGE_SOURCE: action
+        NODE9_TELEMETRY_INPUT: ${{ inputs.telemetry }}
       run: |
         set -euo pipefail
+        case "$NODE9_TELEMETRY_INPUT" in [Ff][Aa][Ll][Ss][Ee]) export NODE9_NO_TELEMETRY=1 ;; esac
         # Uploads only: resolve the exact scanner version first and run that one,
         # so the upload reports the version that really scanned. A range or a
         # dist-tag resolves to its highest matching version (resolve-version.js,
