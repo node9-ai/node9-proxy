@@ -12,7 +12,7 @@
     },
     {
       "name": "shield:publishing:review-package",
-      "tool": "{,mcp__*__}{publish_package,publish,npm_publish,pypi_upload,publish_version,publish_extension}",
+      "tool": "{,mcp__*__}{publish_package,npm_publish,pypi_upload,publish_version,publish_extension}",
       "conditions": [],
       "verdict": "review",
       "reason": "This publishes a package. node9 asks before publishing (Publishing shield)."
@@ -45,7 +45,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*(?:npm|pnpm)\\s+publish\\b",
+          "value": "(?:^|[^\\w-])(?:npm|pnpm)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
           "flags": "i"
         }
       ],
@@ -59,7 +59,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*yarn\\s+(?:npm\\s+publish|publish)\\b",
+          "value": "(?:^|[^\\w-])(?:yarn)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
           "flags": "i"
         }
       ],
@@ -73,12 +73,40 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*twine\\s+upload\\b",
+          "value": "(?:^|[^\\w-])(?:twine)(?![\\w-])[^;&|]{0,200}?\\s(?:upload)(?![\\w-])",
           "flags": "i"
         }
       ],
       "verdict": "review",
       "reason": "twine upload publishes to PyPI. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-python-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:poetry|uv|hatch|flit)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "This publishes the Python package to PyPI. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-release-tool-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:lerna|changeset|vsce|ovsx)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "This publishes packages or an editor extension through a release tool. node9 asks before publishing (Publishing shield)."
     },
     {
       "name": "shield:publishing:review-cargo-publish",
@@ -87,7 +115,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*cargo\\s+publish\\b",
+          "value": "(?:^|[^\\w-])(?:cargo)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
           "flags": "i"
         }
       ],
@@ -101,7 +129,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*gem\\s+push\\b",
+          "value": "(?:^|[^\\w-])(?:gem)(?![\\w-])[^;&|]{0,200}?\\s(?:push)(?![\\w-])",
           "flags": "i"
         }
       ],
@@ -115,7 +143,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*docker\\s+push\\b",
+          "value": "(?:^|[^\\w-])(?:docker|podman)(?![\\w-])[^;&|]{0,200}?\\s(?:push|--push)(?![\\w-])",
           "flags": "i"
         }
       ],
@@ -129,7 +157,7 @@
         {
           "field": "command",
           "op": "matches",
-          "value": "(^|&&|\\|\\||;)\\s*gh\\s+release\\s+(?:create|upload|edit)\\b",
+          "value": "(?:^|[^\\w-])(?:gh)(?![\\w-])[^;&|]{0,200}?\\srelease\\s+(?:create|upload|edit)(?![\\w-])",
           "flags": "i"
         }
       ],

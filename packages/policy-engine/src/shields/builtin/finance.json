@@ -54,7 +54,7 @@
     },
     {
       "name": "shield:finance:review-card",
-      "tool": "{,mcp__*__}{create_card,issue_card,create_virtual_card,update_card_limit}",
+      "tool": "{,mcp__*__}{issue_card,create_virtual_card,create_issuing_card,update_card_limit}",
       "conditions": [],
       "verdict": "review",
       "reason": "This issues a card or changes its limit. node9 asks before money moves (Finance shield)."

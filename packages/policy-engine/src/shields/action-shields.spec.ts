@@ -84,11 +84,36 @@ describe('publishing: the shell commands that publish are the same switch', () =
     'yarn npm publish',
     'cd dist && npm publish',
     'twine upload dist/*',
-    'cargo publish --dry-run',
+    'cargo publish',
     'gem push my-gem-1.0.0.gem',
     'docker push ghcr.io/o/img:1',
     'gh release create v1.2.0 --notes "x"',
     'gh release upload v1.2.0 out.tgz',
+    // The same publish, spelled the ways people and agents really type it.
+    'NPM_TOKEN=x npm publish',
+    'sudo npm publish',
+    'cd pkg\nnpm publish',
+    '/usr/local/bin/npm publish',
+    'npm --tag beta publish',
+    'pnpm -r publish',
+    'npx npm publish',
+    'python -m twine upload dist/*',
+    'poetry publish --build',
+    'uv publish',
+    'docker image push ghcr.io/o/img:1',
+    'docker buildx build --push -t ghcr.io/o/img:1 .',
+    'gh -R o/r release create v1',
+    'npx lerna publish from-package',
+    'npx changeset publish',
+    'npx @vscode/vsce publish',
+    'cd x && podman push img',
+    // A dry run is still asked about: matching `--dry-run` anywhere in the
+    // command let `npm publish --dry-run=false`, a `# --dry-run` comment or a
+    // log file named `--dry-run` through. A review on a dry run costs little.
+    'npm publish --dry-run=false',
+    'npm publish # --dry-run',
+    'npm publish > /tmp/no--dry-run.log',
+    'cargo publish --dry-run',
   ])('%s asks', (command) => {
     expect(fires(command)).toBe(true);
   });
@@ -100,8 +125,17 @@ describe('publishing: the shell commands that publish are the same switch', () =
     'gh release list',
     'gh release view v1.0.0',
     'cargo build --release',
-    'echo "npm publish" > notes.md',
     'git commit -m "npm publish later"',
+    // A quoted mention outside a message flag (`echo "npm publish"`) does ask:
+    // the command text keeps its quotes, and telling a mention from
+    // `NPM_TOKEN="$T" npm publish` is beyond a regex. A review, not a block.
+    'npm i publish-kit',
+    'npm view x publishConfig',
+    'npm test | grep publish',
+    'gh release delete v1',
+    'poetry install',
+    'npm-run-all build publish',
+    'pnpm-lock-check publish',
   ])('%s does not', (command) => {
     expect(fires(command)).toBe(false);
   });

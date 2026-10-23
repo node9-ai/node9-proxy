@@ -4483,8 +4483,10 @@ export function registerScanCommand(program: Command): void {
               .filter((s) => s.sourceType === 'shield' && s.shieldKey)
               .map((s) => s.shieldKey!)
           );
+          // The action shields are switched on from the Apps page, not pitched
+          // by a history scan (node9Firewall#385).
           const noHitShields = Object.keys(SHIELDS)
-            .filter((n) => !hitShieldIds.has(n))
+            .filter((n) => !hitShieldIds.has(n) && !ACTION_SHIELD_NAMES.has(n))
             .sort();
           const quietEnabled = noHitShields.filter((n) => enabledShieldSet.has(n));
           const emptyShields = noHitShields.filter((n) => !enabledShieldSet.has(n));
