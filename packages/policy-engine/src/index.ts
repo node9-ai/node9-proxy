@@ -87,6 +87,7 @@ export {
   type PositionedArg,
   unwrapCommandHead,
   extractShellDestinations,
+  shellScriptOperands,
   parseDestHost,
 } from './shell';
 

@@ -2343,6 +2343,75 @@ function extractLiteralArgs(callExpr: any): {
   return { name, flags, paths: args.map((a) => a.value), words, args };
 }
 
+/** Shells whose first operand is a script file to run (`bash x.sh`). */
+const SCRIPT_RUNNERS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'source', '.']);
+/** Short options of those shells that take a value, so `bash -o pipefail x.sh` keeps x.sh. */
+const SCRIPT_RUNNER_VALUE_FLAGS = new Set(['-o', '+o', '-O', '+O', '--rcfile', '--init-file']);
+export const MAX_SCRIPT_OPERANDS = 8;
+
+/**
+ * The script files a command runs, as written: the first operand of a shell
+ * (`bash x.sh`, `sh -e ./x.sh`, `source env.sh`, `. ./lib.sh`) and a head that
+ * is itself a path (`./deploy.sh`, `/tmp/run.sh`, `scripts/build.sh`). `-c`
+ * payloads are inline code, not files, and are read by the payload walkers.
+ * Wrappers (`sudo`, `env`, `timeout`) are seen through. Paths under
+ * `node_modules` or a `.bin` directory are installed tools, not scripts the
+ * session wrote, and are left out. Pure: the caller resolves against its cwd
+ * and decides whether a path is one the session wrote (fw#372 A3).
+ */
+export function shellScriptOperands(command: string): string[] {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (p: string | null): void => {
+    if (!p || p.startsWith('-') || seen.has(p) || out.length >= MAX_SCRIPT_OPERANDS) return;
+    if (/(^|[\\/])node_modules[\\/]|[\\/]\.bin[\\/]/.test(p)) return;
+    seen.add(p);
+    out.push(p);
+  };
+  try {
+    walkWithCalls(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const callArgs: any[] = n.Args || [];
+      if (callArgs.length === 0) return true;
+      const words = callArgs.map((a) => resolveWordLiteral(a));
+      const h = unwrapCommandHead(words);
+      const headWord = words[h];
+      if (headWord === null || headWord === undefined) return true;
+      const name = baseWord(headWord);
+      if (SCRIPT_RUNNERS.has(name)) {
+        for (let i = h + 1; i < words.length; i++) {
+          const w = words[i];
+          if (w === null) return true; // a dynamic word: the operand is unknowable
+          if (w === '-c' || w === '-lc' || w === '-ec') return true; // inline code
+          if (w === '--') {
+            add(words[i + 1] ?? null);
+            return true;
+          }
+          if (w.startsWith('-') || w.startsWith('+')) {
+            if (SCRIPT_RUNNER_VALUE_FLAGS.has(w)) i++;
+            continue;
+          }
+          add(w);
+          return true;
+        }
+        return true;
+      }
+      // A path run directly: it has a separator and is not a bare name on PATH.
+      if (/[\\/]/.test(headWord)) add(headWord);
+      return true;
+    });
+  } catch {
+    return out;
+  }
+  return out;
+}
+
 /**
  * An unquoted word written as a Windows drive path, with its backslashes kept:
  * `cat C:\\Users\\x\\.ssh\\id_rsa`. POSIX resolution reads `\\U` as an escape and

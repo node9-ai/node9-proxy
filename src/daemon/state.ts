@@ -13,6 +13,7 @@ import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon';
 import { maskPersonalValue, scanArgumentSecrets, type ScanFinding } from '@node9/policy-engine';
 import { SuggestionTracker, type Suggestion } from './suggestion-tracker.js';
 import { TaintStore, SessionTaintStore } from './taint-store.js';
+import { SessionWriteStore } from './written-store.js';
 import { SessionExposureStore } from './exposure-store.js';
 import { sessionCounters } from './session-counters.js';
 import { sessionHistory } from './session-history.js';
@@ -105,6 +106,9 @@ export const sessionTaintStore = new SessionTaintStore();
 /** Session exposure (fw#318): the session READ outside content; the next call
  *  that sends is judged against what it read. Not a detection. */
 export const sessionExposureStore = new SessionExposureStore();
+/** Files an agent session wrote (fw#372 A3): a script run by path later is
+ *  judged from its content when it is one of them. */
+export const sessionWriteStore = new SessionWriteStore();
 /** Cumulative per-tool allow count for the 💡 insight line.
  *  Unlike suggestionTracker, this never resets after the suggestion threshold —
  *  only on deny. Used by all approval channels (terminal, browser, native popup).
