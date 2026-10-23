@@ -167,6 +167,34 @@ export const IBAN_LENGTH: Readonly<Record<string, number>> = {
 };
 
 /**
+ * BBAN shapes from the SWIFT registry for the countries whose format is fixed
+ * and common in practice. A country not listed keeps the length-only rule.
+ */
+const IBAN_BBAN_SHAPE: Readonly<Record<string, RegExp>> = {
+  AT: /^\d{16}$/,
+  BE: /^\d{12}$/,
+  CH: /^\d{5}[A-Z0-9]{12}$/,
+  CZ: /^\d{20}$/,
+  DE: /^\d{18}$/,
+  DK: /^\d{14}$/,
+  ES: /^\d{20}$/,
+  FI: /^\d{14}$/,
+  FR: /^\d{10}[A-Z0-9]{11}\d{2}$/,
+  GB: /^[A-Z]{4}\d{14}$/,
+  HU: /^\d{24}$/,
+  IE: /^[A-Z]{4}\d{14}$/,
+  IL: /^\d{19}$/,
+  IT: /^[A-Z]\d{10}[A-Z0-9]{12}$/,
+  LU: /^\d{3}[A-Z0-9]{13}$/,
+  NL: /^[A-Z]{4}\d{10}$/,
+  NO: /^\d{11}$/,
+  PL: /^\d{24}$/,
+  PT: /^\d{21}$/,
+  RO: /^[A-Z]{4}[A-Z0-9]{16}$/,
+  SE: /^\d{20}$/,
+};
+
+/**
  * IBAN (ISO 13616). Contract: accepts human formatting (spaces, dashes, any
  * case), so the CALLER does not strip. Rejects an unregistered country, a
  * value shorter than the country's length, and a failing mod-97. The
@@ -180,6 +208,11 @@ export function validateIban(raw: string): boolean {
   if (want === undefined || s.length < want) return false;
   const iban = s.slice(0, want);
   if (!/^[A-Z0-9]+$/.test(iban)) return false;
+  // The country's BBAN shape, where the registry fixes one (fw#372 X5): a
+  // German BBAN is 18 digits, so a hex-looking token that happens to pass
+  // mod-97 under a DE prefix is not an IBAN.
+  const shape = IBAN_BBAN_SHAPE[iban.slice(0, 2)];
+  if (shape && !shape.test(iban.slice(4))) return false;
   // Move the first four characters to the end, map A..Z -> 10..35, take mod 97
   // as a stream so no big-integer is needed.
   const rearranged = iban.slice(4) + iban.slice(0, 4);

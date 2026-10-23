@@ -337,22 +337,51 @@ const MAX_PII_SCAN_BYTES = 100_000;
  * be caught via JSON.stringify; keep that). Depth-capped so a circular object
  * terminates. Mirrors `stringValues` in canonical.ts.
  */
-function* stringLeaves(v: unknown, depth = 0): Generator<string> {
+function* stringLeaves(
+  v: unknown,
+  depth = 0,
+  key?: string
+): Generator<[string, string | undefined]> {
   if (depth > 6) return;
   if (typeof v === 'string') {
-    if (v.length > 0) yield v;
+    if (v.length > 0) yield [v, key];
     return;
   }
   if (typeof v === 'number') {
-    if (Number.isFinite(v)) yield String(v);
+    if (Number.isFinite(v)) yield [String(v), key];
     return;
   }
   if (!v || typeof v !== 'object') return;
   if (Array.isArray(v)) {
-    for (const x of v) yield* stringLeaves(x, depth + 1);
+    for (const x of v) yield* stringLeaves(x, depth + 1, key);
     return;
   }
-  for (const x of Object.values(v)) yield* stringLeaves(x, depth + 1);
+  for (const [k, x] of Object.entries(v)) yield* stringLeaves(x, depth + 1, k);
+}
+
+// Argument keys under which an IBAN is WHERE the money goes, not personal
+// data leaking: a transfer's `recipient`, an email's `to`, a payment's
+// `iban`. The exposure gate judges such a destination; the PII gate stays
+// out of its way when the IBAN is the whole value (fw#372 X1). An IBAN inside
+// a longer text under the same key is still leaked data.
+const IBAN_DESTINATION_KEYS = new Set([
+  'to',
+  'recipient',
+  'recipients',
+  'payee',
+  'beneficiary',
+  'destination',
+  'iban',
+  'account',
+  'account_number',
+  'accountnumber',
+]);
+const WHOLE_IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9 -]{11,34}$/;
+
+function isIbanDestination(leaf: string, key: string | undefined): boolean {
+  if (!key || !IBAN_DESTINATION_KEYS.has(key.toLowerCase())) return false;
+  const value = leaf.trim();
+  return WHOLE_IBAN_RE.test(value) && validateIban(value);
 }
 
 // JSON string escapes that hide a word boundary: `\n`, `\t`, `\r`, `\"`,
@@ -394,13 +423,15 @@ export function detectArgsPii(args: unknown): PiiPattern[] {
   const found = new Set<PiiPattern>();
   let budget = MAX_PII_SCAN_BYTES;
   try {
-    for (const leaf of stringLeaves(args)) {
+    for (const [leaf, key] of stringLeaves(args)) {
       if (budget <= 0) break;
       const t = leaf.length > budget ? leaf.slice(0, budget) : leaf;
       budget -= t.length;
+      const destination = isIbanDestination(t, key);
       for (const view of [t, jsonUnescapedView(t)]) {
         if (view === null) continue;
         for (const p of detectPii(view)) {
+          if (p === 'IBAN' && destination) continue;
           if (REALTIME_PII_PATTERNS.includes(p)) found.add(p);
         }
       }

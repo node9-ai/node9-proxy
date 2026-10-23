@@ -443,3 +443,45 @@ describe('national identifiers with a check digit (fw#372 B2)', () => {
     expect(REALTIME_PII_PATTERNS).toContain('National ID');
   });
 });
+
+describe('an IBAN that IS the recipient is a destination, not leaked PII (fw#372 X1)', () => {
+  const IBAN = asmB(ib('de-1'), ' ');
+  it('the whole value under a recipient-like key is not flagged; elsewhere it is', () => {
+    for (const key of [
+      'recipient',
+      'iban',
+      'account',
+      'payee',
+      'to',
+      'beneficiary',
+      'account_number',
+    ]) {
+      expect(argsHasIban({ [key]: IBAN }), key).toBe(false);
+      expect(argsHasIban({ transfer: { [key]: IBAN, amount: 10 } }), key).toBe(false);
+    }
+    expect(argsHasIban({ note: IBAN })).toBe(true);
+    expect(argsHasIban({ body: 'please pay ' + IBAN })).toBe(true);
+    expect(argsHasIban({ recipient: 'pay ' + IBAN + ' today' })).toBe(true);
+  });
+  it('the offline detector is unchanged: the value is still an IBAN in text', () => {
+    expect(hasIban('recipient: ' + IBAN)).toBe(true);
+  });
+});
+
+describe('IBAN: the country fixes the BBAN shape (fw#372 X5)', () => {
+  // Every value here passes mod-97; the check digits were computed in Python.
+  it('letters inside a German BBAN are not an IBAN', () => {
+    expect(hasIban('DE24370400440532ABCD00')).toBe(false);
+    expect(hasIban('DE24 3704 0044 0532 ABCD 00')).toBe(false);
+  });
+  it.each([
+    'NL91ABNA0417164300',
+    'ES9121000418450200051332',
+    'IT60X0542811101000000123456',
+    'CH9300762011623852957',
+    'PL61109010140000071219812874',
+    'IL620108000000099999999',
+  ])('%s keeps its country shape and is an IBAN', (iban) => {
+    expect(hasIban('acct ' + iban)).toBe(true);
+  });
+});

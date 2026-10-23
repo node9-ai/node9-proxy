@@ -2112,7 +2112,8 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
 
   let positionals = 0;
   let selectedProgram = false; // a script operand or `-m module` was chosen
-  for (const a of args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
     if (a == null) {
       positionals++; // dynamic arg — treat as a script operand
       selectedProgram = true;
@@ -2123,7 +2124,18 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
     // Django option, not `python3 -c CODE` (/code-review round 3 — this scan
     // used to keep matching code flags past the script and flagged every
     // `node scripts/build.js -p production`).
-    if (!selectedProgram && isInlineCodeFlag(interp, a)) return true;
+    if (!selectedProgram && isInlineCodeFlag(interp, a)) {
+      // A shell's LITERAL payload is a command this detector can read, and
+      // every other tier already reads it (literalShellPayload): `sh -c 'ls'`
+      // and find's `-exec sh -c 'gzip "$1"' _ {} \;` are everyday shapes, not
+      // a blind tunnel (fw#372 X2). The review stays for a dynamic payload,
+      // for one that runs a positional or evals, and for one that itself
+      // runs inline code.
+      if (!/^(bash|sh|zsh|dash|ksh)$/.test(interp)) return true;
+      const payload = args[i + 1];
+      if (payload == null) return true;
+      return shellPayloadNeedsReview(payload);
+    }
     // `-m module` selects a program too, so a trailing `-` after it is that
     // module's stdin DATA (`python3 -m black -`), not the interpreter reading code.
     if (a === '-m') {
@@ -2150,6 +2162,63 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
     if (!/^(bash|sh|zsh)$/i.test(interp)) return true;
   }
   return false;
+}
+
+const MAX_PAYLOAD_NESTING = 8;
+let payloadNesting = 0;
+
+/**
+ * Does a shell's literal `-c` payload still need the inline-execution review?
+ * Yes when it cannot be parsed, when a command in it is a positional or a
+ * dynamic word (`"$0" "$@"`, `exec "$1"`), when it evals or sources, or when
+ * it runs inline code of its own (`sh -c 'python3 -c ...'`). Otherwise the
+ * payload is an ordinary command the other tiers judge on their own.
+ */
+function shellPayloadNeedsReview(payload: string): boolean {
+  if (payloadNesting >= MAX_PAYLOAD_NESTING) return true;
+  const f = parseShared(payload);
+  if (f === PARSE_FAIL) return true;
+  let review = false;
+  payloadNesting++;
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node || review) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const words: (string | null)[] = (n.Args || []).map((a: any) => resolveWordLiteral(a));
+      if (words.length === 0) return true;
+      const h = unwrapCommandHead(words);
+      const head = words[h];
+      if (head === null || head === undefined) {
+        review = true; // a positional or a variable in command position
+        return false;
+      }
+      const name = head.split('/').pop()?.toLowerCase() ?? '';
+      if (name === 'eval' || name === 'source' || name === '.') {
+        review = true;
+        return false;
+      }
+      return true;
+    });
+    // A pipe into a shell or an interpreter inside the payload (`curl .. | sh`)
+    // is the eval-remote family's business; the review stays so it is seen.
+    if (!review && detectDangerousShellExec(payload) !== null) review = true;
+    if (
+      !review &&
+      /\|\s*(?:[\w./-]*\/)?(?:ba|z|da|k|c|fi)?sh\b|\|\s*(?:python[\d.]*|node|perl|ruby|php)\b/i.test(
+        payload
+      )
+    )
+      review = true;
+    if (!review && detectInlineExec(payload)) review = true;
+  } catch {
+    review = true;
+  } finally {
+    payloadNesting--;
+  }
+  return review;
 }
 
 /**

@@ -324,8 +324,11 @@ describe('policy.commandChecks — governance for built-in detections', () => {
 
   it('AST detector: bundled code flags still flag (-xc / -uc / -pe)', async () => {
     writeHome();
+    // `bash -xc "echo hi"` left this list with fw#372 X2: a shell's literal
+    // payload is judged by its content, and `echo hi` is nothing. The bundle
+    // is still read: the nested interpreter below keeps the review.
     for (const command of [
-      'bash -xc "echo hi"',
+      'bash -xc "python3 -c \'print(1)\'"',
       'python3 -uc "print(1)"',
       'perl -pe "s/x/y/"',
       'ruby -ne "puts $_"',
@@ -436,12 +439,16 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     expect(r.approved).toBe(true);
   });
 
-  it('sh -c (explicit inline form) still flags', async () => {
+  it('sh -c with a literal, ordinary payload passes; a dynamic or nested one still flags (fw#372 X2)', async () => {
     writeHome();
-    const r = await authorizeHeadless('Bash', { command: 'sh -c "ls"' }, undefined, {
+    const plain = await authorizeHeadless('Bash', { command: 'sh -c "ls"' }, undefined, {
       deferReview: true,
     });
-    expect(r.review).toBe(true);
+    expect(plain.approved).toBe(true);
+    for (const command of ['sh -c "$CMD"', 'sh -c "node -e \'process.exit(0)\'"']) {
+      const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
+      expect(r.approved, command).toBe(false);
+    }
   });
 
   it('pipe-chain de-dup: a sensitive-file pipe is pipe-chain, NOT inline-exec', async () => {

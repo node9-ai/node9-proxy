@@ -2585,7 +2585,7 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
     // Use inline-exec to get a 'review' verdict without triggering a smart rule
     // (smart rules set localSmartRuleMatched=true which skips the native racer).
     // 'bash -c ...' matches the INLINE_EXEC_PATTERN and returns review without a ruleName.
-    const result = await authorizeHeadless('bash', { command: 'bash -c "echo hello"' });
+    const result = await authorizeHeadless('bash', { command: 'python3 -c "print(1)"' });
 
     // Assert: native won
     expect(result.approved).toBe(true);
