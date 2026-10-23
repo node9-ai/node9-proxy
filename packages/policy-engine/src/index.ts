@@ -217,6 +217,7 @@ export { stripTerminalEscapes, stripControlChars, safeMessage } from './utils/sa
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
 export {
   BUILTIN_SHIELDS,
+  ACTION_SHIELD_NAMES,
   isShieldVerdict,
   validateShieldDefinition,
   validateOverrides,

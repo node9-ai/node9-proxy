@@ -1,0 +1,169 @@
+{
+  "name": "publishing",
+  "description": "Asks before something goes public or ships outside the organisation (a release, a package, a deploy, a post), whatever the request said. The same switch covers the shell commands that publish.",
+  "aliases": ["release", "deploy"],
+  "smartRules": [
+    {
+      "name": "shield:publishing:review-release",
+      "tool": "{,mcp__*__}{create_release,publish_release,create_tag_release,update_release,promote_release}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "A release ships code to everyone who installs it. node9 asks before publishing, whatever the request said (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-package",
+      "tool": "{,mcp__*__}{publish_package,npm_publish,pypi_upload,publish_version,publish_extension}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This publishes a package. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-deploy",
+      "tool": "{,mcp__*__}{deploy,create_deployment,deploy_site,promote_deployment,trigger_deploy,deploy_to_production,rollout}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This deploys to an environment other people use. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-post",
+      "tool": "{,mcp__*__}{post_tweet,create_tweet,post_webpage,publish_post,create_post,publish_page,send_announcement,post_announcement,create_linkedin_post,schedule_post}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This posts outside the organisation. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-visibility",
+      "tool": "{,mcp__*__}{set_visibility,make_public,set_public,publish_repository,change_visibility,update_visibility}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This makes something public. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-npm-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:npm|pnpm)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "npm publish ships the package to everyone who installs it. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-yarn-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:yarn)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "yarn publish ships the package to everyone who installs it. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-twine-upload",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:twine)(?![\\w-])[^;&|]{0,200}?\\s(?:upload)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "twine upload publishes to PyPI. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-python-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:poetry|uv|hatch|flit)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "This publishes the Python package to PyPI. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-release-tool-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:lerna|changeset|vsce|ovsx)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "This publishes packages or an editor extension through a release tool. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-cargo-publish",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:cargo)(?![\\w-])[^;&|]{0,200}?\\s(?:publish)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "cargo publish ships the crate. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-gem-push",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:gem)(?![\\w-])[^;&|]{0,200}?\\s(?:push)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "gem push publishes to RubyGems. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-docker-push",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:docker|podman)(?![\\w-])[^;&|]{0,200}?\\s(?:push|--push)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "docker push publishes the image to a registry. node9 asks before publishing (Publishing shield)."
+    },
+    {
+      "name": "shield:publishing:review-gh-release",
+      "tool": "bash",
+      "conditions": [
+        {
+          "field": "command",
+          "op": "matches",
+          "value": "(?:^|[^\\w-])(?:gh)(?![\\w-])[^;&|]{0,200}?\\srelease\\s+(?:create|upload|edit)(?![\\w-])",
+          "flags": "i"
+        }
+      ],
+      "verdict": "review",
+      "reason": "gh release ships a release on GitHub. node9 asks before publishing (Publishing shield)."
+    }
+  ],
+  "dangerousWords": []
+}

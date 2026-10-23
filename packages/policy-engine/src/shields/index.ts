@@ -1,6 +1,6 @@
 // Builtin shield registry + pure validators.
 //
-// The 11 JSON files in builtin/ are the canonical source. We import them
+// The 13 JSON files in builtin/ are the canonical source. We import them
 // statically so the engine ships them as code: no fs.readdir at runtime,
 // works the same in CJS/ESM bundles, and the host repo doesn't need to
 // know where the JSONs live on disk.
@@ -12,7 +12,9 @@ import aws from './builtin/aws.json';
 import bashSafe from './builtin/bash-safe.json';
 import docker from './builtin/docker.json';
 import filesystem from './builtin/filesystem.json';
+import finance from './builtin/finance.json';
 import github from './builtin/github.json';
+import identity from './builtin/identity.json';
 import k8s from './builtin/k8s.json';
 // mcp-tool-gating shield removed — its only HITL surface was the local
 // browser dashboard (retired in v3). The mcp-pin rug-pull defense in
@@ -20,6 +22,7 @@ import k8s from './builtin/k8s.json';
 import mongodb from './builtin/mongodb.json';
 import postgres from './builtin/postgres.json';
 import projectJail from './builtin/project-jail.json';
+import publishing from './builtin/publishing.json';
 import redis from './builtin/redis.json';
 
 export interface ShieldDefinition {
@@ -90,7 +93,7 @@ export function validateOverrides(raw: unknown): {
 }
 
 /**
- * The 11 shields shipped with node9. User shields installed at
+ * The 13 shields shipped with node9. User shields installed at
  * ~/.node9/shields/*.json are merged on top of these by the host.
  */
 export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
@@ -98,13 +101,31 @@ export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
   [(bashSafe as ShieldDefinition).name]: bashSafe as ShieldDefinition,
   [(docker as ShieldDefinition).name]: docker as ShieldDefinition,
   [(filesystem as ShieldDefinition).name]: filesystem as ShieldDefinition,
+  // Dangerous actions as category shields (node9Firewall#385): an MCP app's
+  // money, credential and publishing tools, asked about whatever the request
+  // said. One glob per rule covers the bare name the gateway sends and the
+  // mcp__<server>__ name the agent hook sends.
+  [(finance as ShieldDefinition).name]: finance as ShieldDefinition,
   [(github as ShieldDefinition).name]: github as ShieldDefinition,
+  [(identity as ShieldDefinition).name]: identity as ShieldDefinition,
   [(k8s as ShieldDefinition).name]: k8s as ShieldDefinition,
   [(mongodb as ShieldDefinition).name]: mongodb as ShieldDefinition,
   [(postgres as ShieldDefinition).name]: postgres as ShieldDefinition,
   [(projectJail as ShieldDefinition).name]: projectJail as ShieldDefinition,
+  [(publishing as ShieldDefinition).name]: publishing as ShieldDefinition,
   [(redis as ShieldDefinition).name]: redis as ShieldDefinition,
 };
+
+/**
+ * The category shields for dangerous actions on MCP apps (node9Firewall#385):
+ * enabled from the Apps page for the apps a user connects, not recommended by
+ * a repository or history scan, which has nothing to say about them.
+ */
+export const ACTION_SHIELD_NAMES: ReadonlySet<string> = new Set([
+  'finance',
+  'identity',
+  'publishing',
+]);
 
 // ── Builtin shield regex safety check (runs at module load) ──────────────
 // Smart-rule conditions inside shield JSONs use `matches` / `notMatches`
