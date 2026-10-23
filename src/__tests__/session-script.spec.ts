@@ -6,6 +6,7 @@
 // exercised on a file written into a temp project.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
+import { spawnSync } from 'child_process';
 import os from 'os';
 import path from 'path';
 
@@ -25,7 +26,12 @@ vi.mock('../auth/daemon.js', async (orig) => ({
 }));
 
 import { authorizeHeadless, _resetConfigCache } from '../core.js';
-import { resolveSessionScript, sessionWriteTargets } from '../auth/session-script.js';
+import {
+  readScriptFile,
+  resolveSessionScript,
+  sessionWriteTargets,
+  MAX_SCRIPT_BYTES,
+} from '../auth/session-script.js';
 import { prepareFileAccesses } from '../policy/file-access.js';
 
 const LAYERS = { trusted: { bash: 'command' } };
@@ -203,4 +209,43 @@ describe('the gate judges a script the session wrote from its content', () => {
       expect(r.reason ?? '').not.toMatch(/written this session/);
     }
   );
+});
+
+// CodeQL js/file-system-race: the check and the read go through one descriptor, so
+// the file judged is the file read, and a FIFO can never block the hook.
+describe('readScriptFile', () => {
+  let dir = '';
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-read-script-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads a regular file within the cap', () => {
+    const f = path.join(dir, 'run.sh');
+    fs.writeFileSync(f, 'echo hi\n');
+    expect(readScriptFile(f)).toBe('echo hi\n');
+  });
+
+  it('refuses a file over the cap, and one exactly one byte over', () => {
+    const f = path.join(dir, 'big.sh');
+    fs.writeFileSync(f, 'a'.repeat(MAX_SCRIPT_BYTES));
+    expect(readScriptFile(f)).toHaveLength(MAX_SCRIPT_BYTES);
+    fs.writeFileSync(f, 'a'.repeat(MAX_SCRIPT_BYTES + 1));
+    expect(readScriptFile(f)).toBeNull();
+  });
+
+  it('refuses a directory and a missing path', () => {
+    expect(readScriptFile(dir)).toBeNull();
+    expect(readScriptFile(path.join(dir, 'nope.sh'))).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')('returns at once for a FIFO instead of blocking', () => {
+    const f = path.join(dir, 'pipe.sh');
+    expect(spawnSync('mkfifo', [f]).status).toBe(0);
+    const started = Date.now();
+    expect(readScriptFile(f)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });

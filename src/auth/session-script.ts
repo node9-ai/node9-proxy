@@ -36,14 +36,40 @@ export interface SessionScriptDeps {
   readScript: (resolved: string) => string | null;
 }
 
-/** The file's content when it is a regular file within the size cap, else null. */
+/**
+ * The file's content when it is a regular file within the size cap, else null.
+ *
+ * One descriptor serves the check and the read. A stat of the path followed by a
+ * read of the path could be raced: the file swapped in between for a larger one, or
+ * for a FIFO whose read would block the hook. O_NONBLOCK keeps the open itself from
+ * blocking on a FIFO (it is 0 on Windows, which has none).
+ */
 export function readScriptFile(resolved: string): string | null {
+  let fd: number | undefined;
   try {
-    const st = fs.statSync(resolved);
+    fd = fs.openSync(resolved, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > MAX_SCRIPT_BYTES) return null;
-    return fs.readFileSync(resolved, 'utf8');
+    // Read one byte past the cap: a file that grew after the fstat is refused too.
+    const buf = Buffer.alloc(MAX_SCRIPT_BYTES + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = fs.readSync(fd, buf, n, buf.length - n, n);
+      if (got === 0) break;
+      n += got;
+    }
+    if (n > MAX_SCRIPT_BYTES) return null;
+    return buf.subarray(0, n).toString('utf8');
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
   }
 }
 
