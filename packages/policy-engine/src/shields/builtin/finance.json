@@ -1,0 +1,71 @@
+{
+  "name": "finance",
+  "description": "Asks before money moves through a payment or banking app (refunds, payouts, transfers, charges, invoices), whatever the request said. Reads are never asked about.",
+  "aliases": ["payments", "money"],
+  "smartRules": [
+    {
+      "name": "shield:finance:review-refund",
+      "tool": "{,mcp__*__}{create_refund,refund_payment,refund_charge,refund_order,issue_refund}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "A refund returns money to a customer. node9 asks before money moves, whatever the request said (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-payout",
+      "tool": "{,mcp__*__}{create_payout,send_payout,payout,create_payouts_batch}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "A payout moves the balance to a bank account. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-transfer",
+      "tool": "{,mcp__*__}{transfer_create,transfer_authorization_create,create_transfer,transfer_money,transfer_funds,send_money,wire_transfer,create_wire,schedule_transaction,update_scheduled_transaction,create_transaction}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "A transfer moves money between accounts. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-charge",
+      "tool": "{,mcp__*__}{create_payment_intent,confirm_payment_intent,capture_payment_intent,create_charge,create_payment,capture_payment,capture_order,create_order,authorize_order,create_checkout_session}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This charges a card or captures a payment. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-payment-link",
+      "tool": "{,mcp__*__}{create_payment_link,create_invoice,finalize_invoice,send_invoice,pay_invoice,create_invoice_item}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This bills someone or creates a link that charges a card. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-subscription",
+      "tool": "{,mcp__*__}{create_subscription,cancel_subscription,update_subscription,pause_subscription,resume_subscription}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "A subscription starts or stops recurring charges. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-dispute",
+      "tool": "{,mcp__*__}{update_dispute,accept_dispute,close_dispute}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This answers or concedes a chargeback. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-card",
+      "tool": "{,mcp__*__}{create_card,issue_card,create_virtual_card,update_card_limit}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This issues a card or changes its limit. node9 asks before money moves (Finance shield)."
+    },
+    {
+      "name": "shield:finance:review-withdraw",
+      "tool": "{,mcp__*__}{withdraw,withdraw_funds,create_withdrawal,request_withdrawal}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "A withdrawal moves money out. node9 asks before money moves (Finance shield)."
+    }
+  ],
+  "dangerousWords": []
+}

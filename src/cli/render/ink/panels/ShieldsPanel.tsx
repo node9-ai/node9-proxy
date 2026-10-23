@@ -16,7 +16,7 @@ import { Box, Text } from 'ink';
 import type { ScanSummary } from '../../../../scan-summary.js';
 import { rollupByShield } from '../../scan-derive.js';
 import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../../../protection.js';
-import { BUILTIN_SHIELDS } from '@node9/policy-engine';
+import { ACTION_SHIELD_NAMES, BUILTIN_SHIELDS } from '@node9/policy-engine';
 
 interface Props {
   summary: ScanSummary;
@@ -48,8 +48,10 @@ export function ShieldsPanel({ summary, width, enabledShields = [] }: Props): Re
   // Zero-hit builtins split by state (N6): only a shield that is NOT
   // already enforcing may be pitched as "install proactively" — the
   // founder's machine showed an ACTIVE postgres shield under that line.
+  // The action shields protect connected MCP apps, not a repository, and are
+  // enabled from the Apps page; a history scan does not pitch them.
   const zeroHitAll = Object.keys(BUILTIN_SHIELDS)
-    .filter((name) => !hitNames.has(name))
+    .filter((name) => !hitNames.has(name) && !ACTION_SHIELD_NAMES.has(name))
     .sort();
   const zeroHitBuiltins = zeroHitAll.filter((name) => !enabled.has(name));
   const zeroHitEnabled = zeroHitAll.filter((name) => enabled.has(name));

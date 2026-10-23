@@ -104,11 +104,14 @@ describe('listShields', () => {
     'bash-safe',
     'docker',
     'filesystem',
+    'finance',
     'github',
+    'identity',
     'k8s',
     'mongodb',
     'postgres',
     'project-jail',
+    'publishing',
     'redis',
   ];
 
@@ -965,7 +968,21 @@ describe('SHIELDS loader: user shields', () => {
         expect(['block', 'review', 'allow'], `${shieldName}/${rule.name} verdict`).toContain(
           rule.verdict
         );
-        expect(rule.conditions.length, `${shieldName}/${rule.name} conditions`).toBeGreaterThan(0);
+        // A rule may have no condition only when its tool glob names specific
+        // tools (the action shields' whole-tool rules, node9Firewall#385): a
+        // condition-less rule on `*` or `bash` would match every call.
+        const wholeTool = rule.conditions.length === 0;
+        if (wholeTool) {
+          expect(rule.tool, `${shieldName}/${rule.name} whole-tool rule`).not.toBe('*');
+          expect(rule.tool, `${shieldName}/${rule.name} whole-tool rule`).not.toBe('bash');
+          expect(String(rule.tool), `${shieldName}/${rule.name} whole-tool rule`).toMatch(
+            /^\{,mcp__\*__\}/
+          );
+        } else {
+          expect(rule.conditions.length, `${shieldName}/${rule.name} conditions`).toBeGreaterThan(
+            0
+          );
+        }
       }
     }
   });

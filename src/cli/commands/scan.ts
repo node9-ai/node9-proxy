@@ -33,6 +33,7 @@ import {
   analyzeFsOperation,
   AST_FS_REGEX_RULES,
   BUILTIN_SHIELDS,
+  ACTION_SHIELD_NAMES,
   toolMatchesRule,
   resolveShellInput,
   shellRuleArgs,
@@ -3649,8 +3650,12 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   // Zero-hit builtins split by state (N6): only a shield that is NOT
   // already enforcing may be pitched as "install proactively" — the
   // founder's machine showed an ACTIVE postgres shield under that line.
+  // The action shields (finance, identity, publishing; node9Firewall#385)
+  // protect the MCP apps a user connects, not a repository, and ship as
+  // Add-an-app cards on the Apps page. A history scan has nothing to say
+  // about them, so they are not pitched here.
   const zeroHitAll = Object.keys(BUILTIN_SHIELDS)
-    .filter((name) => !hitShieldSet.has(name))
+    .filter((name) => !hitShieldSet.has(name) && !ACTION_SHIELD_NAMES.has(name))
     .sort();
   const zeroHitBuiltins = zeroHitAll.filter((name) => !enabledSet.has(name));
   const zeroHitEnabled = zeroHitAll.filter((name) => enabledSet.has(name));
