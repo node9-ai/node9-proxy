@@ -178,6 +178,9 @@ describe('batch 3b: the repository owner', () => {
     try {
       expect(readLocalTree(dir).owner).toBe('acme');
       expect(readGitRefTree(dir, 'HEAD')?.owner).toBe('acme');
+      // Gap 1: the repository name too, without the `.git` suffix.
+      expect(readLocalTree(dir).repo).toBe('x');
+      expect(readGitRefTree(dir, 'HEAD')?.repo).toBe('x');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

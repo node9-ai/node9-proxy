@@ -28,12 +28,21 @@ import {
   resolveShellInput,
   shellRuleArgs,
   detectInlineExec,
+  inlineExecReview,
+  inlineExecReason,
+  inlineExecDescription,
   toolMatchesRule,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
   type ShellCommandAnalysis,
 } from '../shell';
-import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
+import {
+  matchesPattern,
+  evaluateSmartConditions,
+  getNestedValue,
+  mcpServerFromToolName,
+  ruleServerMatches,
+} from '../rules';
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
 import { evaluateEgress, type EgressPolicy, type EgressVerdict } from '../egress';
@@ -91,6 +100,9 @@ export interface PolicyConfig {
      * shape by hand; the catalog then answers from those knobs.
      */
     checks?: Record<string, string>;
+    /** Where each `checks` value came from (the host's resolution). A pinned,
+     *  cloud-mandated pack rule follows only a `workspace` value (fw#390). */
+    checkSources?: Record<string, 'local' | 'project' | 'workspace'>;
   };
   settings: {
     mode: string;
@@ -127,6 +139,13 @@ export interface PolicyContext extends FileAccessContext {
    * trusted host code; absent means the engine scans.
    */
   argumentScan?: DlpMatch | null;
+  /**
+   * The MCP server label the host resolved for this call (the gateway's
+   * `resolveServerLabel`, the hook's `mcp__<server>__` prefix). Absent: the
+   * engine derives it from a namespaced tool name. Scopes rules that set
+   * `server` / `notServer` (node9Firewall#390).
+   */
+  mcpServer?: string;
 }
 
 export type ProvenanceTrust = 'system' | 'managed' | 'user' | 'suspect' | 'unknown';
@@ -717,11 +736,20 @@ async function evaluatePolicyCore(
       // Only a rule the host shipped (`builtin`) follows the catalog; a user
       // rule that reuses a shipped name keeps its own verdict. A cloud-pinned
       // mandate is the organisation's; a local value must not touch it.
-      if (!rule.builtin || rule.pinned) return undefined;
+      if (!rule.builtin) return undefined;
       const id = checkIdForRule(rule.name);
       if (!id) return undefined;
       const def = getCheck(id);
       if (!def) return undefined;
+      if (rule.pinned) {
+        // fw#390: the organisation's own value for the pack row of a shield it
+        // mandates by name (its rules carry a server scope rows cannot hold)
+        // does apply: "stop asking" from the dashboard. Nothing else does.
+        const explicit = config.policy.checks?.[id];
+        return def.pack && config.policy.checkSources?.[id] === 'workspace' && isVerdict(explicit)
+          ? { id, value: explicit }
+          : undefined;
+      }
       // A shield's rule carries its own verdict (and any `node9 shield set`
       // override). Only an explicit pack-row entry governs it; a shield rule
       // folded into a product check (filesystem's chmod) keeps its verdict.
@@ -732,8 +760,10 @@ async function evaluatePolicyCore(
       }
       return { id, value: cv(id) };
     };
+    const serverLabel = context.mcpServer ?? mcpServerFromToolName(toolName);
     const matches = config.policy.smartRules.filter((rule) => {
       if (!toolMatchesRule(toolName, rule.tool, layers)) return false;
+      if (!ruleServerMatches(rule, serverLabel)) return false;
       if (astSuppressed(rule)) return false;
       if (rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') return false;
       if (!evaluateSmartConditions(shellRuleArgs(toolName, args, rule.tool, layers), rule))
@@ -864,13 +894,21 @@ async function evaluatePolicyCore(
       else if (v) candidates.push(v);
     };
 
-    // Inline execution.
-    if (detectInlineExec(shellCommand)) {
+    // Inline execution (node9Firewall#385). Strict mode asks on every inline
+    // call; every other mode reads the code and asks when it does something
+    // dangerous or cannot be read.
+    const inline =
+      config.settings.mode === 'strict'
+        ? detectInlineExec(shellCommand)
+          ? undefined
+          : null
+        : inlineExecReview(shellCommand);
+    if (inline !== null) {
       consider('commands.inline-exec', {
         decision: 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
-        ruleDescription:
-          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
+        ...(inline ? { reason: inlineExecReason(inline) } : {}),
+        ruleDescription: inlineExecDescription(inline),
         tier: 3,
         checkId: 'commands.inline-exec',
       });

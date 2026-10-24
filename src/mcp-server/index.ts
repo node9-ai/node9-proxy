@@ -16,6 +16,8 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import { classifyDecision, decisionTag } from '../audit/decision';
 import { getConfig, checkPause } from '../core';
+import { appForShield } from '../apps/catalog';
+import { recordUserDecision } from '../apps/state';
 import { isKeyedForPolicy, KEYED_POLICY_WRITE_REASON } from '../config/keyed-guard';
 import { isDaemonRunning } from '../auth/daemon';
 import {
@@ -518,6 +520,9 @@ function handleShieldEnable(args: Record<string, unknown>): string {
     return `Shield "${name}" is already active.`;
   }
   writeActiveShields([...active, name]);
+  // An app's shield is a decision about the app (fw#390): detection keeps it.
+  const enabledApp = appForShield(name);
+  if (enabledApp) recordUserDecision(enabledApp.slug, 'on');
   const shield = getShield(name)!;
   return `Shield "${name}" enabled — ${shield.smartRules.length} smart rule${shield.smartRules.length === 1 ? '' : 's'} now active.`;
 }
@@ -538,6 +543,8 @@ function handleShieldDisable(args: Record<string, unknown>): string {
     return `Shield "${name}" is not active.`;
   }
   writeActiveShields(active.filter((s) => s !== name));
+  const disabledApp = appForShield(name);
+  if (disabledApp) recordUserDecision(disabledApp.slug, 'off');
   return `Shield "${name}" disabled.`;
 }
 

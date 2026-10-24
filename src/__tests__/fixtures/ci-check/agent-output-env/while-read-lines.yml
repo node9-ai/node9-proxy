@@ -1,0 +1,21 @@
+# Each line of the answer file is appended to GITHUB_ENV, one at a time.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p "List labels for: $BODY" > labels.txt
+      - run: |
+          while read -r line; do
+            echo "$line" >> "$GITHUB_ENV"
+          done < labels.txt
+      - run: ./scripts/apply-labels.sh

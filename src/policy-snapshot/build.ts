@@ -14,6 +14,7 @@ import { ENGINE_VERSION } from '@node9/policy-engine';
 import type { McpToolsConfig, McpToolAnnotations } from '../daemon/mcp-tools.js';
 import type { McpStatusEntry } from '../mcp-status.js';
 import type { SyncHealth } from '../daemon/sync.js';
+import type { AppsFile } from '../apps/state.js';
 
 const MAX_RULES = 500;
 const MAX_EGRESS = 200;
@@ -74,6 +75,35 @@ export interface PolicySnapshotBody {
   // every legacy machine on its next snapshot with no migration guesswork.
   machineId?: string;
   platform?: string;
+  /** fw#390: the apps node9 found on this machine and the decision on each
+   *  (apps.json). Names only; no project paths. */
+  apps?: SnapshotApp[];
+}
+
+export interface SnapshotApp {
+  slug: string;
+  state: 'on' | 'off';
+  by: 'detected' | 'user';
+  signals: Array<{ kind: string; value: string }>;
+}
+
+const MAX_APPS = 50;
+const MAX_APP_SIGNALS = 6;
+
+/** The apps.json view the dashboard gets: no project paths, capped. */
+export function snapshotApps(file: AppsFile): SnapshotApp[] {
+  return Object.entries(file.apps)
+    .slice(0, MAX_APPS)
+    .map(([slug, r]) => ({
+      slug,
+      state: r.state,
+      // The wire keeps two authors; a record made while the workspace decides
+      // was found by detection.
+      by: r.by === 'user' ? 'user' : 'detected',
+      signals: r.signals
+        .slice(0, MAX_APP_SIGNALS)
+        .map((s) => ({ kind: s.kind, value: s.value.slice(0, 128) })),
+    }));
 }
 
 export function buildPolicySnapshot(

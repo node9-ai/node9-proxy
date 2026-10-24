@@ -16,7 +16,7 @@ import http from 'http';
 import { runBlast } from '../../cli/commands/blast.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
 import { parseJSONLFile, type DailyEntry } from '../../costSync.js';
-import { ACTION_SHIELD_NAMES } from '@node9/policy-engine';
+import { APP_SHIELD_NAMES } from '@node9/policy-engine';
 import { SHIELDS, readActiveShields } from '../../shields.js';
 import { getConfig } from '../../config/index.js';
 import { NON_DECISION_SOURCES } from '../../audit/decision.js';
@@ -726,9 +726,8 @@ export function loadShieldStatus(): ShieldStatus {
       cfg.policySource === 'workspace' ? (cfg.policy.appliedShields ?? []) : readActiveShields()
     );
     const active = all.filter((n) => activeSet.has(n));
-    // The action shields protect connected MCP apps and are switched on from
-    // the Apps page (node9Firewall#385): not a call to action here.
-    const inactive = all.filter((n) => !activeSet.has(n) && !ACTION_SHIELD_NAMES.has(n));
+    // An app shield turns on when node9 finds the app (node9Firewall#390).
+    const inactive = all.filter((n) => !activeSet.has(n) && !APP_SHIELD_NAMES.has(n));
     return { active, inactive };
   } catch {
     return { active: [], inactive: [] };

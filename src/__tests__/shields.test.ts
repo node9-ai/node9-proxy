@@ -100,19 +100,22 @@ describe('listShields', () => {
   // mcp-tool-gating retired in v3 browser-removal sprint — its only
   // human-in-the-loop surface was the local browser dashboard.
   const EXPECTED_BUILTIN_SHIELDS = [
+    'auth0',
     'aws',
     'bash-safe',
     'docker',
     'filesystem',
-    'finance',
     'github',
-    'identity',
     'k8s',
     'mongodb',
+    'okta',
+    'paypal',
+    'plaid',
     'postgres',
     'project-jail',
-    'publishing',
     'redis',
+    'square',
+    'stripe',
   ];
 
   it('loads every builtin shield JSON', () => {
@@ -124,6 +127,12 @@ describe('listShields', () => {
 
   it.each(EXPECTED_BUILTIN_SHIELDS)('resolves "%s" by canonical name', (name) => {
     expect(resolveShieldName(name)).toBe(name);
+  });
+
+  // 2.37.0 shipped finance, identity and publishing as shields; they are the
+  // general action checks now (node9Firewall#390) and no longer resolve.
+  it.each(['finance', 'identity', 'publishing'])('"%s" is no longer a shield', (name) => {
+    expect(resolveShieldName(name)).toBeNull();
   });
 });
 

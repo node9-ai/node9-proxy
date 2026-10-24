@@ -37,6 +37,7 @@ const SmartConditionSchema = z
     ),
     value: z.string().optional(),
     flags: z.string().optional(),
+    reading: z.enum(['access']).optional(),
   })
   .refine(
     (c) => {
@@ -49,6 +50,9 @@ const SmartConditionSchema = z
 export const SmartRuleSchema = z.object({
   name: z.string().optional(),
   tool: z.string().min(1, 'Smart rule tool must not be empty'),
+  // Scope to an MCP server label (glob), or keep off one (node9Firewall#390).
+  server: z.string().min(1).optional(),
+  notServer: z.string().min(1).optional(),
   conditions: z.array(SmartConditionSchema).min(1, 'Smart rule must have at least one condition'),
   conditionMode: z.enum(['all', 'any']).optional(),
   verdict: z.enum(['allow', 'review', 'block'], {

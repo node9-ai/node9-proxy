@@ -29,6 +29,7 @@ import { normalizeHost } from '../auth/trusted-hosts';
 
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+import { GENERAL_ACTION_RULES } from '@node9/policy-engine';
 import {
   BUILTIN_DANGEROUS_WORDS,
   CHECK_VERDICT_RANK,
@@ -267,6 +268,9 @@ export interface Config {
     // Managed MCP per-tool permissions { serverKey: { bareTool: allow|review|block } }.
     // Applied from the managed cache; enforced in the gateway authorize path.
     appPermissions: Record<string, Record<string, 'allow' | 'review' | 'block'>>;
+    // Managed server links { serverKey: appSlug } (node9Firewall#390): a server
+    // an admin said is an app is judged as that app at the gate.
+    appLinks: Record<string, string>;
     // Task #22: org-mandated credential-jail paths (managedConfig.jailPaths).
     // They also expand into org:-prefixed smartRules, but the orchestrator's
     // file-tool guard needs the PATHS themselves: rules alone can't tell it
@@ -460,8 +464,10 @@ export const DEFAULT_CONFIG: Config = {
             op: 'matches',
             // Single spaces on purpose: a nested `\\s+` inside the alternation
             // fails the engine's ReDoS check and the rule would be dropped.
+            // `apps`: turning an app off, allowing one of its actions, or
+            // linking a server to an app (the general checks leave it).
             value:
-              '(^|&&|\\|\\||;)\\s*(npx )?node9 (session-(exposure|taint) clear|trust (add|recipient add)|pause|shield (disable|set)|egress allow|approver set)\\b',
+              '(^|&&|\\|\\||;)\\s*(npx )?node9 (session-(exposure|taint) clear|trust (add|recipient add)|pause|shield (disable|set)|apps (link|[a-z0-9-]{1,32} (off|[a-z]{1,32} allow))|egress allow|approver set)\\b',
             flags: 'i',
           },
         ],
@@ -555,6 +561,11 @@ export const DEFAULT_CONFIG: Config = {
         description:
           'The AI wants to download a script from the internet and run it immediately, without you seeing what it contains. This is one of the most common ways malware gets installed.',
       },
+      // ── Actions in apps (node9Firewall#390) ───────────────────────────────
+      // actions.money / actions.access / actions.publish: the action templates
+      // on every MCP server no app shield claims, plus the shell publishing
+      // rules. Review by default; the check value governs them.
+      ...GENERAL_ACTION_RULES,
     ],
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'block' },
     egress: {
@@ -591,6 +602,7 @@ export const DEFAULT_CONFIG: Config = {
     trustedHosts: [],
     trustedHostsManaged: false,
     appPermissions: {},
+    appLinks: {},
     managedJailPaths: [],
   },
   environments: {},
@@ -1029,6 +1041,7 @@ export function getConfig(cwd?: string): Config {
     trustedHosts: [] as string[],
     trustedHostsManaged: false,
     appPermissions: {},
+    appLinks: {} as Record<string, string>,
     managedJailPaths: [] as Array<{ path: string; verdict: 'block' | 'review' }>,
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
@@ -1435,6 +1448,7 @@ export function getConfig(cwd?: string): Config {
           jailPaths?: { path?: unknown; verdict?: unknown }[];
           trustedHosts?: unknown;
           appPermissions?: unknown;
+          appLinks?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -1724,6 +1738,14 @@ export function getConfig(cwd?: string): Config {
           mergedPolicy.trustedHosts = mc.trustedHosts
             .filter((h): h is string => typeof h === 'string')
             .map((h) => normalizeHost(h));
+        }
+        // Managed server links (node9Firewall#390): { serverKey: appSlug }.
+        if (mc.appLinks && typeof mc.appLinks === 'object' && !Array.isArray(mc.appLinks)) {
+          const links: Record<string, string> = {};
+          for (const [key, slug] of Object.entries(mc.appLinks as Record<string, unknown>)) {
+            if (typeof slug === 'string' && /^[a-z0-9-]{1,40}$/.test(slug)) links[key] = slug;
+          }
+          mergedPolicy.appLinks = links;
         }
         // Managed MCP app permissions REPLACE the local map (coerced to known
         // decisions). Enforced by the gateway authorize path.

@@ -43,10 +43,11 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   // ── Commands ──────────────────────────────────────────────────────────────
   'commands.inline-exec': {
-    plain: 'The agent runs a small program written inside the command itself.',
+    plain:
+      'The agent runs a small program written inside the command itself, and node9 reads it: ordinary code runs, code that deletes, sends data out, runs other commands or reads protected files is held, and so is code node9 cannot read.',
     example: `node -e "require('fs').rmSync('dist', {recursive: true})"`,
     advice:
-      'Agents do this often for harmless tasks. Set Log if your team finds the review prompts noisy; keep Review if agents work near production.',
+      'Keep Review. Strict mode reviews every inline call, harmless or not; Log or Off only if inline code never reaches anything that matters.',
   },
   'commands.eval-dynamic': {
     plain:
@@ -80,6 +81,26 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     plain: 'The agent makes a file writable by every user on the machine.',
     example: 'chmod 777 deploy.sh',
     advice: 'Keep Review. A narrower permission (755, 644) almost always does the job.',
+  },
+  'actions.money': {
+    plain:
+      'The agent moves money (a refund, a payout, a transfer, a charge) through an app node9 has no protection for, such as an internal billing server.',
+    example: 'refund_order on a server called acme-billing',
+    advice:
+      'Keep Review. When the app is Stripe or PayPal, turn on its own protection instead: it covers the CLI, the API and scripts too, and a call from it no longer comes here.',
+  },
+  'actions.access': {
+    plain:
+      'The agent changes a password, a key, a role or who belongs to a team, through an app node9 has no protection for.',
+    example: 'invite_user or grant_role on a company admin server',
+    advice: 'Keep Review. Set Log on a sandbox workspace where agents manage test users all day.',
+  },
+  'actions.publish': {
+    plain:
+      'The agent publishes something outside the organisation (a release, a package, a deploy, a public post) through an app node9 has no protection for.',
+    example: 'create_release or deploy_to_production on a company MCP server',
+    advice:
+      'Keep Review. Set Log on a release machine whose pipeline publishes on purpose, never on a developer laptop.',
   },
   'commands.sudo': {
     plain: 'The agent runs a command as the administrator (root).',
@@ -277,7 +298,7 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   'loading.malicious-package': {
     plain:
-      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only.',
+      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only. A new release built from the same repository as the one before it (registry provenance) and an install script the package has always run do not stop; a release that lost the provenance its previous release had does.',
     example: 'npm install of a package flagged as malware',
     advice: 'Keep Block for known-malicious packages; brand-new packages already stop for Review.',
   },

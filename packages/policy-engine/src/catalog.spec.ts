@@ -29,7 +29,7 @@ describe('catalog integrity', () => {
       expect(seen.has(c.id), `duplicate id ${c.id}`).toBe(false);
       seen.add(c.id);
       expect(c.id, c.id).toMatch(
-        /^(commands|data|network|files|behavior|loading|packs)\.[a-z0-9.-]+$/
+        /^(commands|data|network|files|behavior|loading|actions|packs)\.[a-z0-9.-]+$/
       );
       const groupIds = CHECK_GROUPS.map((g) => g.id);
       expect(groupIds, c.id).toContain(c.group);

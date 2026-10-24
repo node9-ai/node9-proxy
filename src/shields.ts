@@ -19,6 +19,8 @@ import {
   type ShieldOverrides,
 } from '@node9/policy-engine';
 
+import { withAccessReading } from './shields/build';
+
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from '@node9/policy-engine';
 export { isShieldVerdict } from '@node9/policy-engine';
 
@@ -50,7 +52,7 @@ function loadUserShields(): Record<string, ShieldDefinition> {
         process.stderr.write(`[node9] ${v.error}: ${filePath}\n`);
         continue;
       }
-      result[v.ok.name] = v.ok;
+      result[v.ok.name] = withAccessReading(v.ok);
     } catch (err) {
       process.stderr.write(`[node9] Failed to load user shield ${file}: ${String(err)}\n`);
     }

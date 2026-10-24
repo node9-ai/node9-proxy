@@ -148,7 +148,8 @@ describe('ignored tool patterns', () => {
 // ── Standard mode — safe tools ────────────────────────────────────────────────
 
 describe('standard mode — safe tools', () => {
-  it.each(['create_user', 'send_notification', 'invoke_lambda', 'start_job'])(
+  // create_user is an access change now (actions.access, node9Firewall#390).
+  it.each(['create_note', 'send_notification', 'invoke_lambda', 'start_job'])(
     'allows "%s" without prompting',
     async (tool) => {
       const confirm = await getConfirm();
@@ -511,7 +512,7 @@ describe('global config (~/.node9/config.json)', () => {
         environments: {},
       }
     );
-    expect((await evaluatePolicy('create_user')).decision).toBe('allow');
+    expect((await evaluatePolicy('create_note')).decision).toBe('allow');
   });
 });
 
@@ -679,7 +680,7 @@ describe('evaluatePolicy — project config', () => {
   });
 
   it('returns "allow" for safe tool in standard mode', async () => {
-    expect((await evaluatePolicy('create_user')).decision).toBe('allow');
+    expect((await evaluatePolicy('create_note')).decision).toBe('allow');
   });
 
   it('respects project-level dangerousWords override', async () => {
@@ -2585,7 +2586,10 @@ describe('resolveNode9SaaS — decidedBy field when local racer wins', () => {
     // Use inline-exec to get a 'review' verdict without triggering a smart rule
     // (smart rules set localSmartRuleMatched=true which skips the native racer).
     // 'bash -c ...' matches the INLINE_EXEC_PATTERN and returns review without a ruleName.
-    const result = await authorizeHeadless('bash', { command: 'python3 -c "print(1)"' });
+    // Inline code that runs a command: reviewed by commands.inline-exec (fw#385).
+    const result = await authorizeHeadless('bash', {
+      command: 'python3 -c "import os; os.system(\'ls\')"',
+    });
 
     // Assert: native won
     expect(result.approved).toBe(true);

@@ -1,0 +1,10 @@
+# The caller names the template by its full path in the same repository, on
+# pull_request_target, with no gate.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  call:
+    uses: Example-Org/Example-Repo/.github/workflows/template.yml@main
+    secrets: inherit

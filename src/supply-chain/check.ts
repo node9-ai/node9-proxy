@@ -6,6 +6,10 @@
 //       per policy.packageCheck.onMalicious), advisory id in the reason
 //   a malicious record exists but the version is unknown → review
 //   published under maxAgeHours, or an npm install script → review
+//   ...unless the release is built from the same repository as the one before
+//       it (registry provenance), and an install script the previous release
+//       also ran is no signal (node9Firewall#385)
+//   a release without the provenance its previous release had → review
 //   anything else, and every lookup failure → allow
 //
 // Contract: never throws, never blocks because a lookup failed. Failures are
@@ -20,7 +24,14 @@ import {
 } from '@node9/policy-engine';
 import { lookupIndex, entryCovers, type OsvEntry } from './osv-index';
 import { queryOsvMalicious } from './osv-online';
-import { HAS_REGISTRY_CLIENT, registryInfo, type RegistryInfo } from './registry';
+import {
+  HAS_REGISTRY_CLIENT,
+  pypiHistory,
+  registryInfo,
+  type RegistryInfo,
+  type ReleaseHistory,
+} from './registry';
+import { npmSourceRepo, pypiSourceRepo, type SourceRepo } from './provenance';
 import { resolveInstalled, LOCAL_FIRST_MANAGERS } from './local-resolve';
 
 export interface PackageCheckConfig {
@@ -38,7 +49,7 @@ export interface PackageFinding {
   version?: string;
   /** The finding is about the copy already in node_modules, not a download. */
   installed?: boolean;
-  kind: 'malicious' | 'malicious-unpinned' | 'new' | 'install-script';
+  kind: 'malicious' | 'malicious-unpinned' | 'new' | 'install-script' | 'provenance-drop';
   detail: string;
   advisories?: string[];
 }
@@ -277,7 +288,98 @@ async function checkOne(
       detail: `${label(p, version)} runs an install script`,
     });
   }
+  if (info && version && (cfg.newPackage !== 'off' || cfg.installScript !== 'off')) {
+    return byHistory(p, version, info, findings, misses);
+  }
   return findings;
+}
+
+const SOFT: ReadonlySet<PackageFinding['kind']> = new Set(['new', 'install-script']);
+
+/**
+ * Weigh the age and install-script findings against the release before this
+ * one (node9Firewall#385):
+ *
+ *   an install script the previous release also ran is how the package has
+ *   always installed (esbuild, bcrypt): no finding. A script that appears in
+ *   this release, a first release, or an unknown history keep it.
+ *
+ *   a release built from the same source repository as the previous one, both
+ *   by registry provenance, is the project's own CI publishing: its age and
+ *   install-script findings are dropped. A release without the provenance its
+ *   previous release had is a finding of its own, whatever its age.
+ *
+ * Malicious findings are never touched. Every lookup that fails leaves the
+ * findings as they were and records a miss.
+ */
+async function byHistory(
+  p: PackageInstallRequest,
+  version: string,
+  info: RegistryInfo,
+  findings: PackageFinding[],
+  misses: string[]
+): Promise<PackageFinding[]> {
+  let out = findings;
+  let h: ReleaseHistory | undefined = info.history;
+  if (!h && p.ecosystem === 'PyPI' && out.some((f) => SOFT.has(f.kind))) {
+    try {
+      h = (await pypiHistory(p.name, version)) ?? undefined;
+    } catch (err) {
+      misses.push(`${label(p, version)}: release history ${(err as Error).message}`);
+    }
+  }
+  if (!h || !h.previous) return out;
+  const previous = h.previous;
+
+  if (h.previousHasInstallScript === true) {
+    out = out.filter((f) => f.kind !== 'install-script');
+  }
+
+  const drop = (): PackageFinding => ({
+    pkg: p,
+    version,
+    kind: 'provenance-drop',
+    detail: `${label(p, version)} was published without the provenance its previous release (${previous}) had`,
+  });
+
+  if (p.ecosystem === 'npm') {
+    // The abbreviated document says per version whether provenance exists, so
+    // a drop costs no request and is a finding even outside the age window.
+    if (h.previousProvenance && h.provenance === false) return [...out, drop()];
+    if (!out.some((f) => SOFT.has(f.kind)) || !h.provenance || !h.previousProvenance) return out;
+    const [now, before] = await Promise.all([
+      npmSourceRepo(p.name, version),
+      npmSourceRepo(p.name, previous),
+    ]);
+    return vouched(p, version, now, before, out, misses);
+  }
+
+  if (p.ecosystem === 'PyPI') {
+    if (!out.some((f) => SOFT.has(f.kind)) || !info.file || !h.previousFile) return out;
+    const [now, before] = await Promise.all([
+      pypiSourceRepo(p.name, version, info.file),
+      pypiSourceRepo(p.name, previous, h.previousFile),
+    ]);
+    if (now === 'none' && before !== 'none' && before !== 'unknown') return [...out, drop()];
+    return vouched(p, version, now, before, out, misses);
+  }
+  return out;
+}
+
+function vouched(
+  p: PackageInstallRequest,
+  version: string,
+  now: SourceRepo,
+  before: SourceRepo,
+  findings: PackageFinding[],
+  misses: string[]
+): PackageFinding[] {
+  if (now === 'unknown' || before === 'unknown') {
+    misses.push(`${label(p, version)}: provenance unreadable, findings kept`);
+    return findings;
+  }
+  if (now === 'none' || before === 'none' || now !== before) return findings;
+  return findings.filter((f) => !SOFT.has(f.kind));
 }
 
 /**

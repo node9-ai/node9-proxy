@@ -14,6 +14,11 @@ describe('deriveServerName', () => {
     ['uvx mcp-server-git --repo .', 'git'],
     ['node /opt/tools/slack-mcp-server.js', 'slack'],
     ['python3 -m my_server', 'my_server'],
+    // An app's official server is named by its vendor (fw#390).
+    ['npx -y @stripe/mcp --tools=all', 'stripe'],
+    ['npx -y @paypal/mcp', 'paypal'],
+    ['npx mcp-remote https://mcp.stripe.com', 'stripe'],
+    ['npx -y mcp-remote https://mcp.squareup.com/sse', 'squareup'],
     ['', 'MCP Server'],
     ['   ', 'MCP Server'],
   ])('%s → %s', (cmd, expected) => {

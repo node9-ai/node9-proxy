@@ -1,0 +1,19 @@
+# Only members can start it: a hardening note, not an alert.
+name: Assist
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  assist:
+    if: contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASK: ${{ github.event.comment.body }}
+        run: claude -p "$ASK" > reply.txt
+      - run: echo "REPLY=$(cat reply.txt)" >> "$GITHUB_ENV"
+      - run: ./scripts/reply.sh

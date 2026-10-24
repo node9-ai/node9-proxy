@@ -57,9 +57,15 @@ export {
 export type { ScanView } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
-export type { ShellCommandAnalysis, FsOpVerdict, ShellDestination } from './shell';
+export type {
+  ShellCommandAnalysis,
+  FsOpVerdict,
+  ShellDestination,
+  InlineExecReview,
+} from './shell';
 export {
   normalizeCommandForPolicy,
+  fileAccessView,
   detectDangerousShellExec,
   detectDangerousEval,
   analyzeShellCommand,
@@ -74,6 +80,9 @@ export {
   shellRuleArgs,
   toolMatchesRule,
   detectInlineExec,
+  inlineExecReview,
+  inlineExecReason,
+  inlineExecDescription,
   AST_FS_REGEX_RULES,
   FS_READ_TOOLS,
   COMMAND_WRAPPERS,
@@ -202,7 +211,13 @@ export type { ShellExposure } from './exposure/shell';
 export { classifyShellExposure } from './exposure/shell';
 
 // Smart rules — tool-name pattern match + condition evaluator.
-export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';
+export {
+  matchesPattern,
+  getNestedValue,
+  evaluateSmartConditions,
+  mcpServerFromToolName,
+  ruleServerMatches,
+} from './rules';
 
 // Regex utilities — ReDoS-safe validation + LRU-cached compilation.
 export { validateRegex, getCompiledRegex } from './utils/regex';
@@ -214,10 +229,22 @@ export { validateRegex, getCompiledRegex } from './utils/regex';
 export { stripTerminalEscapes, stripControlChars, safeMessage } from './utils/safe-text';
 
 // Shields — 11 builtin definitions + pure validators (no fs).
+// Tune from the event (node9Firewall#390): suggestions from repeated approvals.
+export { suggestFromApprovals, unwrapRuleLabel } from './suggest';
+export type { ApprovalRow, Suggestion, SuggestOptions } from './suggest';
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
 export {
+  APP_SHIELD_SPECS,
+  APP_SHIELD_NAMES,
+  APP_SERVER_GLOB,
+  ACTION_CHECKS,
+  ACTION_TEMPLATES,
+  GENERAL_ACTION_RULES,
+  REPLACED_SHIELDS,
+} from './shields/apps';
+export type { ActionTemplateName } from './shields/apps';
+export {
   BUILTIN_SHIELDS,
-  ACTION_SHIELD_NAMES,
   isShieldVerdict,
   validateShieldDefinition,
   validateOverrides,

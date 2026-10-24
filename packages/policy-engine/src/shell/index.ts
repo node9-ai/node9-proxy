@@ -16,6 +16,8 @@ import mvdanSh from 'mvdan-sh';
 import { matchesPattern } from '../rules';
 import { isShellShapedTool, type InspectionInput } from './tool-input';
 import { foldHomoglyphs } from '../dlp/normalize';
+import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES } from '../files/paths';
+import { inlineLanguageOf, judgeInlineCode, type InlineCodeCategory } from './inline-code';
 export {
   BASH_TOOL_NAMES,
   isBashTool,
@@ -242,6 +244,94 @@ function cachedNormalize(command: string, compute: () => CommandReadings): Comma
  */
 export function normalizeCommandForPolicy(command: string): string {
   return commandReadingsImpl(command).posix;
+}
+
+// A first line that is an interpreter line and nothing else: a path, then
+// plain words (`-S`, `python3`, `-u`). Anything a shell could act on (`&`,
+// `;`, `|`, `$`, a redirect, a quote) keeps the line: POSIX shells read `#!`
+// as a comment, but cmd.exe does not, and `#!/bin/sh & type secret` runs the
+// second command there.
+const INTERPRETER_LINE = /^#![ \t]*[\w./+-]+(?:[ \t]+[\w./+=:-]+)*[ \t]*\r?(?=\n|$)/;
+
+/**
+ * The command as a file-access rule sees it (node9Firewall#385). A jail of
+ * /usr or /bin must not meet `#!/usr/bin/env bash` or `/usr/bin/python3 app.py`:
+ * the interpreter line names the program that runs the script and the program
+ * path names what runs; neither is a file the command reads. So the clean
+ * interpreter line on the first line is dropped, and the program word of each
+ * command (after `sudo`, `env` and the other wrappers) is cut to its name.
+ * Every argument and redirect stays, so `cat /usr/share/x`, `bash /etc/x.sh`
+ * (the script is read) and `wc < /etc/hosts` still meet the jail.
+ *
+ * Only a program in a system program directory, or a relative one, is cut
+ * (PROGRAM_DIR): a script run from a jailed directory keeps its path and still
+ * meets the jail. An unparsable command is returned unchanged (the strict
+ * direction for a jail).
+ */
+export function fileAccessView(command: string): string {
+  const hit = accessViewCache.get(command);
+  if (hit !== undefined) return hit;
+  const view = fileAccessViewImpl(command);
+  if (accessViewCache.size >= ACCESS_VIEW_CACHE_MAX) {
+    const oldest = accessViewCache.keys().next().value;
+    if (oldest !== undefined) accessViewCache.delete(oldest);
+  }
+  accessViewCache.set(command, view);
+  return view;
+}
+
+// Where installed programs live. Running one by its path (`/usr/bin/python3`)
+// names what runs, not a file the command reads. A program elsewhere under an
+// absolute or home path keeps its path: running a script inside a jailed
+// directory (`~/.gmail-mcp/dump.sh`) hands that directory's contents to the
+// agent as surely as `cat` would. A relative program (`./bin/run`) is the
+// project's own, unless it climbs out with `..`.
+const PROGRAM_DIR =
+  /^(?:\/usr(?:\/local)?|\/opt\/homebrew|\/home\/linuxbrew\/\.linuxbrew)?\/s?bin\/[^/]+$|^\/snap\/bin\/[^/]+$|^(?![/~\\]|[A-Za-z]:|.*\.\.)/;
+
+const ACCESS_VIEW_CACHE_MAX = 1_000;
+const accessViewCache = new Map<string, string>();
+
+function fileAccessViewImpl(command: string): string {
+  const text = command.replace(INTERPRETER_LINE, '');
+  const f = parseShared(text);
+  if (f === PARSE_FAIL) return text;
+  const toCharIndex = byteOffsetToCharIndex(text);
+  const at = (byteOffset: number): number =>
+    toCharIndex === null ? byteOffset : toCharIndex(byteOffset);
+  const edits: Array<[number, number, string]> = [];
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any[] = n.Args || [];
+      const words = args.map((a) => resolveWordLiteral(a));
+      const head = unwrapCommandHead(words);
+      for (const i of new Set([0, head])) {
+        const word = words[i];
+        if (i >= args.length || word === null || word === undefined || !/[\\/]/.test(word)) {
+          continue;
+        }
+        if (!PROGRAM_DIR.test(word)) continue;
+        const name = word.split(/[\\/]/).pop() ?? '';
+        if (!name) continue;
+        const s = at(args[i].Pos().Offset());
+        const e = at(args[i].End().Offset());
+        if (s < 0 || e < 0) continue;
+        edits.push([s, e, name]);
+      }
+      return true;
+    });
+  } catch {
+    return text;
+  }
+  edits.sort((a, b) => b[0] - a[0]);
+  let out = text;
+  for (const [s, e, rep] of edits) out = out.slice(0, s) + rep + out.slice(e);
+  return out;
 }
 
 /**
@@ -2117,27 +2207,103 @@ export function unwrapCommandHead(
 }
 
 /**
- * Does this ONE statement execute inline code? `pipeFed` says whether it reads
- * another command's stdout (decided by the caller at the pipeline node).
+ * One statement that runs inline code: the interpreter, and the code it runs.
+ * `code` holds one entry per code argument (`perl -e A -e B` has two); an entry
+ * is null where node9 cannot read the code: a variable, a pipe from another
+ * program, a file on stdin, a heredoc the shell expands.
+ */
+interface InlineCall {
+  interp: string;
+  code: Array<string | null>;
+  /** How the unreadable code arrives, for the approval prompt. */
+  source?: 'pipe' | 'file' | 'variable' | 'payload';
+}
+
+/** A heredoc body as the interpreter receives it, or null when the shell would
+ *  expand part of it (`<<EOF` with `$x` or `$(...)` inside). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function heredocText(word: any): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parts: any[] = word?.Parts ?? [];
+  let out = '';
+  for (const p of parts) {
+    if (syntax.NodeType(p) !== 'Lit') return null;
+    out += p.Value ?? '';
+  }
+  return out;
+}
+
+/** The code a stdin redirect feeds the interpreter: a heredoc or herestring body,
+ *  or null for a file (`< x.py`) or an expanding heredoc. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function stdinCodeOf(redirs: any[]): { code: string | null; source?: 'file' | 'variable' } {
+  const heredoc = new Set([deriveRedirOp('cat <<X\nX'), deriveRedirOp('cat <<-X\nX')]);
+  const herestring = deriveRedirOp('cat <<< x');
+  for (const r of redirs) {
+    if (!r || !redirStdinOps().has(r.Op)) continue;
+    if (heredoc.has(r.Op)) {
+      const text = heredocText(r.Hdoc);
+      return text === null ? { code: null, source: 'variable' } : { code: text };
+    }
+    if (r.Op === herestring) {
+      const text = resolveWordLiteral(r.Word);
+      return text === null ? { code: null, source: 'variable' } : { code: text };
+    }
+    return { code: null, source: 'file' };
+  }
+  return { code: null, source: 'file' };
+}
+
+/**
+ * The code attached to a code flag (`perl -pe's/x/y/'`, `python3 -cCODE`,
+ * `node --eval=CODE`), or null when the code is the next argument.
+ */
+function attachedCode(interp: string, flag: string): string | null {
+  const eq = flag.indexOf('=');
+  if (flag.startsWith('--')) return eq >= 0 ? flag.slice(eq + 1) : null;
+  if (/^(pwsh|powershell)/.test(interp)) return null;
+  const letters = /^(perl|ruby|lua|bun|osascript|rscript|irb)$/.test(interp)
+    ? 'e'
+    : /^(node|tsx|ts-node)$/.test(interp)
+      ? 'ep'
+      : interp === 'php'
+        ? 'r'
+        : 'c';
+  const body = flag.slice(1);
+  const at = [...body].findIndex((ch) => letters.includes(ch.toLowerCase()));
+  if (at < 0) return null;
+  let rest = body.slice(at + 1);
+  // `node -pe CODE`: both letters take code, so the bundle is the flag alone.
+  if (letters === 'ep' && /^[ep]*$/i.test(rest)) rest = '';
+  return rest === '' ? null : rest;
+}
+
+/**
+ * Does this ONE statement execute inline code, and which? `pipeFed` says whether
+ * it reads another command's stdout (decided by the caller at the pipeline
+ * node). Null when the statement runs no inline code.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
+function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   const cmd = stmt?.Cmd;
-  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return false;
+  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
-  if (words.length === 0) return false;
+  if (words.length === 0) return null;
 
   const headIdx = unwrapCommandHead(words);
   const rawHead = words[headIdx];
-  if (rawHead == null) return false;
+  if (rawHead == null) return null;
   const interp = (rawHead.split('/').pop() ?? '').toLowerCase();
-  if (!INLINE_INTERPRETER.test(interp)) return false;
+  if (!INLINE_INTERPRETER.test(interp)) return null;
 
   let args = words.slice(headIdx + 1);
   // `deno eval "code"` spells the code form as a subcommand.
-  if (interp === 'deno' && (args[0] ?? '').toLowerCase() === 'eval') return true;
+  if (interp === 'deno' && (args[0] ?? '').toLowerCase() === 'eval') {
+    const code = args[1] ?? null;
+    return { interp, code: [code], source: code === null ? 'variable' : undefined };
+  }
 
   // `su USER -c CODE` — the leading bare operand is a TARGET (a user), not a
   // program, so it must not trip the "a program was selected" rule below (which
@@ -2147,11 +2313,24 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
     args = firstFlag >= 0 ? args.slice(firstFlag) : [];
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const redirs: any[] = stmt.Redirs || cmd.Redirs || [];
+  const stdinFed = redirs.some((r) => r && redirStdinOps().has(r.Op));
+  const fromStdin = (): InlineCall => {
+    if (stdinFed) {
+      const { code, source } = stdinCodeOf(redirs);
+      return { interp, code: [code], source };
+    }
+    return { interp, code: [null], source: 'pipe' };
+  };
+
   let positionals = 0;
   let selectedProgram = false; // a script operand or `-m module` was chosen
+  const codes: Array<string | null> = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a == null) {
+      if (codes.length > 0) break; // an argument to the code, not the interpreter
       positionals++; // dynamic arg — treat as a script operand
       selectedProgram = true;
       continue;
@@ -2167,11 +2346,28 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
       // and find's `-exec sh -c 'gzip "$1"' _ {} \;` are everyday shapes, not
       // a blind tunnel (fw#372 X2). The review stays for a dynamic payload,
       // for one that runs a positional or evals, and for one that itself
-      // runs inline code.
-      if (!/^(bash|sh|zsh|dash|ksh)$/.test(interp)) return true;
-      const payload = args[i + 1];
-      if (payload == null) return true;
-      return shellPayloadNeedsReview(payload);
+      // runs inline code that needs a review.
+      if (/^(bash|sh|zsh|dash|ksh)$/.test(interp)) {
+        const payload = args[i + 1];
+        if (payload == null) return { interp, code: [null], source: 'variable' };
+        return shellPayloadNeedsReview(payload)
+          ? { interp, code: [null], source: 'payload' }
+          : null;
+      }
+      const attached = attachedCode(interp, a);
+      if (attached !== null) {
+        codes.push(attached);
+      } else {
+        codes.push(args[i + 1] ?? null);
+        i++;
+      }
+      continue;
+    }
+    // After the code, the rest are the code's own arguments (`perl -e CODE f`);
+    // only another code flag (`perl -e A -e B`) adds to what runs.
+    if (codes.length > 0) {
+      if (a.startsWith('-')) continue;
+      break;
     }
     // `-m module` selects a program too, so a trailing `-` after it is that
     // module's stdin DATA (`python3 -m black -`), not the interpreter reading code.
@@ -2179,26 +2375,26 @@ function inlineExecStmt(stmt: any, pipeFed: boolean): boolean {
       selectedProgram = true;
       continue;
     }
-    if (a === '-' && !selectedProgram) return true; // bare interpreter reading code from stdin
+    if (a === '-' && !selectedProgram) return fromStdin(); // bare interpreter reading code from stdin
     if (!a.startsWith('-')) {
       positionals++;
       selectedProgram = true;
     }
   }
+  if (codes.length > 0) {
+    return { interp, code: codes, source: codes.includes(null) ? 'variable' : undefined };
+  }
 
   // No script operand + code arriving over stdin (heredoc, herestring,
   // `< file`) or a pipe → the interpreter executes whatever it is fed.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const redirs: any[] = stmt.Redirs || cmd.Redirs || [];
-  const stdinFed = redirs.some((r) => r && redirStdinOps().has(r.Op));
   if (positionals === 0 && (stdinFed || pipeFed)) {
     // Shells are excluded from the IMPLICIT forms: `curl … | bash` belongs to
     // the eval-remote / pipe-to-shell family (Class A tiers that own it, and
     // flagging it here would DOWNGRADE their block to a review), and
     // `bash <<'EOF'` is the everyday multi-command idiom.
-    if (!/^(bash|sh|zsh)$/i.test(interp)) return true;
+    if (!/^(bash|sh|zsh)$/i.test(interp)) return fromStdin();
   }
-  return false;
+  return null;
 }
 
 const MAX_PAYLOAD_NESTING = 8;
@@ -2249,7 +2445,7 @@ function shellPayloadNeedsReview(payload: string): boolean {
       )
     )
       review = true;
-    if (!review && detectInlineExec(payload)) review = true;
+    if (!review && inlineExecReview(payload) !== null) review = true;
   } catch {
     review = true;
   } finally {
@@ -2258,28 +2454,16 @@ function shellPayloadNeedsReview(payload: string): boolean {
   return review;
 }
 
-/**
- * AST-aware inline-execution detector. Returns true when the command runs code
- * supplied on the command line, via stdin, or via a pipe into a bare
- * interpreter. Structural, so it is not fooled by quoting, escapes, option
- * bundles, or wrapper nesting. Pure.
- */
-export function detectInlineExec(command: string): boolean {
-  const f = parseShared(command);
-  if (f === PARSE_FAIL) {
-    // Conservative fallback: the plain `interp -c CODE` form, anchored per
-    // simple-command. A command mvdan cannot parse is unlikely to run, but this
-    // detector gates a bypass tunnel — degrade to the old narrow check, never
-    // to silence.
-    return /(^|[|;&]|&&)\s*(?:[\w./-]*\/)?(python[\d.]*|perl|ruby|node|php|lua|deno|bun|pwsh|osascript|rscript|bash|sh|zsh)\s+-{1,2}[a-z]*[ceEr]/i.test(
-      command
-    );
-  }
+const MAX_INLINE_CALLS = 16;
 
-  let found = false;
+/** Every statement in a command that runs inline code, or PARSE_FAIL. */
+function inlineExecCalls(command: string): InlineCall[] | typeof PARSE_FAIL {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return PARSE_FAIL;
+  const calls: InlineCall[] = [];
   try {
     syntax.Walk(f, (node: unknown) => {
-      if (!node || found) return false;
+      if (!node || calls.length >= MAX_INLINE_CALLS) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
       const t = syntax.NodeType(n);
@@ -2290,21 +2474,125 @@ export function detectInlineExec(command: string): boolean {
       // (verified: `Y === Y` is false). `&&`/`||` are BinaryCmds too — only a
       // non-list operator is a pipe.
       if (t === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
-        if (inlineExecStmt(n.Y, true)) {
-          found = true;
-          return false;
-        }
+        const call = inlineExecCall(n.Y, true);
+        if (call) calls.push(call);
       }
-      if (t === 'Stmt' && inlineExecStmt(n, false)) {
-        found = true;
-        return false;
+      if (t === 'Stmt') {
+        const call = inlineExecCall(n, false);
+        if (call) calls.push(call);
       }
       return true;
     });
   } catch {
-    return found; // partial result on walker error
+    // partial result on walker error
   }
-  return found;
+  return calls;
+}
+
+// Conservative fallback for a command mvdan cannot parse: the plain
+// `interp -c CODE` form, anchored per simple-command. A command mvdan cannot
+// parse is unlikely to run, but this detector gates a bypass tunnel — degrade
+// to the old narrow check, never to silence.
+const INLINE_EXEC_FALLBACK =
+  /(^|[|;&]|&&)\s*(?:[\w./-]*\/)?(python[\d.]*|perl|ruby|node|php|lua|deno|bun|pwsh|osascript|rscript|bash|sh|zsh)\s+-{1,2}[a-z]*[ceEr]/i;
+
+/**
+ * AST-aware inline-execution detector. Returns true when the command runs code
+ * supplied on the command line, via stdin, or via a pipe into a bare
+ * interpreter, whatever the code does. Structural, so it is not fooled by
+ * quoting, escapes, option bundles, or wrapper nesting. Pure. Strict mode asks
+ * on this; every other mode asks on inlineExecReview.
+ */
+export function detectInlineExec(command: string): boolean {
+  const calls = inlineExecCalls(command);
+  if (calls === PARSE_FAIL) return INLINE_EXEC_FALLBACK.test(command);
+  return calls.length > 0;
+}
+
+/** Why a command's inline code needs a review: what it does, in which language. */
+export interface InlineExecReview {
+  outcome: 'dangerous' | 'unreadable';
+  interp: string;
+  /** "deletes files", "reads its code from a pipe" ... */
+  what: string;
+  evidence?: string;
+  category?: InlineCodeCategory;
+}
+
+const UNREADABLE_SOURCE: Record<NonNullable<InlineCall['source']>, string> = {
+  pipe: 'reads its code from another program through a pipe',
+  file: 'reads its code from a file on stdin',
+  variable: 'runs code the shell fills in at run time',
+  payload: 'runs a shell payload that evaluates, sources or runs further code',
+};
+
+/** The credential jail's paths and the system account files, as a string in code. */
+function isProtectedCodePath(p: string): boolean {
+  if (matchSensitivePath(p) !== null) return true;
+  return (
+    (SYSTEM_AUTH_FILES as readonly string[]).includes(p) ||
+    SYSTEM_AUTH_DIRS.some((d) => p === d || p.startsWith(d + '/'))
+  );
+}
+
+/** What the approval prompt says about an inline-code review. */
+export function inlineExecDescription(r: InlineExecReview | null | undefined): string {
+  const lead = r
+    ? `The AI is running code directly from the command line: ${inlineExecReason(r).replace(/^This/, 'this')}.`
+    : 'The AI is running code directly from the command line.';
+  return `${lead} Review the full script below before allowing it to execute.`;
+}
+
+/** The approval prompt's reason for an inline-code review. */
+export function inlineExecReason(r: InlineExecReview): string {
+  const who = r.interp ? `This inline ${r.interp} code` : 'This inline code';
+  return r.evidence ? `${who} ${r.what} (${r.evidence})` : `${who} ${r.what}`;
+}
+
+/**
+ * Does the inline code in this command need a review (node9Firewall#385)? Null
+ * when every inline call is readable code that does nothing dangerous; else the
+ * first dangerous finding, or the first unreadable one when none is dangerous.
+ * A command with no inline code returns null.
+ */
+export function inlineExecReview(command: string): InlineExecReview | null {
+  const calls = inlineExecCalls(command);
+  if (calls === PARSE_FAIL) {
+    return INLINE_EXEC_FALLBACK.test(command)
+      ? { outcome: 'unreadable', interp: '', what: 'could not be parsed' }
+      : null;
+  }
+  // The walk stops collecting at the cap, so a call past it was never read:
+  // the command keeps the review rather than passing on what was seen.
+  let unreadable: InlineExecReview | null =
+    calls.length >= MAX_INLINE_CALLS
+      ? { outcome: 'unreadable', interp: '', what: 'runs more inline programs than node9 reads' }
+      : null;
+  for (const call of calls) {
+    const language = inlineLanguageOf(call.interp);
+    for (const code of call.code) {
+      let finding: InlineExecReview | null = null;
+      if (code === null) {
+        finding = {
+          outcome: 'unreadable',
+          interp: call.interp,
+          what: UNREADABLE_SOURCE[call.source ?? 'variable'],
+        };
+      } else if (language === null) {
+        finding = {
+          outcome: 'unreadable',
+          interp: call.interp,
+          what: `is ${call.interp} code, which node9 does not read`,
+        };
+      } else {
+        const judged = judgeInlineCode(language, code, isProtectedCodePath);
+        if (judged) finding = { ...judged, interp: call.interp };
+      }
+      if (finding?.outcome === 'dangerous') return finding;
+      if (finding && !unreadable) unreadable = finding;
+    }
+  }
+  return unreadable;
 }
 
 /**

@@ -1,0 +1,24 @@
+# JSON output to a file, then a raw jq projection into a variable, then GITHUB_ENV. The job
+# can mint a cloud token.
+name: Review
+on:
+  pull_request_target:
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Review this checkout" \
+            --output-format json > out.json
+      - run: |
+          S=$(jq -r '.result' out.json)
+          echo "REVIEW=$S" >> "$GITHUB_ENV"
+      - run: ./scripts/publish.sh

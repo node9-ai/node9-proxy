@@ -6,6 +6,14 @@
 // is shared with the Report [2] view in `node9 monitor` — this command is
 // just the terminal renderer wrapped around it.
 
+import { appsReportLines, approvalsFromAudit, suggestionLines } from '../../apps/report';
+import { LOCAL_AUDIT_LOG } from '../../audit';
+import { readAppsFile } from '../../apps/state';
+import { observeAudit } from '../../apps/detect';
+import { dashboardNudge, markNudgeShown, readShownNudges, teamProject } from '../../apps/nudges';
+import { readActiveShields } from '../../shields';
+import { getConfig } from '../../config';
+import { readCredentials } from '../../daemon/sync';
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { aggregateReportFromAudit, type ResponseDlpEntry } from '../aggregate/report-audit';
@@ -127,12 +135,58 @@ export function registerReportCommand(program: Command): void {
       }
 
       renderTerminalReport(data, responseDlpEntries, excludeTests);
+
+      // fw#390: what node9 found and protects, and the dashboard when it helps.
+      // The shields the config applied: the workspace's on a keyed machine.
+      const cfg = getConfig();
+      const workspaceGoverned = cfg.policySource === 'workspace';
+      const appliedShields = cfg.policy.appliedShields ?? readActiveShields();
+      // fw#390 section 19: the dashboard at the one moment it helps, once.
+      const nudge = dashboardNudge(
+        {
+          loggedIn: readCredentials() !== null,
+          unanswered: data.timedOut ?? 0,
+          asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
+          team: () => teamProject(observeAudit(LOCAL_AUDIT_LOG).projects),
+        },
+        readShownNudges()
+      );
+      if (nudge) markNudgeShown(nudge.key);
+      const appLines = [
+        ...appsReportLines(readAppsFile(), appliedShields, { workspaceGoverned }),
+        ...(nudge ? [nudge.line] : []),
+        // fw#390 phase 4: the smallest change that stops a question a person
+        // keeps approving. Never applied by itself.
+        ...suggestionLines(
+          approvalsFromAudit(LOCAL_AUDIT_LOG, periodStartMs(period)),
+          workspaceGoverned
+        ),
+      ];
+      if (appLines.length > 0) {
+        console.log('');
+        for (const line of appLines) console.log('  ' + chalk.cyan(line));
+        console.log('');
+      }
     });
 }
 
 // ---------------------------------------------------------------------------
 // Terminal renderer
 // ---------------------------------------------------------------------------
+
+/** The start of a report period, for the suggestions' audit read. */
+function periodStartMs(period: ReportPeriod): number {
+  const day = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  if (period === 'today') return new Date(new Date().toDateString()).getTime();
+  if (period === '30d') return now - 30 * day;
+  if (period === '90d') return now - 90 * day;
+  if (period === 'month') {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  }
+  return now - 7 * day;
+}
 
 function renderTerminalReport(
   data: BuildReportJsonInput,

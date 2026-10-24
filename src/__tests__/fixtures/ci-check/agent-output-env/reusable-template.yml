@@ -1,0 +1,24 @@
+# A reusable workflow with no caller in view: capped at medium.
+name: Review template
+on:
+  workflow_call:
+    inputs:
+      head_sha:
+        type: string
+        required: true
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_sha }}
+          path: pr
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: claude -p "Review the change in ./pr" > review.txt
+      - run: echo "REVIEW=$(cat review.txt)" >> "$GITHUB_ENV"
+      - run: ./scripts/report.sh

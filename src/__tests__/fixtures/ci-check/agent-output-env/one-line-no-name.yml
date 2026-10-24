@@ -1,0 +1,19 @@
+# Newlines are stripped, but the whole line is the answer: it names the variable itself.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p "One word for: $BODY" > word.txt
+      - run: cat word.txt | tr -d '\n' >> "$GITHUB_ENV"
+      - run: ./scripts/next.sh

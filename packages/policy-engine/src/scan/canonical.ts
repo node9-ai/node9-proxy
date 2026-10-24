@@ -713,7 +713,16 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // national identifiers with a check digit, a PGP private key block and a
 // Grafana API key, and the output scan reading decoded views. Histories
 // scanned under v28 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
+// canonical-v30 (2026-10-24, node9Firewall#385): a jail path rule reads the
+// command as a file access (fileAccessView), so a script's interpreter line
+// and the program a command runs no longer meet a jail of /usr or /bin.
+// Histories scanned under v29 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v30';
+
+// 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
+// rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
+// gate's server scope. History scans meet smart rules on shell rows only, and
+// no default shell rule changed, so detector output is the same.
 
 // 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
 // SYSTEM_DIRS sets for the live file policy (files.system-dirs); the extractor
@@ -740,6 +749,9 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
 // verdicts moved. dlp/, pipe-chain and destructive-regex are untouched. A
 // version bump would cost every daemon a full re-scan and change nothing.
 
+// 2026-10-24, hash bumped with NO version bump (fw#390 review): rules/index.ts
+// reads an MCP server label as a string with `/` as `-`. History applies smart
+// rules to shell rows only, so no finding changes.
 // 2026-10-02, hash bumped with NO version bump: shell/index.ts only exported
 // parseShared and resolveWordLiteral for the package-install extractor
 // (shell/package-install.ts, outside the hash set). No detector changed.
@@ -760,7 +772,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '3b936dab47d27942';
+export const CANONICAL_EXTRACTOR_HASH = 'd55f1f9e5bee7e41';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

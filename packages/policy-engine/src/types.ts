@@ -29,6 +29,13 @@ export interface SmartCondition {
     | 'notMatchesGlob';
   value?: string;
   flags?: string;
+  /**
+   * Which reading of a `command` field the regex ops test. Absent: the whole
+   * command text. 'access': the command as a file-access rule sees it, without
+   * a script's interpreter line and with the program each command runs cut to
+   * its name (fileAccessView). Set by the jail's path rules (fw#385).
+   */
+  reading?: 'access';
 }
 
 /**
@@ -43,6 +50,20 @@ export interface SmartCondition {
 export interface SmartRule {
   name?: string;
   tool: string;
+  /**
+   * Glob (case-insensitive) the call's MCP server label must match: the
+   * gateway's resolved label, or `<server>` from a `mcp__<server>__<tool>`
+   * name. A call with no label (a shell command, a bare tool name) never
+   * matches a rule that sets this. Lets an app's shield say "only Stripe's
+   * create_refund", not every server's (node9Firewall#390).
+   */
+  server?: string;
+  /**
+   * Glob the call's MCP server label must NOT match. A call with no label
+   * passes. The general action checks use it to stay off a server an app
+   * shield claims, so turning that shield off makes the app quiet.
+   */
+  notServer?: string;
   conditions: SmartCondition[];
   conditionMode?: 'all' | 'any';
   verdict: 'allow' | 'review' | 'block';

@@ -22,6 +22,17 @@ import {
 import { buildShield } from '../../shields/build';
 import { createShield } from '../../shields/create';
 import type { ShieldDefinition } from '@node9/policy-engine';
+import { REPLACED_SHIELDS } from '@node9/policy-engine';
+import { appForShield } from '../../apps/catalog';
+import { recordUserDecision } from '../../apps/state';
+
+/** An unknown name, or one of the three shields 2.37.0 shipped that are now
+ *  general checks (node9Firewall#390): say what replaced it. */
+function unknownShield(service: string): void {
+  const replaced = REPLACED_SHIELDS[service.toLowerCase()];
+  if (replaced) console.error(chalk.yellow(`\n${replaced}\n`));
+  else console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
+}
 import { appendConfigAudit } from '../../audit';
 import { cliGuardPolicyWrite } from '../../config/keyed-guard';
 import { getConfig } from '../../config';
@@ -89,7 +100,7 @@ export function registerShieldCommand(program: Command): void {
       if (!cliGuardPolicyWrite(`shield enable ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
-        console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
+        unknownShield(service);
         console.log(`Run ${chalk.cyan('node9 shield list')} to see available shields.\n`);
         process.exit(1);
       }
@@ -101,6 +112,9 @@ export function registerShieldCommand(program: Command): void {
         return;
       }
       writeActiveShields([...active, name!]);
+      // An app's shield: a person's decision that detection keeps (fw#390).
+      const enabledApp = appForShield(name!);
+      if (enabledApp) recordUserDecision(enabledApp.slug, 'on');
 
       console.log(chalk.green(`\n🛡️  Shield "${name}" enabled.`));
       console.log(chalk.gray(`   ${shield.smartRules.length} smart rules now active.`));
@@ -124,10 +138,15 @@ export function registerShieldCommand(program: Command): void {
       if (!cliGuardPolicyWrite(`shield disable ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
-        console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
+        unknownShield(service);
         console.log(`Run ${chalk.cyan('node9 shield list')} to see available shields.\n`);
         process.exit(1);
       }
+
+      // Turned off stays off: detection never turns this app back on, even
+      // when it is not on yet (fw#390).
+      const disabledApp = appForShield(name!);
+      if (disabledApp) recordUserDecision(disabledApp.slug, 'off');
 
       const active = readActiveShields();
       if (!active.includes(name!)) {
@@ -292,7 +311,7 @@ export function registerShieldCommand(program: Command): void {
       if (!cliGuardPolicyWrite(`shield set ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
-        console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
+        unknownShield(service);
         console.error(`Run ${chalk.cyan('node9 shield list')} to see available shields.\n`);
         process.exit(1);
       }
@@ -361,7 +380,7 @@ export function registerShieldCommand(program: Command): void {
       if (!cliGuardPolicyWrite(`shield unset ${service}`)) return;
       const name = resolveShieldName(service);
       if (!name) {
-        console.error(chalk.red(`\n❌ Unknown shield: "${service}"\n`));
+        unknownShield(service);
         process.exit(1);
       }
       const ruleName = resolveShieldRule(name, rule);

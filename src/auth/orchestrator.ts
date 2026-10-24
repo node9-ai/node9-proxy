@@ -1,6 +1,7 @@
 // src/auth/orchestrator.ts
 // The multi-channel race engine: coordinates cloud, native, browser, and terminal approval channels.
 import { randomUUID } from 'crypto';
+import { resolveLinkedServer } from '../apps/state';
 import os from 'os';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
@@ -693,6 +694,13 @@ async function _authorizeHeadlessCore(
       config,
       skipIgnoredFastPath,
       argumentScan: argScan,
+      // A server a person linked to an app is judged as that app (fw#390).
+      mcpServer: resolveLinkedServer(meta?.mcpServer, {
+        serverKey: meta?.serverKey,
+        managedLinks: config.policy.appLinks,
+        appliedShields: config.policy.appliedShields,
+        workspaceGoverned: config.policySource === 'workspace',
+      }),
     });
     if (!sessionScript || own.decision === 'block') return own;
     // The script's content, judged as a Bash command of its own; its verdict

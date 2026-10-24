@@ -678,3 +678,213 @@ describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10
     expect(calls).toContain('http://registry.test/node9-canary-big/1.5.0');
   });
 });
+
+describe('runPackageCheck — the release before this one (node9Firewall#385)', () => {
+  const FRESH = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  const isAbbrev = (init?: RequestInit) =>
+    String((init?.headers as Record<string, string> | undefined)?.Accept ?? '').includes(
+      'install-v1'
+    );
+  type V = { script?: boolean; prov?: boolean };
+  const prov = (name: string, v: string) => ({
+    url: `http://registry.test/-/npm/v1/attestations/${name}@${v}`,
+    provenance: { predicateType: 'https://slsa.dev/provenance/v1' },
+  });
+  /** An abbreviated document with a version list, newest = latest. */
+  function npmHistory(name: string, versions: Record<string, V>, modified = OLD) {
+    const keys = Object.keys(versions);
+    return json({
+      name,
+      modified,
+      'dist-tags': { latest: keys[keys.length - 1] },
+      versions: Object.fromEntries(
+        keys.map((v) => [
+          v,
+          {
+            hasInstallScript: versions[v].script || undefined,
+            dist: versions[v].prov ? { attestations: prov(name, v) } : {},
+          },
+        ])
+      ),
+    });
+  }
+  /** An npm attestation document whose SLSA provenance names `repo`. */
+  function attestation(repo: string) {
+    const statement = {
+      predicate: { buildDefinition: { externalParameters: { workflow: { repository: repo } } } },
+    };
+    return json({
+      attestations: [
+        { predicateType: 'https://github.com/npm/attestation/tree/main/specs/publish/v0.1' },
+        {
+          predicateType: 'https://slsa.dev/provenance/v1',
+          bundle: {
+            dsseEnvelope: { payload: Buffer.from(JSON.stringify(statement)).toString('base64') },
+          },
+        },
+      ],
+    });
+  }
+  const att = (name: string, v: string) =>
+    `http://registry.test/-/npm/v1/attestations/${name}@${v}`;
+
+  describe('install scripts', () => {
+    it('a script the previous release also ran is no finding (esbuild, bcrypt)', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-native'] = () =>
+        npmHistory('node9-canary-native', { '1.0.0': { script: true }, '1.1.0': { script: true } });
+      const r = await runPackageCheck(...bash('npm i node9-canary-native'), CFG);
+      expect(r.verdict).toBe('allow');
+      expect(calls).toHaveLength(1);
+    });
+    it('a script that appears in this release is a finding (the Shai-Hulud shape)', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-native'] = () =>
+        npmHistory('node9-canary-native', { '1.0.0': {}, '1.1.0': { script: true } });
+      const r = await runPackageCheck(...bash('npm i node9-canary-native'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['install-script']);
+    });
+    it('a first release with a script is a finding', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-native'] = () =>
+        npmHistory('node9-canary-native', { '1.0.0': { script: true } });
+      const r = await runPackageCheck(...bash('npm i node9-canary-native'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['install-script']);
+    });
+    it('a prerelease is not "the release before"', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-native'] = () =>
+        npmHistory('node9-canary-native', {
+          '1.0.0': {},
+          '1.1.0-beta.1': { script: true },
+          '1.1.0': { script: true },
+        });
+      const r = await runPackageCheck(...bash('npm i node9-canary-native'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['install-script']);
+    });
+  });
+
+  describe('provenance (npm)', () => {
+    const young = (versions: Record<string, V>) => (init?: RequestInit) =>
+      isAbbrev(init)
+        ? npmHistory('node9-canary-ci', versions, FRESH)
+        : json({ time: { '2.0.0': FRESH } });
+
+    it('a young release built from the same repository as the one before it passes', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-ci'] = young({
+        '1.0.0': { prov: true },
+        '2.0.0': { prov: true, script: true },
+      });
+      routes[att('node9-canary-ci', '2.0.0')] = () => attestation('https://github.com/acme/ci');
+      routes[att('node9-canary-ci', '1.0.0')] = () => attestation('https://github.com/Acme/ci.git');
+      const r = await runPackageCheck(...bash('npm i node9-canary-ci'), CFG);
+      expect(r.verdict).toBe('allow');
+      expect(r.findings).toEqual([]);
+    });
+    it('built from another repository: the findings stay', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-ci'] = young({
+        '1.0.0': { prov: true },
+        '2.0.0': { prov: true },
+      });
+      routes[att('node9-canary-ci', '2.0.0')] = () => attestation('https://github.com/evil/fork');
+      routes[att('node9-canary-ci', '1.0.0')] = () => attestation('https://github.com/acme/ci');
+      const r = await runPackageCheck(...bash('npm i node9-canary-ci'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+    });
+    it('provenance that disappears is a finding, even outside the age window, with no extra request', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-ci'] = () =>
+        npmHistory('node9-canary-ci', { '1.0.0': { prov: true }, '1.0.1': {} });
+      const r = await runPackageCheck(...bash('npm i node9-canary-ci'), CFG);
+      expect(r.verdict).toBe('review');
+      expect(r.findings.map((f) => f.kind)).toEqual(['provenance-drop']);
+      expect(r.reason).toContain('without the provenance its previous release (1.0.0) had');
+      expect(calls).toHaveLength(1);
+    });
+    it('an unreadable provenance record keeps the findings and records a miss', async () => {
+      indexWith('npm', 'node9-canary-other', []);
+      routes['http://registry.test/node9-canary-ci'] = young({
+        '1.0.0': { prov: true },
+        '2.0.0': { prov: true },
+      });
+      routes[att('node9-canary-ci', '2.0.0')] = () => json({}, 500);
+      routes[att('node9-canary-ci', '1.0.0')] = () => attestation('https://github.com/acme/ci');
+      const r = await runPackageCheck(...bash('npm i node9-canary-ci'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+      expect(r.misses.join('\n')).toContain('provenance unreadable');
+    });
+    it('a known malicious release is blocked whatever its provenance', async () => {
+      indexWith('npm', 'node9-canary-ci', [{ id: 'MAL-0000-0009', versions: ['2.0.0'] }]);
+      routes['http://registry.test/node9-canary-ci'] = young({
+        '1.0.0': { prov: true },
+        '2.0.0': { prov: true },
+      });
+      routes[att('node9-canary-ci', '2.0.0')] = () => attestation('https://github.com/acme/ci');
+      routes[att('node9-canary-ci', '1.0.0')] = () => attestation('https://github.com/acme/ci');
+      const r = await runPackageCheck(...bash('npm i node9-canary-ci'), CFG);
+      expect(r.verdict).toBe('block');
+    });
+  });
+
+  describe('provenance (PyPI)', () => {
+    const recent = new Date(Date.now() - 3_600_000).toISOString();
+    const project = (name: string) =>
+      json({
+        info: { version: '2.0' },
+        urls: [{ upload_time_iso_8601: recent, filename: `${name}-2.0.tar.gz` }],
+        releases: {
+          '1.9': [{ filename: `${name}-1.9.tar.gz` }],
+          '2.0rc1': [{ filename: `${name}-2.0rc1.tar.gz` }],
+          '2.0': [{ filename: `${name}-2.0.tar.gz` }],
+        },
+      });
+    const integrity = (name: string, v: string) =>
+      `http://pypi.test/integrity/${name}/${v}/${name}-${v}.tar.gz/provenance`;
+    const bundle = (repository: string) =>
+      json({
+        version: 1,
+        attestation_bundles: [{ publisher: { kind: 'GitHub', repository, workflow: 'r.yml' } }],
+      });
+
+    it('a young release uploaded by the same Trusted Publisher repository passes', async () => {
+      indexWith('PyPI', 'node9-canary-other', []);
+      routes['http://pypi.test/pypi/node9-canary-py/json'] = () => project('node9-canary-py');
+      routes[integrity('node9-canary-py', '2.0')] = () => bundle('acme/py');
+      routes[integrity('node9-canary-py', '1.9')] = () => bundle('acme/py');
+      const r = await runPackageCheck(...bash('pip install node9-canary-py'), CFG);
+      expect(r.verdict).toBe('allow');
+    });
+    it('a pinned install reads the history it needs only because of a finding', async () => {
+      indexWith('PyPI', 'node9-canary-other', []);
+      routes['http://pypi.test/pypi/node9-canary-py/2.0/json'] = () =>
+        json({
+          info: { version: '2.0' },
+          urls: [{ upload_time_iso_8601: recent, filename: 'node9-canary-py-2.0.tar.gz' }],
+        });
+      routes['http://pypi.test/pypi/node9-canary-py/json'] = () => project('node9-canary-py');
+      routes[integrity('node9-canary-py', '2.0')] = () => bundle('acme/py');
+      routes[integrity('node9-canary-py', '1.9')] = () => bundle('acme/py');
+      const r = await runPackageCheck(...bash('pip install node9-canary-py==2.0'), CFG);
+      expect(r.verdict).toBe('allow');
+      expect(calls).toContain('http://pypi.test/pypi/node9-canary-py/json');
+    });
+    it('no provenance where the previous release had it: a finding of its own', async () => {
+      indexWith('PyPI', 'node9-canary-other', []);
+      routes['http://pypi.test/pypi/node9-canary-py/json'] = () => project('node9-canary-py');
+      routes[integrity('node9-canary-py', '2.0')] = () => new Response('', { status: 404 });
+      routes[integrity('node9-canary-py', '1.9')] = () => bundle('acme/py');
+      const r = await runPackageCheck(...bash('pip install node9-canary-py'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['new', 'provenance-drop']);
+    });
+    it('neither release has provenance: the age finding stays', async () => {
+      indexWith('PyPI', 'node9-canary-other', []);
+      routes['http://pypi.test/pypi/node9-canary-py/json'] = () => project('node9-canary-py');
+      routes[integrity('node9-canary-py', '2.0')] = () => new Response('', { status: 404 });
+      routes[integrity('node9-canary-py', '1.9')] = () => new Response('', { status: 404 });
+      const r = await runPackageCheck(...bash('pip install node9-canary-py'), CFG);
+      expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+    });
+  });
+});

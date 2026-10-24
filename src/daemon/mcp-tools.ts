@@ -51,9 +51,20 @@ export function deriveServerName(cmd: string): string {
   if (!cmd || typeof cmd !== 'string') return 'MCP Server';
   const strip = (s: string) =>
     s.replace(/^(mcp-server|server|mcp)-/i, '').replace(/-(mcp-server|server|mcp)$/i, '') || s;
-  // Scoped npm package: @scope/server-filesystem → filesystem
-  const scoped = cmd.match(/@[\w.-]+\/([\w.-]+)/);
-  if (scoped) return strip(scoped[1]);
+  // A package whose own name says only "mcp" or "server" is named by its
+  // scope or host, so an app's server is recognisable (fw#390): the server
+  // glob `*stripe*` must meet `@stripe/mcp`.
+  const generic = (n: string) => /^(mcp|server|mcp-server)$/i.test(n);
+  // Scoped npm package: @scope/server-filesystem → filesystem; @stripe/mcp → stripe
+  const scoped = cmd.match(/@([\w.-]+)\/([\w.-]+)/);
+  if (scoped) return generic(strip(scoped[2])) ? scoped[1] : strip(scoped[2]);
+  // A remote server through mcp-remote: the site's name
+  // (`npx mcp-remote https://mcp.stripe.com` → stripe).
+  if (/(^|[\s/])mcp-remote(\s|$)/.test(cmd)) {
+    const host = cmd.match(/https?:\/\/([\w.-]+)/)?.[1];
+    const labels = host?.split('.').filter(Boolean) ?? [];
+    if (labels.length >= 2) return labels[labels.length - 2];
+  }
   // Otherwise the first non-flag, non-runner token's basename.
   const runners = new Set([
     'npx',
