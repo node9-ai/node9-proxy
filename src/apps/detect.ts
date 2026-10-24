@@ -140,13 +140,28 @@ export function observeAudit(auditFile: string): Observed {
   return { servers, commands, projects: dirs };
 }
 
+/** Open once, check and read through the same descriptor: a stat followed by
+ *  a read by path could read a file swapped in between. Non-blocking, so a
+ *  FIFO named like a manifest fails the regular-file check instead of
+ *  blocking the daemon. */
+const READ_FLAGS =
+  typeof fs.constants.O_NONBLOCK === 'number'
+    ? fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
+    : fs.constants.O_RDONLY;
+
 function readSmall(file: string): string | null {
+  let fd: number | undefined;
   try {
-    const st = fs.statSync(file);
+    fd = fs.openSync(file, READ_FLAGS);
+    const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
-    return fs.readFileSync(file, 'utf8');
+    const buf = Buffer.alloc(st.size);
+    const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return buf.toString('utf8', 0, n);
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

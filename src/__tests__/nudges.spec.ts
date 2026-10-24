@@ -77,7 +77,9 @@ describe('once each', () => {
     const shown = readShownNudges(home);
     expect([...shown]).toEqual(['dashboard-questions']);
     expect(dashboardNudge(signals({ asked: 40 }), shown)).toBeNull();
-    expect(fs.statSync(nudgesFilePath(home)).mode & 0o777).toBe(0o600);
+    // File modes exist only on POSIX.
+    if (process.platform !== 'win32')
+      expect(fs.statSync(nudgesFilePath(home)).mode & 0o777).toBe(0o600);
   });
 
   it('an unreadable file is none shown', () => {

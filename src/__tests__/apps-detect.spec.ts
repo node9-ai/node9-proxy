@@ -5,6 +5,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import {
   programsOf,
   observeAudit,
@@ -108,6 +109,21 @@ describe('a project: dependency names and env NAMES, never values', () => {
   });
 });
 
+describe('a manifest that is not a regular file', () => {
+  // Opened once, non-blocking, and checked through the same descriptor: a
+  // FIFO named package.json must not block the daemon (CodeQL
+  // js/file-system-race on the stat-then-read it replaced).
+  it.skipIf(process.platform === 'win32')('a FIFO is skipped at once', () => {
+    const d = tmp();
+    const r = spawnSync('mkfifo', [path.join(d, 'package.json')]);
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    const t0 = Date.now();
+    expect([...projectPackages(d)]).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+});
+
 describe('matchApps', () => {
   it('names each app with how it was found, and no value', () => {
     const d = tmp();
@@ -184,6 +200,8 @@ describe('applyDetection on a machine the workspace manages', () => {
     fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
     const prevHome = process.env.HOME;
     process.env.HOME = home;
+    // Windows reads USERPROFILE, not HOME: pin the home both ways.
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
     try {
       vi.resetModules();
       const state = await import('../apps/state.js');
@@ -206,6 +224,7 @@ describe('applyDetection on a machine the workspace manages', () => {
       expect(shields.readActiveShields()).toContain('stripe');
     } finally {
       process.env.HOME = prevHome;
+      homeSpy.mockRestore();
       vi.resetModules();
     }
   });
@@ -217,6 +236,8 @@ describe('applyDetection on a machine the workspace manages', () => {
     fs.writeFileSync(file, '{"version":1,"apps":{"stripe":{"state":"off"');
     const prevHome = process.env.HOME;
     process.env.HOME = home;
+    // Windows reads USERPROFILE, not HOME: pin the home both ways.
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
     try {
       vi.resetModules();
       const state = await import('../apps/state.js');
@@ -230,6 +251,7 @@ describe('applyDetection on a machine the workspace manages', () => {
       expect(fs.readFileSync(file, 'utf8')).toBe('{"version":1,"apps":{"stripe":{"state":"off"');
     } finally {
       process.env.HOME = prevHome;
+      homeSpy.mockRestore();
       vi.resetModules();
     }
   });
@@ -268,6 +290,8 @@ describe('resolveLinkedServer: local and workspace links', () => {
     );
     const prevHome = process.env.HOME;
     process.env.HOME = home;
+    // Windows reads USERPROFILE, not HOME: pin the home both ways.
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
     try {
       vi.resetModules();
       const state = await import('../apps/state.js');
@@ -295,6 +319,7 @@ describe('resolveLinkedServer: local and workspace links', () => {
         expect(state.resolveLinkedServer(label, { ...opts, serverKey: label })).toBe(label);
     } finally {
       process.env.HOME = prevHome;
+      homeSpy.mockRestore();
       vi.resetModules();
     }
   });
