@@ -1,20 +1,17 @@
 // src/apps/report.ts
 // The "Apps" lines of `node9 report` (node9Firewall#390, phase 2): what node9
-// found and whether it is protected, and, at the one moment it helps, the
-// dashboard: a machine that is not logged in and was asked 10 or more times
-// in the period. Pure: returns lines, the caller prints.
+// found and whether it is protected. When to suggest the dashboard is
+// nudges.ts. Pure: returns lines, the caller prints.
 import fs from 'fs';
 import { APP_CATALOG, actionWordOf } from './catalog';
 import type { AppsFile } from './state';
 import { suggestFromApprovals, type ApprovalRow, type Suggestion } from '@node9/policy-engine';
 
-export const DASHBOARD_NUDGE_AT = 10;
-
 export function appsReportLines(
   file: AppsFile,
   /** The shields the config applied (the workspace's on a keyed machine). */
   activeShields: readonly string[],
-  opts: { loggedIn: boolean; asked: number; workspaceGoverned?: boolean }
+  opts: { workspaceGoverned?: boolean } = {}
 ): string[] {
   const active = new Set(activeShields);
   const known = (slug: string) => Object.prototype.hasOwnProperty.call(file.apps, slug);
@@ -36,11 +33,6 @@ export function appsReportLines(
       opts.workspaceGoverned
         ? 'See how each was found: node9 apps. Turn one on in the dashboard.'
         : 'See how each was found, or turn one off: node9 apps'
-    );
-  }
-  if (!opts.loggedIn && opts.asked >= DASHBOARD_NUDGE_AT) {
-    lines.push(
-      `node9 asked ${opts.asked} times this period. Approve from your phone and stop a question with one click: node9 login`
     );
   }
   return lines;

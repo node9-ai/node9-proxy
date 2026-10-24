@@ -9,6 +9,8 @@
 import { appsReportLines, approvalsFromAudit, suggestionLines } from '../../apps/report';
 import { LOCAL_AUDIT_LOG } from '../../audit';
 import { readAppsFile } from '../../apps/state';
+import { observeAudit } from '../../apps/detect';
+import { dashboardNudge, markNudgeShown, readShownNudges, teamProject } from '../../apps/nudges';
 import { readActiveShields } from '../../shields';
 import { getConfig } from '../../config';
 import { readCredentials } from '../../daemon/sync';
@@ -139,12 +141,20 @@ export function registerReportCommand(program: Command): void {
       const cfg = getConfig();
       const workspaceGoverned = cfg.policySource === 'workspace';
       const appliedShields = cfg.policy.appliedShields ?? readActiveShields();
-      const appLines = [
-        ...appsReportLines(readAppsFile(), appliedShields, {
+      // fw#390 section 19: the dashboard at the one moment it helps, once.
+      const nudge = dashboardNudge(
+        {
           loggedIn: readCredentials() !== null,
+          unanswered: data.timedOut ?? 0,
           asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
-          workspaceGoverned,
-        }),
+          team: () => teamProject(observeAudit(LOCAL_AUDIT_LOG).projects),
+        },
+        readShownNudges()
+      );
+      if (nudge) markNudgeShown(nudge.key);
+      const appLines = [
+        ...appsReportLines(readAppsFile(), appliedShields, { workspaceGoverned }),
+        ...(nudge ? [nudge.line] : []),
         // fw#390 phase 4: the smallest change that stops a question a person
         // keeps approving. Never applied by itself.
         ...suggestionLines(

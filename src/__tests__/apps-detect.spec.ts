@@ -171,21 +171,11 @@ describe('appsReportLines', () => {
     links: {},
   };
   it('names what is protected and what a person turned off', () => {
-    const lines = appsReportLines(file, ['stripe'], { loggedIn: true, asked: 3 });
+    const lines = appsReportLines(file, ['stripe']);
     expect(lines[0]).toContain('Stripe');
     expect(lines[1]).toContain('Redis');
   });
-  it('suggests the dashboard only when not logged in and asked often', () => {
-    expect(
-      appsReportLines(file, ['stripe'], { loggedIn: false, asked: 9 }).join('\n')
-    ).not.toContain('node9 login');
-    expect(appsReportLines(file, ['stripe'], { loggedIn: false, asked: 10 }).join('\n')).toContain(
-      'node9 login'
-    );
-    expect(
-      appsReportLines(file, ['stripe'], { loggedIn: true, asked: 50 }).join('\n')
-    ).not.toContain('node9 login');
-  });
+  // When to suggest the dashboard: nudges.spec.ts.
 });
 
 describe('applyDetection on a machine the workspace manages', () => {

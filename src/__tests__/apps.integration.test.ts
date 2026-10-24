@@ -174,6 +174,39 @@ describe.skipIf(process.platform === 'win32')('node9 report: tune from the event
   });
 });
 
+// fw#390 section 19: the dashboard is suggested at the moment it helps, once.
+describe('node9 report suggests the dashboard once', () => {
+  it('questions nobody answered: one line, recorded, not repeated', () => {
+    const home = makeHome('node9-apps-nudge-');
+    homes.push(home);
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    const ts = new Date().toISOString();
+    const rows = [1, 2, 3].map((i) => ({
+      ts,
+      tool: 'Bash',
+      args: { command: `rm -rf build${i}` },
+      decision: 'deny',
+      checkedBy: 'timeout',
+      // A card nobody answered: the daemon's timer decided (approval-card design).
+      source: 'daemon',
+      decidedBy: 'timer',
+      sessionId: `s${i}`,
+    }));
+    fs.appendFileSync(
+      path.join(home, '.node9', 'audit.log'),
+      rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
+    );
+    const first = runCli(home, ['report']);
+    expect(first.error).toBeUndefined();
+    expect(first.status, first.stderr).toBe(0);
+    expect(first.stdout).toContain('questions waited with nobody to answer');
+    expect(Object.keys(read(home, 'nudges.json'))).toEqual(['dashboard-unanswered']);
+    const second = runCli(home, ['report']);
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stdout).not.toContain('questions waited with nobody to answer');
+  });
+});
+
 // fw#390 phase 4, end to end on a workspace-managed machine: the workspace
 // mandates Stripe by name (pinned) and sets its refund row to Log from the
 // dashboard ("stop asking"). The hook lets a refund through and still asks
