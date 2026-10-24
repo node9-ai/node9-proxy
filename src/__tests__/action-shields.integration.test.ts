@@ -62,6 +62,13 @@ describe.skipIf(process.platform === 'win32')('action shields at the real gate',
     expect(probe(h, 'mcp__okta__list_users', {}).verdict).toBe('allow');
   });
 
+  it('identity on: adding a user to a channel and sharing a file are held', () => {
+    const h = home('identity');
+    expect(probe(h, 'mcp__chat__add_user_to_channel', { user: 'eve' }).verdict).toBe('review');
+    expect(probe(h, 'mcp__drive__share_file', { file_id: '7' }).verdict).toBe('review');
+    expect(probe(h, 'mcp__chat__send_channel_message', { text: 'hi' }).verdict).toBe('allow');
+  });
+
   it('publishing on: both doors, the MCP release and the shell publish', () => {
     const h = home('publishing');
     expect(probe(h, 'mcp__github__create_release', { tag: 'v1' }).verdict).toBe('review');
