@@ -2834,7 +2834,8 @@ function analyzeAgentOutputToEnvInner(
   const reach = triggerReach(wf, raw);
   const untrustedTrigger = reach.untrusted || reach.reusable;
   if (!untrustedTrigger) return [];
-  const inj = new Set(injectableJobs(wf, raw, untrustedTrigger));
+  // Computed once a job has a sink: almost no workflow does.
+  let inj: Set<Job> | null = null;
 
   let best: { severity: Severity; finding: CiFinding } | null = null;
   for (const job of jobList(wf)) {
@@ -2871,6 +2872,7 @@ function analyzeAgentOutputToEnvInner(
     const pat = usesPatIn([job]) || secrets.some((s) => GITHUB_PAT_NAME_RE.test(s));
     const codeWrite = hasCodeWritePerm(wf, [job]);
     const prWrite = hasPrWritePerm(wf, [job]);
+    inj ??= new Set(injectableJobs(wf, raw, untrustedTrigger));
     const gated = !inj.has(job);
     let severity: Severity =
       codeWrite || pat ? 'critical' : secrets.length || cloud || prWrite ? 'high' : 'medium';

@@ -136,3 +136,80 @@ describe('gap 4: reading the shell', () => {
     expect(Date.now() - t).toBeLessThan(3_000);
   });
 });
+
+describe('gap 4: review fixes (2026-10-24)', () => {
+  const cli = /claude\s+-p/;
+  const sinks = (steps: Parameters<typeof agentOutputSinks>[0]) =>
+    agentOutputSinks([...steps, { run: 'next', agent: null }], cli).length;
+
+  it('a prompt that names jq or tr does not clean the answer', () => {
+    expect(
+      sinks([
+        {
+          run: 'R=$(claude -p "Use jq and tr -d to read it")\necho "V=$R" >> $GITHUB_ENV',
+          agent: 'run',
+        },
+      ])
+    ).toBe(1);
+  });
+
+  it('an inline env assignment is not a fixed name for the written line', () => {
+    expect(
+      sinks([
+        { run: 'claude -p "x" > o.txt', agent: 'run' },
+        { run: "LC_ALL=C tr -d '\\n' < o.txt >> $GITHUB_ENV", agent: null },
+      ])
+    ).toBe(1);
+  });
+
+  it('a shell heredoc body line under a fixed name, one-line value: no finding', () => {
+    expect(
+      sinks([
+        { run: 'claude -p "x" > o.txt', agent: 'run' },
+        { run: 'V=$(head -n 1 o.txt)\ncat <<EOF >> $GITHUB_ENV\nSUMMARY=$V\nEOF', agent: null },
+      ])
+    ).toBe(0);
+  });
+
+  it('non-text outputs of an agent action are not its answer', () => {
+    const write = (out: string) => [
+      { id: 'claude', agent: 'action' as const },
+      { run: `echo "X=\${{ steps.claude.outputs.${out} }}" >> $GITHUB_ENV`, agent: null },
+    ];
+    expect(sinks(write('branch_name'))).toBe(0);
+    expect(sinks(write('execution_file'))).toBe(0);
+    expect(sinks(write('result'))).toBe(1);
+  });
+
+  it('a path output read with jq -r is the answer', () => {
+    expect(
+      sinks([
+        { id: 'claude', agent: 'action' },
+        {
+          run: 'echo "R=$(jq -r \'.[-1].result\' ${{ steps.claude.outputs.execution_file }})" >> $GITHUB_ENV',
+          agent: null,
+        },
+      ])
+    ).toBe(1);
+  });
+
+  it('a `>` inside a quoted message is not a redirect', () => {
+    expect(
+      sinks([
+        { run: 'R=$(claude -p "x")\necho "score > 5 for $R"', agent: 'run' },
+        { run: 'echo "Y=$(cat 5)" >> $GITHUB_ENV', agent: null },
+      ])
+    ).toBe(0);
+  });
+
+  it('a long chain of tainted copies over many steps stays fast', () => {
+    const chain = Array.from({ length: 3000 }, (_, i) => `cat f${i} > f${i + 1}`).join('\n');
+    const steps = [
+      { run: 'claude -p "x" > f0', agent: 'run' as const },
+      ...Array.from({ length: 50 }, () => ({ run: chain, agent: null })),
+    ];
+    const t = Date.now();
+    agentOutputSinks(steps, cli);
+    expect(Date.now() - t).toBeLessThan(3_000);
+  });
+});

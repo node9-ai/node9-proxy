@@ -43,6 +43,11 @@ export interface EnvSink {
 const RUN_MAX = 100_000;
 const LINES_MAX = 4_000;
 const PASSES = 3;
+// Tainted files and variables kept per job, commands read per job, lines looked back for a block
+// opener: the scanned text is attacker-controlled, and these keep one job linear in practice.
+const TAINT_MAX = 256;
+const COMMANDS_MAX = 40_000;
+const LOOKBACK = 200;
 
 // ── reading a run block into commands ───────────────────────────────────────
 
@@ -247,12 +252,40 @@ function isSpecialTarget(p: string): boolean {
   return /^(\/dev\/|&|\$\{?GITHUB_(ENV|PATH|OUTPUT|STEP_SUMMARY|STATE)\b|\$env:)/i.test(p);
 }
 
+/** The text with what is inside quotes blanked, same length: a `>` in a message is no redirect,
+ *  and a match index still points into the original. */
+function maskQuoted(text: string): string {
+  let out = '';
+  let quote: '"' | "'" | null = null;
+  for (const c of text) {
+    if (quote) {
+      if (c === quote) {
+        quote = null;
+        out += c;
+      } else out += c === '\n' ? c : '_';
+    } else {
+      if (c === '"' || c === "'") quote = c;
+      out += c;
+    }
+  }
+  return out;
+}
+
 /** The files a command writes its output to. */
 function writeTargets(cmd: string): string[] {
   const out: string[] = [];
   const { outer } = substitutions(cmd);
-  for (const m of outer.matchAll(REDIRECT_RE)) out.push(m[2]);
-  for (const m of outer.matchAll(TEE_RE)) out.push(m[3]);
+  const masked = maskQuoted(outer);
+  // Match on the masked text, read the target from the original (`> "$OUT"`).
+  for (const m of masked.matchAll(REDIRECT_RE)) {
+    const start = (m.index ?? 0) + m[0].length - m[2].length - m[1].length * 2;
+    const raw = outer.slice(start, (m.index ?? 0) + m[0].length);
+    out.push(raw);
+  }
+  for (const m of masked.matchAll(TEE_RE)) {
+    const start = (m.index ?? 0) + m[0].length - m[3].length - m[2].length * 2;
+    out.push(outer.slice(start, (m.index ?? 0) + m[0].length));
+  }
   return out.map(normPath).filter((p) => p && !isSpecialTarget(p) && !/^\$SUB\d+$/.test(p));
 }
 
@@ -265,6 +298,42 @@ const STRIP_RE =
 const JQ_RE = /\bjq\b((?:\s+-{1,2}[a-zA-Z][\w-]{0,30})*)/g;
 
 /** The last transform in `text` decides: a number (null), one line, or raw text. */
+/** Pipeline stages of a command: split at a top-level `|` (not `||`) outside quotes. */
+function pipelineStages(cmd: string): string[] {
+  const out: string[] = [];
+  let buf = '';
+  let quote: '"' | "'" | null = null;
+  let depth = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '(') depth++;
+    else if (c === ')' && depth > 0) depth--;
+    else if (c === '|' && depth === 0 && cmd[i + 1] !== '|' && cmd[i - 1] !== '|') {
+      out.push(buf);
+      buf = '';
+      continue;
+    }
+    buf += c;
+  }
+  out.push(buf);
+  return out;
+}
+
+/** The transform that decides a command's output. The agent's own stage is skipped, and so is
+ *  everything before it: its arguments are a prompt, which may well mention `jq` or `tr`. */
+function transformOf(cmd: string, agentLine: RegExp | null): { level: Level | null } | null {
+  if (!agentLine) return lastTransform(cmd);
+  const stages = pipelineStages(cmd);
+  let last = -1;
+  stages.forEach((st, i) => {
+    if (agentLine.test(st)) last = i;
+  });
+  return lastTransform(stages.slice(last + 1).join(' | '));
+}
+
 function lastTransform(text: string): { at: number; level: Level | null } | null {
   let best: { at: number; level: Level | null } | null = null;
   const take = (at: number, level: Level | null) => {
@@ -282,6 +351,12 @@ function lastTransform(text: string): { at: number; level: Level | null } | null
 
 const max = (a: Level | null, b: Level | null): Level | null =>
   a === 'full' || b === 'full' ? 'full' : (a ?? b);
+
+// Agent action outputs that are not the agent's text (claude-code-action's branch and session).
+const NON_TEXT_OUTPUT_RE =
+  /^(branch_name|session_id|github_token|conclusion|exit_code|exit-code)$/i;
+const PATH_OUTPUT_RE = /[_-](file|path)$/i;
+const READER_RE = /\b(cat|jq|yq|head|tail|grep|sed|awk|cut|python3?|node)\b|<\s*["']?\$\{\{/;
 
 interface Taint {
   vars: Map<string, Level>;
@@ -304,9 +379,12 @@ function directSources(text: string, t: Taint): { level: Level | null; at: numbe
     const l = t.vars.get(m[1]) ?? t.fileVars.get(m[1]);
     if (l) hit(l, m.index ?? 0);
   }
-  for (const m of text.matchAll(/steps\.([\w-]{1,100})\.outputs\./g)) {
+  for (const m of text.matchAll(/steps\.([\w-]{1,100})\.outputs\.([\w-]{0,100})/g)) {
     const l = t.outputs.get(m[1]);
-    if (l) hit(l, m.index ?? 0);
+    if (!l || NON_TEXT_OUTPUT_RE.test(m[2])) continue;
+    // A path output (`execution_file`) is the agent's text only where a command reads it.
+    if (PATH_OUTPUT_RE.test(m[2]) && !READER_RE.test(text)) continue;
+    hit(l, m.index ?? 0);
   }
   if (t.files.size) {
     const norm = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, '$$$1').replace(/["']/g, '');
@@ -338,7 +416,7 @@ export function levelOf(cmd: string, t: Taint): { level: Level | null; at: numbe
   const subLevels = subs.map((s) => {
     const d = directSources(s, t);
     if (!d.level) return null;
-    const tr = lastTransform(s);
+    const tr = transformOf(s, t.agentLine);
     // The last transform decides what is left: a number, one line, or raw text.
     return tr ? tr.level : d.level;
   });
@@ -355,7 +433,7 @@ export function levelOf(cmd: string, t: Taint): { level: Level | null; at: numbe
   }
   if (!level) return { level: null, at };
   // A pipeline after the sources: `cat f | tr -d '\n' >> "$GITHUB_ENV"`.
-  const tr = lastTransform(outer);
+  const tr = transformOf(outer, t.agentLine);
   if (tr) level = tr.level;
   return { level, at };
 }
@@ -385,7 +463,10 @@ function echoes(delim: string, isVar: boolean): RegExp {
   const d = isVar ? `\\$\\{?${delim}\\}?` : delim;
   return new RegExp(`(?:^|[\\s;{])echo\\s+["']?${d}["']?\\s*(?:[>;}]|$)`, 'm');
 }
-const FIXED_NAME_RE = /[A-Za-z_][A-Za-z0-9_]{0,100}(?:=|<<)/;
+// The written line starts with a name the workflow chose: `echo "NAME=…"`, `printf 'NAME=…'`, or
+// a line of a shell heredoc body. An inline env assignment (`LC_ALL=C tr …`) is not one.
+const FIXED_NAME_RE =
+  /\b(?:echo|printf)(?:\s+-[a-zA-Z]+)*\s+["']?[A-Za-z_][A-Za-z0-9_]{0,100}(?:=|<<)|\n[ \t]*[A-Za-z_][A-Za-z0-9_]{0,100}(?:=|<<)/;
 // The binary followed by an argument, not the word in a message (`echo "MODEL=claude"`).
 const LOOSE_AGENT_RE = /(?:^|[\s;&|(])(?:claude|aider|codex|gemini)\s+[-"'$]/i;
 
@@ -397,6 +478,12 @@ const BLOCK_OPEN: Record<string, RegExp> = {
   done: /^\s*(?:for|while|until)\b/,
   fi: /^\s*if\b/,
 };
+
+/** Raise a name's level, up to TAINT_MAX names per map. */
+function taint(m: Map<string, Level>, k: string, l: Level): void {
+  if (!m.has(k) && m.size >= TAINT_MAX) return;
+  m.set(k, max(m.get(k) ?? null, l) as Level);
+}
 
 function envFilePaths(env: Record<string, unknown> | undefined, files: Map<string, Level>) {
   const out = new Map<string, Level>();
@@ -416,6 +503,7 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
   const outputs = new Map<string, Level>();
   const sinks: EnvSink[] = [];
   const agentRe = new RegExp(agentCli.source, agentCli.flags.replace('g', ''));
+  let budget = COMMANDS_MAX;
 
   steps.forEach((st, idx) => {
     if (st.agent === 'action') {
@@ -455,8 +543,9 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
         fileVars: envFilePaths(st.env, files),
         agentLine,
       };
-      for (let li = 0; li < lines.length; li++) {
+      for (let li = 0; li < lines.length && budget > 0; li++) {
         for (const cmd of commandsOf(lines[li])) {
+          if (--budget < 0) break;
           const isAgentCmd = !!agentLine && agentLine.test(cmd);
           const target = sinkTarget(cmd);
           if (target) {
@@ -465,7 +554,7 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
             const close = BLOCK_CLOSE_RE.exec(cmd);
             if (close) {
               const opener = BLOCK_OPEN[close[1]];
-              for (let k = li - 1; k >= 0; k--) {
+              for (let k = li - 1; k >= Math.max(0, li - LOOKBACK); k--) {
                 if (opener.test(lines[k])) {
                   parts = lines.slice(k, li).flatMap(commandsOf).concat(cmd);
                   break;
@@ -511,7 +600,7 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
           if (loopFile) {
             const l = levelOf(loopFile[0], t).level;
             if (l) {
-              for (let k = li; k >= 0; k--) {
+              for (let k = li; k >= Math.max(0, li - LOOKBACK); k--) {
                 const w = WHILE_READ_RE.exec(lines[k]);
                 if (!w) continue;
                 for (const v of w[1].trim().split(/\s+/))
@@ -526,7 +615,7 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
           if (assign) {
             const rhs = cmd.slice(assign[0].length);
             if (RANDOM_RE.test(rhs)) randomVars.add(assign[1]);
-            if (level) vars.set(assign[1], max(vars.get(assign[1]) ?? null, level) as Level);
+            if (level) taint(vars, assign[1], level);
           }
           const read = READ_RE.exec(cmd);
           if (read && level && !/-d/.test(read[1])) {
@@ -535,11 +624,11 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
           }
           if (level || isAgentCmd) {
             const l: Level = isAgentCmd ? 'full' : (level as Level);
-            for (const p of writeTargets(cmd)) files.set(p, max(files.get(p) ?? null, l) as Level);
+            for (const p of writeTargets(cmd)) taint(files, p, l);
             if (isAgentCmd)
               for (const m of cmd.matchAll(OUTPUT_FLAG_RE)) {
                 const p = normPath(m[2]);
-                if (p && !isSpecialTarget(p)) files.set(p, 'full');
+                if (p && !isSpecialTarget(p)) taint(files, p, 'full');
               }
             if (st.id && OUTPUT_TARGET_RE.test(cmd))
               outputs.set(st.id, max(outputs.get(st.id) ?? null, l) as Level);
@@ -550,7 +639,7 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
       for (const [k, v] of Object.entries(st.env ?? {})) {
         if (typeof v !== 'string') continue;
         const l = files.get('$' + k);
-        if (l && !files.has(normPath(v.trim()))) files.set(normPath(v.trim()), l);
+        if (l && !files.has(normPath(v.trim()))) taint(files, normPath(v.trim()), l);
       }
       if (vars.size + files.size + outputs.size === before) break;
     }
