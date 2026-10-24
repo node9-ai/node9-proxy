@@ -225,3 +225,44 @@ describe('a command word spelt with look-alike letters meets the same rule (fw#3
     expect(folded.decision).toBe(plain.decision);
   });
 });
+
+// fw#390: a shield the workspace mandates by name is pinned; its pack rows
+// follow the workspace's own value ("stop asking" from the dashboard) and
+// nothing else, so a local value still cannot weaken the mandate.
+describe('a pinned, mandated pack rule', () => {
+  const PINNED_REFUND: SmartRule = {
+    name: 'shield:stripe:review-refund',
+    tool: '{,mcp__*__}create_refund',
+    server: '*stripe*',
+    conditions: [],
+    verdict: 'review',
+    reason: 'refund',
+    builtin: true,
+    pinned: true,
+  } as SmartRule;
+  const cfgPinned = (
+    checks: Record<string, string>,
+    checkSources: Record<string, 'local' | 'project' | 'workspace'>
+  ) => cfg(checks, { smartRules: [PINNED_REFUND], checkSources });
+  const refund = (config: PolicyConfig) =>
+    evaluatePolicy(config, 'mcp__stripe__create_refund', { amount: 1 }, { agent: 'Claude Code' });
+
+  it('the workspace value applies: log lets it through, logged', async () => {
+    const v = await refund(
+      cfgPinned({ 'packs.stripe.refund': 'log' }, { 'packs.stripe.refund': 'workspace' })
+    );
+    expect(v.decision).toBe('allow');
+  });
+
+  it('a local value does not touch it', async () => {
+    const v = await refund(
+      cfgPinned({ 'packs.stripe.refund': 'off' }, { 'packs.stripe.refund': 'local' })
+    );
+    expect(v.decision).toBe('review');
+  });
+
+  it('no value: the mandate as shipped', async () => {
+    const v = await refund(cfgPinned({}, {}));
+    expect(v.decision).toBe('review');
+  });
+});

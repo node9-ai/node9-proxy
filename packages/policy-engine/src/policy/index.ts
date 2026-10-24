@@ -100,6 +100,9 @@ export interface PolicyConfig {
      * shape by hand; the catalog then answers from those knobs.
      */
     checks?: Record<string, string>;
+    /** Where each `checks` value came from (the host's resolution). A pinned,
+     *  cloud-mandated pack rule follows only a `workspace` value (fw#390). */
+    checkSources?: Record<string, 'local' | 'project' | 'workspace'>;
   };
   settings: {
     mode: string;
@@ -733,11 +736,20 @@ async function evaluatePolicyCore(
       // Only a rule the host shipped (`builtin`) follows the catalog; a user
       // rule that reuses a shipped name keeps its own verdict. A cloud-pinned
       // mandate is the organisation's; a local value must not touch it.
-      if (!rule.builtin || rule.pinned) return undefined;
+      if (!rule.builtin) return undefined;
       const id = checkIdForRule(rule.name);
       if (!id) return undefined;
       const def = getCheck(id);
       if (!def) return undefined;
+      if (rule.pinned) {
+        // fw#390: the organisation's own value for the pack row of a shield it
+        // mandates by name (its rules carry a server scope rows cannot hold)
+        // does apply: "stop asking" from the dashboard. Nothing else does.
+        const explicit = config.policy.checks?.[id];
+        return def.pack && config.policy.checkSources?.[id] === 'workspace' && isVerdict(explicit)
+          ? { id, value: explicit }
+          : undefined;
+      }
       // A shield's rule carries its own verdict (and any `node9 shield set`
       // override). Only an explicit pack-row entry governs it; a shield rule
       // folded into a product check (filesystem's chmod) keeps its verdict.

@@ -5,7 +5,16 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { CLI, makeHome, runCli, probe, cleanup, writeConfig } from './helpers/gauntlet';
+import {
+  CLI,
+  makeHome,
+  runCli,
+  probe,
+  cleanup,
+  writeConfig,
+  writeCloudCache,
+} from './helpers/gauntlet';
+import { writeKeyedHome } from './helpers/env';
 
 const SECRET = 'sk_live_' + 'Z9y8X7w6V5u4T3s2R1q0P9o8';
 const homes: string[] = [];
@@ -162,5 +171,35 @@ describe.skipIf(process.platform === 'win32')('node9 report: tune from the event
     expect(r.error).toBeUndefined();
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain('node9 apps stripe refunds allow --force');
+  });
+});
+
+// fw#390 phase 4, end to end on a workspace-managed machine: the workspace
+// mandates Stripe by name (pinned) and sets its refund row to Log from the
+// dashboard ("stop asking"). The hook lets a refund through and still asks
+// about a payout; a local value could not have done that.
+describe.skipIf(process.platform === 'win32')('a workspace "stop asking" on a mandated app', () => {
+  it('the workspace pack value reaches the gate; the rest of the mandate holds', () => {
+    const home = makeHome('node9-apps-keyed-');
+    homes.push(home);
+    writeKeyedHome(home, { apiUrl: 'http://127.0.0.1:9' });
+    writeConfig(home, {
+      settings: {
+        mode: 'standard',
+        approvalTimeoutMs: 0,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+      policy: {},
+    });
+    writeCloudCache(home, {
+      fetchedAt: '2026-10-24T00:00:00Z',
+      rules: [],
+      shields: ['stripe'],
+      config: { version: '2', checks: { 'packs.stripe.refund': 'log' } },
+    });
+    expect(probe(home, 'mcp__stripe__create_refund', { payment_intent: 'pi_1' }).verdict).toBe(
+      'allow'
+    );
+    expect(probe(home, 'mcp__stripe__create_payout', { amount: 1 }).verdict).toBe('review');
   });
 });
