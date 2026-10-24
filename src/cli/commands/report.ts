@@ -6,6 +6,10 @@
 // is shared with the Report [2] view in `node9 monitor` — this command is
 // just the terminal renderer wrapped around it.
 
+import { appsReportLines } from '../../apps/report';
+import { readAppsFile } from '../../apps/state';
+import { readActiveShields } from '../../shields';
+import { readCredentials } from '../../daemon/sync';
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { aggregateReportFromAudit, type ResponseDlpEntry } from '../aggregate/report-audit';
@@ -127,6 +131,17 @@ export function registerReportCommand(program: Command): void {
       }
 
       renderTerminalReport(data, responseDlpEntries, excludeTests);
+
+      // fw#390: what node9 found and protects, and the dashboard when it helps.
+      const appLines = appsReportLines(readAppsFile(), readActiveShields(), {
+        loggedIn: readCredentials() !== null,
+        asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
+      });
+      if (appLines.length > 0) {
+        console.log('');
+        for (const line of appLines) console.log('  ' + chalk.cyan(line));
+        console.log('');
+      }
     });
 }
 

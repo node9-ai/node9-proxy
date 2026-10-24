@@ -49,6 +49,7 @@ import type { ExplainResult } from './policy';
 import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand } from './cli/commands/shield';
+import { registerAppsCommand } from './cli/commands/apps';
 import { registerConfigCommand } from './cli/commands/config-cmd';
 import { autoMigrateLocalConfig } from './config/migrate';
 import { registerDoctorCommand } from './cli/commands/doctor';
@@ -912,6 +913,7 @@ registerUndoCommand(program);
 
 // Shield management + config show
 registerShieldCommand(program);
+registerAppsCommand(program);
 registerConfigCommand(program);
 
 // Trusted-host allowlist

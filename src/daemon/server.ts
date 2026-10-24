@@ -1,6 +1,7 @@
 // src/daemon/server.ts
 // HTTP server for the Node9 localhost approval daemon.
 // All route handlers live here; shared state is in daemon/state.ts.
+import { startAppDetection } from '../apps/daemon';
 import http from 'http';
 import { autoMigrateLocalConfig } from '../config/migrate';
 import fs from 'fs';
@@ -286,6 +287,7 @@ export function startDaemon(): void {
     startOsvSync();
     startMcpReconciler();
     startHookHeal();
+    startAppDetection(); // fw#390: found = protected
     loadInsightCounts(); // restore persisted nudge counters across restarts
   } catch (err) {
     // Preserve the FULL stack: to stderr (captured by the auto-start path's fd

@@ -1,0 +1,184 @@
+// Finding apps from names only (node9Firewall#390, phase 2): MCP server
+// labels and programs in the audit log, dependency names in a project's
+// manifests, env var NAMES in its .env files. A value never comes back.
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import {
+  programsOf,
+  observeAudit,
+  projectPackages,
+  projectEnvNames,
+  matchApps,
+} from '../apps/detect';
+import { appsReportLines } from '../apps/report';
+
+const dirs: string[] = [];
+function tmp(): string {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-apps-'));
+  dirs.push(d);
+  return d;
+}
+afterEach(() => {
+  for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+});
+
+const SECRET = 'sk_live_' + 'A1b2C3d4E5f6G7h8I9j0K1l2';
+
+describe('programsOf: the program each command segment runs', () => {
+  it.each([
+    ['psql -h db -c "select 1"', ['psql']],
+    ['STRIPE_API_KEY=x stripe refunds create', ['stripe']],
+    ['sudo -E redis-cli FLUSHALL', ['redis-cli']],
+    ['cd x && /usr/local/bin/kubectl get pods | grep api', ['cd', 'kubectl', 'grep']],
+    ['npx stripe listen', ['stripe']],
+    ['', []],
+  ])('%s', (cmd, want) => {
+    expect(programsOf(cmd)).toEqual(want);
+  });
+});
+
+describe('observeAudit', () => {
+  it('reads MCP servers, Bash programs and working directories, newest first', () => {
+    const d = tmp();
+    const audit = path.join(d, 'audit.log');
+    const rows = [
+      { tool: 'Bash', argsPreview: 'psql -c "select 1"', workingDir: '/srv/old' },
+      { tool: 'mcp__stripe__list_customers', argsPreview: '{}', workingDir: '/srv/shop' },
+      { tool: 'create_refund', mcpServer: 'PayPal-Live', workingDir: '/srv/shop' },
+      'not json',
+    ];
+    fs.writeFileSync(
+      audit,
+      rows.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n')
+    );
+    const obs = observeAudit(audit);
+    expect([...obs.servers].sort()).toEqual(['paypal-live', 'stripe']);
+    expect(obs.commands.has('psql')).toBe(true);
+    expect(obs.projects).toEqual(['/srv/shop', '/srv/old']);
+  });
+
+  it('a missing log observes nothing', () => {
+    const obs = observeAudit(path.join(tmp(), 'nope.log'));
+    expect(obs.servers.size + obs.commands.size + obs.projects.length).toBe(0);
+  });
+});
+
+describe('a project: dependency names and env NAMES, never values', () => {
+  it('reads package.json, requirements.txt and pyproject.toml', () => {
+    const d = tmp();
+    fs.writeFileSync(
+      path.join(d, 'package.json'),
+      JSON.stringify({
+        dependencies: { stripe: '^14', express: '^4' },
+        devDependencies: { '@aws-sdk/client-s3': '^3' },
+      })
+    );
+    fs.writeFileSync(
+      path.join(d, 'requirements.txt'),
+      '# deps\nboto3==1.34\n-r other.txt\npsycopg2-binary\n'
+    );
+    fs.writeFileSync(
+      path.join(d, 'pyproject.toml'),
+      '[project]\ndependencies = ["pymongo>=4", "httpx"]\n[tool.poetry.dependencies]\npython = "^3.11"\nredis = "^5"\n'
+    );
+    const pk = projectPackages(d);
+    for (const n of [
+      'stripe',
+      'express',
+      '@aws-sdk/client-s3',
+      'boto3',
+      'psycopg2-binary',
+      'pymongo',
+      'redis',
+    ])
+      expect(pk.has(n), n).toBe(true);
+    expect(pk.has('python')).toBe(false);
+  });
+
+  it('keeps the name of every .env line and drops its value', () => {
+    const d = tmp();
+    fs.writeFileSync(
+      path.join(d, '.env'),
+      `STRIPE_SECRET_KEY=${SECRET}\nexport DATABASE_URL="postgres://u:p@h/db"\n# comment\n`
+    );
+    const names = projectEnvNames(d);
+    expect([...names].sort()).toEqual(['DATABASE_URL', 'STRIPE_SECRET_KEY']);
+  });
+});
+
+describe('matchApps', () => {
+  it('names each app with how it was found, and no value', () => {
+    const d = tmp();
+    fs.writeFileSync(
+      path.join(d, 'package.json'),
+      JSON.stringify({ dependencies: { stripe: '^14' } })
+    );
+    fs.writeFileSync(path.join(d, '.env'), `STRIPE_SECRET_KEY=${SECRET}\nPAYPAL_CLIENT_ID=abc\n`);
+    const found = matchApps(
+      { servers: new Set(['redis-prod']), commands: new Set(['psql', 'git']), projects: [d] },
+      [{ dir: d, packages: projectPackages(d), envNames: projectEnvNames(d) }]
+    );
+    const bySlug = Object.fromEntries(found.map((f) => [f.slug, f.signals]));
+    expect(Object.keys(bySlug).sort()).toEqual(['paypal', 'postgres', 'redis', 'stripe']);
+    expect(bySlug.stripe.map((s) => `${s.kind}:${s.value}`)).toEqual([
+      'package:stripe',
+      'env-name:STRIPE_SECRET_KEY',
+    ]);
+    expect(JSON.stringify(found)).not.toContain(SECRET);
+    // git is everywhere and names no app.
+    expect(bySlug.github).toBeUndefined();
+  });
+});
+
+describe('appsReportLines', () => {
+  const file = {
+    version: 1 as const,
+    apps: {
+      stripe: { state: 'on' as const, by: 'detected' as const, at: '', signals: [] },
+      redis: { state: 'off' as const, by: 'user' as const, at: '', signals: [] },
+    },
+    links: {},
+  };
+  it('names what is protected and what a person turned off', () => {
+    const lines = appsReportLines(file, ['stripe'], { loggedIn: true, asked: 3 });
+    expect(lines[0]).toContain('Stripe');
+    expect(lines[1]).toContain('Redis');
+  });
+  it('suggests the dashboard only when not logged in and asked often', () => {
+    expect(
+      appsReportLines(file, ['stripe'], { loggedIn: false, asked: 9 }).join('\n')
+    ).not.toContain('node9 login');
+    expect(appsReportLines(file, ['stripe'], { loggedIn: false, asked: 10 }).join('\n')).toContain(
+      'node9 login'
+    );
+    expect(
+      appsReportLines(file, ['stripe'], { loggedIn: true, asked: 50 }).join('\n')
+    ).not.toContain('node9 login');
+  });
+});
+
+describe('applyDetection on a machine the workspace manages', () => {
+  it('records what it found and turns no shield on', async () => {
+    const home = tmp();
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      vi.resetModules();
+      const state = await import('../apps/state.js');
+      const shields = await import('../shields.js');
+      const res = state.applyDetection(
+        [{ slug: 'stripe', signals: [{ kind: 'package', value: 'stripe' }] }],
+        { managed: true, home }
+      );
+      expect(res).toEqual({ turnedOn: [], recordedOnly: ['stripe'] });
+      expect(state.readAppsFile(home).apps.stripe.state).toBe('on');
+      expect(shields.readActiveShields()).not.toContain('stripe');
+    } finally {
+      process.env.HOME = prevHome;
+      vi.resetModules();
+    }
+  });
+});
