@@ -339,6 +339,10 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'commands.dangerous-word',
   'commands.node9-disarm',
   'data.pipe-chain',
+  // The general action checks (node9Firewall#390): smart rules the map governs.
+  'actions.money',
+  'actions.access',
+  'actions.publish',
 ]);
 
 /**

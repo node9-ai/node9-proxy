@@ -82,6 +82,26 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     example: 'chmod 777 deploy.sh',
     advice: 'Keep Review. A narrower permission (755, 644) almost always does the job.',
   },
+  'actions.money': {
+    plain:
+      'The agent moves money (a refund, a payout, a transfer, a charge) through an app node9 has no protection for, such as an internal billing server.',
+    example: 'refund_order on a server called acme-billing',
+    advice:
+      'Keep Review. When the app is Stripe or PayPal, turn on its own protection instead: it covers the CLI, the API and scripts too, and a call from it no longer comes here.',
+  },
+  'actions.access': {
+    plain:
+      'The agent changes a password, a key, a role or who belongs to a team, through an app node9 has no protection for.',
+    example: 'invite_user or grant_role on a company admin server',
+    advice: 'Keep Review. Set Log on a sandbox workspace where agents manage test users all day.',
+  },
+  'actions.publish': {
+    plain:
+      'The agent publishes something outside the organisation (a release, a package, a deploy, a public post) through an app node9 has no protection for.',
+    example: 'create_release or deploy_to_production on a company MCP server',
+    advice:
+      'Keep Review. Set Log on a release machine whose pipeline publishes on purpose, never on a developer laptop.',
+  },
   'commands.sudo': {
     plain: 'The agent runs a command as the administrator (root).',
     example: 'sudo apt-get install -y nginx',

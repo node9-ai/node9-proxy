@@ -36,7 +36,13 @@ import {
   extractShellDestinations,
   type ShellCommandAnalysis,
 } from '../shell';
-import { matchesPattern, evaluateSmartConditions, getNestedValue } from '../rules';
+import {
+  matchesPattern,
+  evaluateSmartConditions,
+  getNestedValue,
+  mcpServerFromToolName,
+  ruleServerMatches,
+} from '../rules';
 import { analyzePipeChain } from './pipe-chain';
 import { extractAllSshHosts } from './ssh-parser';
 import { evaluateEgress, type EgressPolicy, type EgressVerdict } from '../egress';
@@ -130,6 +136,13 @@ export interface PolicyContext extends FileAccessContext {
    * trusted host code; absent means the engine scans.
    */
   argumentScan?: DlpMatch | null;
+  /**
+   * The MCP server label the host resolved for this call (the gateway's
+   * `resolveServerLabel`, the hook's `mcp__<server>__` prefix). Absent: the
+   * engine derives it from a namespaced tool name. Scopes rules that set
+   * `server` / `notServer` (node9Firewall#390).
+   */
+  mcpServer?: string;
 }
 
 export type ProvenanceTrust = 'system' | 'managed' | 'user' | 'suspect' | 'unknown';
@@ -735,8 +748,10 @@ async function evaluatePolicyCore(
       }
       return { id, value: cv(id) };
     };
+    const serverLabel = context.mcpServer ?? mcpServerFromToolName(toolName);
     const matches = config.policy.smartRules.filter((rule) => {
       if (!toolMatchesRule(toolName, rule.tool, layers)) return false;
+      if (!ruleServerMatches(rule, serverLabel)) return false;
       if (astSuppressed(rule)) return false;
       if (rmCleanupWaiver && rule.name === 'review-rm' && rule.verdict === 'review') return false;
       if (!evaluateSmartConditions(shellRuleArgs(toolName, args, rule.tool, layers), rule))

@@ -693,6 +693,7 @@ async function _authorizeHeadlessCore(
       config,
       skipIgnoredFastPath,
       argumentScan: argScan,
+      mcpServer: meta?.mcpServer,
     });
     if (!sessionScript || own.decision === 'block') return own;
     // The script's content, judged as a Bash command of its own; its verdict

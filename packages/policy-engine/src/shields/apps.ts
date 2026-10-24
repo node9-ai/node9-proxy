@@ -1,0 +1,361 @@
+// App shields and the general action checks, generated from action templates
+// (node9Firewall#390).
+//
+// finance.json, identity.json and publishing.json are TEMPLATES: the list of
+// actions that move money, change access or publish, named the way MCP
+// servers name their tools. They are no longer shields of their own. Two
+// things are built from them:
+//
+//  1. An app shield per app (Stripe, PayPal): every template rule scoped to
+//     that app's MCP server (`server`), plus the app's other doors: its CLI,
+//     its API host, its library in a script the agent wrote. One app, one
+//     shield: turning Stripe off never touches PayPal.
+//  2. The general action checks (actions.money, actions.access,
+//     actions.publish): the same template rules for every server NO app
+//     shield claims (`notServer`), on by default as a safety net for an
+//     internal billing server, a vendor without a shield, Zapier.
+//
+// A claimed server stays out of the general checks even while its app shield
+// is off, so "off" on an app means quiet.
+
+import type { SmartRule } from '../types';
+import finance from './builtin/finance.json';
+import identity from './builtin/identity.json';
+import publishing from './builtin/publishing.json';
+
+export type ActionTemplateName = 'finance' | 'identity' | 'publishing';
+
+interface TemplateFile {
+  smartRules: SmartRule[];
+}
+
+export const ACTION_TEMPLATES: Readonly<Record<ActionTemplateName, readonly SmartRule[]>> = {
+  finance: (finance as TemplateFile).smartRules,
+  identity: (identity as TemplateFile).smartRules,
+  publishing: (publishing as TemplateFile).smartRules,
+};
+
+/** The general check each template feeds, and the word its rules carry. */
+export const ACTION_CHECKS: Readonly<
+  Record<ActionTemplateName, { checkId: string; slug: string; label: string }>
+> = {
+  finance: { checkId: 'actions.money', slug: 'money', label: 'Money check' },
+  identity: { checkId: 'actions.access', slug: 'access', label: 'Accounts and access check' },
+  publishing: { checkId: 'actions.publish', slug: 'publish', label: 'Publishing check' },
+};
+
+/** A template rule that names MCP tools (the shell rules of publishing do not). */
+function isToolRule(rule: SmartRule): boolean {
+  return rule.tool.startsWith('{,mcp__*__}');
+}
+
+/** `shield:finance:review-refund` -> `review-refund`. */
+function actionPart(ruleName: string | undefined): string {
+  const m = /^shield:[^:]+:(.+)$/.exec(ruleName ?? '');
+  return m ? m[1] : (ruleName ?? 'rule');
+}
+
+/** Swap the template's trailing "(Finance shield)" for the new owner. */
+function ownReason(reason: string | undefined, owner: string): string | undefined {
+  if (!reason) return reason;
+  return reason.replace(/\((?:Finance|Identity|Publishing) shield\)\.?$/, `(${owner}).`);
+}
+
+// ── Apps ─────────────────────────────────────────────────────────────────────
+
+// Bounded gap between a program and its subcommand: env prefixes, sudo, flags,
+// a path; one command only (; & | end it). Same shape as the publishing rules.
+const GAP = '[^;&|]{0,200}?';
+const prog = (alt: string) => `(?:^|[^\\w-])(?:${alt})(?![\\w-])`;
+// The runtime compiles a rule regex only up to 256 characters (utils/regex.ts)
+// and reads a longer one as no match, so a door is split into short
+// conditions, all of which must hold, or into one rule per spelling.
+
+/** An HTTP client in the same command as `host` (one command: ; & | end it). */
+const httpTo = (host: string) => prog('curl|wget|http|https|xh') + '[^;&|]{0,400}?' + host;
+
+/** The command carries a write: a POST or DELETE method, or a body, which
+ *  makes curl send POST. */
+const HTTP_WRITE: SmartRule['conditions'][number] = {
+  field: 'command',
+  op: 'matches',
+  value:
+    '-X\\s*(?:POST|DELETE)|--request[=\\s]+(?:POST|DELETE)|\\s-d[\\s\'"@]|\\s--data|\\s-F\\s|\\s--form\\s|\\s(?:POST|DELETE)\\s',
+  flags: 'i',
+};
+
+interface AppShieldSpec {
+  name: string;
+  label: string;
+  description: string;
+  template: ActionTemplateName;
+  /** Glob for the app's MCP server label (case-insensitive). */
+  server: string;
+  /** The app's other doors, as bash rules (the code door is a session script
+   *  judged as a Bash command, so it is a bash rule too). */
+  doors: SmartRule[];
+}
+
+const STRIPE_OBJECTS =
+  'refunds|payouts|charges|transfers|payment_intents|payment_links|invoices|subscriptions|topups';
+
+export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
+  {
+    name: 'stripe',
+    label: 'Stripe',
+    description:
+      'Asks before money moves in Stripe (refunds, payouts, charges, invoices, subscriptions), whether the agent uses the Stripe MCP server, the stripe CLI, the API or the Stripe library in a script. Reads are never asked about.',
+    template: 'finance',
+    server: '*stripe*',
+    doors: [
+      {
+        name: 'shield:stripe:review-cli',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              prog('stripe') +
+              GAP +
+              `\\s(?:${STRIPE_OBJECTS})\\s+(?:create|cancel|capture|confirm|update|pay|finalize_invoice|send_invoice|void_invoice)(?![\\w-])`,
+            flags: 'i',
+          },
+        ],
+        verdict: 'review',
+        reason: 'The stripe CLI is about to move money. node9 asks before money moves (Stripe).',
+      },
+      {
+        name: 'shield:stripe:review-cli-request',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              prog('stripe') + GAP + `\\s(?:post|delete)\\s+/?v1/(?:${STRIPE_OBJECTS})(?![\\w-])`,
+            flags: 'i',
+          },
+        ],
+        verdict: 'review',
+        reason:
+          'A raw stripe CLI request is about to move money. node9 asks before money moves (Stripe).',
+      },
+      {
+        name: 'shield:stripe:review-api',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: httpTo(`api\\.stripe\\.com/v1/(?:${STRIPE_OBJECTS})(?![\\w-])`),
+            flags: 'i',
+          },
+          HTTP_WRITE,
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'A request to the Stripe API is about to move money. node9 asks before money moves (Stripe).',
+      },
+      {
+        name: 'shield:stripe:review-code',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // Python: stripe.Refund.create(...)
+            value:
+              '\\bstripe\\.(?:Refund|Payout|Transfer|Charge|PaymentIntent|PaymentLink|Invoice|Subscription|Topup)\\.(?:create|cancel|capture|confirm|modify|pay|finalize_invoice|send_invoice|void_invoice)\\b',
+          },
+        ],
+        verdict: 'review',
+        reason:
+          'This code moves money through the Stripe library. node9 asks before money moves (Stripe).',
+      },
+      {
+        name: 'shield:stripe:review-code-node',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // Node: stripe.refunds.create(...)
+            value:
+              '\\bstripe\\.(?:refunds|payouts|transfers|charges|paymentIntents|paymentLinks|invoices|subscriptions|topups)\\.(?:create|cancel|capture|confirm|update|pay|finalizeInvoice|sendInvoice|voidInvoice)\\s*\\(',
+          },
+        ],
+        verdict: 'review',
+        reason:
+          'This code moves money through the Stripe library. node9 asks before money moves (Stripe).',
+      },
+      {
+        name: 'shield:stripe:review-code-http',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // requests.post("https://api.stripe.com/v1/refunds", ...)
+            value: `\\.post\\(\\s*["'\`][^"'\`]{0,80}api\\.stripe\\.com/v1/(?:${STRIPE_OBJECTS})`,
+          },
+        ],
+        verdict: 'review',
+        reason: 'This code posts to the Stripe API. node9 asks before money moves (Stripe).',
+      },
+    ],
+  },
+  {
+    name: 'paypal',
+    label: 'PayPal',
+    description:
+      'Asks before money moves in PayPal (refunds, payouts, captured orders, invoices, subscriptions), whether the agent uses a PayPal MCP server, the API or the PayPal SDK in a script. The sandbox is never asked about, and neither are reads.',
+    template: 'finance',
+    server: '*paypal*',
+    doors: [
+      {
+        name: 'shield:paypal:review-api',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The live hosts only: api.paypal.com and api-m.paypal.com. The
+            // sandbox (api-m.sandbox.paypal.com) moves no money.
+            value: httpTo('api(?:-m)?\\.paypal\\.com/v[12]/'),
+            flags: 'i',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            // The endpoints that move money.
+            value:
+              '\\.paypal\\.com/v[12]/(?:payments/(?:captures|authorizations|sale|payouts|payment|referenced-payouts)|checkout/orders/[^\\s/]{1,64}/(?:capture|authorize)|invoicing/invoices|billing/subscriptions)',
+            flags: 'i',
+          },
+          HTTP_WRITE,
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'A request to the PayPal API is about to move money. node9 asks before money moves (PayPal).',
+      },
+      {
+        name: 'shield:paypal:review-code',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The Node SDKs (checkout-server-sdk, paypal-server-sdk) and the
+            // Python paypalrestsdk.
+            value:
+              '\\b(?:CapturesRefundRequest|OrdersCaptureRequest|AuthorizationsCaptureRequest|PayoutsPostRequest)\\b' +
+              '|\\b(?:captureOrder|refundCapturedPayment|captureAuthorizedPayment|createBatchPayout)\\s*\\(' +
+              '|\\bpaypalrestsdk\\.(?:Payout|Sale|Capture|Invoice|BillingAgreement)\\b',
+          },
+        ],
+        verdict: 'review',
+        reason: 'This code moves money through PayPal. node9 asks before money moves (PayPal).',
+      },
+      {
+        name: 'shield:paypal:review-code-http',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: `\\.post\\(\\s*["'\`][^"'\`]{0,80}api(?:-m)?\\.paypal\\.com/v[12]/`,
+          },
+        ],
+        verdict: 'review',
+        reason: 'This code posts to the PayPal API. node9 asks before money moves (PayPal).',
+      },
+    ],
+  },
+];
+
+export interface GeneratedShield {
+  name: string;
+  description: string;
+  aliases: string[];
+  smartRules: SmartRule[];
+  dangerousWords: string[];
+}
+
+/** The app shield: the template's tool rules scoped to the app's server, and
+ *  the app's own doors. */
+function buildAppShield(spec: AppShieldSpec): GeneratedShield {
+  const owner = spec.label;
+  const toolRules = ACTION_TEMPLATES[spec.template].filter(isToolRule).map((rule): SmartRule => ({
+    ...rule,
+    name: `shield:${spec.name}:${actionPart(rule.name)}`,
+    server: spec.server,
+    reason: ownReason(rule.reason, owner),
+  }));
+  return {
+    name: spec.name,
+    description: spec.description,
+    aliases: [],
+    smartRules: [...toolRules, ...spec.doors],
+    dangerousWords: [],
+  };
+}
+
+export const APP_SHIELDS: readonly GeneratedShield[] = APP_SHIELD_SPECS.map(buildAppShield);
+
+/** The app shields' names. node9 turns one on when it finds the app; a history
+ *  scan with no hit for it does not pitch it. */
+export const APP_SHIELD_NAMES: ReadonlySet<string> = new Set(APP_SHIELD_SPECS.map((s) => s.name));
+
+/** Every MCP server an app shield claims, as one glob: `{*stripe*,*paypal*}`. */
+export const APP_SERVER_GLOB = `{${APP_SHIELD_SPECS.map((s) => s.server).join(',')}}`;
+
+// ── General action checks ────────────────────────────────────────────────────
+
+/**
+ * The rules behind actions.money / actions.access / actions.publish: the
+ * template's MCP tool rules, kept off any server an app shield claims.
+ *
+ * The publishing template's shell rules (npm publish, twine upload, docker
+ * push, gh release) are NOT general: each names a registry, which is an app,
+ * and becomes a door of that app's shield. They stay off by default until
+ * then, as in 2.37.0, which also keeps the exposure gate's decision that a
+ * publish to the project's own registry is logged, not held (node9Firewall#318).
+ */
+function buildGeneralRules(): SmartRule[] {
+  const out: SmartRule[] = [];
+  for (const name of Object.keys(ACTION_TEMPLATES) as ActionTemplateName[]) {
+    const { slug, label } = ACTION_CHECKS[name];
+    for (const rule of ACTION_TEMPLATES[name].filter(isToolRule)) {
+      const part = actionPart(rule.name).replace(/^review-/, '');
+      out.push({
+        ...rule,
+        name: `review-action-${slug}-${part}`,
+        notServer: APP_SERVER_GLOB,
+        reason: ownReason(rule.reason, label),
+      });
+    }
+  }
+  return out;
+}
+
+export const GENERAL_ACTION_RULES: readonly SmartRule[] = buildGeneralRules();
+
+/** Rule names per general check, for the catalog's `legacy` lists. */
+export function generalActionRuleNames(template: ActionTemplateName): string[] {
+  const { slug } = ACTION_CHECKS[template];
+  return GENERAL_ACTION_RULES.filter((r) => r.name?.startsWith(`review-action-${slug}-`)).map(
+    (r) => r.name as string
+  );
+}
+
+/** The three shields 2.37.0 shipped and this release replaces, with what to
+ *  use instead. `node9 shield enable finance` answers with this. */
+export const REPLACED_SHIELDS: Readonly<Record<string, string>> = {
+  finance:
+    'finance is now the Money check (actions.money), on by default. For an app: node9 shield enable stripe (or paypal).',
+  identity: 'identity is now the Accounts and access check (actions.access), on by default.',
+  publishing: 'publishing is now the Publishing check (actions.publish), on by default.',
+};

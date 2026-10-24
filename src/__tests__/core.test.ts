@@ -148,7 +148,8 @@ describe('ignored tool patterns', () => {
 // ── Standard mode — safe tools ────────────────────────────────────────────────
 
 describe('standard mode — safe tools', () => {
-  it.each(['create_user', 'send_notification', 'invoke_lambda', 'start_job'])(
+  // create_user is an access change now (actions.access, node9Firewall#390).
+  it.each(['create_note', 'send_notification', 'invoke_lambda', 'start_job'])(
     'allows "%s" without prompting',
     async (tool) => {
       const confirm = await getConfirm();
@@ -511,7 +512,7 @@ describe('global config (~/.node9/config.json)', () => {
         environments: {},
       }
     );
-    expect((await evaluatePolicy('create_user')).decision).toBe('allow');
+    expect((await evaluatePolicy('create_note')).decision).toBe('allow');
   });
 });
 
@@ -679,7 +680,7 @@ describe('evaluatePolicy — project config', () => {
   });
 
   it('returns "allow" for safe tool in standard mode', async () => {
-    expect((await evaluatePolicy('create_user')).decision).toBe('allow');
+    expect((await evaluatePolicy('create_note')).decision).toBe('allow');
   });
 
   it('respects project-level dangerousWords override', async () => {

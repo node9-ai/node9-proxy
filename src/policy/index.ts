@@ -65,6 +65,9 @@ export async function evaluatePolicy(
     config?: ReturnType<typeof getConfig>;
     /** The gate's scanArgumentSecrets(args) for these arguments, when already computed. */
     argumentScan?: DlpMatch | null;
+    /** The MCP server label the caller resolved (gateway or hook), for rules
+     *  scoped to a server (node9Firewall#390). */
+    mcpServer?: string;
   }
 ): Promise<PolicyVerdict> {
   const config = opts?.config ?? getConfig(cwd);
@@ -82,6 +85,7 @@ export async function evaluatePolicy(
       activeEnvironment,
       skipIgnoredFastPath: opts?.skipIgnoredFastPath,
       argumentScan: opts?.argumentScan,
+      mcpServer: opts?.mcpServer,
     },
     {
       checkProvenance,

@@ -29,6 +29,7 @@ import { normalizeHost } from '../auth/trusted-hosts';
 
 export type { SmartCondition, SmartRule } from '@node9/policy-engine';
 import type { SmartRule } from '@node9/policy-engine';
+import { GENERAL_ACTION_RULES } from '@node9/policy-engine';
 import {
   BUILTIN_DANGEROUS_WORDS,
   CHECK_VERDICT_RANK,
@@ -555,6 +556,11 @@ export const DEFAULT_CONFIG: Config = {
         description:
           'The AI wants to download a script from the internet and run it immediately, without you seeing what it contains. This is one of the most common ways malware gets installed.',
       },
+      // ── Actions in apps (node9Firewall#390) ───────────────────────────────
+      // actions.money / actions.access / actions.publish: the action templates
+      // on every MCP server no app shield claims, plus the shell publishing
+      // rules. Review by default; the check value governs them.
+      ...GENERAL_ACTION_RULES,
     ],
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'block' },
     egress: {

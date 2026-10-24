@@ -27,6 +27,30 @@ export function matchesPattern(text: string, patterns: string[] | string): boole
   return isMatch(withoutDotSlash) || isMatch(`./${withoutDotSlash}`);
 }
 
+/** `<server>` from a `mcp__<server>__<tool>` name: the hook's spelling. Same
+ *  pattern as the gateway's extractMcpServer. */
+export function mcpServerFromToolName(toolName: string): string | undefined {
+  const match = toolName.match(/^mcp__([^_](?:[^_]|_(?!_))*?)__/i);
+  return match?.[1];
+}
+
+/**
+ * Whether a rule's server scope admits a call (node9Firewall#390). `server`
+ * needs a label that matches; `notServer` refuses a label that matches and
+ * admits a call with none.
+ */
+export function ruleServerMatches(
+  rule: { server?: string; notServer?: string },
+  serverLabel: string | undefined
+): boolean {
+  const label = serverLabel?.trim() || undefined;
+  if (rule.server) {
+    if (!label || !matchesPattern(label, rule.server)) return false;
+  }
+  if (rule.notServer && label && matchesPattern(label, rule.notServer)) return false;
+  return true;
+}
+
 /**
  * Path segments that would walk the prototype chain or read class internals.
  * Smart-rule field paths come from user-authored config and are evaluated

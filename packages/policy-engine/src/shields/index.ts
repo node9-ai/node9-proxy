@@ -1,20 +1,19 @@
 // Builtin shield registry + pure validators.
 //
-// The 13 JSON files in builtin/ are the canonical source. We import them
+// The JSON files in builtin/ are the canonical source. We import them
 // statically so the engine ships them as code: no fs.readdir at runtime,
 // works the same in CJS/ESM bundles, and the host repo doesn't need to
 // know where the JSONs live on disk.
 
 import safeRegex from 'safe-regex2';
+import { validateRegex } from '../utils/regex';
 import type { SmartRule } from '../types';
 
 import aws from './builtin/aws.json';
 import bashSafe from './builtin/bash-safe.json';
 import docker from './builtin/docker.json';
 import filesystem from './builtin/filesystem.json';
-import finance from './builtin/finance.json';
 import github from './builtin/github.json';
-import identity from './builtin/identity.json';
 import k8s from './builtin/k8s.json';
 // mcp-tool-gating shield removed — its only HITL surface was the local
 // browser dashboard (retired in v3). The mcp-pin rug-pull defense in
@@ -22,8 +21,11 @@ import k8s from './builtin/k8s.json';
 import mongodb from './builtin/mongodb.json';
 import postgres from './builtin/postgres.json';
 import projectJail from './builtin/project-jail.json';
-import publishing from './builtin/publishing.json';
 import redis from './builtin/redis.json';
+// finance.json, identity.json and publishing.json are action templates, not
+// shields: apps.ts builds the app shields and the general action checks from
+// them (node9Firewall#390).
+import { APP_SHIELDS, ACTION_TEMPLATES, GENERAL_ACTION_RULES } from './apps';
 
 export interface ShieldDefinition {
   name: string;
@@ -93,7 +95,7 @@ export function validateOverrides(raw: unknown): {
 }
 
 /**
- * The 13 shields shipped with node9. User shields installed at
+ * The shields shipped with node9. User shields installed at
  * ~/.node9/shields/*.json are merged on top of these by the host.
  */
 export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
@@ -101,31 +103,16 @@ export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
   [(bashSafe as ShieldDefinition).name]: bashSafe as ShieldDefinition,
   [(docker as ShieldDefinition).name]: docker as ShieldDefinition,
   [(filesystem as ShieldDefinition).name]: filesystem as ShieldDefinition,
-  // Dangerous actions as category shields (node9Firewall#385): an MCP app's
-  // money, credential and publishing tools, asked about whatever the request
-  // said. One glob per rule covers the bare name the gateway sends and the
-  // mcp__<server>__ name the agent hook sends.
-  [(finance as ShieldDefinition).name]: finance as ShieldDefinition,
   [(github as ShieldDefinition).name]: github as ShieldDefinition,
-  [(identity as ShieldDefinition).name]: identity as ShieldDefinition,
   [(k8s as ShieldDefinition).name]: k8s as ShieldDefinition,
   [(mongodb as ShieldDefinition).name]: mongodb as ShieldDefinition,
   [(postgres as ShieldDefinition).name]: postgres as ShieldDefinition,
   [(projectJail as ShieldDefinition).name]: projectJail as ShieldDefinition,
-  [(publishing as ShieldDefinition).name]: publishing as ShieldDefinition,
   [(redis as ShieldDefinition).name]: redis as ShieldDefinition,
+  // App shields generated from the action templates (node9Firewall#390): one
+  // per app, every door (MCP server, CLI, API, library), off by default.
+  ...Object.fromEntries(APP_SHIELDS.map((s) => [s.name, s as ShieldDefinition])),
 };
-
-/**
- * The category shields for dangerous actions on MCP apps (node9Firewall#385):
- * enabled from the Apps page for the apps a user connects, not recommended by
- * a repository or history scan, which has nothing to say about them.
- */
-export const ACTION_SHIELD_NAMES: ReadonlySet<string> = new Set([
-  'finance',
-  'identity',
-  'publishing',
-]);
 
 // ── Builtin shield regex safety check (runs at module load) ──────────────
 // Smart-rule conditions inside shield JSONs use `matches` / `notMatches`
@@ -136,16 +123,43 @@ export const ACTION_SHIELD_NAMES: ReadonlySet<string> = new Set([
 // dlp/index.ts. Catches a vulnerable pattern landing in a future
 // shield-JSON edit before any customer hits it.
 function assertBuiltinShieldRegexesAreSafe(): void {
-  for (const shield of Object.values(BUILTIN_SHIELDS)) {
+  // Generated rule sets (node9Firewall#390): the action templates ship as the
+  // general action checks, and the app shields are built from them. They are
+  // held to the runtime's own validation (length cap, syntax, safe-regex2): a
+  // pattern it refuses compiles to null and reads as NO MATCH, so a rule that
+  // promises a review would silently allow.
+  // The older shields are checked with safe-regex2 only: two project-jail
+  // rules (block-read-env, review-read-credentials) exceed the 256-character
+  // cap today and are tracked separately rather than failing the load.
+  const generated = new Set(APP_SHIELDS.map((a) => a.name));
+  const sets: { name: string; strict: boolean; smartRules: readonly SmartRule[] }[] = [
+    ...Object.values(BUILTIN_SHIELDS).map((sh) => ({
+      name: sh.name,
+      strict: generated.has(sh.name),
+      smartRules: sh.smartRules,
+    })),
+    ...Object.entries(ACTION_TEMPLATES).map(([name, smartRules]) => ({
+      name,
+      strict: true,
+      smartRules,
+    })),
+    { name: 'general-action-checks', strict: true, smartRules: GENERAL_ACTION_RULES },
+  ];
+  for (const shield of sets) {
     for (const rule of shield.smartRules) {
       const conditions = rule.conditions ?? [];
       for (const cond of conditions) {
         if (cond.op !== 'matches' && cond.op !== 'notMatches') continue;
         const pattern = cond.value;
         if (!pattern) continue;
-        if (!safeRegex(pattern)) {
+        const problem = shield.strict
+          ? validateRegex(pattern)
+          : safeRegex(pattern)
+            ? null
+            : 'potential ReDoS';
+        if (problem) {
           throw new Error(
-            `[node9 engine] Shield '${shield.name}' rule '${rule.name ?? rule.tool}' has unsafe regex: ${pattern}`
+            `[node9 engine] Shield '${shield.name}' rule '${rule.name ?? rule.tool}' has a regex the runtime refuses (${problem}): ${pattern}`
           );
         }
       }

@@ -211,7 +211,13 @@ export type { ShellExposure } from './exposure/shell';
 export { classifyShellExposure } from './exposure/shell';
 
 // Smart rules — tool-name pattern match + condition evaluator.
-export { matchesPattern, getNestedValue, evaluateSmartConditions } from './rules';
+export {
+  matchesPattern,
+  getNestedValue,
+  evaluateSmartConditions,
+  mcpServerFromToolName,
+  ruleServerMatches,
+} from './rules';
 
 // Regex utilities — ReDoS-safe validation + LRU-cached compilation.
 export { validateRegex, getCompiledRegex } from './utils/regex';
@@ -225,8 +231,17 @@ export { stripTerminalEscapes, stripControlChars, safeMessage } from './utils/sa
 // Shields — 11 builtin definitions + pure validators (no fs).
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
 export {
+  APP_SHIELD_SPECS,
+  APP_SHIELD_NAMES,
+  APP_SERVER_GLOB,
+  ACTION_CHECKS,
+  ACTION_TEMPLATES,
+  GENERAL_ACTION_RULES,
+  REPLACED_SHIELDS,
+} from './shields/apps';
+export type { ActionTemplateName } from './shields/apps';
+export {
   BUILTIN_SHIELDS,
-  ACTION_SHIELD_NAMES,
   isShieldVerdict,
   validateShieldDefinition,
   validateOverrides,

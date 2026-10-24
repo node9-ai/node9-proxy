@@ -15,6 +15,7 @@
 // Design: "Controls catalog: design and architecture" (2026-10-03).
 
 import { BUILTIN_SHIELDS } from './shields';
+import { generalActionRuleNames } from './shields/apps';
 import { isStrictGatedTier, type SsrfTier } from './egress/ssrf';
 import { CHECK_TEXT } from './catalog-text';
 
@@ -34,7 +35,8 @@ export function isVerdict(v: unknown): v is Verdict {
 }
 
 /** Groups are by what the user fears, not by the mechanism that catches it. */
-export type CheckGroup = 'commands' | 'data' | 'network' | 'files' | 'behavior' | 'loading';
+export type CheckGroup =
+  'commands' | 'data' | 'network' | 'files' | 'behavior' | 'loading' | 'actions';
 
 export const CHECK_GROUPS: readonly { id: CheckGroup; title: string }[] = [
   { id: 'commands', title: 'Commands' },
@@ -43,6 +45,7 @@ export const CHECK_GROUPS: readonly { id: CheckGroup; title: string }[] = [
   { id: 'files', title: 'Files' },
   { id: 'behavior', title: 'Agent behavior' },
   { id: 'loading', title: 'What the agent loads' },
+  { id: 'actions', title: 'Actions in apps' },
 ];
 
 export interface CheckDef {
@@ -493,6 +496,41 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     values: ALL,
     defaultValue: 'block',
     legacy: ['📦 Node9 Package Check (Malicious)', '📦 Node9 Package Check (Review)'],
+  },
+  // ── Actions in apps (node9Firewall#390) ──────────────────────────────────
+  // The safety net under the app shields: an action that moves money, changes
+  // access or publishes, on an MCP server no app shield claims (an internal
+  // billing server, a vendor with no shield, Zapier). Review by default; the
+  // rules come from the action templates (shields/apps.ts).
+  {
+    id: 'actions.money',
+    group: 'actions',
+    title: 'Money moves',
+    catches:
+      'a refund, payout, transfer, charge or withdrawal through an app with no protection of its own',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: generalActionRuleNames('finance'),
+  },
+  {
+    id: 'actions.access',
+    group: 'actions',
+    title: 'Accounts and access change',
+    catches:
+      'a password, key, role, permission or user changed through an app with no protection of its own',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: generalActionRuleNames('identity'),
+  },
+  {
+    id: 'actions.publish',
+    group: 'actions',
+    title: 'Something is published',
+    catches:
+      'a release, package, deploy or public post through an app with no protection of its own',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: generalActionRuleNames('publishing'),
   },
 ];
 
