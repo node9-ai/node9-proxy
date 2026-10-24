@@ -182,3 +182,55 @@ describe('applyDetection on a machine the workspace manages', () => {
     }
   });
 });
+
+describe('resolveLinkedServer: local and workspace links', () => {
+  it('maps a label by this machine, by server key, by the gateway name and by a cfg: key', async () => {
+    const home = tmp();
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'mcp-tools.json'),
+      JSON.stringify({ k1: { tools: [], disabled: [], status: 'approved', name: 'billing-gw' } })
+    );
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      vi.resetModules();
+      const state = await import('../apps/state.js');
+      state.setLink('acme_billing', 'stripe', home);
+      expect(state.resolveLinkedServer('acme_billing')).toBe('stripe');
+      const managedLinks = { k1: 'paypal', 'cfg:claude:pay-svc': 'stripe' };
+      expect(state.resolveLinkedServer('x', { serverKey: 'k1', managedLinks })).toBe('paypal');
+      expect(state.resolveLinkedServer('billing-gw', { managedLinks })).toBe('paypal');
+      expect(state.resolveLinkedServer('pay-svc', { managedLinks })).toBe('stripe');
+      expect(state.resolveLinkedServer('other', { managedLinks })).toBe('other');
+    } finally {
+      process.env.HOME = prevHome;
+      vi.resetModules();
+    }
+  });
+});
+
+describe('snapshotApps: what the dashboard gets', () => {
+  it('names and states, no project paths, capped signals', async () => {
+    const { snapshotApps } = await import('../policy-snapshot/build.js');
+    const out = snapshotApps({
+      version: 1,
+      apps: {
+        stripe: {
+          state: 'on',
+          by: 'detected',
+          at: '',
+          signals: Array.from({ length: 9 }, (_, i) => ({
+            kind: 'package' as const,
+            value: `p${i}`,
+            project: '/home/dana/secret-project',
+          })),
+        },
+      },
+      links: {},
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].signals).toHaveLength(6);
+    expect(JSON.stringify(out)).not.toContain('secret-project');
+  });
+});

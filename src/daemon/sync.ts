@@ -5,6 +5,7 @@
 // cloudSyncIntervalHours, else the 5h default — see resolveSyncIntervalMs).
 // The proxy reads rules-cache.json via getConfig() to enforce cloud-defined rules
 // even when offline.
+import { readAppsFile } from '../apps/state.js';
 import fs from 'fs';
 import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
 import https from 'https';
@@ -14,7 +15,7 @@ import { getConfig, getCredentials } from '../config/index.js';
 import { runBlast } from '../cli/commands/blast.js';
 import { runPosture } from '../posture/index.js';
 import { shipPosture } from '../posture/ship.js';
-import { buildPolicySnapshot } from '../policy-snapshot/build.js';
+import { buildPolicySnapshot, snapshotApps } from '../policy-snapshot/build.js';
 import { readMcpToolsConfig } from './mcp-tools.js';
 import { readTrustedRecipients } from '../auth/trusted-recipients.js';
 import { atomicWriteSync } from './state.js';
@@ -211,6 +212,8 @@ export interface ManagedConfigCache {
   jailPaths?: { path: string; verdict: string }[];
   trustedHosts?: string[];
   appPermissions?: Record<string, Record<string, string>>;
+  /** node9Firewall#390: { serverKey: appSlug }, a server an admin linked. */
+  appLinks?: Record<string, string>;
   locked: string[];
 }
 
@@ -268,6 +271,7 @@ interface CloudPolicyBody {
     jailPaths?: { path?: unknown; verdict?: unknown }[];
     trustedHosts?: unknown;
     appPermissions?: unknown;
+    appLinks?: unknown;
     locked?: unknown;
   }; // M2 settings
   /** Phase 3a: `{ version: "2", checks, tuning, packs, approvals }`. */
@@ -878,6 +882,14 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     }
     if (Object.keys(ap).length) out.appPermissions = ap;
   }
+  if (mc.appLinks && typeof mc.appLinks === 'object' && !Array.isArray(mc.appLinks)) {
+    const links: Record<string, string> = {};
+    for (const [key, slug] of Object.entries(mc.appLinks as Record<string, unknown>)) {
+      if (typeof slug === 'string' && /^[a-z0-9-]{1,40}$/.test(slug)) links[key] = slug;
+    }
+    // A present-but-empty map is a valid REPLACE that clears old links.
+    out.appLinks = links;
+  }
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
@@ -893,7 +905,8 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.packageCheck !== undefined ||
     out.jailPaths !== undefined ||
     out.trustedHosts !== undefined ||
-    out.appPermissions !== undefined
+    out.appPermissions !== undefined ||
+    out.appLinks !== undefined
     ? out
     : undefined;
 }
@@ -1155,6 +1168,8 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
       // fw#318 2b: the developer's personal trusted recipients.
       personalTrustedRecipients()
     );
+    // fw#390: what node9 found on this machine, names only.
+    body.apps = snapshotApps(readAppsFile());
     await shipPolicySnapshot(body, creds);
   } catch {
     // Silent — never break sync over a policy-mirror push.
@@ -1191,6 +1206,8 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
       // fw#318 2b: the developer's personal trusted recipients.
       personalTrustedRecipients()
     );
+    // fw#390: what node9 found on this machine, names only.
+    body.apps = snapshotApps(readAppsFile());
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
   } catch (e) {

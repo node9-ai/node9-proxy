@@ -695,7 +695,10 @@ async function _authorizeHeadlessCore(
       skipIgnoredFastPath,
       argumentScan: argScan,
       // A server a person linked to an app is judged as that app (fw#390).
-      mcpServer: resolveLinkedServer(meta?.mcpServer),
+      mcpServer: resolveLinkedServer(meta?.mcpServer, {
+        serverKey: meta?.serverKey,
+        managedLinks: config.policy.appLinks,
+      }),
     });
     if (!sessionScript || own.decision === 'block') return own;
     // The script's content, judged as a Bash command of its own; its verdict

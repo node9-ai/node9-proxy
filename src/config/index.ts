@@ -268,6 +268,9 @@ export interface Config {
     // Managed MCP per-tool permissions { serverKey: { bareTool: allow|review|block } }.
     // Applied from the managed cache; enforced in the gateway authorize path.
     appPermissions: Record<string, Record<string, 'allow' | 'review' | 'block'>>;
+    // Managed server links { serverKey: appSlug } (node9Firewall#390): a server
+    // an admin said is an app is judged as that app at the gate.
+    appLinks: Record<string, string>;
     // Task #22: org-mandated credential-jail paths (managedConfig.jailPaths).
     // They also expand into org:-prefixed smartRules, but the orchestrator's
     // file-tool guard needs the PATHS themselves: rules alone can't tell it
@@ -597,6 +600,7 @@ export const DEFAULT_CONFIG: Config = {
     trustedHosts: [],
     trustedHostsManaged: false,
     appPermissions: {},
+    appLinks: {},
     managedJailPaths: [],
   },
   environments: {},
@@ -1035,6 +1039,7 @@ export function getConfig(cwd?: string): Config {
     trustedHosts: [] as string[],
     trustedHostsManaged: false,
     appPermissions: {},
+    appLinks: {} as Record<string, string>,
     managedJailPaths: [] as Array<{ path: string; verdict: 'block' | 'review' }>,
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
@@ -1441,6 +1446,7 @@ export function getConfig(cwd?: string): Config {
           jailPaths?: { path?: unknown; verdict?: unknown }[];
           trustedHosts?: unknown;
           appPermissions?: unknown;
+          appLinks?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -1730,6 +1736,14 @@ export function getConfig(cwd?: string): Config {
           mergedPolicy.trustedHosts = mc.trustedHosts
             .filter((h): h is string => typeof h === 'string')
             .map((h) => normalizeHost(h));
+        }
+        // Managed server links (node9Firewall#390): { serverKey: appSlug }.
+        if (mc.appLinks && typeof mc.appLinks === 'object' && !Array.isArray(mc.appLinks)) {
+          const links: Record<string, string> = {};
+          for (const [key, slug] of Object.entries(mc.appLinks as Record<string, unknown>)) {
+            if (typeof slug === 'string' && /^[a-z0-9-]{1,40}$/.test(slug)) links[key] = slug;
+          }
+          mergedPolicy.appLinks = links;
         }
         // Managed MCP app permissions REPLACE the local map (coerced to known
         // decisions). Enforced by the gateway authorize path.

@@ -16,6 +16,7 @@ import { APP_BY_SLUG } from './catalog';
 import type { AppSignal, FoundApp } from './detect';
 import { readActiveShields, writeActiveShields } from '../shields';
 import { appendConfigAudit } from '../audit';
+import { readMcpToolsConfig } from '../daemon/mcp-tools';
 
 export type AppState = 'on' | 'off';
 export type AppDecidedBy = 'detected' | 'user';
@@ -149,21 +150,47 @@ export function setLink(server: string, slug: string | null, home?: string): voi
 // The gate reads links on every MCP call: cache by mtime.
 let linkCache: { mtimeMs: number; file: string; links: Record<string, string> } | null = null;
 
-/**
- * The server label the gate should judge: a label a person linked to an app
- * becomes that app's slug, so the app's shield meets it and the general
- * checks leave it. Unlinked labels pass through.
- */
-export function resolveLinkedServer(label: string | undefined): string | undefined {
-  if (!label) return label;
+function localLinks(): Record<string, string> {
   const file = appsFilePath();
   try {
     const mtimeMs = fs.statSync(file).mtimeMs;
     if (!linkCache || linkCache.file !== file || linkCache.mtimeMs !== mtimeMs) {
       linkCache = { mtimeMs, file, links: readAppsFile().links };
     }
+    return linkCache.links;
   } catch {
-    return label;
+    return {};
   }
-  return linkCache.links[label.toLowerCase()] ?? label;
+}
+
+/**
+ * The server label the gate should judge: a label a person linked to an app
+ * becomes that app's slug, so the app's shield meets it and the general
+ * checks leave it. Two sources:
+ *  - this machine's links (`node9 apps link`), by label;
+ *  - the workspace's links (`appLinks`, managed, keyed by server key): by the
+ *    gateway's server key when the call has one, else by the name the
+ *    gateway recorded for that key in mcp-tools.json (the hook's path).
+ * Unlinked labels pass through.
+ */
+export function resolveLinkedServer(
+  label: string | undefined,
+  opts: { serverKey?: string; managedLinks?: Record<string, string> } = {}
+): string | undefined {
+  if (!label) return label;
+  const lower = label.toLowerCase();
+  const local = localLinks()[lower];
+  if (local) return local;
+  const managed = opts.managedLinks ?? {};
+  if (opts.serverKey && managed[opts.serverKey]) return managed[opts.serverKey];
+  const keys = Object.keys(managed);
+  if (keys.length === 0) return label;
+  const tools = readMcpToolsConfig();
+  for (const key of keys) {
+    // A server that never launched is keyed `cfg:<agent>:<name>` in the
+    // snapshot (policy-snapshot/build.ts); its name is the rest of the key.
+    const name = key.startsWith('cfg:') ? key.split(':').slice(2).join(':') : tools[key]?.name;
+    if (name?.toLowerCase() === lower) return managed[key];
+  }
+  return label;
 }
