@@ -30,6 +30,22 @@ describe('suggestFromApprovals', () => {
     ]);
   });
 
+  it('never offers to quiet a rule that is not an app pack row', () => {
+    const three = (rule: string) => [ok(rule, 's1'), ok(rule, 's1'), ok(rule, 's2')];
+    // A credential-file read and chmod are product checks, not pack rows.
+    expect(suggestFromApprovals(three('shield:project-jail:review-read-credentials'))).toEqual([]);
+    expect(suggestFromApprovals(three('shield:filesystem:review-chmod-777'))).toEqual([]);
+    // A user or org rule whose name only contains a shield-like part.
+    expect(suggestFromApprovals(three('org:shield:stripe:review-refund-extra'))).toEqual([]);
+    expect(
+      suggestFromApprovals([
+        ok('my-review-action-money-x', 's1', 'acme'),
+        ok('my-review-action-money-x', 's1', 'acme'),
+        ok('my-review-action-money-x', 's2', 'acme'),
+      ])
+    ).toEqual([]);
+  });
+
   it('asks for more: two approvals, or one session', () => {
     expect(
       suggestFromApprovals([

@@ -21,6 +21,7 @@ import {
   writeShieldOverride,
 } from '../../shields';
 import { cliGuardPolicyWrite, isKeyedForPolicy } from '../../config/keyed-guard';
+import { getConfig } from '../../config';
 import { appendConfigAudit } from '../../audit';
 import { isShieldVerdict } from '@node9/policy-engine';
 
@@ -51,8 +52,11 @@ function scanNow(): void {
 
 function list(): void {
   const file = readAppsFile();
-  const active = new Set(readActiveShields());
-  const rows = APP_CATALOG.filter((a) => file.apps[a.slug] || active.has(a.shield));
+  // The shields the config applied: the workspace's on a keyed machine.
+  const cfg = getConfig();
+  const active = new Set(cfg.policy.appliedShields ?? readActiveShields());
+  const known = (slug: string) => Object.prototype.hasOwnProperty.call(file.apps, slug);
+  const rows = APP_CATALOG.filter((a) => known(a.slug) || active.has(a.shield));
   console.log('');
   if (rows.length === 0) {
     console.log(
@@ -62,9 +66,13 @@ function list(): void {
     return;
   }
   for (const app of rows) {
-    const rec = file.apps[app.slug];
+    const rec = known(app.slug) ? file.apps[app.slug] : undefined;
     const on = active.has(app.shield);
-    const state = on ? chalk.green('protected') : chalk.yellow('off');
+    const state = on
+      ? chalk.green('protected')
+      : rec?.by === 'user'
+        ? chalk.yellow('off')
+        : chalk.yellow('not protected');
     const how = rec?.signals.length
       ? rec.signals
           .slice(0, 3)
@@ -151,13 +159,23 @@ export function registerAppsCommand(program: Command): void {
         if (!cliGuardPolicyWrite(`apps link ${b}`)) return;
         setLink(b, c);
         appendConfigAudit({ event: 'app-link', server: b, app: c });
-        console.log(chalk.green(`\nServer ${b} is ${APP_BY_SLUG.get(c)?.label} now.\n`));
+        const linked = APP_BY_SLUG.get(c)!;
+        console.log(chalk.green(`\nServer ${b} is ${linked.label} now.\n`));
+        // The gate honours a link only while the app is protected; until then
+        // the general checks keep the server.
+        if (!readActiveShields().includes(linked.shield))
+          console.log(
+            chalk.yellow(
+              `${linked.label} is off, so node9 still asks about ${b} through the general checks. Turn it on: node9 apps ${c} on\n`
+            )
+          );
         return;
       }
       if (a === 'unlink') {
         if (!b) return fail('Usage: node9 apps unlink <server>');
         if (!cliGuardPolicyWrite(`apps unlink ${b}`)) return;
         setLink(b, null);
+        appendConfigAudit({ event: 'app-unlink', server: b });
         console.log(chalk.green(`\nServer ${b} is no longer linked.\n`));
         return;
       }

@@ -43,7 +43,13 @@ export function ruleServerMatches(
   rule: { server?: string; notServer?: string },
   serverLabel: string | undefined
 ): boolean {
-  const label = serverLabel?.trim() || undefined;
+  // A label is outside data: anything but a string is no label. `*` in a
+  // glob does not cross `/`, so `@stripe/mcp` or `stripe/prod` is read with
+  // the slashes as dashes.
+  const label =
+    typeof serverLabel === 'string'
+      ? serverLabel.trim().replace(/[\\/]/g, '-') || undefined
+      : undefined;
   if (rule.server) {
     if (!label || !matchesPattern(label, rule.server)) return false;
   }

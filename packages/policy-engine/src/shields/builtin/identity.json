@@ -33,7 +33,7 @@
     },
     {
       "name": "shield:identity:review-user",
-      "tool": "{,mcp__*__}{create_user,delete_user,deactivate_user,suspend_user,activate_user,unlock_user,make_admin,promote_user,demote_user,update_user_role}",
+      "tool": "{,mcp__*__}{create_user,delete_user,delete_deactivated_user,deactivate_user,suspend_user,activate_user,unlock_user,make_admin,promote_user,demote_user,update_user_role}",
       "conditions": [],
       "verdict": "review",
       "reason": "This creates, removes or promotes an account. node9 asks before accounts change (Identity shield)."

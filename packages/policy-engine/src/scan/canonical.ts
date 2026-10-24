@@ -749,6 +749,9 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v30';
 // verdicts moved. dlp/, pipe-chain and destructive-regex are untouched. A
 // version bump would cost every daemon a full re-scan and change nothing.
 
+// 2026-10-24, hash bumped with NO version bump (fw#390 review): rules/index.ts
+// reads an MCP server label as a string with `/` as `-`. History applies smart
+// rules to shell rows only, so no finding changes.
 // 2026-10-02, hash bumped with NO version bump: shell/index.ts only exported
 // parseShared and resolveWordLiteral for the package-install extractor
 // (shell/package-install.ts, outside the hash set). No detector changed.
@@ -769,7 +772,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v30';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '6eceb2d674700e16';
+export const CANONICAL_EXTRACTOR_HASH = 'd55f1f9e5bee7e41';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

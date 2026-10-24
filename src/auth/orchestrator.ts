@@ -698,6 +698,8 @@ async function _authorizeHeadlessCore(
       mcpServer: resolveLinkedServer(meta?.mcpServer, {
         serverKey: meta?.serverKey,
         managedLinks: config.policy.appLinks,
+        appliedShields: config.policy.appliedShields,
+        workspaceGoverned: config.policySource === 'workspace',
       }),
     });
     if (!sessionScript || own.decision === 'block') return own;

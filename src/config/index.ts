@@ -464,8 +464,10 @@ export const DEFAULT_CONFIG: Config = {
             op: 'matches',
             // Single spaces on purpose: a nested `\\s+` inside the alternation
             // fails the engine's ReDoS check and the rule would be dropped.
+            // `apps`: turning an app off, allowing one of its actions, or
+            // linking a server to an app (the general checks leave it).
             value:
-              '(^|&&|\\|\\||;)\\s*(npx )?node9 (session-(exposure|taint) clear|trust (add|recipient add)|pause|shield (disable|set)|egress allow|approver set)\\b',
+              '(^|&&|\\|\\||;)\\s*(npx )?node9 (session-(exposure|taint) clear|trust (add|recipient add)|pause|shield (disable|set)|apps (link|[a-z0-9-]{1,32} (off|[a-z]{1,32} allow))|egress allow|approver set)\\b',
             flags: 'i',
           },
         ],

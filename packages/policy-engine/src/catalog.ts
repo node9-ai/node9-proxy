@@ -626,7 +626,7 @@ const OVERRIDE_PREFIX = 'Override block rule:';
 const LABEL_WRAPPERS = ['Smart Rule:', 'Node9 (AST):', 'project-jail (AST):'] as const;
 
 /** The rule name inside a wrapping label, or undefined when `s` is not one. */
-function unwrapRuleLabel(s: string): string | undefined {
+export function ruleNameInLabel(s: string): string | undefined {
   let rest = s;
   const override = rest.lastIndexOf(OVERRIDE_PREFIX);
   if (override >= 0) rest = rest.slice(override + OVERRIDE_PREFIX.length).trimStart();
@@ -649,7 +649,7 @@ export function checkIdForRule(nameOrLabel: string | undefined): string | undefi
   // "⚠️ Override block rule: Smart Rule: ...". Plain string work, not a
   // regex: the old pattern backtracked polynomially on a label with a long
   // run of spaces after the prefix (CodeQL js/polynomial-redos).
-  const unwrapped = unwrapRuleLabel(s);
+  const unwrapped = ruleNameInLabel(s);
   if (unwrapped !== undefined) return checkIdForRule(unwrapped);
 
   if (s.startsWith('shield:project-jail:')) {

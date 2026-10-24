@@ -10,6 +10,7 @@ import { appsReportLines, approvalsFromAudit, suggestionLines } from '../../apps
 import { LOCAL_AUDIT_LOG } from '../../audit';
 import { readAppsFile } from '../../apps/state';
 import { readActiveShields } from '../../shields';
+import { getConfig } from '../../config';
 import { readCredentials } from '../../daemon/sync';
 import type { Command } from 'commander';
 import chalk from 'chalk';
@@ -134,14 +135,22 @@ export function registerReportCommand(program: Command): void {
       renderTerminalReport(data, responseDlpEntries, excludeTests);
 
       // fw#390: what node9 found and protects, and the dashboard when it helps.
+      // The shields the config applied: the workspace's on a keyed machine.
+      const cfg = getConfig();
+      const workspaceGoverned = cfg.policySource === 'workspace';
+      const appliedShields = cfg.policy.appliedShields ?? readActiveShields();
       const appLines = [
-        ...appsReportLines(readAppsFile(), readActiveShields(), {
+        ...appsReportLines(readAppsFile(), appliedShields, {
           loggedIn: readCredentials() !== null,
           asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
+          workspaceGoverned,
         }),
         // fw#390 phase 4: the smallest change that stops a question a person
         // keeps approving. Never applied by itself.
-        ...suggestionLines(approvalsFromAudit(LOCAL_AUDIT_LOG, periodStartMs(period))),
+        ...suggestionLines(
+          approvalsFromAudit(LOCAL_AUDIT_LOG, periodStartMs(period)),
+          workspaceGoverned
+        ),
       ];
       if (appLines.length > 0) {
         console.log('');

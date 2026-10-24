@@ -226,7 +226,8 @@ describe('app shields: one app, every door', () => {
       expect(shield).toBeDefined();
       const toolRules = shield.smartRules.filter((r) => r.tool !== 'bash');
       expect(toolRules.length).toBe(
-        ACTION_TEMPLATES[spec.template].filter((r) => r.tool !== 'bash').length
+        ACTION_TEMPLATES[spec.template].filter((r) => r.tool !== 'bash').length +
+          (spec.mcpTools?.length ?? 0)
       );
       for (const r of toolRules) {
         expect(r.name).toMatch(new RegExp(`^shield:${name}:review-`));
@@ -243,11 +244,27 @@ describe('app shields: one app, every door', () => {
       .find((r) => evaluateSmartConditions({ command }, r))?.name;
 
   it.each([
-    ['stripe refunds create --charge ch_1', 'shield:stripe:review-cli'],
-    ['NPM_TOKEN=x stripe refunds create --charge ch_1', 'shield:stripe:review-cli'],
-    ['stripe payouts create --amount 1000 --currency usd', 'shield:stripe:review-cli'],
-    ['stripe payment_intents confirm pi_1', 'shield:stripe:review-cli'],
-    ['stripe post /v1/refunds -d charge=ch_1', 'shield:stripe:review-cli-request'],
+    ['stripe refunds create --charge ch_1 --live', 'shield:stripe:review-cli'],
+    ['NPM_TOKEN=x stripe refunds create --live --charge ch_1', 'shield:stripe:review-cli'],
+    ['stripe payouts create --amount 1000 --currency usd --live', 'shield:stripe:review-cli'],
+    ['stripe payment_intents confirm pi_1 --api-key sk_live_51Hxyz', 'shield:stripe:review-cli'],
+    ['stripe post /v1/refunds -d charge=ch_1 --live', 'shield:stripe:review-cli-request'],
+    [
+      'curl --json \'{"charge":"ch_1"}\' https://api.stripe.com/v1/refunds -u "$K:"',
+      'shield:stripe:review-api',
+    ],
+    [
+      'wget --post-data "charge=ch_1" https://api.stripe.com/v1/refunds',
+      'shield:stripe:review-api',
+    ],
+    [
+      'curl -G -X POST https://api.stripe.com/v1/refunds -u "$K:" -d charge=ch_1',
+      'shield:stripe:review-api',
+    ],
+    [
+      'curl -g https://api.stripe.com/v1/refunds -u "$K:" -d charge=ch_1',
+      'shield:stripe:review-api',
+    ],
     [
       'curl https://api.stripe.com/v1/refunds -u "$STRIPE_KEY:" -d charge=ch_1',
       'shield:stripe:review-api',
@@ -272,6 +289,13 @@ describe('app shields: one app, every door', () => {
 
   it.each([
     'stripe refunds list',
+    // The stripe CLI is in test mode unless --live or a live key.
+    'stripe refunds create --charge ch_1',
+    'curl https://api.stripe.com/v1/refunds -u sk_test_51Hxyz: -d charge=ch_1',
+    'stripe.Refund.create(charge="ch_1", api_key="sk_test_51Hxyz")',
+    // -G sends the data as a query string: Stripe's docs spell every list so.
+    'curl -G https://api.stripe.com/v1/charges -u "$K:" -d limit=3',
+    'curl https://api.stripe.com/v1/refunds -G --data-urlencode "limit=3" -u "$K:"',
     'stripe customers create --email a@example.com',
     'stripe login',
     'stripe listen --forward-to localhost:3000',
@@ -307,6 +331,7 @@ describe('app shields: one app, every door', () => {
     'curl -X POST https://api-m.sandbox.paypal.com/v2/payments/captures/7XY/refund',
     'curl https://api-m.paypal.com/v2/checkout/orders/5O1',
     'npm install @paypal/paypal-server-sdk',
+    "requests.post('https://api-m.paypal.com/v1/oauth2/token', data={'grant_type': 'client_credentials'})",
   ])('paypal leaves alone: %s', (command) => {
     expect(door('paypal', command)).toBeUndefined();
   });
@@ -343,6 +368,8 @@ describe('app shields: one app, every door', () => {
     'curl -X POST https://connect.squareupsandbox.com/v2/refunds -d @r.json',
     'curl https://connect.squareup.com/v2/payments -H "Authorization: Bearer $T"',
     'curl -X POST https://connect.squareup.com/v2/customers/search -d @q.json',
+    'curl -X POST https://connect.squareup.com/v2/invoices/search -d @q.json',
+    "axios.post('https://connect.squareup.com/v2/orders/search', {})",
     'await client.refunds.refundPayment({ paymentId }); // no Square SDK in this file',
     "import { SquareClient } from 'square';\nawait client.payments.list();",
     'npm install square',
@@ -409,6 +436,7 @@ describe('app shields: one app, every door', () => {
 
   it.each([
     'curl https://acme.okta.com/api/v1/users -H "Authorization: SSWS $T"',
+    'curl -s "https://acme.okta.com/api/v1/users?limit=5" -G -d "search=profile.department eq \\"x\\""',
     'curl -X POST https://acme.okta.com/api/v1/authn -d @creds.json',
     'curl -X POST https://acme.okta.com/oauth2/v1/token -d grant_type=client_credentials',
     'await db.createUser({ email }); // no Okta SDK in this file',
@@ -449,6 +477,47 @@ describe('app shields: one app, every door', () => {
     'npm install @auth0/auth0-react',
   ])('auth0 leaves alone: %s', (command) => {
     expect(door('auth0', command)).toBeUndefined();
+  });
+
+  it("the vendors' own MCP tools: Square's one request tool, Auth0's tenant changes", () => {
+    const tool = (shield: string, name: string, args: Record<string, unknown>) =>
+      BUILTIN_SHIELDS[shield].smartRules
+        .filter((r) => r.tool !== 'bash')
+        .find((r) => toolMatchesRule(name, r.tool) && evaluateSmartConditions(args, r))?.name;
+    expect(
+      tool('square', 'mcp__square__make_api_request', {
+        service: 'refunds',
+        method: 'refundPayment',
+      })
+    ).toBe('shield:square:review-mcp-request');
+    expect(
+      tool('square', 'make_api_request', { service: 'payments', method: 'create', request: {} })
+    ).toBe('shield:square:review-mcp-request');
+    expect(
+      tool('square', 'make_api_request', { service: 'payments', method: 'list' })
+    ).toBeUndefined();
+    expect(
+      tool('square', 'make_api_request', { service: 'customers', method: 'create' })
+    ).toBeUndefined();
+    expect(tool('auth0', 'mcp__auth0__auth0_deploy_action', { id: 'a1' })).toBe(
+      'shield:auth0:review-tenant-config'
+    );
+    expect(tool('auth0', 'auth0_list_applications', {})).toBeUndefined();
+  });
+
+  it('a label with a slash is read with dashes', () => {
+    const stripe = BUILTIN_SHIELDS.stripe.smartRules.find((r) => r.tool !== 'bash')!;
+    expect(ruleServerMatches(stripe, '@stripe/mcp')).toBe(true);
+    expect(ruleServerMatches(stripe, 'stripe/prod')).toBe(true);
+  });
+
+  it('a label that is not a string is no label', () => {
+    const stripe = BUILTIN_SHIELDS.stripe.smartRules.find((r) => r.tool !== 'bash')!;
+    const general = GENERAL_ACTION_RULES[0];
+    const notString = (() => {}) as unknown as string;
+    expect(() => ruleServerMatches(stripe, notString)).not.toThrow();
+    expect(ruleServerMatches(stripe, notString)).toBe(false);
+    expect(ruleServerMatches(general, notString)).toBe(true);
   });
 
   it('Square claims its own servers, never Squarespace', () => {
@@ -548,12 +617,13 @@ describe('the gate', () => {
 
   it('with Stripe on: the stripe CLI in the shell is reviewed by the Stripe shield', async () => {
     const r = await gate(cfgWith('stripe'), 'Bash', {
-      command: 'stripe refunds create --charge ch_1',
+      command: 'stripe refunds create --charge ch_1 --live',
     });
     expect(r.decision).toBe('review');
     expect(r.ruleName).toBe('shield:stripe:review-cli');
     expect(
-      (await gate(cfgWith(), 'Bash', { command: 'stripe refunds create --charge ch_1' })).decision
+      (await gate(cfgWith(), 'Bash', { command: 'stripe refunds create --charge ch_1 --live' }))
+        .decision
     ).toBe('allow');
   });
 

@@ -75,24 +75,30 @@ const prog = (alt: string) => `(?:^|[^\\w-])(?:${alt})(?![\\w-])`;
 /** An HTTP client in the same command as `host` (one command: ; & | end it). */
 const httpTo = (host: string) => prog('curl|wget|http|https|xh') + '[^;&|]{0,400}?' + host;
 
-/** The command carries a write: a POST or DELETE method, or a body, which
- *  makes curl send POST. */
-const HTTP_WRITE: SmartRule['conditions'][number] = {
+/**
+ * The command carries a write: a write method (curl -X / --request, wget
+ * --method or --post-data, httpie's `POST`), or a body, which makes curl send
+ * POST unless -G / --get turns it into a GET with a query string (how
+ * Stripe's docs spell every list call). Case-sensitive on purpose: with `i`,
+ * `-G` would also be curl's `-g` (globoff), which changes no method.
+ */
+const httpWrite = (methods: string): SmartRule['conditions'][number] => ({
   field: 'command',
   op: 'matches',
   value:
-    '-X\\s*(?:POST|DELETE)|--request[=\\s]+(?:POST|DELETE)|\\s-d[\\s\'"@]|\\s--data|\\s-F\\s|\\s--form\\s|\\s(?:POST|DELETE)\\s',
-  flags: 'i',
-};
+    `-X\\s*(?:${methods})|--(?:request|method)[=\\s]+(?:${methods})|--post-(?:data|file)|\\s(?:${methods}|${methods.toLowerCase()})\\s` +
+    `|^(?!.*\\s(?:-[a-zA-Z]*G|--get)(?![\\w-])).*(?:\\s-d[\\s'"@]|\\s--data|\\s--json\\s|\\s-F\\s|\\s--form\\s)`,
+});
+const HTTP_WRITE = httpWrite('POST|DELETE');
+/** For APIs that also change things with PUT or PATCH (Okta adds a group
+ *  member with PUT, Auth0 updates a user with PATCH). */
+const HTTP_WRITE_ANY = httpWrite('POST|PUT|PATCH|DELETE');
 
-/** A write for an API that also changes things with PUT or PATCH (Okta adds
- *  a group member with PUT, Auth0 updates a user with PATCH). */
-const HTTP_WRITE_ANY: SmartRule['conditions'][number] = {
+/** A Stripe test key in the command: test mode, no money moves. */
+const NOT_STRIPE_TEST: SmartRule['conditions'][number] = {
   field: 'command',
-  op: 'matches',
-  value:
-    '-X\\s*(?:POST|PUT|PATCH|DELETE)|--request[=\\s]+(?:POST|PUT|PATCH|DELETE)|\\s-d[\\s\'"@]|\\s--data|\\s-F\\s|\\s--form\\s|\\s(?:POST|PUT|PATCH|DELETE)\\s',
-  flags: 'i',
+  op: 'notMatches',
+  value: '\\b[sr]k_test_',
 };
 
 /** `requests.post("https://<host>...`, `axios.post('https://<host>...` in a script. */
@@ -108,6 +114,10 @@ interface AppShieldSpec {
   /** The app's other doors, as bash rules (the code door is a session script
    *  judged as a Bash command, so it is a bash rule too). */
   doors: SmartRule[];
+  /** Tools of the vendor's own MCP server that the template's names miss
+   *  (Square's single make_api_request); scoped to the server like the
+   *  template's. */
+  mcpTools?: SmartRule[];
 }
 
 const STRIPE_OBJECTS =
@@ -135,7 +145,14 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
               `\\s(?:${STRIPE_OBJECTS})\\s+(?:create|cancel|capture|confirm|update|pay|finalize_invoice|send_invoice|void_invoice)(?![\\w-])`,
             flags: 'i',
           },
+          {
+            field: 'command',
+            op: 'matches',
+            // The stripe CLI works in test mode unless told otherwise.
+            value: '\\s--live(?![\\w-])|\\b[sr]k_live_',
+          },
         ],
+        conditionMode: 'all',
         verdict: 'review',
         reason: 'The stripe CLI is about to move money. node9 asks before money moves (Stripe).',
       },
@@ -150,7 +167,14 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
               prog('stripe') + GAP + `\\s(?:post|delete)\\s+/?v1/(?:${STRIPE_OBJECTS})(?![\\w-])`,
             flags: 'i',
           },
+          {
+            field: 'command',
+            op: 'matches',
+            // The stripe CLI works in test mode unless told otherwise.
+            value: '\\s--live(?![\\w-])|\\b[sr]k_live_',
+          },
         ],
+        conditionMode: 'all',
         verdict: 'review',
         reason:
           'A raw stripe CLI request is about to move money. node9 asks before money moves (Stripe).',
@@ -166,6 +190,7 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
             flags: 'i',
           },
           HTTP_WRITE,
+          NOT_STRIPE_TEST,
         ],
         conditionMode: 'all',
         verdict: 'review',
@@ -183,7 +208,9 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
             value:
               '\\bstripe\\.(?:Refund|Payout|Transfer|Charge|PaymentIntent|PaymentLink|Invoice|Subscription|Topup)\\.(?:create|cancel|capture|confirm|modify|pay|finalize_invoice|send_invoice|void_invoice)\\b',
           },
+          NOT_STRIPE_TEST,
         ],
+        conditionMode: 'all',
         verdict: 'review',
         reason:
           'This code moves money through the Stripe library. node9 asks before money moves (Stripe).',
@@ -199,7 +226,9 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
             value:
               '\\bstripe\\.(?:refunds|payouts|transfers|charges|paymentIntents|paymentLinks|invoices|subscriptions|topups)\\.(?:create|cancel|capture|confirm|update|pay|finalizeInvoice|sendInvoice|voidInvoice)\\s*\\(',
           },
+          NOT_STRIPE_TEST,
         ],
+        conditionMode: 'all',
         verdict: 'review',
         reason:
           'This code moves money through the Stripe library. node9 asks before money moves (Stripe).',
@@ -214,7 +243,9 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
             // requests.post("https://api.stripe.com/v1/refunds", ...)
             value: `\\.post\\(\\s*["'\`][^"'\`]{0,80}api\\.stripe\\.com/v1/(?:${STRIPE_OBJECTS})`,
           },
+          NOT_STRIPE_TEST,
         ],
+        conditionMode: 'all',
         verdict: 'review',
         reason: 'This code posts to the Stripe API. node9 asks before money moves (Stripe).',
       },
@@ -280,7 +311,11 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
           {
             field: 'command',
             op: 'matches',
-            value: `\\.post\\(\\s*["'\`][^"'\`]{0,80}api(?:-m)?\\.paypal\\.com/v[12]/`,
+            // The endpoints that move money; the token call every script
+            // starts with (/v1/oauth2/token) is not one.
+            value: postTo(
+              'api(?:-m)?\\.paypal\\.com/v[12]/(?:payments/(?:captures|authorizations|sale|payouts|payment|referenced-payouts)|checkout/orders/[^\\s/"\'`]{1,64}/(?:capture|authorize)|invoicing/invoices|billing/subscriptions)'
+            ),
           },
         ],
         verdict: 'review',
@@ -296,6 +331,33 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
     template: 'finance',
     // Square's servers, never Squarespace (a website builder).
     server: '{*square,*square[-_]*,*squareup*}',
+    mcpTools: [
+      {
+        // Square's official MCP server has one tool for every API call; the
+        // service and method name what it does.
+        name: 'shield:square:review-mcp-request',
+        tool: '{,mcp__*__}make_api_request',
+        conditions: [
+          {
+            field: 'service',
+            op: 'matches',
+            value:
+              '^(?:refunds|payments|orders|invoices|subscriptions|disputes|gift_cards|gift_card_activities|checkout|terminal)$',
+            flags: 'i',
+          },
+          {
+            field: 'method',
+            op: 'notMatches',
+            value: '^(?:list|get|retrieve|search|batch_?retrieve|calculate)',
+            flags: 'i',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'A request through the Square MCP server is about to move money. node9 asks before money moves (Square).',
+      },
+    ],
     doors: [
       {
         name: 'shield:square:review-api',
@@ -306,7 +368,7 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
             op: 'matches',
             // The live host only; the sandbox is connect.squareupsandbox.com.
             value: httpTo(
-              'connect\\.squareup\\.com/v2/(?:refunds|payments|orders/[^\\s/?]{1,64}/pay|invoices|subscriptions|disputes|gift-cards/activities)(?![\\w-])'
+              'connect\\.squareup\\.com/v2/(?:refunds|payments|orders/[^\\s/?]{1,64}/pay|invoices|subscriptions|disputes|gift-cards/activities)(?![\\w-]|/search)'
             ),
             flags: 'i',
           },
@@ -347,7 +409,9 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
           {
             field: 'command',
             op: 'matches',
-            value: postTo('connect\\.squareup\\.com/v2/'),
+            value: postTo(
+              'connect\\.squareup\\.com/v2/(?:refunds|payments|orders/[^\\s/?"\'`]{1,64}/pay|invoices|subscriptions|disputes|gift-cards/activities)(?![\\w-]|/search)'
+            ),
           },
         ],
         verdict: 'review',
@@ -483,6 +547,19 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
       'Asks before a user, a role, an application or its permissions change in Auth0, whether the agent uses an Auth0 MCP server, the auth0 CLI, the Management API or the Auth0 SDK in a script. Reads and signing in are never asked about.',
     template: 'identity',
     server: '*auth0*',
+    mcpTools: [
+      {
+        // Auth0's official MCP server: applications (their secrets and
+        // callbacks), APIs and their scopes, and Actions (code that runs at
+        // every sign-in).
+        name: 'shield:auth0:review-tenant-config',
+        tool: '{,mcp__*__}{auth0_create_application,auth0_update_application,auth0_create_resource_server,auth0_update_resource_server,auth0_create_action,auth0_update_action,auth0_deploy_action}',
+        conditions: [],
+        verdict: 'review',
+        reason:
+          'This changes an Auth0 application, API or sign-in Action. node9 asks before access changes (Auth0).',
+      },
+    ],
     doors: [
       {
         name: 'shield:auth0:review-cli',
@@ -567,11 +644,15 @@ function buildAppShield(spec: AppShieldSpec): GeneratedShield {
     server: spec.server,
     reason: ownReason(rule.reason, owner),
   }));
+  const ownTools = (spec.mcpTools ?? []).map((rule): SmartRule => ({
+    ...rule,
+    server: spec.server,
+  }));
   return {
     name: spec.name,
     description: spec.description,
     aliases: [],
-    smartRules: [...toolRules, ...spec.doors],
+    smartRules: [...toolRules, ...ownTools, ...spec.doors],
     dangerousWords: [],
   };
 }

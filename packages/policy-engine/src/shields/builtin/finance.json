@@ -19,7 +19,7 @@
     },
     {
       "name": "shield:finance:review-transfer",
-      "tool": "{,mcp__*__}{transfer_create,transfer_authorization_create,create_transfer,transfer_money,transfer_funds,send_money,wire_transfer,create_wire,schedule_transaction,update_scheduled_transaction,create_transaction}",
+      "tool": "{,mcp__*__}{transfer_create,transfer_authorization_create,create_transfer,transfer_money,transfer_funds,send_money,wire_transfer,create_wire,schedule_transaction,update_scheduled_transaction}",
       "conditions": [],
       "verdict": "review",
       "reason": "A transfer moves money between accounts. node9 asks before money moves (Finance shield)."

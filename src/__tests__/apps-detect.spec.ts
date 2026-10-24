@@ -203,12 +203,68 @@ describe('applyDetection on a machine the workspace manages', () => {
         { managed: true, home }
       );
       expect(res).toEqual({ turnedOn: [], recordedOnly: ['stripe'] });
-      expect(state.readAppsFile(home).apps.stripe.state).toBe('on');
+      expect(state.readAppsFile(home).apps.stripe.by).toBe('workspace');
       expect(shields.readActiveShields()).not.toContain('stripe');
+
+      // Off the workspace (logout), an app found meanwhile is new again:
+      // found = protected.
+      const after = state.applyDetection(
+        [{ slug: 'stripe', signals: [{ kind: 'package', value: 'stripe' }] }],
+        { managed: false, home }
+      );
+      expect(after.turnedOn).toEqual(['stripe']);
+      expect(shields.readActiveShields()).toContain('stripe');
     } finally {
       process.env.HOME = prevHome;
       vi.resetModules();
     }
+  });
+
+  it('an apps.json it cannot read is left alone: no decision is forgotten', async () => {
+    const home = tmp();
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    const file = path.join(home, '.node9', 'apps.json');
+    fs.writeFileSync(file, '{"version":1,"apps":{"stripe":{"state":"off"');
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      vi.resetModules();
+      const state = await import('../apps/state.js');
+      const shields = await import('../shields.js');
+      const res = state.applyDetection(
+        [{ slug: 'stripe', signals: [{ kind: 'package', value: 'stripe' }] }],
+        { managed: false, home }
+      );
+      expect(res).toEqual({ turnedOn: [], recordedOnly: [], unreadable: true });
+      expect(shields.readActiveShields()).not.toContain('stripe');
+      expect(fs.readFileSync(file, 'utf8')).toBe('{"version":1,"apps":{"stripe":{"state":"off"');
+    } finally {
+      process.env.HOME = prevHome;
+      vi.resetModules();
+    }
+  });
+
+  it('keeps only well-formed signals from the file', async () => {
+    const home = tmp();
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'apps.json'),
+      JSON.stringify({
+        version: 1,
+        apps: {
+          stripe: {
+            state: 'on',
+            by: 'detected',
+            signals: [{ kind: 'package', value: 7 }, null, { kind: 'package', value: 'stripe' }],
+          },
+        },
+        links: { constructor: 'stripe', x: 'nope' },
+      })
+    );
+    const state = await import('../apps/state.js');
+    const file = state.readAppsFile(home);
+    expect(file.apps.stripe.signals).toEqual([{ kind: 'package', value: 'stripe' }]);
+    expect(Object.keys(file.links)).toEqual(['constructor']);
   });
 });
 
@@ -226,12 +282,27 @@ describe('resolveLinkedServer: local and workspace links', () => {
       vi.resetModules();
       const state = await import('../apps/state.js');
       state.setLink('acme_billing', 'stripe', home);
-      expect(state.resolveLinkedServer('acme_billing')).toBe('stripe');
+      const appliedShields = ['stripe', 'paypal'];
+      expect(state.resolveLinkedServer('acme_billing', { appliedShields })).toBe('stripe');
       const managedLinks = { k1: 'paypal', 'cfg:claude:pay-svc': 'stripe' };
-      expect(state.resolveLinkedServer('x', { serverKey: 'k1', managedLinks })).toBe('paypal');
-      expect(state.resolveLinkedServer('billing-gw', { managedLinks })).toBe('paypal');
-      expect(state.resolveLinkedServer('pay-svc', { managedLinks })).toBe('stripe');
-      expect(state.resolveLinkedServer('other', { managedLinks })).toBe('other');
+      const opts = { managedLinks, appliedShields };
+      expect(state.resolveLinkedServer('x', { ...opts, serverKey: 'k1' })).toBe('paypal');
+      expect(state.resolveLinkedServer('billing-gw', opts)).toBe('paypal');
+      expect(state.resolveLinkedServer('pay-svc', opts)).toBe('stripe');
+      expect(state.resolveLinkedServer('other', opts)).toBe('other');
+
+      // A link to an app that is off would take the server out of the
+      // general checks with nothing in their place: it waits.
+      expect(state.resolveLinkedServer('acme_billing', { appliedShields: [] })).toBe(
+        'acme_billing'
+      );
+      // On a machine the workspace governs, local links are inert.
+      expect(
+        state.resolveLinkedServer('acme_billing', { appliedShields, workspaceGoverned: true })
+      ).toBe('acme_billing');
+      // Labels are outside names: nothing inherited is a link.
+      for (const label of ['constructor', '__proto__', 'toString', 'hasOwnProperty'])
+        expect(state.resolveLinkedServer(label, { ...opts, serverKey: label })).toBe(label);
     } finally {
       process.env.HOME = prevHome;
       vi.resetModules();

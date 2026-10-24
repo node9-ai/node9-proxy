@@ -70,7 +70,7 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
     const mcp = probe(h, 'mcp__stripe__create_refund', { payment_intent: 'pi_3Q', amount: 1200 });
     expect(mcp.verdict, mcp.stdout).toBe('review');
     expect(mcp.stdout).toContain('Stripe');
-    const cli = probe(h, 'Bash', { command: 'stripe refunds create --charge ch_1' });
+    const cli = probe(h, 'Bash', { command: 'stripe refunds create --charge ch_1 --live' });
     expect(cli.verdict, cli.stdout).toBe('review');
     expect(probe(h, 'mcp__stripe__list_customers', { limit: 5 }).verdict).toBe('allow');
     expect(probe(h, 'mcp__paypal__create_refund', { id: 'c1' }).verdict).toBe('allow');
@@ -105,6 +105,32 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
     expect(r.error).toBeUndefined();
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('Money check');
+  });
+
+  it('by default: a budgeting entry is not money moving', () => {
+    const h = home();
+    expect(probe(h, 'mcp__ynab__create_transaction', { amount: -1200 }).verdict).toBe('allow');
+  });
+
+  it('the agent may not turn an app off, allow its actions or relink a server from the shell', () => {
+    const h = home();
+    for (const command of [
+      'node9 apps stripe off',
+      'node9 apps stripe refunds allow --force',
+      'node9 apps link acme-billing stripe',
+    ]) {
+      const r = probe(h, 'Bash', { command });
+      expect(r.verdict, `${command}: ${r.stdout}`).toBe('review');
+    }
+    expect(probe(h, 'Bash', { command: 'node9 apps' }).verdict).toBe('allow');
+    expect(probe(h, 'Bash', { command: 'node9 apps stripe on' }).verdict).toBe('allow');
+  });
+
+  it('a server named after an Object property is judged, not failed open', () => {
+    const h = home();
+    const r = probe(h, 'mcp__constructor__create_refund', { amount: 1200 });
+    expect(r.error).toBeUndefined();
+    expect(r.verdict, r.stdout).toBe('review');
   });
 
   it('by default: a password change, adding a user to a channel and sharing a file are held', () => {

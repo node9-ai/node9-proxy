@@ -12,18 +12,31 @@ export const DASHBOARD_NUDGE_AT = 10;
 
 export function appsReportLines(
   file: AppsFile,
+  /** The shields the config applied (the workspace's on a keyed machine). */
   activeShields: readonly string[],
-  opts: { loggedIn: boolean; asked: number }
+  opts: { loggedIn: boolean; asked: number; workspaceGoverned?: boolean }
 ): string[] {
   const active = new Set(activeShields);
-  const apps = APP_CATALOG.filter((a) => file.apps[a.slug] || active.has(a.shield));
+  const known = (slug: string) => Object.prototype.hasOwnProperty.call(file.apps, slug);
+  const apps = APP_CATALOG.filter((a) => known(a.slug) || active.has(a.shield));
   const lines: string[] = [];
   if (apps.length > 0) {
-    const on = apps.filter((a) => active.has(a.shield)).map((a) => a.label);
-    const off = apps.filter((a) => !active.has(a.shield)).map((a) => a.label);
-    if (on.length > 0) lines.push(`Apps protected: ${on.join(', ')}`);
-    if (off.length > 0) lines.push(`Apps you turned off: ${off.join(', ')}`);
-    lines.push('See how each was found, or turn one off: node9 apps');
+    const on = apps.filter((a) => active.has(a.shield));
+    const off = apps.filter((a) => !active.has(a.shield));
+    const byYou = off.filter((a) => known(a.slug) && file.apps[a.slug].by === 'user');
+    const notYet = off.filter((a) => !byYou.includes(a));
+    if (on.length > 0) lines.push(`Apps protected: ${on.map((a) => a.label).join(', ')}`);
+    if (byYou.length > 0)
+      lines.push(`Apps you turned off: ${byYou.map((a) => a.label).join(', ')}`);
+    if (notYet.length > 0)
+      lines.push(
+        `Apps found, not protected${opts.workspaceGoverned ? ' (the workspace decides)' : ''}: ${notYet.map((a) => a.label).join(', ')}`
+      );
+    lines.push(
+      opts.workspaceGoverned
+        ? 'See how each was found: node9 apps. Turn one on in the dashboard.'
+        : 'See how each was found, or turn one off: node9 apps'
+    );
   }
   if (!opts.loggedIn && opts.asked >= DASHBOARD_NUDGE_AT) {
     lines.push(
@@ -89,21 +102,29 @@ export function approvalsFromAudit(auditFile: string, sinceMs: number): Approval
   return out;
 }
 
-/** The command that applies a suggestion, for a person to run. */
-export function suggestionLine(s: Suggestion): string {
+/** The command that applies a suggestion, for a person to run; on a machine
+ *  the workspace governs, the dashboard, where the change is made. */
+export function suggestionLine(s: Suggestion, workspaceGoverned = false): string {
   if (s.kind === 'quiet-rule') {
     const app = APP_CATALOG.find((a) => a.shield === s.shield);
     const word = actionWordOf(s.shield, s.rule);
     const what = word ?? s.rule.replace(/^review-/, '');
-    const cmd = word
-      ? `node9 apps ${app?.slug ?? s.shield} ${word} allow --force`
-      : `node9 shield set ${s.shield} ${s.rule} allow --force`;
+    const cmd = workspaceGoverned
+      ? `the app's page in the dashboard`
+      : word
+        ? `node9 apps ${app?.slug ?? s.shield} ${word} allow --force`
+        : `node9 shield set ${s.shield} ${s.rule} allow --force`;
     return `${app?.label ?? s.shield}: you approved ${what} ${s.approvals} times in ${s.sessions} sessions. Stop asking: ${cmd}`;
   }
-  return `Server ${s.server} was asked about ${s.approvals} times and you approved each. Which app is it? node9 apps link ${s.server} <app>`;
+  const answer = workspaceGoverned
+    ? 'answer it in the dashboard (Protection)'
+    : `node9 apps link ${s.server} <app>`;
+  return `Server ${s.server} was asked about ${s.approvals} times and you approved each. Which app is it? ${answer}`;
 }
 
 /** The suggestion lines of `node9 report`. */
-export function suggestionLines(rows: readonly ApprovalRow[]): string[] {
-  return suggestFromApprovals(rows).slice(0, 5).map(suggestionLine);
+export function suggestionLines(rows: readonly ApprovalRow[], workspaceGoverned = false): string[] {
+  return suggestFromApprovals(rows)
+    .slice(0, 5)
+    .map((s) => suggestionLine(s, workspaceGoverned));
 }

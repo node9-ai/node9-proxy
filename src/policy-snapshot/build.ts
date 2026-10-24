@@ -97,7 +97,9 @@ export function snapshotApps(file: AppsFile): SnapshotApp[] {
     .map(([slug, r]) => ({
       slug,
       state: r.state,
-      by: r.by,
+      // The wire keeps two authors; a record made while the workspace decides
+      // was found by detection.
+      by: r.by === 'user' ? 'user' : 'detected',
       signals: r.signals
         .slice(0, MAX_APP_SIGNALS)
         .map((s) => ({ kind: s.kind, value: s.value.slice(0, 128) })),
