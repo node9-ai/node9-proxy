@@ -38,6 +38,13 @@ describe('gap 4: the agent answer written into the job environment', () => {
     expect(run('tee-to-path.yml')[0].title).toMatch(/PATH/);
   });
 
+  it('points at the line that writes a block, not the first `{` in the file', () => {
+    const f = 'file-fixed-heredoc.yml';
+    const line = run(f)[0].line;
+    const text = fs.readFileSync(path.join(FX, f), 'utf8').split('\n');
+    expect(text[(line ?? 0) - 1]).toMatch(/\} >> "\$GITHUB_ENV"/);
+  });
+
   it('points at the line that writes it', () => {
     const f = 'var-same-step.yml';
     const line = run(f)[0].line;
@@ -210,6 +217,144 @@ describe('gap 4: review fixes (2026-10-24)', () => {
     ];
     const t = Date.now();
     agentOutputSinks(steps, cli);
+    expect(Date.now() - t).toBeLessThan(3_000);
+  });
+});
+
+describe('gap 4: independent review fixes (2026-10-24)', () => {
+  const cli = /claude\s+-p/;
+  const sinks = (steps: Parameters<typeof agentOutputSinks>[0]) =>
+    agentOutputSinks([...steps, { run: 'next', agent: null }], cli).length;
+  const agent = (run: string, id?: string) => ({ run, agent: 'run' as const, id });
+  const step = (run: string) => ({ run, agent: null });
+
+  it('a block redirected to GITHUB_OUTPUT carries the answer to a later step', () => {
+    expect(
+      sinks([
+        agent(
+          'R=$(claude -p "x")\n{\n  echo "summary<<EOF"\n  echo "$R"\n  echo "EOF"\n} >> "$GITHUB_OUTPUT"',
+          'ai'
+        ),
+        step('echo "S=${{ steps.ai.outputs.summary }}" >> $GITHUB_ENV'),
+      ])
+    ).toBe(1);
+  });
+
+  it('a block redirected to a file carries the answer', () => {
+    expect(
+      sinks([
+        agent('R=$(claude -p "x")\n{\n  echo "## Summary"\n  echo "$R"\n} > summary.md'),
+        step('{\n  echo "S<<EOF"\n  cat summary.md\n  echo "EOF"\n} >> "$GITHUB_ENV"'),
+      ])
+    ).toBe(1);
+  });
+
+  it('tee inside a substitution writes the answer to its file', () => {
+    expect(
+      sinks([agent('R=$(claude -p "x" | tee out.txt)'), step('cat out.txt >> $GITHUB_ENV')])
+    ).toBe(1);
+  });
+
+  it.each([
+    ["jq '.result' -r out.json"],
+    ["jq --arg k result -r '.[$k]' out.json"],
+    ['jq .result --raw-output out.json'],
+  ])('raw jq output wherever its flag sits: %s', (jq) => {
+    expect(
+      sinks([agent('claude -p "x" > out.json'), step(`echo "S=$(${jq})" >> $GITHUB_ENV`)])
+    ).toBe(1);
+  });
+
+  it.each([
+    ['jq -r \'.messages[] | select(.type | contains("final")) | .text\' out.json'],
+    ['jq -r \'if (.result | length) > 0 then .result else "none" end\' out.json'],
+  ])('a jq filter that only tests inside is not a number: %s', (jq) => {
+    expect(
+      sinks([agent('claude -p "x" > out.json'), step(`echo "S=$(${jq})" >> $GITHUB_ENV`)])
+    ).toBe(1);
+  });
+
+  it('a jq filter that ends in a number or a test is quiet', () => {
+    for (const jq of ["jq '.items | length' out.json", 'jq -r \'.ok | test("yes")\' out.json'])
+      expect(
+        sinks([agent('claude -p "x" > out.json'), step(`echo "S=$(${jq})" >> $GITHUB_ENV`)])
+      ).toBe(0);
+  });
+
+  it('an unquoted expression redirect target does not taint every later expression', () => {
+    expect(
+      sinks([
+        agent('claude -p "x" > ${{ runner.temp }}/out.txt'),
+        step('echo "VERSION=${{ github.sha }}" >> $GITHUB_ENV'),
+      ])
+    ).toBe(0);
+    expect(
+      sinks([
+        agent('claude -p "x" > ${{ runner.temp }}/out.txt'),
+        step('cat ${{ runner.temp }}/out.txt >> $GITHUB_ENV'),
+      ])
+    ).toBe(1);
+  });
+
+  it('a path output handed over through the step env, then read', () => {
+    expect(
+      sinks([
+        { id: 'ai', agent: 'action' },
+        {
+          run: 'R=$(jq -r \'.[-1].result\' "$F")\n{\n  echo "S<<EOF"\n  echo "$R"\n  echo "EOF"\n} >> "$GITHUB_ENV"',
+          stepEnv: { F: '${{ steps.ai.outputs.execution_file }}' },
+          agent: null,
+        },
+      ])
+    ).toBe(1);
+  });
+
+  it.each([
+    ['R="${R//$\'\\n\'/ }"\necho "S=$R" >> $GITHUB_ENV'],
+    ['echo "S=$(base64 -w0 out.txt)" >> $GITHUB_ENV'],
+    ['echo "S=$(sed -n 1p out.txt)" >> $GITHUB_ENV'],
+    ['echo "S=$(cat out.txt | xargs)" >> $GITHUB_ENV'],
+  ])('newline-free idioms under a fixed name are quiet: %s', (run) => {
+    expect(
+      sinks([
+        agent('claude -p "x" > out.txt\nR=$(cat out.txt)'),
+        step(run.replace(/^/, 'R=$(cat out.txt)\n')),
+      ])
+    ).toBe(0);
+  });
+
+  it('a random-delimiter heredoc does not hide a fixed one in the same block', () => {
+    expect(
+      sinks([
+        agent('claude -p "x" > out.txt'),
+        step(
+          'D=$(openssl rand -hex 8)\n{\n  echo "A<<$D"\n  echo hi\n  echo "$D"\n  echo "B<<EOF"\n  cat out.txt\n  echo EOF\n} >> $GITHUB_ENV'
+        ),
+      ])
+    ).toBe(1);
+  });
+
+  it('`cat<<EOF` is a shell heredoc, not a GITHUB_ENV block opener', () => {
+    expect(
+      sinks([
+        agent('claude -p "x" > out.txt'),
+        step(
+          'cat<<EOF > note.txt\nhello\nEOF\nwhile read -r line; do\n  echo "$line" >> "$GITHUB_ENV"\ndone < out.txt'
+        ),
+      ])
+    ).toBe(1);
+  });
+
+  it('crafted while-read lines stay fast', () => {
+    const run =
+      ('while read a' + ' '.repeat(185) + '= ').repeat(250) +
+      '\n' +
+      'done < out.txt\n'.repeat(1000);
+    const t = Date.now();
+    agentOutputSinks(
+      [agent('claude -p "x" > out.txt'), ...Array.from({ length: 5 }, () => step(run))],
+      cli
+    );
     expect(Date.now() - t).toBeLessThan(3_000);
   });
 });

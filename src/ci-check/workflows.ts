@@ -2856,8 +2856,9 @@ function analyzeAgentOutputToEnvInner(
       AGENT_CLI_RE
     );
     if (!sinks.length) continue;
-    // Untrusted text must reach this job's agent for its output to be the author's.
-    const head = agent.every(readOnlySandbox) ? null : untrustedHeadCheckout(steps);
+    // Untrusted text must reach this job's agent for its output to be the author's. A read-only
+    // sandbox limits what the agent does, not what the fork's files make it say.
+    const head = untrustedHeadCheckout(steps);
     const promptUntrusted = promptTakesUntrusted(agent);
     const itemRead = reach.untrusted ? jobReadsUntrustedItem(job) : null;
     const bypass = bypassArmed(agent);
@@ -2928,7 +2929,12 @@ function analyzeAgentOutputToEnvInner(
       signals.push(
         'no explicit `permissions:` block. The token defaults to the repo/org setting, which may grant write; set it explicitly to read-only'
       );
-    const firstLine = sink.text.trim().split('\n')[0];
+    // The line that writes to the file, searched from the step that holds it (a block's `{` or a
+    // repeated `>> "$GITHUB_ENV"` would otherwise match earlier in the file).
+    const writeLine =
+      sink.text.split('\n').find((l) => /GITHUB_(ENV|PATH)/.test(l)) ?? sink.text.split('\n')[0];
+    const stepRun = str(steps[sink.step]?.run).trim().split('\n')[0];
+    const from = stepRun ? Math.max(0, content.indexOf(stepRun)) : 0;
     best = {
       severity,
       finding: withLine(
@@ -2960,7 +2966,8 @@ function analyzeAgentOutputToEnvInner(
             },
           }),
         },
-        lineOf(content, firstLine.trim().slice(0, 200))
+        lineOf(content, writeLine.trim().slice(0, 200), from) ??
+          lineOf(content, writeLine.trim().slice(0, 200))
       ),
     };
   }
