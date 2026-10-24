@@ -1,0 +1,25 @@
+# A heredoc delimiter made at run time: the answer cannot end the block early.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p "Summarise: $BODY" > out.txt
+      - run: |
+          D=$(openssl rand -hex 16)
+          {
+            echo "SUMMARY<<$D"
+            cat out.txt
+            echo "$D"
+          } >> "$GITHUB_ENV"
+      - run: ./scripts/next.sh

@@ -1,0 +1,22 @@
+# The answer is held in a variable and written under a fixed name in the same step; a later
+# step holds a deploy secret.
+name: Review
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          R=$(claude -p "Is this title ok: $TITLE" --max-turns 1)
+          echo "VERDICT=$R" >> $GITHUB_ENV
+      - env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: ./scripts/notify.sh

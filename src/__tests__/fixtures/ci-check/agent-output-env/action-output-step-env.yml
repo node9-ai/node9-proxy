@@ -1,0 +1,24 @@
+# An agent action's output reaches GITHUB_ENV through the next step's env.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+      - id: agent
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: Classify this issue. ${{ github.event.issue.title }} ${{ github.event.issue.body }}
+      - env:
+          OUT: ${{ steps.agent.outputs.final-message }}
+        run: echo "CATEGORY=$OUT" >> "$GITHUB_ENV"
+      - env:
+          SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+        run: ./scripts/post.sh

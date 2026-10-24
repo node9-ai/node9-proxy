@@ -225,6 +225,72 @@ export function explainSecrets(f: SecretFacts): Explain {
   };
 }
 
+// ── CI-2: the agent's output written into the job environment ───────────────
+
+export interface AgentOutputEnvFacts {
+  severity: Severity;
+  /** Written to `$GITHUB_PATH` (a directory the later steps search), not `$GITHUB_ENV`. */
+  path: boolean;
+  triggers: string[];
+  /** The agent job is held by an actor check. */
+  gated: boolean;
+  /** Plain `pull_request`: fork PRs get no secrets. */
+  plainPr: boolean;
+  /** A reusable workflow: who reaches it depends on the caller. */
+  reusable: boolean;
+  holds: { codeWrite: boolean; pat: boolean; prWrite: boolean; cloud: boolean; secrets: string[] };
+}
+
+export function explainAgentOutputEnv(f: AgentOutputEnvFacts): Explain {
+  const file = f.path ? '`$GITHUB_PATH`' : '`$GITHUB_ENV`';
+  const saw = [
+    `The workflow writes the agent's answer into ${file}, which every later step of the job reads.`,
+  ];
+  if (f.gated) saw.push('Only people with write access can start it.');
+  else saw.push(`It starts on ${codes(f.triggers, 4)}, and the agent reads what a stranger wrote.`);
+  const held = [
+    f.holds.codeWrite ? 'a token that can push code or publish' : '',
+    f.holds.pat ? 'a personal access token' : '',
+    f.holds.prWrite && !f.holds.codeWrite ? 'a token that can change pull requests' : '',
+    f.holds.cloud ? 'cloud credentials' : '',
+    f.holds.secrets.length ? `the secrets ${codes(f.holds.secrets)}` : '',
+  ].filter(Boolean);
+  if (held.length) saw.push(`The job holds ${sentence(held, true)}.`);
+  const fix = [
+    "Write the agent's answer to a file and read it in the next step with a strict parser (a fixed list of values, or a number).",
+    `Never append the agent's free text to ${file}.`,
+  ];
+  if (!f.path)
+    fix.push(
+      'If a value must go there, remove line breaks and write it under a fixed name, or use a delimiter made at run time.'
+    );
+  const how = f.path
+    ? 'It can add a folder to the PATH, so a later step runs a program of its choosing.'
+    : 'It can add a line such as `NODE_OPTIONS` or `BASH_ENV`, so a later step runs its code.';
+  if (f.severity === 'advisory')
+    return {
+      headline: "The agent's answer is written into the job's environment",
+      happens: f.gated
+        ? `Only people with write access can start it, so it is safe today. If that check is removed, a stranger who steers the agent could make the next steps run their code. ${how}`
+        : `Pull requests from forks run with a read-only token and no secrets, so a stranger cannot do lasting harm today. It would become dangerous on \`pull_request_target\`. ${how}`,
+      saw,
+      fix: fix.slice(0, 4),
+    };
+  if (f.reusable)
+    return {
+      headline: "A reusable workflow writes the agent's answer into the job's environment",
+      happens: `If a workflow that calls this one runs on pull requests or issues from strangers, they can steer the agent's answer and make the next steps run their code. ${how}`,
+      saw,
+      fix: fix.slice(0, 4),
+    };
+  return {
+    headline: "A stranger can run code in this job through the agent's answer",
+    happens: `A stranger writes ${strangerAction(f.triggers)} that steers what the agent answers. The workflow puts that answer into ${file}. ${how} That code runs with everything the job holds${held.length ? '' : ' (at least its token and cache)'}.`,
+    saw,
+    fix: fix.slice(0, 4),
+  };
+}
+
 // ── CI-1: broad permissions in a committed settings file ─────────────────────
 
 export interface GrantFacts {

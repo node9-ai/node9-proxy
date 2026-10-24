@@ -1,0 +1,17 @@
+# Started by a push: nothing a stranger wrote reaches the agent.
+name: Notes
+on:
+  push:
+    branches: [main]
+jobs:
+  notes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: claude -p "Write release notes" > notes.md
+      - run: echo "NOTES=$(cat notes.md)" >> "$GITHUB_ENV"
+      - run: ./scripts/release.sh

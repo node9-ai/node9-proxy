@@ -1,0 +1,22 @@
+# GITHUB_ENV gets a date, not the answer; the answer goes to GITHUB_OUTPUT.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p "Summarise: $BODY" > out.txt
+      - id: keep
+        run: |
+          echo "TODAY=$(date +%F)" >> "$GITHUB_ENV"
+          echo "summary=$(cat out.txt)" >> "$GITHUB_OUTPUT"
+      - run: ./scripts/next.sh

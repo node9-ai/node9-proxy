@@ -6,10 +6,11 @@
 //   danger = reachability(untrusted → agent) × power(tools/secrets) × exposure
 // then applies the actor gate and mitigations. Static + parse-only.
 
-import { explainSecrets, explainWorkflow } from './explain';
+import { explainAgentOutputEnv, explainSecrets, explainWorkflow } from './explain';
+import { agentOutputSinks } from './env-sink';
 import { parseYamlStrict as parseYaml } from './yaml-strict';
 import { parseFrontmatter } from './frontmatter';
-import { lineOf, lineOfRe } from './lines';
+import { lineOf, lineOfRe, withLine } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
 import { safeText } from './suppress';
@@ -2755,4 +2756,192 @@ function analyzeForkCodeOnTrustInner(
     ];
   }
   return [];
+}
+
+// ─── Gap 4: the agent's output written into the job environment ─────────────
+// The checks above grade damage by what the agent can do itself. Here the workflow does it: it
+// writes the agent's text into `$GITHUB_ENV` or `$GITHUB_PATH`, and every later step of the job
+// runs with a value the PR or issue author can steer (`NODE_OPTIONS`, `BASH_ENV`, PATH): code
+// execution in the job, whatever tools the agent was given. Within one job; see env-sink.ts.
+
+const GITHUB_PAT_NAME_RE = /(?:^|_)PAT(?:_|$)|^(?:GH|GITHUB)_/i;
+
+/** Secrets the later steps, the job env or the workflow env hand to the job (not the default
+ *  token): code running in a later step can read them. */
+function laterSecrets(wf: Workflow, job: Job, from: number): string[] {
+  const blobs = [str((wf as { env?: unknown }).env), str(job.env)];
+  for (const st of (job.steps ?? []).slice(from + 1)) blobs.push(str(st.env), str(st.with));
+  const out = new Set<string>();
+  for (const b of blobs.map(dropDeadSecretRefs))
+    for (const m of b.matchAll(/secrets\.([A-Za-z_][A-Za-z0-9_]*)/gi))
+      if (!/^GITHUB_TOKEN$/i.test(m[1])) out.add(m[1]);
+  return [...out];
+}
+
+export function analyzeAgentOutputToEnv(
+  path: string,
+  content: string,
+  callers?: LocalCaller[],
+  autoLabels?: ReadonlySet<string>,
+  trustedRunSources?: ReadonlySet<string>
+): CiFinding[] {
+  AUTO_LABELS = autoLabels ?? new Set();
+  TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
+  try {
+    return analyzeAgentOutputToEnvInner(path, content, callers);
+  } finally {
+    AUTO_LABELS = new Set();
+    TRUSTED_RUN_SOURCES = new Set();
+    UPSTREAM_TRUSTED = false;
+  }
+}
+
+function analyzeAgentOutputToEnvInner(
+  path: string,
+  content: string,
+  callers?: LocalCaller[]
+): CiFinding[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = loadWorkflow(content).raw;
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const wf = raw as Workflow; // normalised by loadWorkflow
+  if (callers?.length) CALLERS.set(wf, callers);
+  else CALLERS.delete(wf);
+  UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
+  const reach = triggerReach(wf, raw);
+  const untrustedTrigger = reach.untrusted || reach.reusable;
+  if (!untrustedTrigger) return [];
+  const inj = new Set(injectableJobs(wf, raw, untrustedTrigger));
+
+  let best: { severity: Severity; finding: CiFinding } | null = null;
+  for (const job of jobList(wf)) {
+    const steps = (job.steps ?? []).filter(
+      (st): st is Step => st != null && typeof st === 'object'
+    );
+    const agent = steps.filter(isAgentStep);
+    if (!agent.length) continue;
+    const sinks = agentOutputSinks(
+      steps.map((st) => ({
+        id: typeof st.id === 'string' ? st.id : undefined,
+        run: !st.uses && typeof st.run === 'string' ? st.run : undefined,
+        uses: !!st.uses,
+        stepEnv: st.env && typeof st.env === 'object' ? st.env : undefined,
+        env: { ...(st.scopeEnv ?? {}), ...(st.env && typeof st.env === 'object' ? st.env : {}) },
+        agent: isAgentStep(st) ? (st.uses ? 'action' : 'run') : null,
+      })),
+      AGENT_CLI_RE
+    );
+    if (!sinks.length) continue;
+    // Untrusted text must reach this job's agent for its output to be the author's.
+    const head = agent.every(readOnlySandbox) ? null : untrustedHeadCheckout(steps);
+    const promptUntrusted = promptTakesUntrusted(agent);
+    const itemRead = reach.untrusted ? jobReadsUntrustedItem(job) : null;
+    const bypass = bypassArmed(agent);
+    if (!head && !promptUntrusted && !itemRead && !bypass) continue;
+
+    const sink = sinks[0];
+    const secrets = laterSecrets(wf, job, sink.step);
+    const cloud =
+      hasIdTokenWrite(wf, [job]) || steps.some((st) => CLOUD_AUTH_ACTION_RE.test(str(st.uses)));
+    // A GitHub token by name (`GH_PAT`, `GITHUB_BOT_TOKEN`), not any `*_TOKEN`: a chat-service
+    // token is a secret (high), not a key to the repository.
+    const pat = usesPatIn([job]) || secrets.some((s) => GITHUB_PAT_NAME_RE.test(s));
+    const codeWrite = hasCodeWritePerm(wf, [job]);
+    const prWrite = hasPrWritePerm(wf, [job]);
+    const gated = !inj.has(job);
+    let severity: Severity =
+      codeWrite || pat ? 'critical' : secrets.length || cloud || prWrite ? 'high' : 'medium';
+    // Fork PRs on plain `pull_request` run with a read-only token and no secrets.
+    const plainPr = reach.untrusted && !reach.privileged && !reach.reusable;
+    if (gated || plainPr) severity = 'advisory';
+    // A template whose caller is not seen stays capped, unless it is built for attacker input.
+    if (
+      reach.reusable &&
+      !(head === 'root' || promptUntrusted) &&
+      SEVERITY_RANK[severity] > SEVERITY_RANK.medium
+    )
+      severity = 'medium';
+    if (best && SEVERITY_RANK[best.severity] >= SEVERITY_RANK[severity]) continue;
+
+    const target = sink.target === 'GITHUB_PATH' ? '$GITHUB_PATH' : '$GITHUB_ENV';
+    const signals: string[] = [
+      `the agent's output is written to \`${target}\`: \`${safeText(sink.text.trim(), 100)}\``,
+      reach.secretExposed
+        ? `runs with base-repo secrets (${reach.keys
+            .filter((t) => /target|workflow_run/i.test(t))
+            .map((t) => safeText(t, 40))
+            .join(', ')})`
+        : reach.reusable
+          ? `reusable workflow (${reach.keys.map((t) => safeText(t, 40)).join(', ')}): reachability depends on the caller's trigger + actor gate`
+          : `triggered by untrusted input (${reach.keys.map((t) => safeText(t, 40)).join(', ')})`,
+    ];
+    if (head === 'root') signals.push('the agent works on the checked-out PR head');
+    else if (head === 'subdir') signals.push('the agent reads the PR head checked out in a subdir');
+    if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
+    else if (itemRead) signals.push('the agent reads the untrusted PR/issue itself');
+    if (bypass) signals.push('allowed_non_write_users is open, with github_token');
+    const holds = [
+      codeWrite ? 'a write token (contents/packages/actions/deployments)' : '',
+      pat ? 'a personal access token' : '',
+      prWrite && !codeWrite ? 'pull-requests: write' : '',
+      cloud ? 'cloud credentials (id-token: write or a cloud sign-in step)' : '',
+      secrets.length
+        ? `secrets: ${secrets
+            .slice(0, 4)
+            .map((s) => `\`${safeText(s, 60)}\``)
+            .join(', ')}`
+        : '',
+    ].filter(Boolean);
+    if (holds.length) signals.push(`the job holds ${holds.join('; ')}`);
+    if (gated) signals.push('the agent job is actor-gated: latent risk only');
+    if (plainPr)
+      signals.push(
+        'triggered by `pull_request`: fork PRs run with a read-only token and no secrets'
+      );
+    const noExplicitPerms = wf.permissions == null && job.permissions == null;
+    if (noExplicitPerms && !gated && !plainPr)
+      signals.push(
+        'no explicit `permissions:` block. The token defaults to the repo/org setting, which may grant write; set it explicitly to read-only'
+      );
+    const firstLine = sink.text.trim().split('\n')[0];
+    best = {
+      severity,
+      finding: withLine(
+        {
+          check: 'CI-2',
+          rule: 'CI-2.agent-output-to-env',
+          dimension: 'workflows',
+          severity,
+          title:
+            sink.target === 'GITHUB_PATH'
+              ? "The agent's output is added to the job's PATH"
+              : "The agent's output is written into the job's environment",
+          file: path,
+          signals,
+          fix: `Write the agent's result to a file and read it with a strict parser in the next step (a fixed set of values, or a number); never append free text from the agent to \`${target}\`. If a value must go there, strip newlines (\`tr -d '\\n'\`) and write it under a fixed name, or use a delimiter generated at run time.`,
+          explain: explainAgentOutputEnv({
+            severity,
+            path: sink.target === 'GITHUB_PATH',
+            triggers: reach.keys,
+            gated,
+            plainPr,
+            reusable: reach.reusable,
+            holds: {
+              codeWrite,
+              pat,
+              prWrite,
+              cloud,
+              secrets,
+            },
+          }),
+        },
+        lineOf(content, firstLine.trim().slice(0, 200))
+      ),
+    };
+  }
+  return best ? [best.finding] : [];
 }

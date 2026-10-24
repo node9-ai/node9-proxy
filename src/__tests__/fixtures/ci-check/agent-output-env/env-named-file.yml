@@ -1,0 +1,21 @@
+# The redirect target is named by an env variable; a later step reads the same file by path.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ANSWER_FILE: answer.txt
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p "Answer: $BODY" > "$ANSWER_FILE"
+      - run: cat answer.txt >> $GITHUB_ENV
+      - run: ./scripts/reply.sh
