@@ -48,6 +48,7 @@ const PASSES = 3;
 const TAINT_MAX = 256;
 const COMMANDS_MAX = 40_000;
 const LOOKBACK = 200;
+const BLOCK_CHARS_MAX = 20_000;
 
 // ── reading a run block into commands ───────────────────────────────────────
 
@@ -590,8 +591,14 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
       const close = BLOCK_CLOSE_RE.exec(cmd);
       if (!close) return [cmd];
       const opener = BLOCK_OPEN[close[1]];
-      for (let k = li - 1; k >= Math.max(0, li - LOOKBACK); k--)
-        if (opener.test(lines[k])) return lines.slice(k, li).flatMap(commandsOf).concat(cmd);
+      for (let k = li - 1; k >= Math.max(0, li - LOOKBACK); k--) {
+        if (!opener.test(lines[k])) continue;
+        const block = lines.slice(k, li);
+        if (block.reduce((n, l) => n + l.length, 0) > BLOCK_CHARS_MAX) return [cmd];
+        const parts = block.flatMap(commandsOf).concat(cmd);
+        budget -= parts.length;
+        return parts;
+      }
       return [cmd];
     };
     const blockLevel = (parts: string[], t: Taint) => {
@@ -693,18 +700,20 @@ export function agentOutputSinks(steps: SinkStep[], agentCli: RegExp): EnvSink[]
             for (const v of read[2].trim().split(/\s+/)) if (!vars.has(v)) taint(vars, v, 'line');
           }
           // A block redirected to a file or to GITHUB_OUTPUT carries what its lines wrote.
-          const parts = blockOf(li, cmd);
+          const targets = writeTargets(cmd);
+          const toOutput = !!st.id && OUTPUT_TARGET_RE.test(cmd);
+          // `done < f` reads: only a closer that writes somewhere covers its block.
+          const parts = targets.length || toOutput ? blockOf(li, cmd) : [cmd];
           const written = parts.length > 1 ? max(level, blockLevel(parts, t)) : level;
           if (written || isAgentCmd) {
             const l: Level = isAgentCmd ? 'full' : (written as Level);
-            for (const p of writeTargets(cmd)) taint(files, p, l);
+            for (const p of targets) taint(files, p, l);
             if (isAgentCmd)
               for (const m of cmd.matchAll(OUTPUT_FLAG_RE)) {
                 const p = normPath(m[2]);
                 if (p && !isSpecialTarget(p)) taint(files, p, 'full');
               }
-            if (st.id && OUTPUT_TARGET_RE.test(cmd))
-              outputs.set(st.id, max(outputs.get(st.id) ?? null, l) as Level);
+            if (st.id && toOutput) outputs.set(st.id, max(outputs.get(st.id) ?? null, l) as Level);
           }
         }
       }
