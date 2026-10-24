@@ -19,14 +19,14 @@
     },
     {
       "name": "shield:identity:review-access",
-      "tool": "{,mcp__*__}{grant_access,grant_permission,grant_role,revoke_access,revoke_permission,revoke_role,revoke_token,set_permission,set_permissions,set_role,assign_role,update_role,add_permission,remove_permission,attach_policy,detach_policy}",
+      "tool": "{,mcp__*__}{grant_access,grant_permission,grant_role,revoke_access,revoke_permission,revoke_role,revoke_token,set_permission,set_permissions,set_role,assign_role,update_role,add_permission,remove_permission,attach_policy,detach_policy,share_file}",
       "conditions": [],
       "verdict": "review",
       "reason": "This grants or revokes access. node9 asks before access changes (Identity shield)."
     },
     {
       "name": "shield:identity:review-membership",
-      "tool": "{,mcp__*__}{add_member,remove_member,add_user_to_group,remove_user_from_group,add_collaborator,remove_collaborator,invite_user,invite_member,invite_user_to_slack,invite_users,add_org_member,remove_org_member,add_team_member,remove_team_member}",
+      "tool": "{,mcp__*__}{add_member,remove_member,add_user_to_group,remove_user_from_group,add_collaborator,remove_collaborator,invite_user,invite_member,invite_user_to_slack,invite_users,add_org_member,remove_org_member,add_team_member,remove_team_member,add_user_to_channel,remove_user_from_slack}",
       "conditions": [],
       "verdict": "review",
       "reason": "This changes who belongs where. node9 asks before membership changes (Identity shield)."

@@ -1,0 +1,13 @@
+# Bedrock is switched on in the job env, but the CLI only prints its version.
+name: Check
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_CODE_USE_BEDROCK: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - run: claude --version

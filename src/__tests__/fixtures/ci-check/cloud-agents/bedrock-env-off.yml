@@ -1,0 +1,15 @@
+# The Bedrock switch is set to off: no model credential, so not an agent run.
+name: Review
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - env:
+          CLAUDE_CODE_USE_BEDROCK: '0'
+        run: claude -p "Review the changes in this checkout" --dangerously-skip-permissions

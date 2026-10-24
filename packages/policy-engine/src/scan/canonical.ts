@@ -713,7 +713,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // national identifiers with a check digit, a PGP private key block and a
 // Grafana API key, and the output scan reading decoded views. Histories
 // scanned under v28 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
+// canonical-v30 (2026-10-24, node9Firewall#385): a jail path rule reads the
+// command as a file access (fileAccessView), so a script's interpreter line
+// and the program a command runs no longer meet a jail of /usr or /bin.
+// Histories scanned under v29 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v30';
 
 // 2026-10-18, hash bumped with NO version bump: files/paths.ts gained the
 // SYSTEM_DIRS sets for the live file policy (files.system-dirs); the extractor
@@ -760,7 +764,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v29';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '3b936dab47d27942';
+export const CANONICAL_EXTRACTOR_HASH = 'a2cb0ed8cf50d6e9';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

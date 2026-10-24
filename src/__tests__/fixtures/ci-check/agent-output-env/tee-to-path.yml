@@ -1,0 +1,19 @@
+# The answer is copied with tee and later added to PATH.
+name: Fix
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASK: ${{ github.event.comment.body }}
+        run: |
+          claude -p "Which tool folder answers: $ASK" | tee tooldir.txt
+      - run: cat tooldir.txt | tr -d '\n' >> "$GITHUB_PATH"
+      - run: build

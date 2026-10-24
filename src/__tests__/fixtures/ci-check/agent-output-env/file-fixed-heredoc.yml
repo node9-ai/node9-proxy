@@ -1,0 +1,27 @@
+# The CLI's answer goes to a file; a later step puts the file into GITHUB_ENV under a fixed
+# heredoc delimiter. The job can push code.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ask
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p "Summarise this issue: $BODY" > result.md
+      - name: Keep
+        run: |
+          {
+            echo "SUMMARY<<EOF"
+            cat result.md
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+      - run: npm run label

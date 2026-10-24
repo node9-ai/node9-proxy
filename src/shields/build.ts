@@ -104,10 +104,12 @@ export function pathRules(rawPath: string, verdict: Verdict, reason?: string): S
   const why = reason ?? `Accessing ${rawPath} is restricted by this shield`;
   const s = slug(rawPath);
   return [
+    // `reading: 'access'`: a script's interpreter line and the program a
+    // command runs are not reads of the jailed path (node9Firewall#385).
     {
       name: `${verdict}-path-${s}-bash`,
       tool: 'bash',
-      conditions: [{ field: 'command', op: 'matches', value }],
+      conditions: [{ field: 'command', op: 'matches', value, reading: 'access' }],
       verdict,
       reason: why,
     },
@@ -135,6 +137,36 @@ export function pathRules(rawPath: string, verdict: Verdict, reason?: string): S
       reason: why,
     },
   ];
+}
+
+const LEGACY_BASH_PATH_RULE = /^(?:block|review)-path-.+-bash$/;
+
+/**
+ * A shield file written before fw#385 carries the jail's bash path rule
+ * without `reading: 'access'`, so it would keep meeting `#!/usr/bin/env bash`
+ * until the user ran `node9 jail add` again. The loader passes every user
+ * shield through this: a rule of exactly the shape pathRules emits gets the
+ * reading; every other rule is returned as written.
+ */
+export function withAccessReading(def: ShieldDefinition): ShieldDefinition {
+  let changed = false;
+  const smartRules = def.smartRules.map((r) => {
+    const [c, ...rest] = r.conditions ?? [];
+    if (
+      rest.length > 0 ||
+      !c ||
+      r.tool !== 'bash' ||
+      !LEGACY_BASH_PATH_RULE.test(r.name ?? '') ||
+      c.field !== 'command' ||
+      c.op !== 'matches' ||
+      c.reading !== undefined
+    ) {
+      return r;
+    }
+    changed = true;
+    return { ...r, conditions: [{ ...c, reading: 'access' as const }] };
+  });
+  return changed ? { ...def, smartRules } : def;
 }
 
 export interface BuildShieldInput {

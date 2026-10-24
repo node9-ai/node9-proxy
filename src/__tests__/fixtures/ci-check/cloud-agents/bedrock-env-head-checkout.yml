@@ -1,0 +1,23 @@
+# A CLI that reaches its model through Bedrock: no model key, no event text in its env. It runs
+# over the checked-out PR head on pull_request_target.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm install -g @anthropic-ai/claude-code
+      - name: Review
+        env:
+          CLAUDE_CODE_USE_BEDROCK: '1'
+          AWS_REGION: us-east-1
+        run: claude -p "Review the changes in this checkout" --allowedTools "Bash(gh pr comment:*)"

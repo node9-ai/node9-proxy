@@ -57,9 +57,15 @@ export {
 export type { ScanView } from './dlp';
 
 // Shell — AST-based detectors (mvdan-sh). Pure: input is a string, output is a verdict.
-export type { ShellCommandAnalysis, FsOpVerdict, ShellDestination } from './shell';
+export type {
+  ShellCommandAnalysis,
+  FsOpVerdict,
+  ShellDestination,
+  InlineExecReview,
+} from './shell';
 export {
   normalizeCommandForPolicy,
+  fileAccessView,
   detectDangerousShellExec,
   detectDangerousEval,
   analyzeShellCommand,
@@ -74,6 +80,9 @@ export {
   shellRuleArgs,
   toolMatchesRule,
   detectInlineExec,
+  inlineExecReview,
+  inlineExecReason,
+  inlineExecDescription,
   AST_FS_REGEX_RULES,
   FS_READ_TOOLS,
   COMMAND_WRAPPERS,

@@ -28,6 +28,9 @@ import {
   resolveShellInput,
   shellRuleArgs,
   detectInlineExec,
+  inlineExecReview,
+  inlineExecReason,
+  inlineExecDescription,
   toolMatchesRule,
   AST_FS_REGEX_RULES,
   extractShellDestinations,
@@ -864,13 +867,21 @@ async function evaluatePolicyCore(
       else if (v) candidates.push(v);
     };
 
-    // Inline execution.
-    if (detectInlineExec(shellCommand)) {
+    // Inline execution (node9Firewall#385). Strict mode asks on every inline
+    // call; every other mode reads the code and asks when it does something
+    // dangerous or cannot be read.
+    const inline =
+      config.settings.mode === 'strict'
+        ? detectInlineExec(shellCommand)
+          ? undefined
+          : null
+        : inlineExecReview(shellCommand);
+    if (inline !== null) {
       consider('commands.inline-exec', {
         decision: 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
-        ruleDescription:
-          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
+        ...(inline ? { reason: inlineExecReason(inline) } : {}),
+        ruleDescription: inlineExecDescription(inline),
         tier: 3,
         checkId: 'commands.inline-exec',
       });

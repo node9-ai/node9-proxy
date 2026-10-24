@@ -1,0 +1,16 @@
+# Plain pull_request: fork PRs run with a read-only token and no secrets.
+name: Review
+on:
+  pull_request:
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          claude -p "Review: $TITLE" > review.txt
+      - run: echo "REVIEW=$(cat review.txt)" >> "$GITHUB_ENV"
+      - run: ./scripts/report.sh

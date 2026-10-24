@@ -10,6 +10,7 @@ import {
   analyzeWorkflowPlugins,
   analyzeTrustedReaders,
   analyzeForkCodeOnTrust,
+  analyzeAgentOutputToEnv,
   issueFormLabels,
   runSourceOf,
   localCallsOf,
@@ -139,7 +140,8 @@ export function scanTree(tree: RepoTree): ScanResult {
         file.path,
         content,
         autoLabels,
-        trustedRunSources
+        trustedRunSources,
+        { owner: tree.owner, repo: tree.repo }
       )) {
         const list = callersOf.get(target) ?? [];
         list.push(caller);
@@ -188,6 +190,9 @@ export function scanTree(tree: RepoTree): ScanResult {
           findings.push(
             ...analyzeForkCodeOnTrust(file.path, content, callers, autoLabels, trustedRunSources)
           ); // T.7
+          findings.push(
+            ...analyzeAgentOutputToEnv(file.path, content, callers, autoLabels, trustedRunSources)
+          ); // gap 4
           break;
         }
         case 'agent-config':

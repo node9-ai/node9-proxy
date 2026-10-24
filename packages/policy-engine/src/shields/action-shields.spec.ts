@@ -191,6 +191,32 @@ describe('the gate, with a shield on', () => {
     ).toBe('shield:publishing:review-post');
   });
 
+  it('identity: adding or removing a user and sharing a file are reviewed (user and access management)', async () => {
+    const cfg = withShield('identity');
+    const cases: Array<[string, unknown, string]> = [
+      ['mcp__chat__add_user_to_channel', { user: 'eve', channel: 'general' }, 'review-membership'],
+      ['add_user_to_channel', { user: 'eve', channel: 'general' }, 'review-membership'],
+      ['mcp__chat__remove_user_from_slack', { user: 'eve' }, 'review-membership'],
+      ['remove_user_from_slack', { user: 'eve' }, 'review-membership'],
+      ['mcp__drive__share_file', { file_id: '7', email: 'eve@example.test' }, 'review-access'],
+      ['share_file', { file_id: '7', email: 'eve@example.test' }, 'review-access'],
+    ];
+    for (const [tool, args, rule] of cases) {
+      const r = await gate(cfg, tool, args);
+      expect(r.decision, tool).toBe('review');
+      expect(r.ruleName, tool).toBe(`shield:identity:${rule}`);
+    }
+    // Ordinary work in the same apps is not user or access management.
+    for (const tool of [
+      'mcp__chat__send_channel_message',
+      'mcp__calendar__add_calendar_event_participants',
+      'mcp__bank__update_user_info',
+      'mcp__drive__create_file',
+    ]) {
+      expect((await gate(cfg, tool, { text: 'hi' })).decision, tool).toBe('allow');
+    }
+  });
+
   it('without the shield the same calls pass (the shields ship off)', async () => {
     const cfg = {
       ...DEFAULT_CONFIG,

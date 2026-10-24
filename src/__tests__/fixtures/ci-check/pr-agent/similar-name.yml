@@ -1,0 +1,11 @@
+# An action whose name only starts with pr-agent: not the reviewer.
+name: Labels
+on:
+  pull_request_target:
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: example-org/pr-agent-labeler@v1

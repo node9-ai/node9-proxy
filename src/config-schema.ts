@@ -37,6 +37,7 @@ const SmartConditionSchema = z
     ),
     value: z.string().optional(),
     flags: z.string().optional(),
+    reading: z.enum(['access']).optional(),
   })
   .refine(
     (c) => {

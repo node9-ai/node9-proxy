@@ -43,10 +43,11 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   // ── Commands ──────────────────────────────────────────────────────────────
   'commands.inline-exec': {
-    plain: 'The agent runs a small program written inside the command itself.',
+    plain:
+      'The agent runs a small program written inside the command itself, and node9 reads it: ordinary code runs, code that deletes, sends data out, runs other commands or reads protected files is held, and so is code node9 cannot read.',
     example: `node -e "require('fs').rmSync('dist', {recursive: true})"`,
     advice:
-      'Agents do this often for harmless tasks. Set Log if your team finds the review prompts noisy; keep Review if agents work near production.',
+      'Keep Review. Strict mode reviews every inline call, harmless or not; Log or Off only if inline code never reaches anything that matters.',
   },
   'commands.eval-dynamic': {
     plain:
@@ -277,7 +278,7 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   'loading.malicious-package': {
     plain:
-      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only.',
+      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only. A new release built from the same repository as the one before it (registry provenance) and an install script the package has always run do not stop; a release that lost the provenance its previous release had does.',
     example: 'npm install of a package flagged as malware',
     advice: 'Keep Block for known-malicious packages; brand-new packages already stop for Review.',
   },
