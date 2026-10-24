@@ -5,7 +5,6 @@
 // works the same in CJS/ESM bundles, and the host repo doesn't need to
 // know where the JSONs live on disk.
 
-import safeRegex from 'safe-regex2';
 import { validateRegex } from '../utils/regex';
 import type { SmartRule } from '../types';
 
@@ -123,27 +122,18 @@ export const BUILTIN_SHIELDS: Record<string, ShieldDefinition> = {
 // dlp/index.ts. Catches a vulnerable pattern landing in a future
 // shield-JSON edit before any customer hits it.
 function assertBuiltinShieldRegexesAreSafe(): void {
-  // Generated rule sets (node9Firewall#390): the action templates ship as the
-  // general action checks, and the app shields are built from them. They are
-  // held to the runtime's own validation (length cap, syntax, safe-regex2): a
-  // pattern it refuses compiles to null and reads as NO MATCH, so a rule that
-  // promises a review would silently allow.
-  // The older shields are checked with safe-regex2 only: two project-jail
-  // rules (block-read-env, review-read-credentials) exceed the 256-character
-  // cap today and are tracked separately rather than failing the load.
-  const generated = new Set(APP_SHIELDS.map((a) => a.name));
-  const sets: { name: string; strict: boolean; smartRules: readonly SmartRule[] }[] = [
+  // Every shipped rule set is held to the runtime's own validation (length
+  // cap, syntax, safe-regex2): a pattern it refuses compiles to null and reads
+  // as NO MATCH, so a rule that promises a block or a review would silently
+  // allow. Two project-jail rules were over the cap until fw#390 section 20;
+  // this check now fails the build instead.
+  const sets: { name: string; smartRules: readonly SmartRule[] }[] = [
     ...Object.values(BUILTIN_SHIELDS).map((sh) => ({
       name: sh.name,
-      strict: generated.has(sh.name),
       smartRules: sh.smartRules,
     })),
-    ...Object.entries(ACTION_TEMPLATES).map(([name, smartRules]) => ({
-      name,
-      strict: true,
-      smartRules,
-    })),
-    { name: 'general-action-checks', strict: true, smartRules: GENERAL_ACTION_RULES },
+    ...Object.entries(ACTION_TEMPLATES).map(([name, smartRules]) => ({ name, smartRules })),
+    { name: 'general-action-checks', smartRules: GENERAL_ACTION_RULES },
   ];
   for (const shield of sets) {
     for (const rule of shield.smartRules) {
@@ -152,11 +142,7 @@ function assertBuiltinShieldRegexesAreSafe(): void {
         if (cond.op !== 'matches' && cond.op !== 'notMatches') continue;
         const pattern = cond.value;
         if (!pattern) continue;
-        const problem = shield.strict
-          ? validateRegex(pattern)
-          : safeRegex(pattern)
-            ? null
-            : 'potential ReDoS';
+        const problem = validateRegex(pattern);
         if (problem) {
           throw new Error(
             `[node9 engine] Shield '${shield.name}' rule '${rule.name ?? rule.tool}' has a regex the runtime refuses (${problem}): ${pattern}`
