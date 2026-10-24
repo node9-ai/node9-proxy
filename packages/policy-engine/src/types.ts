@@ -29,6 +29,13 @@ export interface SmartCondition {
     | 'notMatchesGlob';
   value?: string;
   flags?: string;
+  /**
+   * Which reading of a `command` field the regex ops test. Absent: the whole
+   * command text. 'access': the command as a file-access rule sees it, without
+   * a script's interpreter line and with the program each command runs cut to
+   * its name (fileAccessView). Set by the jail's path rules (fw#385).
+   */
+  reading?: 'access';
 }
 
 /**

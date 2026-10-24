@@ -244,6 +244,68 @@ export function normalizeCommandForPolicy(command: string): string {
   return commandReadingsImpl(command).posix;
 }
 
+// A first line that is an interpreter line and nothing else: a path, then
+// plain words (`-S`, `python3`, `-u`). Anything a shell could act on (`&`,
+// `;`, `|`, `$`, a redirect, a quote) keeps the line: POSIX shells read `#!`
+// as a comment, but cmd.exe does not, and `#!/bin/sh & type secret` runs the
+// second command there.
+const INTERPRETER_LINE = /^#![ \t]*[\w./+-]+(?:[ \t]+[\w./+=:-]+)*[ \t]*\r?(?=\n|$)/;
+
+/**
+ * The command as a file-access rule sees it (node9Firewall#385). A jail of
+ * /usr or /bin must not meet `#!/usr/bin/env bash` or `/usr/bin/python3 app.py`:
+ * the interpreter line names the program that runs the script and the program
+ * path names what runs; neither is a file the command reads. So the clean
+ * interpreter line on the first line is dropped, and the program word of each
+ * command (after `sudo`, `env` and the other wrappers) is cut to its name.
+ * Every argument and redirect stays, so `cat /usr/share/x`, `bash /etc/x.sh`
+ * (the script is read) and `wc < /etc/hosts` still meet the jail.
+ *
+ * Known limit: a script run directly from a jailed directory (`/etc/x.sh`)
+ * passes; running it does not hand its text to the agent. An unparsable
+ * command is returned unchanged (the strict direction for a jail).
+ */
+export function fileAccessView(command: string): string {
+  const text = command.replace(INTERPRETER_LINE, '');
+  const f = parseShared(text);
+  if (f === PARSE_FAIL) return text;
+  const toCharIndex = byteOffsetToCharIndex(text);
+  const at = (byteOffset: number): number =>
+    toCharIndex === null ? byteOffset : toCharIndex(byteOffset);
+  const edits: Array<[number, number, string]> = [];
+  try {
+    syntax.Walk(f, (node: unknown) => {
+      if (!node) return false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any[] = n.Args || [];
+      const words = args.map((a) => resolveWordLiteral(a));
+      const head = unwrapCommandHead(words);
+      for (const i of new Set([0, head])) {
+        const word = words[i];
+        if (i >= args.length || word === null || word === undefined || !/[\\/]/.test(word)) {
+          continue;
+        }
+        const name = word.split(/[\\/]/).pop() ?? '';
+        if (!name) continue;
+        const s = at(args[i].Pos().Offset());
+        const e = at(args[i].End().Offset());
+        if (s < 0 || e < 0) continue;
+        edits.push([s, e, name]);
+      }
+      return true;
+    });
+  } catch {
+    return text;
+  }
+  edits.sort((a, b) => b[0] - a[0]);
+  let out = text;
+  for (const [s, e, rep] of edits) out = out.slice(0, s) + rep + out.slice(e);
+  return out;
+}
+
 /**
  * Every reading of a command that a rule must be tested against.
  *

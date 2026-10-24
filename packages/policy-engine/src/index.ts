@@ -60,6 +60,7 @@ export type { ScanView } from './dlp';
 export type { ShellCommandAnalysis, FsOpVerdict, ShellDestination } from './shell';
 export {
   normalizeCommandForPolicy,
+  fileAccessView,
   detectDangerousShellExec,
   detectDangerousEval,
   analyzeShellCommand,

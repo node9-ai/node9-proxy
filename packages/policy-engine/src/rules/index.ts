@@ -9,7 +9,7 @@ import pm from 'picomatch';
 import type { SmartRule } from '../types';
 import { normalizeCommandForPolicy } from '../shell';
 import { getCompiledRegex } from '../utils/regex';
-import { commandReadings } from '../shell';
+import { commandReadings, fileAccessView } from '../shell';
 
 /**
  * Glob match a tool name against one pattern or a list, with case-insensitive
@@ -96,23 +96,29 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
   // separator in cmd/PowerShell, and nothing here knows which shell will run.
   // Testing a single reading silently drops matches that exist in the text.
   const readingsCache = new Map<string, string[]>();
-  const resolveFieldReadings = (field: string): string[] => {
-    const cached = readingsCache.get(field);
+  const resolveFieldReadings = (field: string, reading?: 'access'): string[] => {
+    // A file-access rule (the jail, fw#385) reads the command without its
+    // interpreter line and with each program cut to its name; every other
+    // rule reads the whole text. Only `command` has the access view.
+    const access = reading === 'access' && field === 'command';
+    const key = access ? `${field}\u0000access` : field;
+    const cached = readingsCache.get(key);
     if (cached) return cached;
     const primary = resolveField(field);
     if (primary === null) {
-      readingsCache.set(field, []);
+      readingsCache.set(key, []);
       return [];
     }
     let out = [primary];
     if (field === 'command') {
       const raw = getNestedValue(args, field);
       if (typeof raw === 'string') {
-        const collapsed = commandReadings(raw).map((r) => r.replace(/\s+/g, ' ').trim());
-        out = [...new Set([primary, ...collapsed])];
+        const text = access ? fileAccessView(raw) : raw;
+        const collapsed = commandReadings(text).map((r) => r.replace(/\s+/g, ' ').trim());
+        out = access ? [...new Set(collapsed)] : [...new Set([primary, ...collapsed])];
       }
     }
-    readingsCache.set(field, out);
+    readingsCache.set(key, out);
     return out;
   };
 
@@ -133,7 +139,7 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
         const reM = getCompiledRegex(cond.value, cond.flags ?? '');
         if (!reM) return false; // invalid/dangerous pattern → fail closed
         // ANY reading matching is a match — strictest wins, never first-wins.
-        return resolveFieldReadings(cond.field).some((v) => reM.test(v));
+        return resolveFieldReadings(cond.field, cond.reading).some((v) => reM.test(v));
       }
       case 'notMatches': {
         if (!cond.value) return false; // no pattern → fail closed
@@ -143,7 +149,7 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
         // Mirror of `matches`: this condition holds only when NO reading
         // matches, so an allow-rule cannot be satisfied by the reading that
         // happens to miss.
-        return !resolveFieldReadings(cond.field).some((v) => reN.test(v));
+        return !resolveFieldReadings(cond.field, cond.reading).some((v) => reN.test(v));
       }
       case 'matchesGlob':
         return val !== null && cond.value ? pm.isMatch(val, cond.value) : false;

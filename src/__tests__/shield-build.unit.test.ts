@@ -4,7 +4,13 @@
 
 import { describe, it, expect } from 'vitest';
 import safeRegex from 'safe-regex2';
-import { toolRule, pathRules, pathMatchesFragment, buildShield } from '../shields/build';
+import {
+  toolRule,
+  pathRules,
+  pathMatchesFragment,
+  buildShield,
+  withAccessReading,
+} from '../shields/build';
 import { validateShieldDefinition, validateRegex } from '@node9/policy-engine';
 
 describe('toolRule', () => {
@@ -56,6 +62,14 @@ describe('pathRules', () => {
     expect(re.test('cat ~/.gmail-mcp')).toBe(true); // the dir itself
     expect(re.test('cat ~/.gmail-mcphost/x')).toBe(false); // not a prefix match
     expect(re.test('echo gmailmcp')).toBe(false);
+  });
+
+  it('the bash rule reads the command as a file access (fw#385); the file-tool rules do not', () => {
+    const rules = pathRules('/usr', 'block');
+    expect(rules.find((r) => r.tool === 'bash')!.conditions[0].reading).toBe('access');
+    for (const r of rules.filter((x) => x.tool === '*')) {
+      expect(r.conditions[0].reading).toBeUndefined();
+    }
   });
 
   it('handles a multi-segment path', () => {
@@ -203,5 +217,42 @@ describe('pathToRegexFragment — Windows shapes must survive the engine', () =>
         expect(pathMatchesFragment(monster + '\\x.txt', monster)).toBe(false);
       }
     }
+  });
+});
+
+describe('withAccessReading (a shield file written before fw#385)', () => {
+  const legacy = () => {
+    const def = buildShield({ name: 'user-jail', blockPaths: ['/usr'], blockTools: ['rm_rf'] });
+    for (const r of def.smartRules) for (const c of r.conditions) delete c.reading;
+    return def;
+  };
+
+  it("gives the jail's bash path rule the access reading", () => {
+    const up = withAccessReading(legacy());
+    const bash = up.smartRules.find((r) => r.name === 'block-path-usr-bash')!;
+    expect(bash.conditions[0].reading).toBe('access');
+  });
+
+  it('leaves every other rule as written', () => {
+    const up = withAccessReading(legacy());
+    for (const r of up.smartRules.filter((x) => x.name !== 'block-path-usr-bash')) {
+      for (const c of r.conditions) expect(c.reading).toBeUndefined();
+    }
+  });
+
+  it('leaves a hand-written rule with a path-like name but another shape', () => {
+    const def = legacy();
+    def.smartRules.push({
+      name: 'review-path-notes-bash',
+      tool: 'bash',
+      conditions: [
+        { field: 'command', op: 'matches', value: 'notes' },
+        { field: 'command', op: 'matches', value: 'cat' },
+      ],
+      verdict: 'review',
+    });
+    const up = withAccessReading(def);
+    const r = up.smartRules.find((x) => x.name === 'review-path-notes-bash')!;
+    expect(r.conditions.every((c) => c.reading === undefined)).toBe(true);
   });
 });
