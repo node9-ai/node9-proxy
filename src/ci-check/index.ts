@@ -140,7 +140,8 @@ export function scanTree(tree: RepoTree): ScanResult {
         file.path,
         content,
         autoLabels,
-        trustedRunSources
+        trustedRunSources,
+        { owner: tree.owner, repo: tree.repo }
       )) {
         const list = callersOf.get(target) ?? [];
         list.push(caller);

@@ -904,15 +904,15 @@ function readLocalFile(abs: string, rel: string): string {
   }
 }
 
-function localGitHubOwner(root: string): string | undefined {
+function localGitHubRepo(root: string): { owner?: string; repo?: string } {
   // The one .git/config reader (worktrees and commondir followed), shared
   // with the exposure gate's known remotes.
   const origin = readGitRemotes(root, { walkUp: false }).find((r) => r.name === 'origin');
   for (const url of origin?.urls ?? []) {
-    const owner = /github\.com[:/]([\w.-]{1,100})\//i.exec(url)?.[1];
-    if (owner) return owner;
+    const m = /github\.com[:/]([\w.-]{1,100})\/([\w.-]{1,100})/i.exec(url);
+    if (m) return { owner: m[1], repo: m[2].replace(/\.git$/i, '') };
   }
-  return undefined;
+  return {};
 }
 
 export function readLocalTree(dir: string): RepoTree {
@@ -945,10 +945,11 @@ export function readLocalTree(dir: string): RepoTree {
       },
     });
   }
-  const owner = localGitHubOwner(root);
+  const { owner, repo } = localGitHubRepo(root);
   return {
     source: root,
     ...(owner ? { owner } : {}),
+    ...(repo ? { repo } : {}),
     files,
     notes,
     paths: plan.paths,
@@ -1096,10 +1097,11 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
     }
     // The same owner as the head read (review, round 2): without it, a same-owner plugin
     // marketplace was exempt on the head and flagged on the base, a false "fixed" in every PR.
-    const owner = localGitHubOwner(root);
+    const { owner, repo } = localGitHubRepo(root);
     return {
       source: `${root}@${ref}`,
       ...(owner ? { owner } : {}),
+      ...(repo ? { repo } : {}),
       files,
       notes,
       paths: plan.paths,
@@ -1261,6 +1263,7 @@ export async function fetchGitHubTree(
       return {
         source: `${owner}/${repo}`,
         owner,
+        repo,
         files: fetched.filter((f): f is RepoFile => !!f),
         notes,
       };
@@ -1321,6 +1324,7 @@ export async function fetchGitHubTree(
     return {
       source: `${owner}/${repo}`,
       owner,
+      repo,
       files: fetched.filter((f): f is RepoFile => !!f),
       notes,
       paths: plan.paths,
@@ -1333,7 +1337,7 @@ export async function fetchGitHubTree(
     notes.push(
       `fetch degraded (${(err as Error)?.message ?? 'network error'}): results ${INCOMPLETE} (the repo could not be fetched).`
     );
-    return { source: `${owner}/${repo}`, owner, files: [], notes };
+    return { source: `${owner}/${repo}`, owner, repo, files: [], notes };
   }
 }
 

@@ -412,18 +412,36 @@ function loadWorkflow(content: string): { raw: Record<string, unknown>; wf: Work
 }
 
 const LOCAL_WORKFLOW_USES_RE = /^\s*\.\/\.github\/workflows\/([\w.-]{1,200}\.ya?ml)\s*$/i;
+// Gap 1: the same repository's workflow called by its full path. Owner and repo are compared
+// with the scanned repository's (case-insensitive); another repository stays an external call.
+const FULL_WORKFLOW_USES_RE =
+  /^\s*([\w.-]{1,100})\/([\w.-]{1,100})\/\.github\/workflows\/([\w.-]{1,200}\.ya?ml)@\S{1,200}\s*$/i;
+
+/** The file a job's `uses:` calls in this tree, or null (external, unknown repository). */
+function localTarget(uses: string, self?: { owner?: string; repo?: string }): string | null {
+  const m = LOCAL_WORKFLOW_USES_RE.exec(uses);
+  if (m) return `.github/workflows/${m[1]}`;
+  if (!self?.owner || !self.repo) return null;
+  const f = FULL_WORKFLOW_USES_RE.exec(uses);
+  if (!f) return null;
+  return f[1].toLowerCase() === self.owner.toLowerCase() &&
+    f[2].toLowerCase() === self.repo.toLowerCase()
+    ? `.github/workflows/${f[3]}`
+    : null;
+}
 
 /** T.1: the local reusable workflows `content` calls, each with this file as the caller. */
 export function localCallsOf(
   path: string,
   content: string,
   autoLabels?: ReadonlySet<string>,
-  trustedRunSources?: ReadonlySet<string>
+  trustedRunSources?: ReadonlySet<string>,
+  self?: { owner?: string; repo?: string }
 ): { target: string; caller: LocalCaller }[] {
   AUTO_LABELS = autoLabels ?? new Set();
   TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
   try {
-    return localCallsOfInner(path, content);
+    return localCallsOfInner(path, content, self);
   } finally {
     AUTO_LABELS = new Set();
     TRUSTED_RUN_SOURCES = new Set();
@@ -432,7 +450,8 @@ export function localCallsOf(
 
 function localCallsOfInner(
   path: string,
-  content: string
+  content: string,
+  self?: { owner?: string; repo?: string }
 ): { target: string; caller: LocalCaller }[] {
   let raw: Record<string, unknown>;
   try {
@@ -446,10 +465,10 @@ function localCallsOfInner(
   const reach = triggerReach(wf, raw);
   const out: { target: string; caller: LocalCaller }[] = [];
   for (const job of jobList(wf)) {
-    const m = LOCAL_WORKFLOW_USES_RE.exec(str(job.uses));
-    if (!m) continue;
+    const target = localTarget(str(job.uses), self);
+    if (!target) continue;
     out.push({
-      target: `.github/workflows/${m[1]}`,
+      target,
       caller: {
         file: path,
         keys: reach.keys,

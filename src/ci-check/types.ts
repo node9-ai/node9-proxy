@@ -152,6 +152,9 @@ export interface RepoTree {
   /** The GitHub owner (user or org), when known: a source the same owner controls is not a
    *  third party (T.3). */
   owner?: string;
+  /** The GitHub repository name, when known: a reusable workflow called by its full path
+   *  (`<owner>/<repo>/.github/workflows/<f>@<ref>`) is in this tree when both match (gap 1). */
+  repo?: string;
 }
 
 export interface ScanResult {
