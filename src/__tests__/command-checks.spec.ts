@@ -81,7 +81,10 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     _resetCore();
   });
 
-  const INLINE = { command: 'python3 -c "print(40+2)"' };
+  // The inline code in this file runs a command, so every spelling below meets
+  // the review: since fw#385 ordinary inline code (print(1)) runs unprompted,
+  // and the spelling coverage is what these tests pin.
+  const INLINE = { command: 'python3 -c "import os; os.system(0)"' };
 
   // ── inlineExec (Class C) ────────────────────────────────────────────────
   it('inlineExec unset → review (today, byte-for-byte)', async () => {
@@ -116,7 +119,7 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     writeHome();
     const r = await authorizeHeadless(
       'Bash',
-      { command: "python3 - <<'PY'\nprint(42)\nPY" },
+      { command: "python3 - <<'PY'\nimport os; os.system(0)\nPY" },
       undefined,
       { deferReview: true }
     );
@@ -126,9 +129,14 @@ describe('policy.commandChecks — governance for built-in detections', () => {
 
   it('pipe-to-interpreter flags too (echo code | python3)', async () => {
     writeHome();
-    const r = await authorizeHeadless('Bash', { command: 'echo "print(1)" | python3' }, undefined, {
-      deferReview: true,
-    });
+    const r = await authorizeHeadless(
+      'Bash',
+      { command: 'echo "import os; os.system(0)" | python3' },
+      undefined,
+      {
+        deferReview: true,
+      }
+    );
     expect(r.review).toBe(true);
     expect(r.blockedByLabel).toContain('Inline Execution');
   });
@@ -136,9 +144,9 @@ describe('policy.commandChecks — governance for built-in detections', () => {
   it('interpreter FLAGS do not dodge the detector (/review-pr finding)', async () => {
     writeHome();
     for (const command of [
-      'python3 -u -c "print(1)"',
-      'echo "print(1)" | python3 -u',
-      "python3 -u - <<'PY'\nprint(1)\nPY",
+      'python3 -u -c "import os; os.system(0)"',
+      'echo "import os; os.system(0)" | python3 -u',
+      "python3 -u - <<'PY'\nimport os; os.system(0)\nPY",
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -152,12 +160,12 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     // run inline code day-to-day.
     writeHome();
     for (const command of [
-      'cd /tmp && python3 -c "print(1)"',
-      'FOO=1 python3 -c "print(1)"',
-      '/usr/bin/python3 -c "print(1)"',
-      './venv/bin/python -c "print(1)"',
-      'python3.11 -c "print(1)"',
-      'true; node -e "1"',
+      'cd /tmp && python3 -c "import os; os.system(0)"',
+      'FOO=1 python3 -c "import os; os.system(0)"',
+      '/usr/bin/python3 -c "import os; os.system(0)"',
+      './venv/bin/python -c "import os; os.system(0)"',
+      'python3.11 -c "import os; os.system(0)"',
+      'true; node -e "require(0).execSync(0)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -170,19 +178,19 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     // the probe harness 2026-08-12: all of these read `allow`).
     writeHome();
     for (const command of [
-      'env python3 -c "print(1)"',
-      'env FOO=1 python3 -c "print(1)"',
-      'timeout 5 python3 -c "print(1)"',
-      'nice -n 5 python3 -c "print(1)"',
-      'xargs python3 -c "print(1)"',
-      'stdbuf -o0 python3 -c "print(1)"',
-      'nohup python3 -c "print(1)"',
-      'setsid python3 -c "print(1)"',
-      'exec python3 -c "print(1)"',
-      'command python3 -c "print(1)"',
-      'if true; then python3 -c "print(1)"; fi',
-      'while true; do node -e "1"; done',
-      'python3 <<< "print(1)"',
+      'env python3 -c "import os; os.system(0)"',
+      'env FOO=1 python3 -c "import os; os.system(0)"',
+      'timeout 5 python3 -c "import os; os.system(0)"',
+      'nice -n 5 python3 -c "import os; os.system(0)"',
+      'xargs python3 -c "import os; os.system(0)"',
+      'stdbuf -o0 python3 -c "import os; os.system(0)"',
+      'nohup python3 -c "import os; os.system(0)"',
+      'setsid python3 -c "import os; os.system(0)"',
+      'exec python3 -c "import os; os.system(0)"',
+      'command python3 -c "import os; os.system(0)"',
+      'if true; then python3 -c "import os; os.system(0)"; fi',
+      'while true; do node -e "require(0).execSync(0)"; done',
+      'python3 <<< "import os; os.system(0)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -218,10 +226,10 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     expect(control.approved).toBe(true);
 
     for (const command of [
-      'sudo python3 -c "print(1)"',
-      'sudo -u www python3 -c "print(1)"',
-      'doas python3 -c "print(1)"',
-      'sudo env FOO=1 timeout 5 python3 -c "print(1)"',
+      'sudo python3 -c "import os; os.system(0)"',
+      'sudo -u www python3 -c "import os; os.system(0)"',
+      'doas python3 -c "import os; os.system(0)"',
+      'sudo env FOO=1 timeout 5 python3 -c "import os; os.system(0)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -232,17 +240,17 @@ describe('policy.commandChecks — governance for built-in detections', () => {
   it('mainstream interpreter spellings are covered (deno/bun/pwsh/node --eval/perl -pe/attached -c)', async () => {
     writeHome();
     for (const command of [
-      'node --eval "console.log(1)"',
-      'node -p "6*7"',
-      'deno eval "console.log(1)"',
-      'bun -e "console.log(1)"',
+      'node --eval "require(0).execSync(0)"',
+      'node -p "require(0).execSync(0)"',
+      'deno eval "require(0).execSync(0)"',
+      'bun -e "require(0).execSync(0)"',
       'pwsh -Command "Get-Process"',
       'powershell -c "Get-Process"',
       'osascript -e \'display dialog "hi"\'',
-      'Rscript -e "print(1)"',
-      'perl -pe "s/x/y/"',
+      'Rscript -e "import os; os.system(0)"',
+      'perl -pe "system(0)"',
       'ruby -ne "puts $_"',
-      'python3 -c"print(1)"',
+      'python3 -c"import os; os.system(0)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -307,10 +315,10 @@ describe('policy.commandChecks — governance for built-in detections', () => {
   it('AST detector: target-taking wrappers still reach the interpreter', async () => {
     writeHome();
     for (const command of [
-      'chroot /mnt python3 -c "print(1)"',
-      'su deploy -c "print(1)"',
-      'runuser -u app python3 -c "print(1)"',
-      'unshare -n python3 -c "print(1)"',
+      'chroot /mnt python3 -c "import os; os.system(0)"',
+      'su deploy -c "import os; os.system(0)"',
+      'runuser -u app python3 -c "import os; os.system(0)"',
+      'unshare -n python3 -c "import os; os.system(0)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -328,9 +336,9 @@ describe('policy.commandChecks — governance for built-in detections', () => {
     // payload is judged by its content, and `echo hi` is nothing. The bundle
     // is still read: the nested interpreter below keeps the review.
     for (const command of [
-      'bash -xc "python3 -c \'print(1)\'"',
-      'python3 -uc "print(1)"',
-      'perl -pe "s/x/y/"',
+      'bash -xc "python3 -c \'import os; os.system(0)\'"',
+      'python3 -uc "import os; os.system(0)"',
+      'perl -pe "system(0)"',
       'ruby -ne "puts $_"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
@@ -357,16 +365,16 @@ describe('policy.commandChecks — governance for built-in detections', () => {
   it('AST detector: runner front-ends and nested-command flags do not hide it', async () => {
     writeHome();
     for (const command of [
-      'env -u FOO python3 -c "print(1)"',
-      'xargs -I {} python3 -c "print(1)"',
-      'uv run python -c "print(1)"',
-      'poetry run python -c "print(1)"',
-      'conda run -n base python -c "print(1)"',
-      'npx tsx -e "console.log(1)"',
-      'pnpm dlx tsx -e "console.log(1)"',
-      'find . -exec python3 -c "print(1)" ;',
-      'script -c "python3 -c \'print(1)\'" /dev/null',
-      'python3 \\\n -c "print(1)"',
+      'env -u FOO python3 -c "import os; os.system(0)"',
+      'xargs -I {} python3 -c "import os; os.system(0)"',
+      'uv run python -c "import os; os.system(0)"',
+      'poetry run python -c "import os; os.system(0)"',
+      'conda run -n base python -c "import os; os.system(0)"',
+      'npx tsx -e "require(0).execSync(0)"',
+      'pnpm dlx tsx -e "require(0).execSync(0)"',
+      'find . -exec python3 -c "import os; os.system(0)" ;',
+      'script -c "python3 -c \'import os; os.system(0)\'" /dev/null',
+      'python3 \\\n -c "import os; os.system(0)"',
     ]) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.review, command).toBe(true);
@@ -445,7 +453,9 @@ describe('policy.commandChecks — governance for built-in detections', () => {
       deferReview: true,
     });
     expect(plain.approved).toBe(true);
-    for (const command of ['sh -c "$CMD"', 'sh -c "node -e \'process.exit(0)\'"']) {
+    // A nested interpreter whose code runs a command (fw#385: ordinary nested
+    // code such as `node -e 'process.exit(0)'` passes like the plain payload).
+    for (const command of ['sh -c "$CMD"', 'sh -c "node -e \'require(0).execSync(0)\'"']) {
       const r = await authorizeHeadless('Bash', { command }, undefined, { deferReview: true });
       expect(r.approved, command).toBe(false);
     }

@@ -41,7 +41,13 @@ export {
   checkDangerousSql,
   detectInlineExec,
 } from '@node9/policy-engine';
-import { detectInlineExec, toolMatchesRule } from '@node9/policy-engine';
+import {
+  detectInlineExec,
+  inlineExecReview,
+  inlineExecReason,
+  inlineExecDescription,
+  toolMatchesRule,
+} from '@node9/policy-engine';
 
 // ── evaluatePolicy — host wrapper that injects config + I/O hooks ───────────
 
@@ -422,11 +428,16 @@ async function deriveExplainTrace(
     // a prompt with `node9 explain` got the wrong answer (/code-review
     // 2026-08-13). Drift here is worse than a miss: it teaches the user the
     // gate is wrong.
-    if (detectInlineExec(shellCommand)) {
+    // fw#385: strict mode asks on every inline call; every other mode asks
+    // when the code does something dangerous or cannot be read.
+    const strictInline = config.settings.mode === 'strict' && detectInlineExec(shellCommand);
+    const inline = config.settings.mode === 'strict' ? null : inlineExecReview(shellCommand);
+    if (strictInline || inline) {
+      const reason = inline ? inlineExecReason(inline) : undefined;
       steps.push({
         name: 'Inline execution',
         outcome: 'review',
-        detail: 'Inline code execution detected (e.g. "bash -c ...") — always requires review',
+        detail: reason ?? 'Inline code execution detected — strict mode reviews every inline call',
         isFinal: true,
       });
       return {
@@ -436,14 +447,16 @@ async function deriveExplainTrace(
         steps,
         decision: 'review',
         blockedByLabel: 'Node9 Standard (Inline Execution)',
-        ruleDescription:
-          'The AI is running code directly from the command line. Review the full script below before allowing it to execute.',
+        ...(reason ? { reason } : {}),
+        ruleDescription: inlineExecDescription(inline),
       };
     }
     steps.push({
       name: 'Inline execution',
       outcome: 'checked',
-      detail: 'No inline execution pattern detected',
+      detail: detectInlineExec(shellCommand)
+        ? 'Inline code that does nothing dangerous'
+        : 'No inline execution pattern detected',
     });
 
     // ── 3b. AST eval detection ────────────────────────────────────────────

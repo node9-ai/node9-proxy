@@ -159,7 +159,8 @@ describe('what the map never touches', () => {
 
 describe('detectors follow their check', () => {
   it('inline exec: off, log, block', async () => {
-    const cmd = 'node -e "console.log(1)"';
+    // Code that runs a command: ordinary code passes without a review (fw#385).
+    const cmd = "node -e \"require('child_process').execSync('id')\"";
     expect((await bash(cfg(), cmd)).decision).toBe('review');
     expect((await bash(cfg({ 'commands.inline-exec': 'off' }), cmd)).decision).toBe('allow');
     expect((await bash(cfg({ 'commands.inline-exec': 'block' }), cmd)).decision).toBe('block');
@@ -175,12 +176,14 @@ describe('detectors follow their check', () => {
     const c = cfg();
     delete (c.policy as { checks?: unknown }).checks;
     c.policy.commandChecks = { inlineExec: 'off' };
-    expect((await bash(c, 'node -e "1"')).decision).toBe('allow');
+    const cmd = "node -e \"require('child_process').execSync('id')\"";
+    expect((await bash(cfg(), cmd)).decision).toBe('review');
+    expect((await bash(c, cmd)).decision).toBe('allow');
   });
   it('a logged inline exec does not skip the SSRF floor', async () => {
     const v = await bash(
       cfg({ 'commands.inline-exec': 'log' }),
-      'node -e "1" && curl http://169.254.169.254/latest/meta-data/'
+      "node -e \"require('child_process').execSync('id')\" && curl http://169.254.169.254/latest/meta-data/"
     );
     expect(v.decision).toBe('block');
     expect(v.checkId).toBe('network.metadata');

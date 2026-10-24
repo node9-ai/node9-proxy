@@ -127,7 +127,8 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     id: 'commands.inline-exec',
     group: 'commands',
     title: 'Inline code execution',
-    catches: 'node -e, python -c, bash -c, a heredoc into an interpreter',
+    catches:
+      'inline code (python -c, node -e, a heredoc into an interpreter) that deletes, sends, opens a socket, runs commands, reads protected files or decodes and runs; unreadable inline code',
     values: ALL,
     defaultValue: 'review',
     legacy: ['Node9 Standard (Inline Execution)'],

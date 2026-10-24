@@ -43,10 +43,11 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   // ── Commands ──────────────────────────────────────────────────────────────
   'commands.inline-exec': {
-    plain: 'The agent runs a small program written inside the command itself.',
+    plain:
+      'The agent runs a small program written inside the command itself, and node9 reads it: ordinary code runs, code that deletes, sends data out, runs other commands or reads protected files is held, and so is code node9 cannot read.',
     example: `node -e "require('fs').rmSync('dist', {recursive: true})"`,
     advice:
-      'Agents do this often for harmless tasks. Set Log if your team finds the review prompts noisy; keep Review if agents work near production.',
+      'Keep Review. Strict mode reviews every inline call, harmless or not; Log or Off only if inline code never reaches anything that matters.',
   },
   'commands.eval-dynamic': {
     plain:
