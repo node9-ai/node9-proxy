@@ -234,3 +234,92 @@ describe('snapshotApps: what the dashboard gets', () => {
     expect(JSON.stringify(out)).not.toContain('secret-project');
   });
 });
+
+describe('tune from the event: approvals in the audit become one suggestion', () => {
+  it('reads inline approvals and card decisions, and names the command that stops the question', async () => {
+    const { approvalsFromAudit, suggestionLines } = await import('../apps/report.js');
+    const d = tmp();
+    const audit = path.join(d, 'audit.log');
+    const now = Date.now();
+    const row = (o: Record<string, unknown>) =>
+      JSON.stringify({ ts: new Date(now - 1000).toISOString(), ...o });
+    fs.writeFileSync(
+      audit,
+      [
+        row({
+          tool: 'mcp__stripe__create_refund',
+          checkedBy: 'inline-review',
+          decision: 'allow',
+          ruleName: 'Smart Rule: shield:stripe:review-refund',
+          sessionId: 's1',
+        }),
+        row({
+          tool: 'mcp__stripe__create_refund',
+          checkedBy: 'inline-review',
+          decision: 'allow',
+          ruleName: 'Smart Rule: shield:stripe:review-refund',
+          sessionId: 's2',
+        }),
+        row({
+          tool: 'mcp__stripe__create_refund',
+          decidedBy: 'person',
+          decision: 'allow',
+          ruleName: 'shield:stripe:review-refund',
+          sessionId: 's2',
+        }),
+        // An auto-allow is not a person's approval.
+        row({
+          tool: 'mcp__stripe__create_refund',
+          checkedBy: 'smart-rule',
+          decision: 'allow',
+          ruleName: 'shield:stripe:review-refund',
+          sessionId: 's3',
+        }),
+        // Too old for the period.
+        JSON.stringify({
+          ts: new Date(now - 40 * 86400000).toISOString(),
+          tool: 'x',
+          checkedBy: 'inline-review',
+          decision: 'allow',
+          ruleName: 'shield:stripe:review-payout',
+          sessionId: 's9',
+        }),
+      ].join('\n')
+    );
+    const rows = approvalsFromAudit(audit, now - 7 * 86400000);
+    expect(rows).toHaveLength(3);
+    const lines = suggestionLines(rows);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('Stripe: you approved refunds 3 times in 2 sessions');
+    expect(lines[0]).toContain('node9 apps stripe refunds allow --force');
+  });
+
+  it('a card a person denied cancels it', async () => {
+    const { approvalsFromAudit, suggestionLines } = await import('../apps/report.js');
+    const d = tmp();
+    const audit = path.join(d, 'audit.log');
+    const ts = new Date().toISOString();
+    const lines = ['s1', 's2', 's3'].map((s) =>
+      JSON.stringify({
+        ts,
+        tool: 't',
+        checkedBy: 'inline-review',
+        decision: 'allow',
+        ruleName: 'shield:redis:review-config-set',
+        sessionId: s,
+      })
+    );
+    lines.push(
+      JSON.stringify({
+        ts,
+        tool: 't',
+        decidedBy: 'person',
+        decision: 'deny',
+        ruleName: 'shield:redis:review-config-set',
+        sessionId: 's4',
+      })
+    );
+    fs.writeFileSync(audit, lines.join('\n'));
+    expect(suggestionLines(approvalsFromAudit(audit, 0))).toEqual([]);
+  });
+});

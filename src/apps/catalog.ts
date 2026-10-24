@@ -115,3 +115,28 @@ export const APP_BY_SLUG: ReadonlyMap<string, AppEntry> = new Map(
 export function appForShield(shield: string): AppEntry | undefined {
   return APP_CATALOG.find((a) => a.shield === shield);
 }
+
+/** The action words of the payment apps, and the shield rule each sets
+ *  (`node9 apps stripe refunds allow`). */
+const PAYMENT_ACTIONS: Readonly<Record<string, string>> = {
+  refunds: 'review-refund',
+  payouts: 'review-payout',
+  transfers: 'review-transfer',
+  charges: 'review-charge',
+  invoices: 'review-payment-link',
+  subscriptions: 'review-subscription',
+  disputes: 'review-dispute',
+  cards: 'review-card',
+  withdrawals: 'review-withdraw',
+};
+export const ACTIONS_BY_APP: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  stripe: PAYMENT_ACTIONS,
+  paypal: PAYMENT_ACTIONS,
+};
+
+/** The action word of a shield rule (`stripe`, `review-refund` -> `refunds`). */
+export function actionWordOf(shield: string, rule: string): string | undefined {
+  const actions = ACTIONS_BY_APP[shield];
+  if (!actions) return undefined;
+  return Object.entries(actions).find(([, r]) => r === rule)?.[0];
+}

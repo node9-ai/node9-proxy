@@ -11,7 +11,7 @@
 //   node9 apps unlink <server>
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { APP_BY_SLUG, APP_CATALOG } from '../../apps/catalog';
+import { APP_BY_SLUG, APP_CATALOG, ACTIONS_BY_APP } from '../../apps/catalog';
 import { detectApps } from '../../apps/detect';
 import { applyDetection, readAppsFile, recordUserDecision, setLink } from '../../apps/state';
 import {
@@ -23,23 +23,6 @@ import {
 import { cliGuardPolicyWrite, isKeyedForPolicy } from '../../config/keyed-guard';
 import { appendConfigAudit } from '../../audit';
 import { isShieldVerdict } from '@node9/policy-engine';
-
-/** The action words of the payment apps, and the shield rule each sets. */
-const PAYMENT_ACTIONS: Readonly<Record<string, string>> = {
-  refunds: 'review-refund',
-  payouts: 'review-payout',
-  transfers: 'review-transfer',
-  charges: 'review-charge',
-  invoices: 'review-payment-link',
-  subscriptions: 'review-subscription',
-  disputes: 'review-dispute',
-  cards: 'review-card',
-  withdrawals: 'review-withdraw',
-};
-const ACTIONS_BY_APP: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  stripe: PAYMENT_ACTIONS,
-  paypal: PAYMENT_ACTIONS,
-};
 
 const SIGNAL_LABEL: Record<string, string> = {
   'mcp-server': 'MCP server',

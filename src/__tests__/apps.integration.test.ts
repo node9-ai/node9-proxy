@@ -131,3 +131,36 @@ describe.skipIf(process.platform === 'win32')('node9 apps', () => {
     expect(r.stdout).not.toContain(SECRET);
   });
 });
+
+describe.skipIf(process.platform === 'win32')('node9 report: tune from the event', () => {
+  it('suggests the command after three approvals in two sessions', () => {
+    const { home } = seededHome();
+    const ts = new Date().toISOString();
+    const rows = [
+      {
+        ts,
+        tool: 'Bash',
+        decision: 'allow',
+        checkedBy: 'local-policy',
+        source: 'pre-hook',
+        sessionId: 's1',
+      },
+      ...['s1', 's2', 's2'].map((sessionId) => ({
+        ts,
+        tool: 'mcp__stripe__create_refund',
+        checkedBy: 'inline-review',
+        decision: 'allow',
+        ruleName: 'Smart Rule: shield:stripe:review-refund',
+        sessionId,
+      })),
+    ];
+    fs.appendFileSync(
+      path.join(home, '.node9', 'audit.log'),
+      rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
+    );
+    const r = runCli(home, ['report']);
+    expect(r.error).toBeUndefined();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('node9 apps stripe refunds allow --force');
+  });
+});

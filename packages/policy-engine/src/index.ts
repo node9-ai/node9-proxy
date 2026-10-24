@@ -229,6 +229,9 @@ export { validateRegex, getCompiledRegex } from './utils/regex';
 export { stripTerminalEscapes, stripControlChars, safeMessage } from './utils/safe-text';
 
 // Shields — 11 builtin definitions + pure validators (no fs).
+// Tune from the event (node9Firewall#390): suggestions from repeated approvals.
+export { suggestFromApprovals, unwrapRuleLabel } from './suggest';
+export type { ApprovalRow, Suggestion, SuggestOptions } from './suggest';
 export type { ShieldDefinition, ShieldVerdict, ShieldOverrides } from './shields';
 export {
   APP_SHIELD_SPECS,

@@ -6,7 +6,8 @@
 // is shared with the Report [2] view in `node9 monitor` — this command is
 // just the terminal renderer wrapped around it.
 
-import { appsReportLines } from '../../apps/report';
+import { appsReportLines, approvalsFromAudit, suggestionLines } from '../../apps/report';
+import { LOCAL_AUDIT_LOG } from '../../audit';
 import { readAppsFile } from '../../apps/state';
 import { readActiveShields } from '../../shields';
 import { readCredentials } from '../../daemon/sync';
@@ -133,10 +134,15 @@ export function registerReportCommand(program: Command): void {
       renderTerminalReport(data, responseDlpEntries, excludeTests);
 
       // fw#390: what node9 found and protects, and the dashboard when it helps.
-      const appLines = appsReportLines(readAppsFile(), readActiveShields(), {
-        loggedIn: readCredentials() !== null,
-        asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
-      });
+      const appLines = [
+        ...appsReportLines(readAppsFile(), readActiveShields(), {
+          loggedIn: readCredentials() !== null,
+          asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
+        }),
+        // fw#390 phase 4: the smallest change that stops a question a person
+        // keeps approving. Never applied by itself.
+        ...suggestionLines(approvalsFromAudit(LOCAL_AUDIT_LOG, periodStartMs(period))),
+      ];
       if (appLines.length > 0) {
         console.log('');
         for (const line of appLines) console.log('  ' + chalk.cyan(line));
@@ -148,6 +154,20 @@ export function registerReportCommand(program: Command): void {
 // ---------------------------------------------------------------------------
 // Terminal renderer
 // ---------------------------------------------------------------------------
+
+/** The start of a report period, for the suggestions' audit read. */
+function periodStartMs(period: ReportPeriod): number {
+  const day = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  if (period === 'today') return new Date(new Date().toDateString()).getTime();
+  if (period === '30d') return now - 30 * day;
+  if (period === '90d') return now - 90 * day;
+  if (period === 'month') {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  }
+  return now - 7 * day;
+}
 
 function renderTerminalReport(
   data: BuildReportJsonInput,
