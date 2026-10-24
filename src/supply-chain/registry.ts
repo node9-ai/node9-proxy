@@ -6,6 +6,7 @@
 import { maxSatisfying, satisfies, validRange } from 'semver';
 import type { PackageEcosystem } from '@node9/policy-engine';
 import { endpoints, fetchJson } from './net';
+import { previousRelease } from './provenance';
 
 export interface RegistryInfo {
   /** The version the install resolves to (the pinned one, else latest). */
@@ -22,6 +23,25 @@ export interface RegistryInfo {
    */
   publishedAtMs?: number;
   hasInstallScript?: boolean;
+  /** What the registry says about the release before this one; absent when
+   *  node9 could not read the version list (a document over the size cap). */
+  history?: ReleaseHistory;
+  /** PyPI: one file of this release, the key of its provenance record. */
+  file?: string;
+}
+
+/** The release before the resolved one (node9Firewall#385). */
+export interface ReleaseHistory {
+  /** The previous final release; null when this is the first. */
+  previous: string | null;
+  /** npm: whether the previous release ran an install script. */
+  previousHasInstallScript?: boolean;
+  /** npm: whether this release and the previous one carry provenance (the
+   *  abbreviated document says so per version). PyPI: unknown until asked. */
+  provenance?: boolean;
+  previousProvenance?: boolean;
+  /** PyPI: one file of the previous release. */
+  previousFile?: string;
 }
 
 const TIMEOUT_MS = 1500;
@@ -81,7 +101,10 @@ async function npmInfo(
   let doc: {
     modified?: string;
     'dist-tags'?: Record<string, string>;
-    versions?: Record<string, { hasInstallScript?: boolean }>;
+    versions?: Record<
+      string,
+      { hasInstallScript?: boolean; dist?: { attestations?: { provenance?: unknown } } }
+    >;
   } | null;
   try {
     doc = (await fetchJson(url, {
@@ -122,6 +145,16 @@ async function npmInfo(
     version: resolved,
     hasInstallScript: v?.hasInstallScript === true,
   };
+  const previous = previousRelease('npm', Object.keys(doc.versions ?? {}), resolved);
+  if (v && previous !== undefined) {
+    const pv = previous ? doc.versions?.[previous] : undefined;
+    info.history = {
+      previous,
+      previousHasInstallScript: pv ? pv.hasInstallScript === true : undefined,
+      provenance: !!v.dist?.attestations?.provenance,
+      previousProvenance: pv ? !!pv.dist?.attestations?.provenance : undefined,
+    };
+  }
   if (!Number.isFinite(modifiedMs)) return info;
   if (Date.now() - modifiedMs >= freshWindowMs) {
     // Nothing about this package changed inside the window, so no version
@@ -155,19 +188,58 @@ async function pypiInfo(name: string, version?: string): Promise<RegistryInfo | 
   const url = version
     ? `${base}/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`
     : `${base}/pypi/${encodeURIComponent(name)}/json`;
-  const doc = (await fetchJson(url, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })) as {
-    info?: { version?: string };
-    urls?: Array<{ upload_time_iso_8601?: string }>;
-  } | null;
+  const doc = (await fetchJson(url, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })) as PypiDoc;
   if (!doc?.info?.version) return null;
   const times = (doc.urls ?? [])
     .map((u) => (u.upload_time_iso_8601 ? Date.parse(u.upload_time_iso_8601) : NaN))
     .filter((t) => Number.isFinite(t));
-  return {
-    version: version ?? doc.info.version,
+  const resolved = version ?? doc.info.version;
+  const info: RegistryInfo = {
+    version: resolved,
     // The earliest file of the release is when it became installable.
     publishedAtMs: times.length > 0 ? Math.min(...times) : undefined,
+    file: doc.urls?.find((u) => typeof u.filename === 'string')?.filename,
   };
+  // The project document (an unpinned install) lists every release.
+  if (doc.releases) info.history = pypiHistoryOf(doc.releases, resolved) ?? undefined;
+  return info;
+}
+
+type PypiDoc = {
+  info?: { version?: string };
+  urls?: Array<{ upload_time_iso_8601?: string; filename?: string }>;
+  releases?: Record<string, Array<{ filename?: string; yanked?: boolean }>>;
+} | null;
+
+function pypiHistoryOf(
+  releases: NonNullable<NonNullable<PypiDoc>['releases']>,
+  version: string
+): ReleaseHistory | null {
+  // A release with no files (all deleted) cannot be installed: not "the one before".
+  const versions = Object.keys(releases).filter((v) => (releases[v] ?? []).length > 0);
+  const previous = previousRelease('PyPI', versions, version);
+  if (previous === undefined) return null;
+  return {
+    previous,
+    previousFile: previous
+      ? releases[previous]?.find((f) => typeof f.filename === 'string')?.filename
+      : undefined,
+  };
+}
+
+/**
+ * The release history of a pinned PyPI install, read only when a finding is
+ * on the table (its project document is the large one: every release). Null
+ * when it cannot be read.
+ */
+export async function pypiHistory(name: string, version: string): Promise<ReleaseHistory | null> {
+  const base = endpoints().pypi;
+  if (!base) return null;
+  const doc = (await fetchJson(`${base}/pypi/${encodeURIComponent(name)}/json`, {
+    timeoutMs: TIMEOUT_MS,
+    maxBytes: MAX_BYTES,
+  })) as PypiDoc;
+  return doc?.releases ? pypiHistoryOf(doc.releases, version) : null;
 }
 
 /**
