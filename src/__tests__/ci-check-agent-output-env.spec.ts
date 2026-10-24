@@ -26,6 +26,7 @@ describe('gap 4: the agent answer written into the job environment', () => {
     ['while-read-lines.yml', 'medium'],
     ['env-named-file.yml', 'medium'],
     ['one-line-no-name.yml', 'medium'],
+    ['diff-fetch-api.yml', 'high'],
   ])('%s: %s', (f, want) => {
     expect(sev(f)).toBe(want);
     expect(run(f)[0].rule).toBe('CI-2.agent-output-to-env');

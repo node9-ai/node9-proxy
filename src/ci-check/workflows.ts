@@ -2785,6 +2785,22 @@ function analyzeForkCodeOnTrustInner(
 
 const GITHUB_PAT_NAME_RE = /(?:^|_)PAT(?:_|$)|^(?:GH|GITHUB)_/i;
 
+// The job fetches the PR's diff before (or in) the agent step: the compare API between the
+// event's base and head, `gh pr diff`, or the PR's file list. Its text is the PR author's.
+const PR_DIFF_FETCH_RE =
+  /\/compare\/[^\s"']{0,200}\.\.\.|\bgh\s+pr\s+diff\b|\/pulls\/[^/\s"']{1,100}\/files\b|\.diff\b[^\n]{0,40}pull/i;
+const PR_HEAD_REF_RE =
+  /github\.event\.pull_request\.(?:head|number)|github\.event\.number\b|github\.event\.issue\.number/;
+
+function jobFetchesPrDiff(job: Job, steps: Step[]): boolean {
+  const first = steps.findIndex(isAgentStep);
+  const text = [
+    str(job.env),
+    ...steps.slice(0, first + 1).map((st) => str(st.run) + ' ' + str(st.with) + ' ' + str(st.env)),
+  ].join('\n');
+  return PR_DIFF_FETCH_RE.test(text) && PR_HEAD_REF_RE.test(text);
+}
+
 /** Secrets the later steps, the job env or the workflow env hand to the job (not the default
  *  token): code running in a later step can read them. */
 function laterSecrets(wf: Workflow, job: Job, from: number): string[] {
@@ -2862,7 +2878,8 @@ function analyzeAgentOutputToEnvInner(
     const promptUntrusted = promptTakesUntrusted(agent);
     const itemRead = reach.untrusted ? jobReadsUntrustedItem(job) : null;
     const bypass = bypassArmed(agent);
-    if (!head && !promptUntrusted && !itemRead && !bypass) continue;
+    const diffRead = reach.untrusted && jobFetchesPrDiff(job, steps);
+    if (!head && !promptUntrusted && !itemRead && !bypass && !diffRead) continue;
 
     const sink = sinks[0];
     const secrets = laterSecrets(wf, job, sink.step);
@@ -2905,6 +2922,7 @@ function analyzeAgentOutputToEnvInner(
     else if (head === 'subdir') signals.push('the agent reads the PR head checked out in a subdir');
     if (promptUntrusted) signals.push('feeds untrusted PR/issue text to the agent');
     else if (itemRead) signals.push('the agent reads the untrusted PR/issue itself');
+    else if (diffRead) signals.push("the job fetches the PR's diff before the agent runs");
     if (bypass) signals.push('allowed_non_write_users is open, with github_token');
     const holds = [
       codeWrite ? 'a write token (contents/packages/actions/deployments)' : '',
