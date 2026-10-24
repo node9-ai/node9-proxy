@@ -46,6 +46,14 @@ describe('gap 4: the agent answer written into the job environment', () => {
     expect(text[(line ?? 0) - 1]).toMatch(/\} >> "\$GITHUB_ENV"/);
   });
 
+  it('a prompt in a heredoc inside $( ) does not swallow the rest of the script', () => {
+    const f = 'diff-fetch-api.yml';
+    const r = run(f)[0];
+    expect(r.signals[0]).toMatch(/review_summary=\$SUMMARY/);
+    const text = fs.readFileSync(path.join(FX, f), 'utf8').split('\n');
+    expect(text[(r.line ?? 0) - 1]).toMatch(/review_summary=.*GITHUB_ENV/);
+  });
+
   it('points at the line that writes it', () => {
     const f = 'var-same-step.yml';
     const line = run(f)[0].line;

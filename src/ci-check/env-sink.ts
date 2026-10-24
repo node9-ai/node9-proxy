@@ -64,8 +64,9 @@ export function logicalLines(src: string): string[] {
   const heredocs: { delim: string; strip: boolean; quoted: boolean }[] = [];
   let i = 0;
   const n = run.length;
-  const endLine = () => {
-    // Read the bodies of the heredocs this line opened.
+  // Read the bodies of the heredocs opened on the physical line just ended (also inside `$( )`,
+  // as in `PROMPT=$(cat <<EOF … EOF)`: the body is data, its quotes open nothing).
+  const readBodies = () => {
     for (const h of heredocs) {
       const body: string[] = [];
       while (i < n) {
@@ -80,6 +81,9 @@ export function logicalLines(src: string): string[] {
       if (!h.quoted && body.length) buf += '\n' + body.join('\n').replace(/['"`;&|]/g, ' ');
     }
     heredocs.length = 0;
+  };
+  const endLine = () => {
+    readBodies();
     if (buf.trim() && out.length < LINES_MAX) out.push(buf);
     buf = '';
   };
@@ -138,6 +142,7 @@ export function logicalLines(src: string): string[] {
     if (c === '\n') {
       i++;
       if (depth > 0) {
+        readBodies();
         buf += ' ; ';
         continue;
       }
