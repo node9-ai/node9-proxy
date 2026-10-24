@@ -263,11 +263,36 @@ const INTERPRETER_LINE = /^#![ \t]*[\w./+-]+(?:[ \t]+[\w./+=:-]+)*[ \t]*\r?(?=\n
  * Every argument and redirect stays, so `cat /usr/share/x`, `bash /etc/x.sh`
  * (the script is read) and `wc < /etc/hosts` still meet the jail.
  *
- * Known limit: a script run directly from a jailed directory (`/etc/x.sh`)
- * passes; running it does not hand its text to the agent. An unparsable
- * command is returned unchanged (the strict direction for a jail).
+ * Only a program in a system program directory, or a relative one, is cut
+ * (PROGRAM_DIR): a script run from a jailed directory keeps its path and still
+ * meets the jail. An unparsable command is returned unchanged (the strict
+ * direction for a jail).
  */
 export function fileAccessView(command: string): string {
+  const hit = accessViewCache.get(command);
+  if (hit !== undefined) return hit;
+  const view = fileAccessViewImpl(command);
+  if (accessViewCache.size >= ACCESS_VIEW_CACHE_MAX) {
+    const oldest = accessViewCache.keys().next().value;
+    if (oldest !== undefined) accessViewCache.delete(oldest);
+  }
+  accessViewCache.set(command, view);
+  return view;
+}
+
+// Where installed programs live. Running one by its path (`/usr/bin/python3`)
+// names what runs, not a file the command reads. A program elsewhere under an
+// absolute or home path keeps its path: running a script inside a jailed
+// directory (`~/.gmail-mcp/dump.sh`) hands that directory's contents to the
+// agent as surely as `cat` would. A relative program (`./bin/run`) is the
+// project's own, unless it climbs out with `..`.
+const PROGRAM_DIR =
+  /^(?:\/usr(?:\/local)?|\/opt\/homebrew|\/home\/linuxbrew\/\.linuxbrew)?\/s?bin\/[^/]+$|^\/snap\/bin\/[^/]+$|^(?![/~\\]|[A-Za-z]:|.*\.\.)/;
+
+const ACCESS_VIEW_CACHE_MAX = 1_000;
+const accessViewCache = new Map<string, string>();
+
+function fileAccessViewImpl(command: string): string {
   const text = command.replace(INTERPRETER_LINE, '');
   const f = parseShared(text);
   if (f === PARSE_FAIL) return text;
@@ -290,6 +315,7 @@ export function fileAccessView(command: string): string {
         if (i >= args.length || word === null || word === undefined || !/[\\/]/.test(word)) {
           continue;
         }
+        if (!PROGRAM_DIR.test(word)) continue;
         const name = word.split(/[\\/]/).pop() ?? '';
         if (!name) continue;
         const s = at(args[i].Pos().Offset());
@@ -2536,7 +2562,12 @@ export function inlineExecReview(command: string): InlineExecReview | null {
       ? { outcome: 'unreadable', interp: '', what: 'could not be parsed' }
       : null;
   }
-  let unreadable: InlineExecReview | null = null;
+  // The walk stops collecting at the cap, so a call past it was never read:
+  // the command keeps the review rather than passing on what was seen.
+  let unreadable: InlineExecReview | null =
+    calls.length >= MAX_INLINE_CALLS
+      ? { outcome: 'unreadable', interp: '', what: 'runs more inline programs than node9 reads' }
+      : null;
   for (const call of calls) {
     const language = inlineLanguageOf(call.interp);
     for (const code of call.code) {

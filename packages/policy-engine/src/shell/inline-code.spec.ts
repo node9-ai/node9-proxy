@@ -124,6 +124,24 @@ describe('dangerous inline code is reviewed, by category', () => {
     expect(category(command)).toBe(expected);
   });
 
+  it.each([
+    ['python3 -c \'import os as o; getattr(o, "system")(1)\'', 'builds-code'],
+    ['python3 -c \'import os; os.__dict__["system"](1)\'', 'builds-code'],
+    ['python3 -c \'import os; vars(os)["system"](1)\'', 'builds-code'],
+    ["python3 -c 'from os import *; system(1)'", 'runs-commands'],
+    ['python3 -c \'open("/tmp/../etc/cron.d/x", "w").write(1)\'', 'writes-outside'],
+    ['python3 -c \'open("../../../home/u/.bashrc", "a").write(1)\'', 'writes-outside'],
+    ['ruby -e \'open("|id")\'', 'runs-commands'],
+  ])('review finding: %s -> %s', (command, expected) => {
+    expect(category(command)).toBe(expected);
+  });
+
+  it('a command with more inline programs than the cap keeps the review (review finding)', () => {
+    const many = Array(16).fill("python3 -c 'print(1)'").join('; ');
+    const r = inlineExecReview(`${many}; python3 -c 'import os; os.system(1)'`);
+    expect(r).not.toBeNull();
+  });
+
   it('resolves an aliased module: import os as o; o.remove', () => {
     expect(category('python3 -c \'import os as o; o.remove("x")\'')).toBe('deletes');
   });

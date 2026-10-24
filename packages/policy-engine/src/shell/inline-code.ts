@@ -66,9 +66,11 @@ const WHAT: Record<InlineCodeCategory, string> = {
 
 type Table = Array<[InlineCodeCategory, RegExp]>;
 
-// A path literal that leaves the project: absolute or home-relative, except the
-// temp directories and the null/standard devices, where scripts write scratch.
-const OUTSIDE = String.raw`(?:~|/(?!tmp/|var/tmp/|dev/(?:null|stdout|stderr)\b))`;
+// A path literal that leaves the project: absolute, home-relative or climbing
+// out with `../`, except the temp directories and the null/standard devices,
+// where scripts write scratch. A temp path that climbs (`/tmp/../etc`) is not
+// exempt.
+const OUTSIDE = String.raw`(?:~|\.\.[\\/]|/(?!(?:tmp|var/tmp)/(?![^'"\n]*\.\.)|dev/(?:null|stdout|stderr)\b))`;
 
 // `import a, b as c, socket` / `from socket import x`, anywhere in the code (a
 // one-liner chains statements with `;`, so a line anchor would miss it).
@@ -108,12 +110,12 @@ const PYTHON: Table = [
     'runs-commands',
     either(
       pyImport('subprocess|pexpect|commands|psutil'),
-      /\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*|fork|forkpty|kill|killpg)\s*\(|\bfrom\s+os\s+import\s+[^\n;]*\b(?:system|popen|exec\w*|spawn\w*|fork|kill)\b/
+      /\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*|fork|forkpty|kill|killpg)\s*\(|\bfrom\s+os\s+import\s+[^\n;]*\b(?:system|popen|exec\w*|spawn\w*|fork|kill)\b|\bfrom\s+(?:os|shutil|pty|ctypes)\s+import\s+\*/
     ),
   ],
   [
     'builds-code',
-    /(?<![\w.])(?:exec|eval|compile|execfile)\s*\(|\b__import__\s*\(|\bimportlib\b|\b(?:c?pickle|dill|marshal|shelve)\.loads?\s*\(|\byaml\.(?:unsafe_)?load\s*\((?![^)\n]*SafeLoader)|\bctypes\b|\bgetattr\s*\(\s*(?:os|subprocess|shutil|socket|sys|builtins|__builtins__)\b|\b__builtins__\b|\bsys\.modules\b|\bglobals\s*\(\s*\)\s*\[/,
+    /(?<![\w.])(?:exec|eval|compile|execfile)\s*\(|\b__import__\s*\(|\bimportlib\b|\b(?:c?pickle|dill|marshal|shelve)\.loads?\s*\(|\byaml\.(?:unsafe_)?load\s*\((?![^)\n]*SafeLoader)|\bctypes\b|\b(?:getattr|vars)\s*\(\s*(?:os|subprocess|shutil|socket|sys|pty|builtins|__builtins__)\b|\b(?:os|subprocess|shutil|socket|sys|pty|builtins)\.__dict__\b|\b__builtins__\b|\bsys\.modules\b|\bglobals\s*\(\s*\)\s*\[/,
   ],
   [
     // Spyware shapes: a screenshot, the clipboard, a key logger.
@@ -197,7 +199,7 @@ const RUBY: Table = [
   ['listens', /\b(?:TCPServer|UNIXServer|WEBrick|PTY)\b/],
   [
     'runs-commands',
-    /(?<![\w.])(?:system|exec|spawn|fork)\b|`[^`]*`|%x[{([|!]|\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|kill|exec)\b|\bKernel\.(?:system|exec|spawn|open)\b/,
+    /(?<![\w.])(?:system|exec|spawn|fork)\b|`[^`]*`|%x[{([|!]|(?<![\w.])open\s*\(?\s*['"]\||\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|kill|exec)\b|\bKernel\.(?:system|exec|spawn|open)\b/,
   ],
   [
     'builds-code',
@@ -250,15 +252,16 @@ export function inlineLanguageOf(interp: string): InlineLanguage | null {
   return null;
 }
 
-// `import os as o` -> every `o.` reads `os.`, so the call tables meet the alias.
-// `import subprocess as sp` needs no rewrite (the import itself is the signal),
-// but the rewrite is harmless there and keeps one rule for every module.
+// `import os as o` -> every use of `o` reads `os` (`o.remove`, `getattr(o, ...)`),
+// so the call tables meet the alias. `import subprocess as sp` needs no rewrite
+// (the import itself is the signal), but it is harmless there and keeps one
+// rule for every module.
 function resolvePythonAliases(code: string): string {
   const aliases = [...code.matchAll(/\bimport\s+([\w.]+)\s+as\s+(\w+)/g)].slice(0, 32);
   let out = code;
   for (const [, mod, alias] of aliases) {
     if (alias === mod) continue;
-    out = out.replace(new RegExp(String.raw`(?<![\w.])${alias}\.`, 'g'), `${mod}.`);
+    out = out.replace(new RegExp(String.raw`(?<![\w.])${alias}\b`, 'g'), mod);
   }
   return out;
 }

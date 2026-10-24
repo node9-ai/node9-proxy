@@ -49,6 +49,13 @@ describe('fileAccessView', () => {
     expect(fileAccessView('ls; /bin/echo ok && ./bin/run')).toBe('ls; echo ok && run');
   });
 
+  it('a program outside the system program directories keeps its path (review finding)', () => {
+    expect(fileAccessView('~/.gmail-mcp/dump-token.sh')).toBe('~/.gmail-mcp/dump-token.sh');
+    expect(fileAccessView('/home/u/.aws/print.sh --all')).toBe('/home/u/.aws/print.sh --all');
+    expect(fileAccessView('../../home/u/.aws/print.sh')).toBe('../../home/u/.aws/print.sh');
+    expect(fileAccessView('/usr/local/bin/tool x')).toBe('tool x');
+  });
+
   it('keeps every argument and redirect', () => {
     expect(fileAccessView('/bin/cat /etc/hosts')).toBe('cat /etc/hosts');
     expect(fileAccessView('/usr/bin/wc -l < /etc/hosts')).toBe('wc -l < /etc/hosts');
@@ -80,6 +87,11 @@ describe("a jail rule with reading: 'access'", () => {
     expect(hits('/usr/bin/python3 /usr/lib/x.py')).toBe(true);
     expect(hits('wc -l < /etc/hosts', ETC)).toBe(true);
     expect(hits('bash /etc/x.sh', ETC)).toBe(true);
+  });
+
+  it('still meets a script run from inside a jailed directory', () => {
+    const AWS = '(^|[\\s/\\\\])\\.aws([\\s/\\\\]|$)';
+    expect(hits('~/.aws/print-keys.sh', AWS)).toBe(true);
   });
 
   it('still meets a path inside a literal shell payload', () => {
