@@ -79,6 +79,8 @@ interface Step {
   scopeEnv?: Record<string, unknown>;
   /** Does that env carry event context? Computed once per job by normalizeWorkflow. */
   scopeEnvEvent?: boolean;
+  /** An earlier step of the job signs in to a cloud (AWS or Google). Set by normalizeWorkflow. */
+  cloudAuthBefore?: boolean;
 }
 interface Job {
   if?: string;
@@ -376,10 +378,13 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
     };
     // Computed once per job, not on every isAgentStep call (a large env times many steps).
     const scopeEnvEvent = wfEnvEvent || EVENT_CONTEXT_RE.test(str(job.env));
+    let cloudAuth = false;
     for (const step of job.steps) {
       if (step == null || typeof step !== 'object') continue;
       step.scopeEnv = scopeEnv;
       step.scopeEnvEvent = scopeEnvEvent;
+      step.cloudAuthBefore = cloudAuth;
+      if (CLOUD_AUTH_ACTION_RE.test(str(step.uses))) cloudAuth = true;
       if (step.with == null || typeof step.with !== 'object') continue;
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(step.with)) {
@@ -517,6 +522,18 @@ const AGENT_CLI_RE = new RegExp(
 const RUN_FUEL_ENV_RE =
   /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|KILO_API_KEY|OPENCODE_API_KEY|DEVIN_API_KEY|LLM_API_KEY|AWS_BEARER_TOKEN_BEDROCK)$/i;
 const EVENT_CONTEXT_RE = /github\.event|context\.payload/;
+// Gap 2: a CLI that reaches its model through a cloud provider holds no model key of its own.
+// It is switched to Bedrock or Vertex by env, or runs after a step that signs in to the cloud.
+const CLOUD_MODEL_ENV_RE = /^CLAUDE_CODE_USE_(BEDROCK|VERTEX)$/i;
+const CLOUD_AUTH_ACTION_RE =
+  /^\s*(aws-actions\/configure-aws-credentials|google-github-actions\/auth)@/i;
+
+/** `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` set to anything but an off value. */
+function cloudModelEnv(env: Record<string, unknown>): boolean {
+  return Object.entries(env).some(
+    ([k, v]) => CLOUD_MODEL_ENV_RE.test(k) && !/^\s*(0|false|no|off)?\s*$/i.test(str(v))
+  );
+}
 
 /** A `run:` step that really invokes an agent (not the loose "agent word next to github.event"
  *  heuristic): only its command line and env are read as the agent's prompt and grants. */
@@ -532,6 +549,19 @@ const FUEL_WITH_KEY_RE =
 const AGENT_PATH_RE =
   /(?:^|[/_.-])(claude|codex|gemini|opencode|goose|aider|kilo(?:code)?)(?:$|[/_.-])/i;
 const PROMPT_INPUT_RE = /^(prompt|direct_prompt|prompt_file|prompt-file|agent)$/i;
+// Gap 3: pr-agent (forks keep the repository name; the image form carries a tag) reviews the PR
+// or answers the comment that started it, with no model key input of a known name and no prompt
+// input. Its commands are not limited to users with write access.
+const PR_AGENT_PATH_RE = /(?:^|\/)pr-agent(?::[\w.-]{1,60})?$/i;
+
+/** The action path after the owner (`owner/path@ref` → `path`). */
+function actionPath(uses: string): string {
+  return uses.replace(/^\s*[^/@\s]{1,100}\//, '').replace(/@.*$/, '');
+}
+
+function isPrAgent(step: Step): boolean {
+  return !!step.uses && PR_AGENT_PATH_RE.test(actionPath(str(step.uses)).trim());
+}
 
 /** T.2b: a wrapper action runs an agent when it is handed a model key, or when its path names
  *  an agent runtime and it takes a prompt (or the job holds a model key). Not the official
@@ -544,7 +574,8 @@ function isWrapperAgent(step: Step): boolean {
   const fuelEnv = Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k));
   // `uses: ./…`: the repository's own action (or, after a head checkout, the fork's).
   if (/^\s*\.\//.test(uses)) return fuelEnv; // the job env reaches the action too (review, round 2)
-  const pathPart = uses.replace(/^\s*[^/@\s]{1,100}\//, '').replace(/@.*$/, '');
+  if (isPrAgent(step)) return true;
+  const pathPart = actionPath(uses);
   return (
     AGENT_PATH_RE.test(pathPart) && (Object.keys(w).some((k) => PROMPT_INPUT_RE.test(k)) || fuelEnv)
   );
@@ -564,7 +595,9 @@ function isAgentStep(step: Step): boolean {
   return (
     !!step.scopeEnvEvent ||
     EVENT_CONTEXT_RE.test(str(step.env)) ||
-    Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k))
+    Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k)) ||
+    cloudModelEnv(env) ||
+    !!step.cloudAuthBefore
   );
 }
 
@@ -827,6 +860,8 @@ function jobReadsUntrustedItem(job: Job): ItemRead | null {
   const agent = steps.filter(isAgentStep);
   if (!agent.length) return null;
   if (ITEM_READ_TOOL_RE.test(collectTools(agent))) return 'tool';
+  // pr-agent reads the PR or comment that started it from the event itself.
+  if (agent.some(isPrAgent)) return 'handle';
   for (const st of agent)
     if (
       ITEM_HANDLE_RE.test(
@@ -2091,8 +2126,9 @@ function analyzeWorkflowInner(
 // fuel — not a finding. CI-4 fires on EXTRA secrets an agent can reach (cloud OIDC,
 // static PATs, DB creds, other API keys) which an injected agent with a shell could
 // exfiltrate. Reuses analyzeWorkflow's reachability model — same danger shape.
+// `OPENAI_KEY` / `OPENAI.KEY` / `ANTHROPIC.KEY`: the names pr-agent reads its model key from.
 const AGENT_FUEL_RE =
-  /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY|GITHUB_TOKEN)$/i;
+  /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY|GITHUB_TOKEN|OPENAI_KEY|OPENAI\.KEY|ANTHROPIC\.KEY)$/i;
 
 // A1: the agent-action INPUT keys that take the LLM credential/endpoint. A secret
 // bound to one of these is fuel regardless of its NAME (nvidia_inference_key,

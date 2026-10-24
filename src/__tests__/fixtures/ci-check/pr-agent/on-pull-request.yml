@@ -1,0 +1,11 @@
+# pr-agent on plain pull_request: fork PRs get a read-only token and no secrets.
+name: PR review
+on:
+  pull_request:
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example-org/pr-agent@v1
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}

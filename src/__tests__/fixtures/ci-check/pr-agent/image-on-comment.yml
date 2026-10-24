@@ -1,0 +1,15 @@
+# pr-agent run from its container image, on comments.
+name: PR commands
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: docker://example/pr-agent:0.30-github_action
+        env:
+          OPENAI.KEY: ${{ secrets.OPENAI_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
