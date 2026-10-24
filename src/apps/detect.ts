@@ -230,7 +230,11 @@ export function matchApps(
       if (!signals.some((x) => x.kind === s.kind && x.value === s.value)) signals.push(s);
     };
     for (const server of obs.servers)
-      if (app.servers.some((a) => server.includes(a))) add({ kind: 'mcp-server', value: server });
+      if (
+        app.servers.some((a) => server.includes(a)) &&
+        !app.notServers?.some((a) => server.includes(a))
+      )
+        add({ kind: 'mcp-server', value: server });
     for (const cmd of app.commands) if (obs.commands.has(cmd)) add({ kind: 'command', value: cmd });
     for (const p of projectFacts) {
       for (const name of p.packages)

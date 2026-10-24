@@ -6,7 +6,8 @@
 // servers name their tools. They are no longer shields of their own. Two
 // things are built from them:
 //
-//  1. An app shield per app (Stripe, PayPal): every template rule scoped to
+//  1. An app shield per app (Stripe, PayPal, Square, Plaid, Okta, Auth0):
+//     every template rule scoped to
 //     that app's MCP server (`server`), plus the app's other doors: its CLI,
 //     its API host, its library in a script the agent wrote. One app, one
 //     shield: turning Stripe off never touches PayPal.
@@ -83,6 +84,19 @@ const HTTP_WRITE: SmartRule['conditions'][number] = {
     '-X\\s*(?:POST|DELETE)|--request[=\\s]+(?:POST|DELETE)|\\s-d[\\s\'"@]|\\s--data|\\s-F\\s|\\s--form\\s|\\s(?:POST|DELETE)\\s',
   flags: 'i',
 };
+
+/** A write for an API that also changes things with PUT or PATCH (Okta adds
+ *  a group member with PUT, Auth0 updates a user with PATCH). */
+const HTTP_WRITE_ANY: SmartRule['conditions'][number] = {
+  field: 'command',
+  op: 'matches',
+  value:
+    '-X\\s*(?:POST|PUT|PATCH|DELETE)|--request[=\\s]+(?:POST|PUT|PATCH|DELETE)|\\s-d[\\s\'"@]|\\s--data|\\s-F\\s|\\s--form\\s|\\s(?:POST|PUT|PATCH|DELETE)\\s',
+  flags: 'i',
+};
+
+/** `requests.post("https://<host>...`, `axios.post('https://<host>...` in a script. */
+const postTo = (host: string) => `\\.post\\(\\s*["'\`][^"'\`]{0,80}${host}`;
 
 interface AppShieldSpec {
   name: string;
@@ -271,6 +285,265 @@ export const APP_SHIELD_SPECS: readonly AppShieldSpec[] = [
         ],
         verdict: 'review',
         reason: 'This code posts to the PayPal API. node9 asks before money moves (PayPal).',
+      },
+    ],
+  },
+  {
+    name: 'square',
+    label: 'Square',
+    description:
+      'Asks before money moves in Square (refunds, payments, paid orders, invoices, subscriptions), whether the agent uses a Square MCP server, the API or the Square SDK in a script. The sandbox host is never asked about, and neither are reads.',
+    template: 'finance',
+    // Square's servers, never Squarespace (a website builder).
+    server: '{*square,*square[-_]*,*squareup*}',
+    doors: [
+      {
+        name: 'shield:square:review-api',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The live host only; the sandbox is connect.squareupsandbox.com.
+            value: httpTo(
+              'connect\\.squareup\\.com/v2/(?:refunds|payments|orders/[^\\s/?]{1,64}/pay|invoices|subscriptions|disputes|gift-cards/activities)(?![\\w-])'
+            ),
+            flags: 'i',
+          },
+          HTTP_WRITE_ANY,
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'A request to the Square API is about to move money. node9 asks before money moves (Square).',
+      },
+      {
+        name: 'shield:square:review-code',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The Square SDK in the script: Node (`square`) or Python (`square`, `squareup`).
+            value:
+              '\\bSquareClient\\b|\\bsquare\\.client\\b|from\\s+square[.\\s]|from\\s+["\']square["\']|require\\(\\s*["\']square["\']',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              '\\.refunds(?:Api)?\\.refund(?:Payment|_payment)\\s*\\(|\\.payments(?:Api)?\\.(?:create|complete)(?:Payment|_payment)?\\s*\\(|\\.orders(?:Api)?\\.pay(?:Order|_order)?\\s*\\(|\\.invoices(?:Api)?\\.publish(?:Invoice|_invoice)?\\s*\\(',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'This code moves money through the Square SDK. node9 asks before money moves (Square).',
+      },
+      {
+        name: 'shield:square:review-code-http',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: postTo('connect\\.squareup\\.com/v2/'),
+          },
+        ],
+        verdict: 'review',
+        reason: 'This code posts to the Square API. node9 asks before money moves (Square).',
+      },
+    ],
+  },
+  {
+    name: 'plaid',
+    label: 'Plaid',
+    description:
+      'Asks before money moves through Plaid (transfers, transfer authorizations, payment initiation), whether the agent uses a Plaid MCP server, the API or the Plaid SDK in a script. The sandbox host is never asked about, and neither are reads such as balances or transactions.',
+    template: 'finance',
+    server: '*plaid*',
+    doors: [
+      {
+        name: 'shield:plaid:review-api',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // Every Plaid endpoint is a POST, so the path is what tells a
+            // write; the live host only, never sandbox.plaid.com. A script
+            // that posts to the URL meets this door too.
+            value: httpTo(
+              'production\\.plaid\\.com/(?:transfer/(?:create|authorization/create|recurring/create)|payment_initiation/payment/create|bank_transfer/create)(?![\\w-])'
+            ),
+            flags: 'i',
+          },
+        ],
+        verdict: 'review',
+        reason:
+          'A request to the Plaid API is about to move money. node9 asks before money moves (Plaid).',
+      },
+      {
+        name: 'shield:plaid:review-code',
+        tool: 'bash',
+        conditions: [
+          { field: 'command', op: 'matches', value: '\\bplaid', flags: 'i' },
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              '\\b(?:transfer(?:Authorization|Recurring)?Create|paymentInitiationPaymentCreate|bankTransferCreate|transfer_(?:authorization_|recurring_)?create|payment_initiation_payment_create|bank_transfer_create)\\s*\\(',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason: 'This code moves money through Plaid. node9 asks before money moves (Plaid).',
+      },
+    ],
+  },
+  {
+    name: 'okta',
+    label: 'Okta',
+    description:
+      'Asks before a user, a group member, a role, a password or a key changes in Okta, whether the agent uses an Okta MCP server, the API or the Okta SDK in a script. Reads and signing in are never asked about.',
+    template: 'identity',
+    server: '*okta*',
+    doors: [
+      {
+        name: 'shield:okta:review-api',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The management API only: sign-in (/api/v1/authn, /sessions,
+            // /oauth2) is not under these paths.
+            value: httpTo(
+              '[\\w-]+\\.okta(?:-emea)?\\.com/api/v1/(?:users|groups|apps|iam|api-tokens|idps|authorizationServers|policies)(?![\\w-])'
+            ),
+            flags: 'i',
+          },
+          HTTP_WRITE_ANY,
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'A request to the Okta API is about to change who has access. node9 asks before access changes (Okta).',
+      },
+      {
+        name: 'shield:okta:review-code',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The Okta SDK in the script: a method named createUser alone is
+            // in half the applications ever written.
+            value: '@okta/okta-sdk|\\bokta\\.Client\\b|from\\s+okta[.\\s]|\\bimport\\s+okta\\b',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              '\\b(?:(?:create|delete|deactivate|suspend|unlock|activate)User|(?:reset|expire)Password|resetFactors|(?:assign|unassign)User(?:To|From)Group|assignRoleTo(?:User|Group))\\s*\\(',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'This code changes who has access in Okta. node9 asks before access changes (Okta).',
+      },
+      {
+        name: 'shield:okta:review-code-py',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value: '@okta/okta-sdk|\\bokta\\.Client\\b|from\\s+okta[.\\s]|\\bimport\\s+okta\\b',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              '\\b(?:(?:create|delete|deactivate|deactivate_or_delete|suspend|unlock|activate)_user|(?:reset|expire)_password|reset_factors|(?:add|remove)_user_(?:to|from)_group|assign_role_to_(?:user|group))\\s*\\(',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'This code changes who has access in Okta. node9 asks before access changes (Okta).',
+      },
+    ],
+  },
+  {
+    name: 'auth0',
+    label: 'Auth0',
+    description:
+      'Asks before a user, a role, an application or its permissions change in Auth0, whether the agent uses an Auth0 MCP server, the auth0 CLI, the Management API or the Auth0 SDK in a script. Reads and signing in are never asked about.',
+    template: 'identity',
+    server: '*auth0*',
+    doors: [
+      {
+        name: 'shield:auth0:review-cli',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              prog('auth0') +
+              GAP +
+              '\\s(?:(?:users|roles|apps|orgs)\\s+(?:create|update|delete|rm)|users\\s+roles\\s+(?:assign|add|remove|rm)|roles\\s+permissions\\s+(?:add|remove|rm)|users\\s+blocks\\s+unblock|api\\s+(?:post|put|patch|delete))(?![\\w-])',
+            flags: 'i',
+          },
+        ],
+        verdict: 'review',
+        reason:
+          'The auth0 CLI is about to change who has access. node9 asks before access changes (Auth0).',
+      },
+      {
+        name: 'shield:auth0:review-api',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The Management API only; /oauth/token is signing in.
+            value: httpTo(
+              '\\.auth0\\.com/api/v2/(?:users|roles|clients|grants|client-grants|organizations|tickets|jobs/users-imports|device-credentials)(?![\\w-])'
+            ),
+            flags: 'i',
+          },
+          HTTP_WRITE_ANY,
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'A request to the Auth0 Management API is about to change who has access. node9 asks before access changes (Auth0).',
+      },
+      {
+        name: 'shield:auth0:review-code',
+        tool: 'bash',
+        conditions: [
+          {
+            field: 'command',
+            op: 'matches',
+            // The Auth0 SDK in the script (Node `auth0`, Python `auth0`).
+            value:
+              '\\bManagementClient\\b|from\\s+auth0[.\\s]|from\\s+["\']auth0["\']|require\\(\\s*["\']auth0["\']',
+          },
+          {
+            field: 'command',
+            op: 'matches',
+            value:
+              '\\.(?:users|roles|organizations|clients)\\.(?:create|delete|update|assignRoles|deleteRoles|assignUsers|addPermissions|deletePermissions|addMembers|deleteMembers|add_roles|remove_roles|add_users|add_permissions|remove_permissions)\\s*\\(',
+          },
+        ],
+        conditionMode: 'all',
+        verdict: 'review',
+        reason:
+          'This code changes who has access in Auth0. node9 asks before access changes (Auth0).',
       },
     ],
   },

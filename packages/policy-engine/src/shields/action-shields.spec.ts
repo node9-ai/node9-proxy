@@ -1,7 +1,7 @@
 // Actions that move money, change access or publish (node9Firewall#385,
 // node9Firewall#390). finance.json, identity.json and publishing.json are
 // templates; apps.ts builds two things from them:
-//   - app shields (stripe, paypal): the template scoped to the app's MCP
+//   - app shields (stripe, paypal, square, plaid, okta, auth0): the template scoped to the app's MCP
 //     server, plus its CLI, API and library doors, off by default;
 //   - the general checks actions.money / actions.access / actions.publish:
 //     the template on every server no app shield claims, on by default.
@@ -14,6 +14,7 @@ import { BUILTIN_SHIELDS } from './index';
 import {
   ACTION_TEMPLATES,
   APP_SERVER_GLOB,
+  APP_SHIELD_SPECS,
   GENERAL_ACTION_RULES,
   REPLACED_SHIELDS,
   type ActionTemplateName,
@@ -218,15 +219,18 @@ describe('the general action checks', () => {
 });
 
 describe('app shields: one app, every door', () => {
-  for (const name of ['stripe', 'paypal']) {
+  for (const spec of APP_SHIELD_SPECS) {
+    const name = spec.name;
     it(`${name} is a shield whose tool rules are scoped to its own server`, () => {
       const shield = BUILTIN_SHIELDS[name];
       expect(shield).toBeDefined();
       const toolRules = shield.smartRules.filter((r) => r.tool !== 'bash');
-      expect(toolRules.length).toBe(ACTION_TEMPLATES.finance.length);
+      expect(toolRules.length).toBe(
+        ACTION_TEMPLATES[spec.template].filter((r) => r.tool !== 'bash').length
+      );
       for (const r of toolRules) {
         expect(r.name).toMatch(new RegExp(`^shield:${name}:review-`));
-        expect(r.server).toBe(`*${name}*`);
+        expect(r.server).toBe(spec.server);
       }
       const doors = shield.smartRules.filter((r) => r.tool === 'bash');
       expect(doors.length).toBeGreaterThan(1);
@@ -305,6 +309,158 @@ describe('app shields: one app, every door', () => {
     'npm install @paypal/paypal-server-sdk',
   ])('paypal leaves alone: %s', (command) => {
     expect(door('paypal', command)).toBeUndefined();
+  });
+  it.each([
+    [
+      'curl -X POST https://connect.squareup.com/v2/refunds -H "Authorization: Bearer $T" -d @r.json',
+      'shield:square:review-api',
+    ],
+    [
+      'curl https://connect.squareup.com/v2/payments -H "Authorization: Bearer $T" --data \'{"amount_money":{}}\'',
+      'shield:square:review-api',
+    ],
+    [
+      'curl -X POST https://connect.squareup.com/v2/orders/ord_1/pay -H "Authorization: Bearer $T"',
+      'shield:square:review-api',
+    ],
+    [
+      "import { SquareClient } from 'square';\nawait client.refunds.refundPayment({ paymentId });",
+      'shield:square:review-code',
+    ],
+    [
+      'from square.client import Client\nresult = client.payments.create_payment(body=body)',
+      'shield:square:review-code',
+    ],
+    [
+      'requests.post("https://connect.squareup.com/v2/refunds", json=body)',
+      'shield:square:review-code-http',
+    ],
+  ])('square: %s', (command, rule) => {
+    expect(door('square', command)).toBe(rule);
+  });
+
+  it.each([
+    'curl -X POST https://connect.squareupsandbox.com/v2/refunds -d @r.json',
+    'curl https://connect.squareup.com/v2/payments -H "Authorization: Bearer $T"',
+    'curl -X POST https://connect.squareup.com/v2/customers/search -d @q.json',
+    'await client.refunds.refundPayment({ paymentId }); // no Square SDK in this file',
+    "import { SquareClient } from 'square';\nawait client.payments.list();",
+    'npm install square',
+  ])('square leaves alone: %s', (command) => {
+    expect(door('square', command)).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'curl -X POST https://production.plaid.com/transfer/create -H "Content-Type: application/json" -d @t.json',
+      'shield:plaid:review-api',
+    ],
+    [
+      'curl https://production.plaid.com/transfer/authorization/create -d @a.json',
+      'shield:plaid:review-api',
+    ],
+    [
+      "const { PlaidApi } = require('plaid');\nawait client.transferCreate(request);",
+      'shield:plaid:review-code',
+    ],
+    [
+      'import plaid\nresponse = client.transfer_authorization_create(request)',
+      'shield:plaid:review-code',
+    ],
+    ['axios.post("https://production.plaid.com/transfer/create", body)', 'shield:plaid:review-api'],
+  ])('plaid: %s', (command, rule) => {
+    expect(door('plaid', command)).toBe(rule);
+  });
+
+  it.each([
+    'curl -X POST https://sandbox.plaid.com/transfer/create -d @t.json',
+    'curl -X POST https://production.plaid.com/accounts/balance/get -d @b.json',
+    'curl -X POST https://production.plaid.com/transactions/sync -d @s.json',
+    "const { PlaidApi } = require('plaid');\nawait client.accountsBalanceGet(request);",
+    'await bank.transferCreate(order); // another bank SDK',
+  ])('plaid leaves alone: %s', (command) => {
+    expect(door('plaid', command)).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'curl -X POST "https://acme.okta.com/api/v1/users?activate=true" -H "Authorization: SSWS $T" -d @u.json',
+      'shield:okta:review-api',
+    ],
+    [
+      'curl -X PUT https://acme.okta.com/api/v1/groups/00g1/users/00u1 -H "Authorization: SSWS $T"',
+      'shield:okta:review-api',
+    ],
+    [
+      'curl -X DELETE https://acme.okta-emea.com/api/v1/users/00u1 -H "Authorization: SSWS $T"',
+      'shield:okta:review-api',
+    ],
+    [
+      "const okta = require('@okta/okta-sdk-nodejs');\nawait client.userApi.createUser({ body });",
+      'shield:okta:review-code',
+    ],
+    [
+      'from okta.client import Client as OktaClient\nawait client.add_user_to_group(group_id, user_id)',
+      'shield:okta:review-code-py',
+    ],
+  ])('okta: %s', (command, rule) => {
+    expect(door('okta', command)).toBe(rule);
+  });
+
+  it.each([
+    'curl https://acme.okta.com/api/v1/users -H "Authorization: SSWS $T"',
+    'curl -X POST https://acme.okta.com/api/v1/authn -d @creds.json',
+    'curl -X POST https://acme.okta.com/oauth2/v1/token -d grant_type=client_credentials',
+    'await db.createUser({ email }); // no Okta SDK in this file',
+    "const okta = require('@okta/okta-sdk-nodejs');\nawait client.userApi.listUsers();",
+  ])('okta leaves alone: %s', (command) => {
+    expect(door('okta', command)).toBeUndefined();
+  });
+
+  it.each([
+    ['auth0 users create --name Jo --email jo@example.com', 'shield:auth0:review-cli'],
+    ['auth0 users roles assign auth0|123 --roles rol_1', 'shield:auth0:review-cli'],
+    ['auth0 roles permissions add rol_1 --api-id x', 'shield:auth0:review-cli'],
+    ['auth0 api post users --data @u.json', 'shield:auth0:review-cli'],
+    [
+      'curl -X PATCH https://acme.eu.auth0.com/api/v2/users/auth0%7C1 -H "Authorization: Bearer $T" -d @u.json',
+      'shield:auth0:review-api',
+    ],
+    [
+      'curl --request POST https://acme.auth0.com/api/v2/roles/rol_1/users -d @u.json',
+      'shield:auth0:review-api',
+    ],
+    [
+      "const { ManagementClient } = require('auth0');\nawait management.users.assignRoles({ id }, { roles });",
+      'shield:auth0:review-code',
+    ],
+    ['from auth0.management import Auth0\nauth0.users.delete(user_id)', 'shield:auth0:review-code'],
+  ])('auth0: %s', (command, rule) => {
+    expect(door('auth0', command)).toBe(rule);
+  });
+
+  it.each([
+    'auth0 users list',
+    'auth0 login',
+    'auth0 apps show abc',
+    'curl https://acme.auth0.com/api/v2/users -H "Authorization: Bearer $T"',
+    'curl -X POST https://acme.auth0.com/oauth/token -d @client.json',
+    'await api.users.create(body); // no Auth0 SDK in this file',
+    'npm install @auth0/auth0-react',
+  ])('auth0 leaves alone: %s', (command) => {
+    expect(door('auth0', command)).toBeUndefined();
+  });
+
+  it('Square claims its own servers, never Squarespace', () => {
+    const square = BUILTIN_SHIELDS.square.smartRules.find((r) => r.tool !== 'bash')!;
+    for (const label of ['square', 'Square', 'my-square', 'square-mcp', 'square_pos', 'squareup'])
+      expect(ruleServerMatches(square, label)).toBe(true);
+    for (const label of ['squarespace', 'squarespace-mcp', 'stripe'])
+      expect(ruleServerMatches(square, label)).toBe(false);
+    // ...so a Squarespace server stays under the general checks.
+    const general = GENERAL_ACTION_RULES[0];
+    expect(ruleServerMatches(general, 'squarespace')).toBe(true);
+    expect(ruleServerMatches(general, 'square-mcp')).toBe(false);
   });
 });
 

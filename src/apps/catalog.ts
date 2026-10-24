@@ -14,6 +14,8 @@ export interface AppEntry {
   shield: string;
   /** Substrings of an MCP server label (case-insensitive). */
   servers: readonly string[];
+  /** Substrings that make a label another app's (`squarespace` is not Square). */
+  notServers?: readonly string[];
   /** The program a shell command starts with. */
   commands: readonly string[];
   /** Package names in package.json, requirements.txt or pyproject.toml.
@@ -105,6 +107,44 @@ export const APP_CATALOG: readonly AppEntry[] = [
     packages: ['@paypal/', 'paypalrestsdk', 'paypal-checkout-serversdk', 'paypal-server-sdk'],
     envPrefixes: ['PAYPAL_'],
   },
+  {
+    slug: 'square',
+    label: 'Square',
+    shield: 'square',
+    servers: ['square'],
+    // Squarespace is a website builder. SQUARE_ already misses SQUARESPACE_.
+    notServers: ['squarespace'],
+    commands: [],
+    packages: ['square', 'squareup'],
+    envPrefixes: ['SQUARE_'],
+  },
+  {
+    slug: 'plaid',
+    label: 'Plaid',
+    shield: 'plaid',
+    servers: ['plaid'],
+    commands: [],
+    packages: ['plaid', 'plaid-python'],
+    envPrefixes: ['PLAID_'],
+  },
+  {
+    slug: 'okta',
+    label: 'Okta',
+    shield: 'okta',
+    servers: ['okta'],
+    commands: ['okta'],
+    packages: ['@okta/', 'okta'],
+    envPrefixes: ['OKTA_'],
+  },
+  {
+    slug: 'auth0',
+    label: 'Auth0',
+    shield: 'auth0',
+    servers: ['auth0'],
+    commands: ['auth0'],
+    packages: ['auth0', '@auth0/'],
+    envPrefixes: ['AUTH0_'],
+  },
 ];
 
 export const APP_BY_SLUG: ReadonlyMap<string, AppEntry> = new Map(
@@ -129,9 +169,22 @@ const PAYMENT_ACTIONS: Readonly<Record<string, string>> = {
   cards: 'review-card',
   withdrawals: 'review-withdraw',
 };
+/** The action words of the identity apps. */
+const ACCESS_ACTIONS: Readonly<Record<string, string>> = {
+  passwords: 'review-password',
+  keys: 'review-key',
+  access: 'review-access',
+  members: 'review-membership',
+  users: 'review-user',
+  mfa: 'review-mfa',
+};
 export const ACTIONS_BY_APP: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   stripe: PAYMENT_ACTIONS,
   paypal: PAYMENT_ACTIONS,
+  square: PAYMENT_ACTIONS,
+  plaid: PAYMENT_ACTIONS,
+  okta: ACCESS_ACTIONS,
+  auth0: ACCESS_ACTIONS,
 };
 
 /** The action word of a shield rule (`stripe`, `review-refund` -> `refunds`). */

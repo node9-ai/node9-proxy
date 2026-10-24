@@ -76,6 +76,29 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
     expect(probe(h, 'mcp__paypal__create_refund', { id: 'c1' }).verdict).toBe('allow');
   });
 
+  it('okta on: a password reset on its server and a user created through the API are held', () => {
+    const h = home({ shield: 'okta' });
+    const mcp = probe(h, 'mcp__okta__reset_password', { user: 'u1' });
+    expect(mcp.verdict, mcp.stdout).toBe('review');
+    expect(mcp.stdout).toContain('Okta');
+    const api = probe(h, 'Bash', {
+      command:
+        'curl -X POST "https://acme.okta.com/api/v1/users?activate=true" -H "Authorization: SSWS $T" -d @u.json',
+    });
+    expect(api.verdict, api.stdout).toBe('review');
+    expect(probe(h, 'mcp__okta__list_users', {}).verdict).toBe('allow');
+  });
+
+  it('square on: a refund on its server is held; a Squarespace server stays with the general checks', () => {
+    const h = home({ shield: 'square' });
+    const mcp = probe(h, 'mcp__square__create_refund', { payment_id: 'p1' });
+    expect(mcp.verdict, mcp.stdout).toBe('review');
+    expect(mcp.stdout).toContain('Square');
+    const site = probe(h, 'mcp__squarespace__create_refund', { order: 'o1' });
+    expect(site.verdict, site.stdout).toBe('review');
+    expect(site.stdout).toContain('Money check');
+  });
+
   it('the old finance shield name says what replaced it', () => {
     const h = home();
     const r = runCli(h, ['shield', 'enable', 'finance']);
@@ -86,24 +109,24 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
 
   it('by default: a password change, adding a user to a channel and sharing a file are held', () => {
     const h = home();
-    expect(probe(h, 'mcp__okta__reset_password', { user: 'u1' }).verdict).toBe('review');
+    expect(probe(h, 'mcp__acme_idp__reset_password', { user: 'u1' }).verdict).toBe('review');
     expect(probe(h, 'mcp__chat__add_user_to_channel', { user: 'eve' }).verdict).toBe('review');
     expect(probe(h, 'mcp__drive__share_file', { file_id: '7' }).verdict).toBe('review');
-    expect(probe(h, 'mcp__okta__list_users', {}).verdict).toBe('allow');
+    expect(probe(h, 'mcp__acme_idp__list_users', {}).verdict).toBe('allow');
     expect(probe(h, 'mcp__chat__send_channel_message', { text: 'hi' }).verdict).toBe('allow');
   });
 
   it('by default: an MCP release is held; a shell publish waits for its registry shield', () => {
     const h = home();
     expect(probe(h, 'mcp__github__create_release', { tag: 'v1' }).verdict).toBe('review');
-    // A shell publish names a registry (an app): a door of that app's shield,
-    // off by default as in 2.37.0 (node9Firewall#390).
+    // A shell publish names a registry (an app); it is in no shield for now,
+    // as in 2.37.0's default (node9Firewall#390, design section 16).
     expect(probe(h, 'Bash', { command: 'npm publish --access public' }).verdict).toBe('allow');
   });
 
   it('a check set to off lets its actions through, and only its own', () => {
     const h = home({ checks: { 'actions.money': 'off' } });
     expect(probe(h, 'mcp__acme_billing__refund_order', { order: 'o1' }).verdict).toBe('allow');
-    expect(probe(h, 'mcp__okta__reset_password', { user: 'u1' }).verdict).toBe('review');
+    expect(probe(h, 'mcp__acme_idp__reset_password', { user: 'u1' }).verdict).toBe('review');
   });
 });

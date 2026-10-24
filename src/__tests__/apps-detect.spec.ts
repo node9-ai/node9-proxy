@@ -130,6 +130,35 @@ describe('matchApps', () => {
     // git is everywhere and names no app.
     expect(bySlug.github).toBeUndefined();
   });
+
+  it('finds Square, Plaid, Okta and Auth0, and never Square from Squarespace', () => {
+    const d = tmp();
+    fs.writeFileSync(
+      path.join(d, 'package.json'),
+      JSON.stringify({ dependencies: { '@okta/okta-sdk-nodejs': '^7', plaid: '^29' } })
+    );
+    fs.writeFileSync(path.join(d, '.env'), 'SQUARESPACE_API_KEY=x\nSQUARE_ACCESS_TOKEN=y\n');
+    const found = matchApps(
+      {
+        servers: new Set(['squarespace', 'square-mcp']),
+        commands: new Set(['auth0']),
+        projects: [d],
+      },
+      [{ dir: d, packages: projectPackages(d), envNames: projectEnvNames(d) }]
+    );
+    const bySlug = Object.fromEntries(found.map((f) => [f.slug, f.signals]));
+    expect(Object.keys(bySlug).sort()).toEqual(['auth0', 'okta', 'plaid', 'square']);
+    expect(bySlug.square.map((s) => `${s.kind}:${s.value}`)).toEqual([
+      'mcp-server:square-mcp',
+      'env-name:SQUARE_ACCESS_TOKEN',
+    ]);
+
+    const onlySquarespace = matchApps(
+      { servers: new Set(['squarespace']), commands: new Set(), projects: [] },
+      []
+    );
+    expect(onlySquarespace).toEqual([]);
+  });
 });
 
 describe('appsReportLines', () => {
