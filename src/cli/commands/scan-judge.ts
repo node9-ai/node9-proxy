@@ -17,6 +17,9 @@ import { forecastDecision, type ForecastVerdict } from '../../auth/forecast';
 import { ForecastSessionState } from '../../auth/forecast-state';
 import { toolRole } from '../../exposure/roles';
 import { scanArgs } from '../../dlp';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import type { DlpFinding, Finding, RuleSource, ScanDedup, ScanResult } from './scan';
 
 export type ScanAgent = Finding['agent'];
@@ -61,6 +64,34 @@ export class HistoryJudge {
   private readonly configs = new Map<string, Config>();
   private readonly sessions = new Map<string, ForecastSessionState>();
   private readonly unknownInputs: Record<string, number> = {};
+  private readonly repos = new Map<string, string | undefined>();
+
+  /** The nearest git repository at or above `cwd` (a `.git` directory or
+   *  file, so worktrees count), home-relative; undefined when none. Cached per
+   *  directory: history repeats the same few cwds thousands of times. */
+  repoOf(cwd: string | undefined): string | undefined {
+    if (!cwd || !path.isAbsolute(cwd)) return undefined;
+    if (this.repos.has(cwd)) return this.repos.get(cwd);
+    let dir = cwd;
+    let found: string | undefined;
+    for (;;) {
+      try {
+        if (fs.existsSync(path.join(dir, '.git'))) {
+          found = dir;
+          break;
+        }
+      } catch {
+        break;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    const home = os.homedir();
+    const label = found && found.startsWith(home) ? '~' + found.slice(home.length) : found;
+    this.repos.set(cwd, label);
+    return label;
+  }
 
   /** The configuration the hook would have read for a call in `cwd`,
    *  resolved once per distinct directory. */
@@ -112,6 +143,8 @@ export class HistoryJudge {
       { cwd: call.cwd, config, session: this.session(call.sessionId), at: clockOf(call.timestamp) }
     );
     for (const u of verdict.unknown) this.unknownInputs[u] = (this.unknownInputs[u] ?? 0) + 1;
+    const repo = this.repoOf(call.cwd);
+    const where = call.cwd ? { cwd: call.cwd, ...(repo && { repo }) } : {};
 
     // Credentials in the arguments: the leaks list, as before.
     let dlpMatched = false;
@@ -126,6 +159,7 @@ export class HistoryJudge {
         project: call.project,
         sessionId: call.sessionId,
         agent: call.agent,
+        ...where,
       };
       const k = `${finding.patternName}|${finding.redactedSample}|${call.project}`;
       if (!dedup.dlpKeys.has(k)) {
@@ -152,6 +186,7 @@ export class HistoryJudge {
             project: call.project,
             sessionId: call.sessionId,
             agent: call.agent,
+            ...where,
           });
         }
       }
@@ -161,7 +196,8 @@ export class HistoryJudge {
     // and decoys above, which have their own lists.
     if (verdict.decision !== 'allow' && verdict.layer !== 'dlp' && verdict.layer !== 'canary') {
       const source = ruleSourceFor(verdict, call.toolName, config);
-      const k = `${source.rule.name ?? '<unnamed>'}|${preview(call.input)}|${call.project}`;
+      // The same command in two repositories is two findings (fw#404).
+      const k = `${source.rule.name ?? '<unnamed>'}|${preview(call.input)}|${call.project}|${repo ?? ''}`;
       if (!dedup.findingsKeys.has(k)) {
         dedup.findingsKeys.add(k);
         result.findings.push({
@@ -178,6 +214,7 @@ export class HistoryJudge {
           ...(verdict.notEnforcedBecause && { notEnforcedBecause: verdict.notEnforcedBecause }),
           layer: verdict.layer,
           unknown: verdict.unknown,
+          ...where,
         });
       }
     }

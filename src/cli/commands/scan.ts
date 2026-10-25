@@ -25,6 +25,7 @@ import { DEFAULT_CONFIG, getConfig } from '../../config';
 const toolInspectionMap: ToolInspection = DEFAULT_CONFIG.policy.toolInspection;
 import { BUILTIN_SHIELDS, APP_SHIELD_NAMES, resolveShellInput } from '@node9/policy-engine';
 import { HistoryJudge, type ScanPolicy } from './scan-judge';
+import { decodeProjectDirName } from '../../costSync';
 import { scanArgs } from '../../dlp';
 import { matchCanaryArgs } from '../../dlp';
 import { canaryCtxValues } from '../../canary/registry';
@@ -106,6 +107,10 @@ export interface Finding {
   layer: string;
   /** Inputs the forecast could not reproduce for this call. */
   unknown: string[];
+  /** The call's own working directory and the git repository it sits in
+   *  (home-relative), when the transcript carries a cwd (fw#404). */
+  cwd?: string;
+  repo?: string;
 }
 
 export interface DlpFinding {
@@ -116,6 +121,8 @@ export interface DlpFinding {
   project: string;
   sessionId: string;
   agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot' | 'shell';
+  cwd?: string;
+  repo?: string;
 }
 
 /** A registered decoy credential seen in history. Carries attribution only:
@@ -1213,10 +1220,7 @@ async function processClaudeProject(
     return;
   }
 
-  const projLabel = stripTerminalEscapes(decodeURIComponent(proj).replace(os.homedir(), '~')).slice(
-    0,
-    40
-  );
+  const projLabel = claudeProjectLabel(proj);
 
   let files: string[];
   try {
@@ -1266,10 +1270,7 @@ async function processClaudeProjectAsync(
     return;
   }
 
-  const projLabel = stripTerminalEscapes(decodeURIComponent(proj).replace(os.homedir(), '~')).slice(
-    0,
-    40
-  );
+  const projLabel = claudeProjectLabel(proj);
 
   let files: string[];
   try {
@@ -1293,6 +1294,20 @@ async function processClaudeProjectAsync(
     );
     await yieldTick();
   }
+}
+
+/** Claude names a project directory after the session's cwd with every `/`
+ *  turned into `-` (`-home-user-proj`). Decode it and make it home-relative;
+ *  the old `homedir` replacement never matched the dashed form (fw#404). */
+function claudeProjectLabel(dirName: string): string {
+  const name = decodeURIComponent(dirName);
+  // Match the home directory in its dashed form first: decoding the whole
+  // name would turn a dash inside the home path itself into a slash.
+  const homeDashed = os.homedir().replace(/\//g, '-');
+  const label = name.startsWith(homeDashed)
+    ? '~' + decodeProjectDirName(name.slice(homeDashed.length))
+    : decodeProjectDirName(name);
+  return stripTerminalEscapes(label).slice(0, 40);
 }
 
 /** Promise that resolves on the next event-loop tick. The async walker
@@ -2381,7 +2396,9 @@ export function printFindingRow(
   // (see Credential Leaks section) so all finding rows look symmetric.
   const stale = isStaleFinding(f.timestamp);
   const ts = f.timestamp ? chalk.dim(fmtTs(f.timestamp) + '  ') : '';
-  const proj = chalk.dim(f.project.slice(0, 22).padEnd(22) + '  ');
+  // The repository the call ran in beats the session's project slug when known.
+  const where = drillDown && f.repo ? f.repo : f.project;
+  const proj = chalk.dim(where.slice(0, 22).padEnd(22) + '  ');
   const agentLabel = agentBadgeText(f.agent);
   const agentBadge = stale ? chalk.dim(agentLabel) : chalk[agentColorName(f.agent)](agentLabel);
   // FindingRef.command is already the preview; fullCommand is the untruncated form.

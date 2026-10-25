@@ -167,9 +167,14 @@ export interface FindingRef {
   sessionId: string;
   agent: AgentId;
   toolName: string;
+  /** The call's working directory and its git repository, when known (fw#404). */
+  cwd?: string;
+  repo?: string;
 }
 
 export interface LeakRef {
+  cwd?: string;
+  repo?: string;
   patternName: string;
   redactedSample: string;
   toolName: string;
@@ -331,6 +336,8 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
       project: f.project,
       sessionId: f.sessionId,
       agent: f.agent,
+      ...(f.cwd && { cwd: f.cwd }),
+      ...(f.repo && { repo: f.repo }),
     }))
   );
   const allCanaries: CanaryRef[] = agents.flatMap((a) =>
@@ -519,6 +526,8 @@ function buildSections(findings: any[]): Section[] {
         sessionId: f.sessionId,
         agent: f.agent,
         toolName: f.toolName,
+        ...(f.cwd && { cwd: f.cwd }),
+        ...(f.repo && { repo: f.repo }),
       });
     }
 
