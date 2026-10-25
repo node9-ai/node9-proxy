@@ -201,7 +201,10 @@ export class ScanCache {
     hasher?: ConfigHasher
   ): void {
     if (!this.enabled) return;
-    const name = createHash('sha256').update(`${agent}|${filePath}|${window}`).digest('hex').slice(0, 40);
+    const name = createHash('sha256')
+      .update(`${agent}|${filePath}|${window}`)
+      .digest('hex')
+      .slice(0, 40);
     const rel = path.join('files', name.slice(0, 2), `${name}.json`);
     const configHashes: Record<string, string> = {};
     if (hasher)
