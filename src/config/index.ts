@@ -2130,8 +2130,11 @@ export function getConfig(cwd?: string): Config {
   // the mode is final, for every check no layer stated. The global file, the
   // workspace and the managed config win outright; a project file may raise a
   // level value, never lower it (the same law as the rest of its policy).
-  {
-    const level = levelOf(mergedSettings.mode);
+  const level = levelOf(mergedSettings.mode);
+  const levelKnobChecks = Object.entries(levelChecks(level)).filter(([id]) => isKnobGoverned(id));
+  const signals = levelPackageSignals(level);
+  // Standard and Audit change no knob: nothing to work out on every hook call.
+  if (levelKnobChecks.length > 0 || signals) {
     const policyOf = (layer: Record<string, unknown> | null): LegacyPolicyKnobs =>
       (layer?.policy as LegacyPolicyKnobs | undefined) ?? {};
     const trusted = new Set<string>([...managedStatedChecks, ...Object.keys(workspaceChecks)]);
@@ -2147,13 +2150,12 @@ export function getConfig(cwd?: string): Config {
     // What the knobs say before the level writes them (the project's raise
     // included); read once, since the writes below change only unstated rows.
     const before = resolveCheckMap(catalogSettingsFromConfig({}, mergedPolicy));
-    for (const [id, v] of Object.entries(levelChecks(level))) {
-      if (!isKnobGoverned(id) || trusted.has(id)) continue;
+    for (const [id, v] of levelKnobChecks) {
+      if (trusted.has(id)) continue;
       if (project.has(id) && CHECK_VERDICT_RANK[v] <= CHECK_VERDICT_RANK[before[id] ?? 'off'])
         continue;
       checkToLegacyPolicy(mergedPolicy as Record<string, unknown>, id, v);
     }
-    const signals = levelPackageSignals(level);
     if (signals) {
       for (const key of ['newPackage', 'installScript'] as const) {
         // Soft only turns a signal off, so any layer that stated it keeps it.

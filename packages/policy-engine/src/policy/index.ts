@@ -995,18 +995,14 @@ async function evaluatePolicyCore(
     if (firstToken && firstToken.startsWith('/') && checkProvenance) {
       const prov = checkProvenance(firstToken, cwd);
       if (prov.trustLevel === 'suspect') {
-        // Block all blocks what the check would only review.
-        const value = cv('commands.temp-binary');
-        const v = applyCheckValue(
-          value === 'review' && isBlockAll(config.settings.mode) ? 'block' : value,
-          {
-            decision: 'review',
-            blockedByLabel: 'Node9: Suspect Binary',
-            reason: `Binary "${firstToken}" resolved to ${prov.resolvedPath} — ${prov.reason}`,
-            tier: 3,
-            checkId: 'commands.temp-binary',
-          }
-        );
+        // Block all's default for this check is block (levels.ts).
+        const v = applyCheckValue(cv('commands.temp-binary'), {
+          decision: 'review',
+          blockedByLabel: 'Node9: Suspect Binary',
+          reason: `Binary "${firstToken}" resolved to ${prov.resolvedPath} — ${prov.reason}`,
+          tier: 3,
+          checkId: 'commands.temp-binary',
+        });
         if (v?.logged) noteLogged(v);
         else if (v) return v;
       }

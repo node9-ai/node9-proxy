@@ -3,7 +3,8 @@
 //
 // A level is a set of DEFAULTS: for every check nobody stated, it picks the
 // value. A value a person or the workspace stated still wins, and a level
-// never picks a value the check does not allow (`configurableValues`). The
+// never picks a value the check does not allow (`configurableValues`), save
+// Block all's catch-all, a row only a level sets. The
 // table below lists only what a level changes; every other check keeps its
 // catalog default. Agreed with the founder 2026-10-25
 // (docs: node9-levels-handoff.md, section 3).
@@ -42,8 +43,8 @@ export function reviewsEveryInline(mode: string | undefined): boolean {
 }
 
 /** Block all: ask before any call no check recognised (the catch-all,
- *  `commands.unknown`), plus the binary-provenance escalations that came with
- *  it. This is what `strict` meant before the levels. */
+ *  `commands.unknown`) and about a binary of unknown origin. This is what
+ *  `strict` meant before the levels. */
 export function isBlockAll(mode: string | undefined): boolean {
   return levelOf(mode) === 'block-all';
 }
@@ -82,12 +83,21 @@ const STRICT: Readonly<Record<string, Verdict>> = {
   'loading.skill-tamper': 'block',
 };
 
+// Block all is Strict plus what strict meant before the levels: the catch-all
+// asks about any call no check recognised, and a suspect binary is blocked.
+// The catch-all row is the one check only a level sets (no person can).
+const BLOCK_ALL: Readonly<Record<string, Verdict>> = {
+  ...STRICT,
+  'commands.unknown': 'review',
+  'commands.temp-binary': 'block',
+};
+
 const LEVEL_CHECKS: Readonly<Record<Level, Readonly<Record<string, Verdict>>>> = {
   audit: {},
   soft: SOFT,
   standard: {},
   strict: STRICT,
-  'block-all': STRICT,
+  'block-all': BLOCK_ALL,
 };
 
 /** The value a level gives a check nobody stated, or undefined when the

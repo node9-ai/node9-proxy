@@ -48,6 +48,8 @@ describe('the level table', () => {
   it('never gives a check a value the check does not allow', () => {
     for (const level of LEVELS) {
       for (const [id, v] of Object.entries(levelChecks(level))) {
+        // The catch-all is the one row only a level sets.
+        if (id === 'commands.unknown') continue;
         expect(CHECK_BY_ID.has(id), `${level}: ${id} is not in the catalog`).toBe(true);
         expect(configurableValues(id), `${level}: ${id} = ${v}`).toContain(v);
       }
@@ -60,8 +62,12 @@ describe('the level table', () => {
     expect(levelPackageSignals('standard')).toBeUndefined();
   });
 
-  it('Block all has the values of Strict', () => {
-    expect(levelChecks('block-all')).toEqual(levelChecks('strict'));
+  it('Block all is Strict plus the catch-all and a blocked suspect binary', () => {
+    expect(levelChecks('block-all')).toEqual({
+      ...levelChecks('strict'),
+      'commands.unknown': 'review',
+      'commands.temp-binary': 'block',
+    });
   });
 
   it('a level never touches an app protection or a dangerous action', () => {
@@ -166,6 +172,19 @@ describe('resolveCheck under a level', () => {
     expect(resolveCheck({ mode: 'strict' }, 'commands.unknown')!.value).toBe('off');
     expect(checksFromLegacyPolicy({}, 'block-all')['commands.unknown']).toBe('review');
     expect(checksFromLegacyPolicy({}, 'strict')['commands.unknown']).toBeUndefined();
+  });
+
+  it('Block all blocks a suspect binary unless a person stated the check', () => {
+    expect(resolveCheck({ mode: 'block-all' }, 'commands.temp-binary')).toMatchObject({
+      value: 'block',
+      source: 'default',
+    });
+    expect(
+      resolveCheck(
+        { mode: 'block-all', checks: { 'commands.temp-binary': 'review' } },
+        'commands.temp-binary'
+      )!.value
+    ).toBe('review');
   });
 
   it('every catalog check resolves at every level', () => {

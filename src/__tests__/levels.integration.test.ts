@@ -121,6 +121,7 @@ describe('protection levels at the gate', () => {
     expect(s.stdout).not.toContain('"permissionDecision":"ask"');
     const b = check('block-all', 'ls -la');
     expect(b.error).toBeUndefined();
+    expect(b.status).toBe(0);
     expect(b.stdout).toContain('"permissionDecision":"ask"');
   });
 });
