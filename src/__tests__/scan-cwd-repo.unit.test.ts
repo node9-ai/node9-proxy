@@ -24,7 +24,8 @@ function repoDir(name: string): string {
 }
 
 describe('cwd and repository per call', () => {
-  it('two repositories under one project slug', async () => {
+  // Claude's dashed project directory names are a POSIX path encoding.
+  it.skipIf(process.platform === 'win32')('two repositories under one project slug', async () => {
     const a = repoDir('alpha');
     const b = repoDir('beta');
     const slug = path.join(home(), 'work').replace(/\//g, '-');
@@ -52,7 +53,10 @@ describe('cwd and repository per call', () => {
     );
     const r = await scanClaudeHistory(null);
     expect(r.findings).toHaveLength(2);
-    expect(r.findings.map((f) => f.repo).sort()).toEqual(['~/work/alpha', '~/work/beta']);
+    expect(r.findings.map((f) => f.repo).sort()).toEqual([
+      path.join('~', 'work', 'alpha'),
+      path.join('~', 'work', 'beta'),
+    ]);
     expect(r.findings[0].cwd).toBe(path.join(a, 'src'));
     expect(r.findings[0].project).toBe('~/work');
   });
@@ -60,8 +64,9 @@ describe('cwd and repository per call', () => {
   it('repoOf: nearest .git, cached, none outside a repository', () => {
     const j = new HistoryJudge();
     const a = repoDir('gamma');
-    expect(j.repoOf(path.join(a, 'src'))).toBe('~/work/gamma');
-    expect(j.repoOf(path.join(a, 'src'))).toBe('~/work/gamma');
+    const gamma = path.join('~', 'work', 'gamma');
+    expect(j.repoOf(path.join(a, 'src'))).toBe(gamma);
+    expect(j.repoOf(path.join(a, 'src'))).toBe(gamma);
     expect(j.repoOf(os.tmpdir())).toBeUndefined();
     expect(j.repoOf(undefined)).toBeUndefined();
     expect(j.repoOf('relative/path')).toBeUndefined();
