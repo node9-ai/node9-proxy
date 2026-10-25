@@ -7,8 +7,10 @@
 // cage). shadowMode/panicMode remain absolute overrides applied above this.
 
 // Strictness orderings, weakest → strictest.
-// mode: observe/audit only log; standard/strict enforce (strict most aggressive).
-export const MODE_ORDER = ['observe', 'audit', 'standard', 'strict'] as const;
+// mode: the protection levels, weakest first. observe/audit only record; soft,
+// standard, strict and block-all enforce, each stricter than the one before.
+// observe is Audit's older name: the same behaviour, kept first for old floors.
+export const MODE_ORDER = ['observe', 'audit', 'soft', 'standard', 'strict', 'block-all'] as const;
 // egress mode: the verdict for an unknown host. off = no gate, block = strictest.
 export const EGRESS_MODE_ORDER = ['off', 'review', 'block'] as const;
 

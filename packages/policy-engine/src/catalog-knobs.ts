@@ -8,6 +8,7 @@
 // the dashboard backend so the two can never disagree on what a knob means.
 
 import { CHECKS, CHECK_BY_ID, isVerdict, isLockedCheck, type Verdict } from './catalog';
+import { isBlockAll } from './levels';
 
 type Obj = Record<string, unknown>;
 
@@ -216,7 +217,7 @@ export function checksFromLegacyPolicy(
   else if (uc?.enabled === true)
     out['behavior.untrusted-content'] = uc.afterExposure === 'log-only' ? 'log' : 'review';
 
-  if (mode === 'strict') out['commands.unknown'] = 'review';
+  if (isBlockAll(mode)) out['commands.unknown'] = 'review';
   return out;
 }
 
@@ -313,6 +314,35 @@ export function checkToLegacyPolicy(policy: Obj, id: string, v: Verdict): boolea
     default:
       return false;
   }
+}
+
+/**
+ * The knob-governed checks a legacy policy block STATES: it sets the field
+ * that picks the check's value. Presence, not value, decides, so a level
+ * (levels.ts) leaves the check alone. A field that turns a check on without
+ * choosing between its on values (`dlp.enabled: true` for the weak-credential
+ * row, `untrustedContent.enabled: true`) does not pin it: older `node9 init`
+ * runs wrote those into every config file.
+ */
+export function knobStatedChecks(policy: LegacyPolicyKnobs): Set<string> {
+  const out = new Set<string>();
+  const has = (o: object | undefined, key: string) =>
+    !!o && typeof o === 'object' && (o as Obj)[key] !== undefined;
+  const { dlp, egress, loopDetection, injectionScan, skillPinning, packageCheck } = policy;
+  const uc = policy.untrustedContent;
+  if (has(dlp, 'enabled')) out.add('data.secrets');
+  if (has(dlp, 'reviewAction') || dlp?.enabled === false) out.add('data.secrets-weak');
+  if (has(dlp, 'pii')) out.add('data.pii');
+  if (has(egress, 'enabled') || has(egress, 'mode')) out.add('network.unknown-host');
+  if (has(egress, 'ssrfStrict')) out.add('network.internal-addresses');
+  if (has(loopDetection, 'enabled')) out.add('behavior.loops');
+  if (has(injectionScan, 'enabled')) out.add('behavior.prompt-injection');
+  if (has(skillPinning, 'enabled') || has(skillPinning, 'mode')) out.add('loading.skill-tamper');
+  if (has(packageCheck, 'enabled') || has(packageCheck, 'onMalicious'))
+    out.add('loading.malicious-package');
+  if (uc && typeof uc === 'object' && (uc.enabled === false || has(uc, 'afterExposure')))
+    out.add('behavior.untrusted-content');
+  return out;
 }
 
 // ── What a file or a workspace may set today ─────────────────────────────────

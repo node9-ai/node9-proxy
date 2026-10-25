@@ -12,6 +12,7 @@ import os from 'os';
 import http from 'http';
 import { DAEMON_PORT, DAEMON_HOST } from '../auth/daemon.js';
 import type { HudStatus } from '../daemon/session-counters.js';
+import { isRecordOnly } from '@node9/policy-engine';
 
 // ── stdin JSON from Claude Code ───────────────────────────────────────────────
 
@@ -353,7 +354,7 @@ function renderSecurityLine(status: HudStatus): string {
   }
 
   // Session counters
-  if (status.mode === 'observe') {
+  if (isRecordOnly(status.mode)) {
     parts.push(`${dim('|')} ${color(GREEN, `✅ ${status.session.allowed} passed`)}`);
     if (status.session.wouldBlock > 0) {
       parts.push(color(YELLOW, `⚠ ${status.session.wouldBlock} would-block`));

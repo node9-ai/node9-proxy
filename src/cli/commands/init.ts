@@ -137,7 +137,7 @@ export function registerInitCommand(program: Command): void {
     .command('init')
     .description('Set up Node9: create config and wire all detected AI agents')
     .option('--force', 'Overwrite existing config')
-    .option('-m, --mode <mode>', 'Initial security mode: standard | strict | audit | observe')
+    .option('-m, --mode <mode>', 'Protection level: audit | soft | standard | strict | block-all')
     .option('--skip-setup', 'Only configure protection; do not wire agents or install a service')
     .option('--recommended', 'Enable recommended protection without asking any questions')
     .action(

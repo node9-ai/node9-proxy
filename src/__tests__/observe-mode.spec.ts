@@ -179,52 +179,29 @@ describe('observe mode — DLP in observe', () => {
   });
 });
 
-describe('observe mode vs audit mode', () => {
-  it('audit mode does not set observeWouldBlock or ruleHit even when a rule matches', async () => {
-    mockProjectConfig({
-      settings: { mode: 'audit', approvalTimeoutMs: 100 },
-      policy: {
-        smartRules: [
-          {
-            name: 'block-deploy',
-            tool: 'Bash',
-            conditions: [{ field: 'command', op: 'matches', value: './deploy.sh' }],
-            verdict: 'block',
-          },
-        ],
+// The protection levels (node9Firewall#385): Audit is observe's new name.
+// Before the levels, `audit` was a second log-only mode that hid the rule a
+// call would have hit; both now record the same would-block.
+describe('audit is observe', () => {
+  const policy = {
+    smartRules: [
+      {
+        name: 'block-deploy',
+        tool: 'Bash',
+        conditions: [{ field: 'command', op: 'matches', value: './deploy.sh' }],
+        verdict: 'block',
       },
-    });
+    ],
+  };
 
-    const result = await authorizeHeadless('Bash', { command: './deploy.sh' });
-
-    expect(result.approved).toBe(true);
-    expect(result.observeWouldBlock).toBeFalsy();
-    expect(result.ruleHit).toBeUndefined();
-  });
-
-  it('observe mode surfaces ruleHit; audit mode does not', async () => {
-    const policy = {
-      smartRules: [
-        {
-          name: 'block-deploy',
-          tool: 'Bash',
-          conditions: [{ field: 'command', op: 'matches', value: './deploy.sh' }],
-          verdict: 'block',
-        },
-      ],
-    };
-
-    mockProjectConfig({ settings: { mode: 'observe', approvalTimeoutMs: 100 }, policy });
-    const observeResult = await authorizeHeadless('Bash', { command: './deploy.sh' });
-    _resetConfigCache();
-
-    mockProjectConfig({ settings: { mode: 'audit', approvalTimeoutMs: 100 }, policy });
-    const auditResult = await authorizeHeadless('Bash', { command: './deploy.sh' });
-
-    expect(observeResult.approved).toBe(true);
-    expect(observeResult.ruleHit).toBe('block-deploy');
-
-    expect(auditResult.approved).toBe(true);
-    expect(auditResult.ruleHit).toBeUndefined();
+  it('audit and observe both approve and surface the would-block', async () => {
+    for (const mode of ['observe', 'audit']) {
+      _resetConfigCache();
+      mockProjectConfig({ settings: { mode, approvalTimeoutMs: 100 }, policy });
+      const result = await authorizeHeadless('Bash', { command: './deploy.sh' });
+      expect(result.approved, mode).toBe(true);
+      expect(result.observeWouldBlock, mode).toBe(true);
+      expect(result.ruleHit, mode).toBe('block-deploy');
+    }
   });
 });

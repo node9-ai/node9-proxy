@@ -949,7 +949,8 @@ describe('audit mode + cloud gating', () => {
       .trim()
       .split('\n')
       .map((l) => JSON.parse(l) as Record<string, unknown>);
-    const auditRow = lines.find((l) => l.checkedBy === 'audit-mode');
+    // Audit is observe (node9Firewall#385 levels): the row is an observe-mode row.
+    const auditRow = lines.find((l) => String(l.checkedBy).startsWith('observe-mode'));
     expect(auditRow).toBeDefined();
     expect(typeof auditRow!.eid).toBe('string');
     expect((auditRow!.eid as string).length).toBeGreaterThanOrEqual(8);
@@ -964,7 +965,7 @@ describe('audit mode + cloud gating', () => {
     });
     expect(res.status).toBe('shipped');
     const shippedRows = batchCalls.flatMap((b) => b.rows);
-    expect(shippedRows.some((row) => row.checkedBy === 'audit-mode')).toBe(true);
+    expect(shippedRows.some((row) => String(row.checkedBy).startsWith('observe-mode'))).toBe(true);
   });
 
   it('audit mode + cloud:false → does NOT POST to /audit', async () => {

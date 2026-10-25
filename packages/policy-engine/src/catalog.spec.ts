@@ -243,8 +243,9 @@ describe("resolveCheck reads today's config shape without changing a verdict", (
     ).toBe('block');
   });
 
-  it('mode strict turns the catch-all on', () => {
-    expect(resolveCheck({ mode: 'strict' }, 'commands.unknown')?.value).toBe('review');
+  it('mode block-all turns the catch-all on; strict does not', () => {
+    expect(resolveCheck({ mode: 'block-all' }, 'commands.unknown')?.value).toBe('review');
+    expect(resolveCheck({ mode: 'strict' }, 'commands.unknown')?.value).toBe('off');
     expect(resolveCheck({ mode: 'standard' }, 'commands.unknown')?.value).toBe('off');
   });
 

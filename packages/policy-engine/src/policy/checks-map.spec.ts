@@ -94,9 +94,9 @@ describe('a product rule follows its check', () => {
       checkId: 'commands.sudo',
     });
   });
-  it('log never pre-empts a later tier: a logged sudo still hits the strict catch-all', async () => {
+  it('log never pre-empts a later tier: a logged sudo still hits the block-all catch-all', async () => {
     const c = cfg({ 'commands.sudo': 'log' });
-    c.settings.mode = 'strict';
+    c.settings.mode = 'block-all';
     const v = await bash(c, 'sudo apt-get install jq');
     expect(v.decision).toBe('review');
     expect(v.checkId).toBe('commands.unknown');

@@ -26,6 +26,7 @@ import {
   TUNING_FIELDS,
   type Verdict,
   type CheckDef,
+  type ModeValue,
 } from '@node9/policy-engine';
 
 export { configurableValues } from '@node9/policy-engine';
@@ -41,7 +42,7 @@ export const CONFIG_FILE_VERSION_2 = '2';
 
 export interface ConfigFileV2 {
   version: '2';
-  mode?: 'standard' | 'strict' | 'audit' | 'observe';
+  mode?: ModeValue;
   /** Catalog id → value. Only what departs from the default is written. */
   checks?: Record<string, Verdict>;
   /** Catalog id → that check's settings (lists, thresholds). */
@@ -192,7 +193,7 @@ export function v2ToLegacy(raw: Record<string, unknown>, options: V2Options = {}
       continue;
     }
     if (id === 'commands.unknown') {
-      warnings.push(`checks.${id}: set "mode": "strict" instead`);
+      warnings.push(`checks.${id}: set "mode": "block-all" instead`);
       continue;
     }
     const allowed = configurableValues(id);

@@ -3,8 +3,10 @@
 // Counters are daemon-lifetime — they reset when the daemon restarts.
 // No persistence required: this is ambient awareness, not audit.
 
+import type { ModeValue } from '@node9/policy-engine';
+
 export interface HudStatus {
-  mode: 'standard' | 'strict' | 'observe' | 'audit';
+  mode: ModeValue;
   session: {
     allowed: number;
     blocked: number;

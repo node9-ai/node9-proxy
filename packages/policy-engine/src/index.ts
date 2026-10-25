@@ -145,6 +145,7 @@ export {
   tuningToLegacyPolicy,
   checksFromLegacyPolicy,
   checkToLegacyPolicy,
+  knobStatedChecks,
   MAP_GOVERNED,
   KNOB_GOVERNED,
   isKnobGoverned,
@@ -152,6 +153,21 @@ export {
   CONFIGURABLE_CHECK_IDS,
 } from './catalog-knobs';
 export type { LegacyPolicyKnobs, TuningField } from './catalog-knobs';
+
+// Protection levels (node9Firewall#385 item 5): what `settings.mode` names.
+export {
+  LEVELS,
+  MODE_VALUES,
+  isModeValue,
+  levelOf,
+  isRecordOnly,
+  reviewsEveryInline,
+  isBlockAll,
+  levelCheckValue,
+  levelChecks,
+  levelPackageSignals,
+} from './levels';
+export type { Level, ModeValue } from './levels';
 
 // Egress / destination policy (GAP-5).
 export type { EgressPolicy, EgressVerdict, Destination } from './egress';

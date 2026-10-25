@@ -74,7 +74,7 @@ describe('problems the user can fix are one line', () => {
   });
   it('an unknown --mode lists the valid modes', () => {
     const r = run(fixture(), ['init', '--skip-setup', '--mode', 'foo']);
-    expectOneLineError(r, 'Mode must be standard, strict, audit, or observe.');
+    expectOneLineError(r, 'Mode must be audit, soft, standard, strict, or block-all.');
   });
 });
 

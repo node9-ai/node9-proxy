@@ -120,17 +120,17 @@ describe('F3 — `shield create --enable` is guarded', () => {
 
 // ── F5 — observe must never render as "standard" ─────────────────────────────
 describe('F5 — a machine enforcing nothing says so', () => {
-  it('`status` names observe when the workspace mandates it', () => {
+  it('`status` names Audit when the workspace mandates observe', () => {
     const home = keyedHome({ mode: 'observe' });
     const r = runCli(home, ['status']);
-    expect(r.out).toMatch(/Mode:\s+observe/);
+    expect(r.out).toMatch(/Mode:\s+audit \(nothing is stopped\)/);
     expect(r.out).not.toMatch(/Mode:\s+standard/);
   });
 
-  it('`config show` names observe too (the second copy of the ternary)', () => {
+  it('`config show` names Audit too (the shared level label)', () => {
     const home = keyedHome({ mode: 'observe' });
     const r = runCli(home, ['config', 'show']);
-    expect(r.out).toMatch(/Mode:\s+observe/);
+    expect(r.out).toMatch(/Mode:\s+audit \(nothing is stopped\)/);
     expect(r.out).not.toMatch(/Mode:\s+standard/);
   });
 

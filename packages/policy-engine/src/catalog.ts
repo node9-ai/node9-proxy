@@ -18,6 +18,7 @@ import { BUILTIN_SHIELDS } from './shields';
 import { generalActionRuleNames } from './shields/apps';
 import { isStrictGatedTier, type SsrfTier } from './egress/ssrf';
 import { CHECK_TEXT } from './catalog-text';
+import { levelCheckValue, isBlockAll } from './levels';
 
 // ── Vocabulary ────────────────────────────────────────────────────────────────
 
@@ -796,7 +797,7 @@ const LEGACY_READERS: Record<string, LegacyReader> = {
   'commands.chmod': (s) => knob(s.commandChecks?.chmod),
   'commands.sql-ddl': (s) => knob(s.commandChecks?.sqlDdl),
   'commands.unknown': (s) =>
-    s.mode === undefined ? undefined : s.mode === 'strict' ? 'review' : 'off',
+    s.mode === undefined ? undefined : isBlockAll(s.mode) ? 'review' : 'off',
   'data.secrets': (s) => enabledOr(s.dlp?.enabled, 'block'),
   'data.secrets-weak': (s) => {
     if (s.dlp?.enabled === false) return 'off';
@@ -837,27 +838,31 @@ const LEGACY_READERS: Record<string, LegacyReader> = {
  * The value in force for one check, read from today's config shape, and
  * where it came from. A locked check always answers its floor. A pack row is
  * `off` unless its pack is applied. Anything the config does not set is the
- * catalog default.
+ * default of the level `settings.mode` names (levels.ts), which for most
+ * checks is the catalog default.
  */
 export function resolveCheck(settings: CatalogSettings, id: string): ResolvedCheck | undefined {
   const def = CHECK_BY_ID.get(id);
   if (!def) return undefined;
   if (isLockedCheck(def)) return { id, value: 'block', source: 'locked' };
   const floor = def.floor ? CHECK_VERDICT_RANK[def.floor] : 0;
+  const levelDefault = levelCheckValue(settings.mode, id) ?? def.defaultValue;
+  const sourceOf = (value: Verdict): CheckSource =>
+    value === levelDefault ? 'default' : 'configured';
   // An explicit entry (a v2 file, or the host's resolved map) wins.
   const explicit = settings.checks?.[id];
   if (isVerdict(explicit)) {
     const value = CHECK_VERDICT_RANK[explicit] < floor ? def.floor! : explicit;
-    return { id, value, source: value === def.defaultValue ? 'default' : 'configured' };
+    return { id, value, source: sourceOf(value) };
   }
   if (def.pack) {
     const on = settings.appliedShields?.includes(def.pack) ?? false;
     return { id, value: on ? def.defaultValue : 'off', source: 'default' };
   }
   const read = LEGACY_READERS[id]?.(settings);
-  if (read === undefined) return { id, value: def.defaultValue, source: 'default' };
+  if (read === undefined) return { id, value: levelDefault, source: 'default' };
   const value = CHECK_VERDICT_RANK[read] < floor ? def.floor! : read;
-  return { id, value, source: value === def.defaultValue ? 'default' : 'configured' };
+  return { id, value, source: sourceOf(value) };
 }
 
 /** Every check resolved, in catalog order. */

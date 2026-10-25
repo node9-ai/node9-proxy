@@ -37,6 +37,7 @@ import { appendConfigAudit } from '../../audit';
 import { cliGuardPolicyWrite } from '../../config/keyed-guard';
 import { getConfig } from '../../config';
 import { httpsFetch } from '../../utils/https-fetch';
+import { levelLabel } from '../render/level-label';
 
 const COMMUNITY_INDEX_URL =
   'https://raw.githubusercontent.com/node9ai/node9-proxy/main/shields/community/index.json';
@@ -571,18 +572,7 @@ export function registerConfigShowCommand(parent: Command): void {
       }
 
       // ── Mode ────────────────────────────────────────────────────────────────
-      // F5: `observe` is the mode where node9 enforces NOTHING (every
-      // block becomes a would-block), and a keyed machine applies a cloud
-      // observe verbatim — so an `else → standard` here reports the exact
-      // opposite of the truth on the one surface people check.
-      const modeLabel =
-        config.settings.mode === 'audit'
-          ? chalk.blue('audit')
-          : config.settings.mode === 'strict'
-            ? chalk.red('strict')
-            : config.settings.mode === 'observe'
-              ? chalk.magenta('observe (nothing is enforced)')
-              : chalk.white('standard');
+      const modeLabel = levelLabel(config.settings.mode);
       console.error(`  Mode: ${modeLabel}\n`);
 
       // ── Active Shields ───────────────────────────────────────────────────────
