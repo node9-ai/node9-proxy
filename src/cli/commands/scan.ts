@@ -24,7 +24,8 @@ import { DEFAULT_CONFIG, getConfig } from '../../config';
 // shell-call COUNT only; the judgement reads the user's own configuration.
 const toolInspectionMap: ToolInspection = DEFAULT_CONFIG.policy.toolInspection;
 import { BUILTIN_SHIELDS, APP_SHIELD_NAMES, resolveShellInput } from '@node9/policy-engine';
-import { HistoryJudge, type ScanPolicy } from './scan-judge';
+import { HistoryJudge, findingDedupKey, dlpDedupKey, type ScanPolicy } from './scan-judge';
+import { ScanCache, configHashOf, fileStamp, windowKey } from './scan-cache';
 import { decodeProjectDirName } from '../../costSync';
 import { scanArgs } from '../../dlp';
 import { matchCanaryArgs } from '../../dlp';
@@ -922,13 +923,10 @@ async function processClaudeFile(
   result: ScanResult,
   dedup: ScanDedup,
   canaryVals: readonly CanaryScanValue[],
-  onProgress?: (done: number) => void,
   onLine?: () => void
 ): Promise<void> {
-  result.filesScanned++;
-  onProgress?.(result.filesScanned);
   // A session counts when its first event inside the window is seen (fw#401);
-  // a file is not a session.
+  // a file is not a session. The caller counts the file.
   let sessionCounted = false;
 
   // basename, not the whole relative path: a nested transcript would
@@ -1206,6 +1204,8 @@ async function processClaudeProject(
   proj: string,
   projectsDir: string,
   judge: HistoryJudge,
+  cache: ScanCache,
+  window: string,
   startDate: Date | null,
   result: ScanResult,
   dedup: ScanDedup,
@@ -1230,18 +1230,30 @@ async function processClaudeProject(
   }
 
   for (const file of files) {
+    const filePath = path.join(projPath, file);
+    result.filesScanned++;
+    onProgress?.(result.filesScanned);
+    const stamp = fileStamp(filePath);
+    const cached = stamp ? cache.get(filePath, stamp, window) : null;
+    if (cached) {
+      mergeFileScan(result, cached, dedup);
+      continue;
+    }
+    const fileResult = emptyScan();
+    const fileDedup = emptyScanDedup();
     await processClaudeFile(
       file,
       projPath,
       projLabel,
       judge,
       startDate,
-      result,
-      dedup,
+      fileResult,
+      fileDedup,
       canaryVals,
-      onProgress,
       onLine
     );
+    if (stamp) cache.put(filePath, stamp, window, 'claude', fileResult);
+    mergeFileScan(result, fileResult, dedup);
   }
 }
 
@@ -1256,6 +1268,8 @@ async function processClaudeProjectAsync(
   proj: string,
   projectsDir: string,
   judge: HistoryJudge,
+  cache: ScanCache,
+  window: string,
   startDate: Date | null,
   result: ScanResult,
   dedup: ScanDedup,
@@ -1280,18 +1294,30 @@ async function processClaudeProjectAsync(
   }
 
   for (const file of files) {
+    const filePath = path.join(projPath, file);
+    result.filesScanned++;
+    onProgress?.(result.filesScanned);
+    const stamp = fileStamp(filePath);
+    const cached = stamp ? cache.get(filePath, stamp, window) : null;
+    if (cached) {
+      mergeFileScan(result, cached, dedup);
+      continue;
+    }
+    const fileResult = emptyScan();
+    const fileDedup = emptyScanDedup();
     await processClaudeFile(
       file,
       projPath,
       projLabel,
       judge,
       startDate,
-      result,
-      dedup,
+      fileResult,
+      fileDedup,
       canaryVals,
-      onProgress,
       onLine
     );
+    if (stamp) cache.put(filePath, stamp, window, 'claude', fileResult);
+    mergeFileScan(result, fileResult, dedup);
     await yieldTick();
   }
 }
@@ -1334,10 +1360,78 @@ function emptyClaudeScan(): ScanResult {
   };
 }
 
+/** An empty per-file result; the parsers fill one per transcript and merge. */
+export function emptyScan(): ScanResult {
+  return emptyClaudeScan();
+}
+
+export interface ScanOptions {
+  /** Reuse per-file results from `~/.node9/scan-cache` (fw#400). Default on;
+   *  `--no-cache` and NODE9_SCAN_CACHE=0 turn it off. */
+  cache?: boolean;
+}
+
+function openScanCache(judge: HistoryJudge, opts: ScanOptions): ScanCache {
+  return new ScanCache({
+    configHash: configHashOf(judge.configFor(undefined)),
+    enabled: opts.cache !== false && process.env.NODE9_SCAN_CACHE !== '0',
+  });
+}
+
+/**
+ * Merge one transcript's result into the run's. The run-wide dedup (a rule
+ * finding repeated across sessions, a leak repeated across files) is applied
+ * here, with the same keys the per-file pass used, so a cached file and a
+ * freshly judged one merge the same way.
+ */
+export function mergeFileScan(result: ScanResult, file: ScanResult, dedup: ScanDedup): void {
+  result.sessions += file.sessions;
+  result.totalToolCalls += file.totalToolCalls;
+  result.bashCalls += file.bashCalls;
+  result.totalCostUSD += file.totalCostUSD;
+  result.sessionsWithEarlySecrets += file.sessionsWithEarlySecrets;
+  result.perSession.push(...file.perSession);
+  result.loopFindings.push(...file.loopFindings);
+  if (file.firstDate && (!result.firstDate || file.firstDate < result.firstDate))
+    result.firstDate = file.firstDate;
+  if (file.lastDate && (!result.lastDate || file.lastDate > result.lastDate))
+    result.lastDate = file.lastDate;
+  if (file.mcpCalls) result.mcpCalls = (result.mcpCalls ?? 0) + file.mcpCalls;
+  for (const [server, n] of Object.entries(file.mcpByServer ?? {})) {
+    result.mcpByServer ??= {};
+    result.mcpByServer[server] = (result.mcpByServer[server] ?? 0) + n;
+  }
+  for (const f of file.findings) {
+    const k = findingDedupKey(f);
+    if (dedup.findingsKeys.has(k)) continue;
+    dedup.findingsKeys.add(k);
+    result.findings.push(f);
+  }
+  for (const d of file.dlpFindings) {
+    const k = dlpDedupKey(d);
+    if (dedup.dlpKeys.has(k)) continue;
+    dedup.dlpKeys.add(k);
+    result.dlpFindings.push(d);
+  }
+  for (const c of file.canaryFindings) {
+    const k = `canary|${c.canaryId}|${c.sessionId}|${c.agent}`;
+    const existing = dedup.canaryIndex.get(k);
+    if (existing) {
+      existing.count += c.count;
+      if (c.timestamp && (!existing.timestamp || c.timestamp < existing.timestamp))
+        existing.timestamp = c.timestamp;
+      continue;
+    }
+    dedup.canaryIndex.set(k, c);
+    result.canaryFindings.push(c);
+  }
+}
+
 export async function scanClaudeHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
-  onLine?: () => void
+  onLine?: () => void,
+  opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   const result = emptyClaudeScan();
@@ -1352,6 +1446,8 @@ export async function scanClaudeHistory(
   }
 
   const judge = new HistoryJudge();
+  const cache = openScanCache(judge, opts);
+  const window = windowKey(startDate);
   const dedup = emptyScanDedup();
   // Read the registry ONCE per scan invocation and pass it down (never per line).
   const canaryVals = safeCanaryScanValues();
@@ -1361,6 +1457,8 @@ export async function scanClaudeHistory(
       proj,
       projectsDir,
       judge,
+      cache,
+      window,
       startDate,
       result,
       dedup,
@@ -1370,6 +1468,7 @@ export async function scanClaudeHistory(
     );
   }
 
+  cache.flush();
   result.policy = judge.policy();
   return result;
 }
@@ -1384,7 +1483,8 @@ export async function scanClaudeHistory(
 export async function scanClaudeHistoryAsync(
   startDate: Date | null,
   onProgress?: (done: number) => void,
-  onLine?: () => void
+  onLine?: () => void,
+  opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   const result = emptyClaudeScan();
@@ -1399,6 +1499,8 @@ export async function scanClaudeHistoryAsync(
   }
 
   const judge = new HistoryJudge();
+  const cache = openScanCache(judge, opts);
+  const window = windowKey(startDate);
   const dedup = emptyScanDedup();
   // Read the registry ONCE per scan invocation and pass it down (never per line).
   const canaryVals = safeCanaryScanValues();
@@ -1408,6 +1510,8 @@ export async function scanClaudeHistoryAsync(
       proj,
       projectsDir,
       judge,
+      cache,
+      window,
       startDate,
       result,
       dedup,
@@ -1417,6 +1521,7 @@ export async function scanClaudeHistoryAsync(
     );
   }
 
+  cache.flush();
   result.policy = judge.policy();
   return result;
 }
@@ -1428,7 +1533,8 @@ export async function scanClaudeHistoryAsync(
 export async function scanGeminiHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
-  onLine?: () => void
+  onLine?: () => void,
+  opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
@@ -1459,6 +1565,8 @@ export async function scanGeminiHistory(
   }
 
   const judge = new HistoryJudge();
+  const cache = openScanCache(judge, opts);
+  const window = windowKey(startDate);
 
   for (const slug of slugDirs) {
     const slugPath = path.join(tmpDir, slug);
@@ -1491,6 +1599,15 @@ export async function scanGeminiHistory(
       const sessionId = chatFile.replace(/\.jsonl?$/, '');
       result.filesScanned++;
       onProgress?.(result.filesScanned);
+      const filePath = path.join(chatsDir, chatFile);
+      const stamp = fileStamp(filePath);
+      const cached = stamp ? cache.get(filePath, stamp, window) : null;
+      if (cached) {
+        mergeFileScan(result, cached, dedup);
+        continue;
+      }
+      const fileResult = emptyScan();
+      const fileDedup = emptyScanDedup();
 
       let raw: string;
       try {
@@ -1550,16 +1667,16 @@ export async function scanGeminiHistory(
               projLabel,
               sessionId,
               'gemini',
-              result,
-              dedup,
+              fileResult,
+              fileDedup,
               canaryVals
             );
             const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere3));
             if (dlpMatch) {
               const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-              if (!dedup.dlpKeys.has(k)) {
-                dedup.dlpKeys.add(k);
-                result.dlpFindings.push({
+              if (!fileDedup.dlpKeys.has(k)) {
+                fileDedup.dlpKeys.add(k);
+                fileResult.dlpFindings.push({
                   patternName: dlpMatch.patternName,
                   redactedSample: dlpMatch.redactedSample,
                   toolName: 'user-prompt',
@@ -1579,13 +1696,14 @@ export async function scanGeminiHistory(
         if (startDate && msg.timestamp && new Date(msg.timestamp) < startDate) continue;
         if (!sessionCounted) {
           sessionCounted = true;
-          result.sessions++;
+          fileResult.sessions++;
         }
 
         if (msg.timestamp) {
-          if (!result.firstDate || msg.timestamp < result.firstDate)
-            result.firstDate = msg.timestamp;
-          if (!result.lastDate || msg.timestamp > result.lastDate) result.lastDate = msg.timestamp;
+          if (!fileResult.firstDate || msg.timestamp < fileResult.firstDate)
+            fileResult.firstDate = msg.timestamp;
+          if (!fileResult.lastDate || msg.timestamp > fileResult.lastDate)
+            fileResult.lastDate = msg.timestamp;
         }
 
         const tokens = msg.tokens;
@@ -1594,12 +1712,12 @@ export async function scanGeminiHistory(
           const p = geminiModelPrice(model);
           if (p) {
             const nonCached = Math.max(0, tokens.input - tokens.cached);
-            result.totalCostUSD += nonCached * p.i + tokens.cached * p.cr + tokens.output * p.o;
+            fileResult.totalCostUSD += nonCached * p.i + tokens.cached * p.cr + tokens.output * p.o;
           }
         }
 
         for (const tc of msg.toolCalls ?? []) {
-          result.totalToolCalls++;
+          fileResult.totalToolCalls++;
           const toolName = tc.name ?? '';
           countMcpCall(result, toolName);
           const toolNameLower = toolName.toLowerCase();
@@ -1608,7 +1726,7 @@ export async function scanGeminiHistory(
           sessionCalls.push({ toolName, input, timestamp: msg.timestamp ?? '' });
 
           if (toolNameLower === 'run_shell_command' || toolNameLower === 'shell') {
-            result.bashCalls++;
+            fileResult.bashCalls++;
           }
 
           const rawCmd = String(input.command ?? '').trimStart();
@@ -1622,8 +1740,8 @@ export async function scanGeminiHistory(
             projLabel,
             sessionId,
             'gemini',
-            result,
-            dedup,
+            fileResult,
+            fileDedup,
             canaryVals
           );
           // One judgement path: the live gate through the forecast entry (fw#399).
@@ -1637,16 +1755,19 @@ export async function scanGeminiHistory(
               sessionId,
               project: projLabel,
             },
-            result,
-            dedup
+            fileResult,
+            fileDedup
           );
           void judged;
         }
       }
-      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'gemini'));
+      fileResult.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'gemini'));
+      if (stamp) cache.put(filePath, stamp, window, 'gemini', fileResult);
+      mergeFileScan(result, fileResult, dedup);
     }
   }
 
+  cache.flush();
   result.policy = judge.policy();
   return result;
 }
@@ -1694,7 +1815,8 @@ function antigravityTranscriptPath(convPath: string): string | null {
 export async function scanAntigravityHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
-  onLine?: () => void
+  onLine?: () => void,
+  opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const result: ScanResult = {
@@ -1718,6 +1840,8 @@ export async function scanAntigravityHistory(
   if (brainDirs.length === 0) return result;
 
   const judge = new HistoryJudge();
+  const cache = openScanCache(judge, opts);
+  const window = windowKey(startDate);
 
   for (const brainDir of brainDirs) {
     let convDirs: string[];
@@ -1740,6 +1864,14 @@ export async function scanAntigravityHistory(
 
       result.filesScanned++;
       onProgress?.(result.filesScanned);
+      const stamp = fileStamp(transcriptFile);
+      const cached = stamp ? cache.get(transcriptFile, stamp, window) : null;
+      if (cached) {
+        mergeFileScan(result, cached, dedup);
+        continue;
+      }
+      const fileResult = emptyScan();
+      const fileDedup = emptyScanDedup();
 
       let raw: string;
       try {
@@ -1776,7 +1908,7 @@ export async function scanAntigravityHistory(
         if (startDate && timestamp && new Date(timestamp) < startDate) continue;
         if (!sessionCounted) {
           sessionCounted = true;
-          result.sessions++;
+          fileResult.sessions++;
         }
 
         // ── User prompt DLP scan ─────────────────────────────────────────
@@ -1790,16 +1922,16 @@ export async function scanAntigravityHistory(
               projLabel,
               sessionId,
               'antigravity',
-              result,
-              dedup,
+              fileResult,
+              fileDedup,
               canaryVals
             );
             const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere5));
             if (dlpMatch) {
               const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-              if (!dedup.dlpKeys.has(k)) {
-                dedup.dlpKeys.add(k);
-                result.dlpFindings.push({
+              if (!fileDedup.dlpKeys.has(k)) {
+                fileDedup.dlpKeys.add(k);
+                fileResult.dlpFindings.push({
                   patternName: dlpMatch.patternName,
                   redactedSample: dlpMatch.redactedSample,
                   toolName: 'user-prompt',
@@ -1817,12 +1949,14 @@ export async function scanAntigravityHistory(
         if (!Array.isArray(step.tool_calls) || step.tool_calls.length === 0) continue;
 
         if (timestamp) {
-          if (!result.firstDate || timestamp < result.firstDate) result.firstDate = timestamp;
-          if (!result.lastDate || timestamp > result.lastDate) result.lastDate = timestamp;
+          if (!fileResult.firstDate || timestamp < fileResult.firstDate)
+            fileResult.firstDate = timestamp;
+          if (!fileResult.lastDate || timestamp > fileResult.lastDate)
+            fileResult.lastDate = timestamp;
         }
 
         for (const tc of step.tool_calls) {
-          result.totalToolCalls++;
+          fileResult.totalToolCalls++;
           const toolName = tc.name ?? '';
           countMcpCall(result, toolName);
           const toolNameLower = toolName.toLowerCase();
@@ -1836,7 +1970,7 @@ export async function scanAntigravityHistory(
           const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
           const isShellTool = shellInput.kind === 'shell';
           if (isShellTool) {
-            result.bashCalls++;
+            fileResult.bashCalls++;
             const cwd = String(input.cwd ?? '');
             if (cwd && projLabel === conv.slice(0, 8)) {
               projLabel = stripTerminalEscapes(cwd).replace(os.homedir(), '~').slice(0, 40);
@@ -1854,8 +1988,8 @@ export async function scanAntigravityHistory(
             projLabel,
             sessionId,
             'antigravity',
-            result,
-            dedup,
+            fileResult,
+            fileDedup,
             canaryVals
           );
           // One judgement path: the live gate through the forecast entry (fw#399).
@@ -1871,16 +2005,21 @@ export async function scanAntigravityHistory(
               cwd:
                 typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? input.cwd : undefined,
             },
-            result,
-            dedup
+            fileResult,
+            fileDedup
           );
           void judged;
         }
       }
-      result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'antigravity'));
+      fileResult.loopFindings.push(
+        ...detectLoops(sessionCalls, projLabel, sessionId, 'antigravity')
+      );
+      if (stamp) cache.put(transcriptFile, stamp, window, 'antigravity', fileResult);
+      mergeFileScan(result, fileResult, dedup);
     }
   }
 
+  cache.flush();
   result.policy = judge.policy();
   return result;
 }
@@ -1912,7 +2051,8 @@ interface CopilotEvent {
 export async function scanCopilotHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
-  onLine?: () => void
+  onLine?: () => void,
+  opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const sessionDir = path.join(os.homedir(), '.copilot', 'session-state');
@@ -1943,6 +2083,8 @@ export async function scanCopilotHistory(
   }
 
   const judge = new HistoryJudge();
+  const cache = openScanCache(judge, opts);
+  const window = windowKey(startDate);
 
   for (const sessionId of sessionIds) {
     const eventsPath = path.join(sessionDir, sessionId, 'events.jsonl');
@@ -1950,6 +2092,14 @@ export async function scanCopilotHistory(
 
     result.filesScanned++;
     onProgress?.(result.filesScanned);
+    const stamp = fileStamp(eventsPath);
+    const cached = stamp ? cache.get(eventsPath, stamp, window) : null;
+    if (cached) {
+      mergeFileScan(result, cached, dedup);
+      continue;
+    }
+    const fileResult = emptyScan();
+    const fileDedup = emptyScanDedup();
 
     let raw: string;
     try {
@@ -1984,7 +2134,7 @@ export async function scanCopilotHistory(
     // `date`, so no session-level guard is needed here.
     for (const row of parseCopilotSession(raw.split('\n'))) {
       if (startDate && row.date && new Date(row.date) < startDate) continue;
-      result.totalCostUSD += row.costUSD;
+      fileResult.totalCostUSD += row.costUSD;
     }
 
     for (const line of raw.split('\n')) {
@@ -2013,7 +2163,7 @@ export async function scanCopilotHistory(
       if (startDate && timestamp && new Date(timestamp) < startDate) continue;
       if (!sessionCounted) {
         sessionCounted = true;
-        result.sessions++;
+        fileResult.sessions++;
       }
 
       // ── User prompt DLP scan ─────────────────────────────────────────
@@ -2027,16 +2177,16 @@ export async function scanCopilotHistory(
             projLabel,
             sessionId,
             'copilot',
-            result,
-            dedup,
+            fileResult,
+            fileDedup,
             canaryVals
           );
           const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere7));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-            if (!dedup.dlpKeys.has(k)) {
-              dedup.dlpKeys.add(k);
-              result.dlpFindings.push({
+            if (!fileDedup.dlpKeys.has(k)) {
+              fileDedup.dlpKeys.add(k);
+              fileResult.dlpFindings.push({
                 patternName: dlpMatch.patternName,
                 redactedSample: dlpMatch.redactedSample,
                 toolName: 'user-prompt',
@@ -2057,17 +2207,19 @@ export async function scanCopilotHistory(
       const toolNameLower = toolName.toLowerCase();
       const input = (ev.data?.arguments ?? {}) as Record<string, unknown>;
 
-      result.totalToolCalls++;
+      fileResult.totalToolCalls++;
       countMcpCall(result, toolName);
       sessionCalls.push({ toolName, input, timestamp });
 
       const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
       const isShellTool = shellInput.kind === 'shell';
-      if (isShellTool) result.bashCalls++;
+      if (isShellTool) fileResult.bashCalls++;
 
       if (timestamp) {
-        if (!result.firstDate || timestamp < result.firstDate) result.firstDate = timestamp;
-        if (!result.lastDate || timestamp > result.lastDate) result.lastDate = timestamp;
+        if (!fileResult.firstDate || timestamp < fileResult.firstDate)
+          fileResult.firstDate = timestamp;
+        if (!fileResult.lastDate || timestamp > fileResult.lastDate)
+          fileResult.lastDate = timestamp;
       }
 
       const rawCmd = String(input.command ?? '').trimStart();
@@ -2080,8 +2232,8 @@ export async function scanCopilotHistory(
         projLabel,
         sessionId,
         'copilot',
-        result,
-        dedup,
+        fileResult,
+        fileDedup,
         canaryVals
       );
       // One judgement path: the live gate through the forecast entry (fw#399).
@@ -2096,14 +2248,17 @@ export async function scanCopilotHistory(
           project: projLabel,
           cwd: sessionCwd,
         },
-        result,
-        dedup
+        fileResult,
+        fileDedup
       );
       void judged;
     }
-    result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'copilot'));
+    fileResult.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'copilot'));
+    if (stamp) cache.put(eventsPath, stamp, window, 'copilot', fileResult);
+    mergeFileScan(result, fileResult, dedup);
   }
 
+  cache.flush();
   result.policy = judge.policy();
   return result;
 }
@@ -2115,7 +2270,8 @@ export async function scanCopilotHistory(
 export async function scanCodexHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
-  onLine?: () => void
+  onLine?: () => void,
+  opts: ScanOptions = {}
 ): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const result: ScanResult = {
@@ -2138,10 +2294,20 @@ export async function scanCodexHistory(
   const jsonlFiles = listCodexSessionFiles();
 
   const judge = new HistoryJudge();
+  const cache = openScanCache(judge, opts);
+  const window = windowKey(startDate);
 
   for (const filePath of jsonlFiles) {
     result.filesScanned++;
     onProgress?.(result.filesScanned);
+    const stamp = fileStamp(filePath);
+    const cached = stamp ? cache.get(filePath, stamp, window) : null;
+    if (cached) {
+      mergeFileScan(result, cached, dedup);
+      continue;
+    }
+    const fileResult = emptyScan();
+    const fileDedup = emptyScanDedup();
 
     let lines: string[];
     try {
@@ -2194,16 +2360,16 @@ export async function scanCodexHistory(
             projLabel,
             sessionId,
             'codex',
-            result,
-            dedup,
+            fileResult,
+            fileDedup,
             canaryVals
           );
           const dlpMatch = scanArgs(scrubDecoys({ text }, decoysHere9));
           if (dlpMatch) {
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-            if (!dedup.dlpKeys.has(k)) {
-              dedup.dlpKeys.add(k);
-              result.dlpFindings.push({
+            if (!fileDedup.dlpKeys.has(k)) {
+              fileDedup.dlpKeys.add(k);
+              fileResult.dlpFindings.push({
                 patternName: dlpMatch.patternName,
                 redactedSample: dlpMatch.redactedSample,
                 toolName: 'user-prompt',
@@ -2225,15 +2391,15 @@ export async function scanCodexHistory(
       if (startDate && ts && new Date(ts) < startDate) continue;
       if (!sessionCounted) {
         sessionCounted = true;
-        result.sessions++;
+        fileResult.sessions++;
       }
 
       if (ts) {
-        if (!result.firstDate || ts < result.firstDate) result.firstDate = ts;
-        if (!result.lastDate || ts > result.lastDate) result.lastDate = ts;
+        if (!fileResult.firstDate || ts < fileResult.firstDate) fileResult.firstDate = ts;
+        if (!fileResult.lastDate || ts > fileResult.lastDate) fileResult.lastDate = ts;
       }
 
-      result.totalToolCalls++;
+      fileResult.totalToolCalls++;
       const toolName = String(payload['name'] ?? '');
       countMcpCall(result, toolName);
       const toolNameLower = toolName.toLowerCase();
@@ -2251,7 +2417,7 @@ export async function scanCodexHistory(
       sessionCalls.push({ toolName, input, timestamp: ts });
 
       if (toolNameLower === 'exec_command' || toolNameLower === 'shell') {
-        result.bashCalls++;
+        fileResult.bashCalls++;
       }
 
       const rawCmd = String(input['command'] ?? '').trimStart();
@@ -2264,8 +2430,8 @@ export async function scanCodexHistory(
         projLabel,
         sessionId,
         'codex',
-        result,
-        dedup,
+        fileResult,
+        fileDedup,
         canaryVals
       );
       // One judgement path: the live gate through the forecast entry (fw#399).
@@ -2280,19 +2446,22 @@ export async function scanCodexHistory(
           project: projLabel,
           cwd: sessionCwd,
         },
-        result,
-        dedup
+        fileResult,
+        fileDedup
       );
       void judged;
     }
 
     for (const event of codexUsageInWindow(parseCodexUsage(lines), startDate)) {
-      result.totalCostUSD += event.costUSD;
+      fileResult.totalCostUSD += event.costUSD;
     }
 
-    result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
+    fileResult.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
+    if (stamp) cache.put(filePath, stamp, window, 'codex', fileResult);
+    mergeFileScan(result, fileResult, dedup);
   }
 
+  cache.flush();
   result.policy = judge.policy();
   return result;
 }
@@ -3291,6 +3460,7 @@ export function registerScanCommand(program: Command): void {
     .description('Forecast: scan agent history and show what node9 would catch if installed')
     .option('--all', 'Scan all history (default: last 90 days)')
     .option('--days <n>', 'Scan last N days of history', '90')
+    .option('--no-cache', 'Re-read and re-judge every transcript (ignore ~/.node9/scan-cache)')
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')
@@ -3313,6 +3483,7 @@ export function registerScanCommand(program: Command): void {
     .action(
       async (options: {
         all?: boolean;
+        cache?: boolean;
         days: string;
         top: string;
         drillDown?: boolean;
@@ -3427,16 +3598,19 @@ export function registerScanCommand(program: Command): void {
           }
         };
         if (useTTY) renderProgressBar(0, totalFiles, 0);
-        const claudeScan = await scanClaudeHistory(startDate, onProgress, onLine);
+        const scanOpts: ScanOptions = { cache: options.cache !== false };
+        const claudeScan = await scanClaudeHistory(startDate, onProgress, onLine, scanOpts);
         const geminiScan = await scanGeminiHistory(
           startDate,
           (done) => onProgress(claudeScan.filesScanned + done),
-          onLine
+          onLine,
+          scanOpts
         );
         const antigravityScan = await scanAntigravityHistory(
           startDate,
           (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
-          onLine
+          onLine,
+          scanOpts
         );
         const copilotScan = await scanCopilotHistory(
           startDate,
@@ -3447,7 +3621,8 @@ export function registerScanCommand(program: Command): void {
                 antigravityScan.filesScanned +
                 done
             ),
-          onLine
+          onLine,
+          scanOpts
         );
         const codexScan = await scanCodexHistory(
           startDate,
@@ -3459,7 +3634,8 @@ export function registerScanCommand(program: Command): void {
                 copilotScan.filesScanned +
                 done
             ),
-          onLine
+          onLine,
+          scanOpts
         );
         const scan = mergeScans(
           mergeScans(mergeScans(mergeScans(claudeScan, geminiScan), antigravityScan), copilotScan),

@@ -234,6 +234,17 @@ export class HistoryJudge {
   }
 }
 
+/** The run-wide key of a rule finding: the same command in the same project
+ *  and repository is one row (fw#404 made the repository part of it). */
+export function findingDedupKey(f: Finding): string {
+  return `${f.source.rule.name ?? '<unnamed>'}|${preview(f.input)}|${f.project}|${f.repo ?? ''}`;
+}
+
+/** The run-wide key of a leak: one row per pattern, sample and project. */
+export function dlpDedupKey(d: DlpFinding): string {
+  return `${d.patternName}|${d.redactedSample}|${d.project}`;
+}
+
 function clockOf(timestamp: string): number {
   const t = Date.parse(timestamp);
   return Number.isFinite(t) ? t : Date.now();
