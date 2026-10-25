@@ -110,7 +110,7 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
   });
 
   it('managed strict: cloud "no rule matched" allow must NOT resolve the call', async () => {
-    writeRulesCache(tmpHome, { managedMode: 'strict' });
+    writeRulesCache(tmpHome, { managedMode: 'block-all' });
 
     const result = await authorizeHeadless('TotallyUnknownTool', { note: 'probe' });
 
@@ -127,7 +127,7 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
   });
 
   it('managed strict: the SaaS is told forceReview so it creates a genuine PENDING', async () => {
-    writeRulesCache(tmpHome, { managedMode: 'strict' });
+    writeRulesCache(tmpHome, { managedMode: 'block-all' });
 
     await authorizeHeadless('TotallyUnknownTool', { note: 'probe' });
 
@@ -155,7 +155,7 @@ describe('cloud immediate-allow vs managed strict (B1 #6)', () => {
     // ruleName, so a tier-7 review fell through to decisions.json. One click
     // granted BEFORE the org mandated strict would permanently exempt the tool
     // — and the call never reaches the cloud, so the BE floor can't catch it.
-    writeRulesCache(tmpHome, { managedMode: 'strict' });
+    writeRulesCache(tmpHome, { managedMode: 'block-all' });
     fs.writeFileSync(
       path.join(tmpHome, '.node9', 'decisions.json'),
       JSON.stringify({ TotallyUnknownTool: 'allow' })

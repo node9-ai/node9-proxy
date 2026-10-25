@@ -115,8 +115,10 @@ INSTRUCTION: Use individual tool calls instead of embedding code in a shell stri
 - Tell the user node9 blocked this and why, then ask how to proceed.`;
   }
 
+  // The catch-all's label keeps its old wording ("Strict Mode Active"): audit
+  // rows and dashboards key on it. The level is Block all.
   if (label.includes('strict mode')) {
-    return `NODE9: Blocked — strict mode is active. All tool calls require explicit human approval.
+    return `NODE9: Blocked — the Block all level is on. All tool calls require explicit human approval.
 INSTRUCTION: Inform the user this action is pending approval. Wait for them to approve via the dashboard or run "node9 pause".`;
   }
 

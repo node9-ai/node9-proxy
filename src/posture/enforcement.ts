@@ -13,6 +13,7 @@ import { evaluatePolicy } from '../policy';
 import { getConfig } from '../config';
 import { getAgentWiring } from '../agent-wiring';
 import type { CheckContext, Coverage, Finding } from './types';
+import { isRecordOnly } from '@node9/policy-engine';
 
 interface EnforceEnv {
   /** node9 is actually enforcing (not observe/audit) AND wired into an agent. */
@@ -66,7 +67,7 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
   const mode = config.settings.mode;
   const wired = getAgentWiring(ctx.home).some((r) => r.isProtected);
   const env: EnforceEnv = {
-    enforcing: wired && mode !== 'observe' && mode !== 'audit',
+    enforcing: wired && !isRecordOnly(mode),
     egressBlocking: config.policy.egress.enabled && config.policy.egress.mode === 'block',
     egressReviewing: config.policy.egress.enabled && config.policy.egress.mode === 'review',
   };

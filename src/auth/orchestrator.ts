@@ -29,7 +29,7 @@ import {
 } from '@node9/policy-engine';
 import { prepareFileAccesses, type PreparedFileAccess } from '../policy/file-access';
 import { resolveSessionScript, recordSessionWrites, type SessionScript } from './session-script';
-import { scanInjection, argumentLeavesText } from '@node9/policy-engine';
+import { scanInjection, argumentLeavesText, isRecordOnly } from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -588,7 +588,9 @@ async function _authorizeHeadlessCore(
   }
 
   const isManual = meta?.agent === 'Terminal';
-  const isObserveMode = config.settings.mode === 'observe';
+  // Audit (and `observe`, its older name): nothing is stopped; every check
+  // records what it would have done.
+  const isObserveMode = isRecordOnly(config.settings.mode);
 
   let explainableLabel = 'Local Config';
   let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
@@ -686,8 +688,7 @@ async function _authorizeHeadlessCore(
     policyRuleDescription =
       'The executable command could not be inspected. Approve this call explicitly.';
   }
-  const fileReview =
-    !isObserveMode && config.settings.mode !== 'audit' && fileFinding?.decision === 'review';
+  const fileReview = !isObserveMode && fileFinding?.decision === 'review';
   const evaluateCurrentPolicy = async (skipIgnoredFastPath = false) => {
     const own = await evaluatePolicy(toolName, args, meta?.agent, options?.cwd, {
       fileAccess,
@@ -717,7 +718,7 @@ async function _authorizeHeadlessCore(
     meta = { ...meta, ruleName: fileFinding.ruleName };
     // The command or edit content may contain credentials; do not log it before DLP runs.
     hashAuditArgs = true;
-    const observing = isObserveMode || config.settings.mode === 'audit';
+    const observing = isObserveMode;
     const blocked =
       !observing && (fileFinding.decision === 'block' || (fileReview && config.settings.panicMode));
     appendLocalAudit(
@@ -1530,21 +1531,6 @@ async function _authorizeHeadlessCore(
     return { approved: true, checkedBy: 'audit' };
   }
 
-  if (config.settings.mode === 'audit') {
-    if (judge) {
-      const policyResult = await evaluateCurrentPolicy();
-      if (policyResult.decision === 'review') {
-        // Local row only — the outbox shipper delivers it to the SaaS.
-        // (The old decision-time POST is gone: it was a latency tax when
-        // awaited and silently lossy when not.)
-        appendLocalAudit(toolName, args, 'allow', 'audit-mode', ownRowMeta(true), hashAuditArgs);
-        // Note: desktop notification intentionally omitted — notify-send routes through
-        // the browser on many Linux setups (Firefox as D-Bus handler), causing spurious popups.
-      }
-    }
-    return { approved: true, checkedBy: 'audit' };
-  }
-
   // ── MCP APP PERMISSIONS (P3 Phase 2 — GOVERN) ─────────────────────────────
   // Per-tool block/review for a gatewayed MCP server, keyed by (serverKey,
   // bareTool). Gated on serverKey ALONE — only the mcp-gateway passes it, and
@@ -1911,7 +1897,7 @@ async function _authorizeHeadlessCore(
     // mode, not a rule) — keying this guard on ruleName alone let the SaaS
     // gate's immediate-allow for an unmatched tool ("no org rule matched",
     // NOT an approval) resolve the call, silently bypassing a cloud-managed
-    // strict mode. Strict says "unmatched requires a human"; cloud's no-match
+    // Block all (the old strict). It says "unmatched requires a human"; cloud's no-match
     // allow must never pre-empt that.
     // Deliberately tier-7-only: other rule-less reviews (e.g. dangerous-word)
     // stay cloud-resolvable — pinned by core.test.ts ("calls cloud API and

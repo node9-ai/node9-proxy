@@ -15,6 +15,7 @@ import {
 } from '../files/protected-access';
 import type { FileAccessContext } from '../files/paths';
 import { extractShellDestTokens } from '../shell/index';
+import { reviewsEveryInline, isBlockAll } from '../levels';
 import { ssrfFloor } from '../egress/ssrf';
 import { ssrfDestinationFloor, extractToolDestinations } from '../egress/destinations';
 import { scanArgumentSecrets } from '../dlp/arguments';
@@ -894,15 +895,14 @@ async function evaluatePolicyCore(
       else if (v) candidates.push(v);
     };
 
-    // Inline execution (node9Firewall#385). Strict mode asks on every inline
-    // call; every other mode reads the code and asks when it does something
-    // dangerous or cannot be read.
-    const inline =
-      config.settings.mode === 'strict'
-        ? detectInlineExec(shellCommand)
-          ? undefined
-          : null
-        : inlineExecReview(shellCommand);
+    // Inline execution (node9Firewall#385). Strict and Block all ask on every
+    // inline call; every other level reads the code and asks when it does
+    // something dangerous or cannot be read.
+    const inline = reviewsEveryInline(config.settings.mode)
+      ? detectInlineExec(shellCommand)
+        ? undefined
+        : null
+      : inlineExecReview(shellCommand);
     if (inline !== null) {
       consider('commands.inline-exec', {
         decision: 'review',
@@ -995,10 +995,10 @@ async function evaluatePolicyCore(
     if (firstToken && firstToken.startsWith('/') && checkProvenance) {
       const prov = checkProvenance(firstToken, cwd);
       if (prov.trustLevel === 'suspect') {
-        // Strict mode blocks what the check would only review.
+        // Block all blocks what the check would only review.
         const value = cv('commands.temp-binary');
         const v = applyCheckValue(
-          value === 'review' && config.settings.mode === 'strict' ? 'block' : value,
+          value === 'review' && isBlockAll(config.settings.mode) ? 'block' : value,
           {
             decision: 'review',
             blockedByLabel: 'Node9: Suspect Binary',
@@ -1010,7 +1010,7 @@ async function evaluatePolicyCore(
         if (v?.logged) noteLogged(v);
         else if (v) return v;
       }
-      if (prov.trustLevel === 'unknown' && config.settings.mode === 'strict') {
+      if (prov.trustLevel === 'unknown' && isBlockAll(config.settings.mode)) {
         return {
           decision: 'review',
           blockedByLabel: 'Node9: Unknown Binary (strict mode)',
@@ -1140,8 +1140,8 @@ async function evaluatePolicyCore(
     else if (v) return v;
   }
 
-  // ── 7. Strict Mode Fallback ─────────────────────────────────────────────
-  if (config.settings.mode === 'strict') {
+  // ── 7. Block all: the catch-all ─────────────────────────────────────────
+  if (isBlockAll(config.settings.mode)) {
     if (activeEnvironment?.requireApproval === false) return allowed();
     return {
       decision: 'review',

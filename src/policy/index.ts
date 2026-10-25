@@ -1,4 +1,5 @@
 import type { InspectionInput, InspectionLayers, DlpMatch } from '@node9/policy-engine';
+import { reviewsEveryInline, isBlockAll } from '@node9/policy-engine';
 // src/policy/index.ts
 // Host wrapper around @node9/policy-engine.
 //
@@ -432,16 +433,17 @@ async function deriveExplainTrace(
     // a prompt with `node9 explain` got the wrong answer (/code-review
     // 2026-08-13). Drift here is worse than a miss: it teaches the user the
     // gate is wrong.
-    // fw#385: strict mode asks on every inline call; every other mode asks
-    // when the code does something dangerous or cannot be read.
-    const strictInline = config.settings.mode === 'strict' && detectInlineExec(shellCommand);
-    const inline = config.settings.mode === 'strict' ? null : inlineExecReview(shellCommand);
+    // fw#385: Strict and Block all ask on every inline call; every other
+    // level asks when the code does something dangerous or cannot be read.
+    const everyInline = reviewsEveryInline(config.settings.mode);
+    const strictInline = everyInline && detectInlineExec(shellCommand);
+    const inline = everyInline ? null : inlineExecReview(shellCommand);
     if (strictInline || inline) {
       const reason = inline ? inlineExecReason(inline) : undefined;
       steps.push({
         name: 'Inline execution',
         outcome: 'review',
-        detail: reason ?? 'Inline code execution detected — strict mode reviews every inline call',
+        detail: reason ?? 'Inline code execution detected — this level reviews every inline call',
         isFinal: true,
       });
       return {
@@ -587,12 +589,12 @@ async function deriveExplainTrace(
     detail: `No dangerous words matched`,
   });
 
-  // ── 8. Strict mode ────────────────────────────────────────────────────────
-  if (config.settings.mode === 'strict') {
+  // ── 8. Block all: the catch-all ───────────────────────────────────────────
+  if (isBlockAll(config.settings.mode)) {
     steps.push({
-      name: 'Strict mode',
+      name: 'Block all',
       outcome: 'review',
-      detail: 'Mode is "strict" — all tools require approval unless explicitly allowed',
+      detail: 'Level is "block-all" — all tools require approval unless explicitly allowed',
       isFinal: true,
     });
     return {
@@ -605,9 +607,9 @@ async function deriveExplainTrace(
     };
   }
   steps.push({
-    name: 'Strict mode',
+    name: 'Block all',
     outcome: 'skip',
-    detail: `Mode is "${config.settings.mode}" — no catch-all review`,
+    detail: `Level is "${config.settings.mode}" — no catch-all review`,
   });
 
   return { tool: toolName, args, waterfall, steps, decision: 'allow' };

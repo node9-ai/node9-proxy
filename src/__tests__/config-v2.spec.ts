@@ -86,7 +86,7 @@ describe('a v2 global file', () => {
   it('mode, approvals, tuning, rules, tools and device land where the loader expects', () => {
     writeGlobal({
       version: '2',
-      mode: 'strict',
+      mode: 'block-all',
       approvals: { channels: ['terminal'], timeoutSeconds: 30, reviewPrompt: 'approver' },
       tuning: {
         'behavior.loops': { threshold: 9, windowSeconds: 60 },
@@ -105,7 +105,7 @@ describe('a v2 global file', () => {
       device: { autoStartDaemon: false },
     });
     const c = getConfig();
-    expect(c.settings.mode).toBe('strict');
+    expect(c.settings.mode).toBe('block-all');
     expect(c.settings.approvers).toMatchObject({ native: false, terminal: true, cloud: false });
     expect(c.settings.approvalTimeoutMs).toBe(30_000);
     expect(c.settings.reviewChannel).toBe('approver');

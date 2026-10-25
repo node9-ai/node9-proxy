@@ -81,7 +81,8 @@ export const ConfigFileSchema = z
     version: z.string().optional(),
     settings: z
       .object({
-        mode: z.enum(['standard', 'strict', 'audit', 'observe']).optional(),
+        // The protection level (levels.ts in the engine); `observe` is Audit's older name.
+        mode: z.enum(['observe', 'audit', 'soft', 'standard', 'strict', 'block-all']).optional(),
         autoStartDaemon: z.boolean().optional(),
         // enableUndo / policy.snapshot: removed with the undo feature. The
         // schema strips undeclared keys silently (plain zod object — no

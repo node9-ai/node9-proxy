@@ -19,6 +19,7 @@ import { safeMessage } from '../utils/safe-text';
 import { autoStartDaemonAndWait, isTestingMode } from './daemon-starter';
 import { askTelemetry, ensureConfig, wireDetectedAgents } from './commands/init';
 import { invalidConfig, isCI, isInteractive, mayChangeService, SetupError } from './interactive';
+import { isModeValue } from '@node9/policy-engine';
 
 export const DEFAULT_SHIELDS = ['bash-safe', 'filesystem', 'project-jail'];
 export type ChecklistKey = 'shields' | 'dlp' | 'egress' | 'service';
@@ -242,8 +243,8 @@ export async function runLocalSetup(opts: {
   if (state.managed && (opts.force || opts.mode || opts.recommended)) {
     throw new SetupError('Policy is managed by your workspace. Change it in the dashboard.');
   }
-  if (opts.mode && !['standard', 'strict', 'audit', 'observe'].includes(opts.mode.toLowerCase())) {
-    throw new SetupError('Mode must be standard, strict, audit, or observe.');
+  if (opts.mode && !isModeValue(opts.mode.toLowerCase())) {
+    throw new SetupError('Mode must be audit, soft, standard, strict, or block-all.');
   }
   const firstInstall = state.fresh;
   const items = buildChecklist(state).filter((i) => !opts.skipSetup || i.key !== 'service');

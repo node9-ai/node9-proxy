@@ -37,6 +37,16 @@ import {
   catalogSettingsFromConfig,
   isVerdict,
   configurableValues,
+  isModeValue,
+  isRecordOnly,
+  levelOf,
+  levelChecks,
+  levelPackageSignals,
+  isKnobGoverned,
+  knobStatedChecks,
+  checkToLegacyPolicy,
+  tuningFromLegacyPolicy,
+  type LegacyPolicyKnobs,
   type CatalogSettings,
   type Verdict,
 } from '@node9/policy-engine';
@@ -971,6 +981,14 @@ const KNOB_TO_CHECK: Record<string, string> = {
   pipeChainHigh: 'data.pipe-chain',
 };
 
+/** The package-signal fields (`newPackage`, `installScript`) a policy block
+ *  states, including the 2.27.0 `registrySignals` boolean. */
+function statedSignalFields(policy: LegacyPolicyKnobs): string[] {
+  return Object.keys(tuningFromLegacyPolicy(policy)['loading.malicious-package'] ?? {}).filter(
+    (k) => k === 'newPackage' || k === 'installScript'
+  );
+}
+
 /** The slice of a merged config the catalog resolver reads. */
 export function catalogSettingsFrom(
   settings: Config['settings'],
@@ -1066,6 +1084,10 @@ export function getConfig(cwd?: string): Config {
   let ssrfStrictSource: Config['ssrfStrictSource'] = 'default';
   // Phase 3a: checks the workspace stated, from the cache's `config` block.
   const workspaceChecks: Record<string, Verdict> = {};
+  // Protection levels: the knob-governed checks (and package-signal fields)
+  // the managed config states, so the level leaves them to the org.
+  const managedStatedChecks = new Set<string>();
+  const managedStatedSignals = new Set<string>();
 
   const applyLayer = (
     source: Record<string, unknown> | null,
@@ -1454,14 +1476,16 @@ export function getConfig(cwd?: string): Config {
         const locked: string[] = Array.isArray(mc.locked)
           ? mc.locked.filter((f): f is string => typeof f === 'string')
           : [];
+        for (const id of knobStatedChecks(mc as LegacyPolicyKnobs)) managedStatedChecks.add(id);
+        for (const k of statedSignalFields(mc as LegacyPolicyKnobs)) managedStatedSignals.add(k);
         // M2a: settings.mode.
         // §0.2 — keyed applies the cloud VERBATIM (validated): the floor
         // helper treats the seeded DEFAULT 'standard' as a local opinion and
         // silently discards a cloud observe/audit. Unkeyed keeps the floor.
         if (typeof mc.mode === 'string') {
           if (keyed) {
-            if (['observe', 'audit', 'standard', 'strict'].includes(mc.mode)) {
-              mergedSettings.mode = mc.mode as Config['settings']['mode'];
+            if (isModeValue(mc.mode)) {
+              mergedSettings.mode = mc.mode;
             }
           } else {
             mergedSettings.mode = resolveManagedMode(
@@ -2009,7 +2033,7 @@ export function getConfig(cwd?: string): Config {
     // PR-2: one listening point includes the env var — a keyed machine's
     // mode comes from the workspace (or the shipped default), never the shell.
     !keyed &&
-    (['observe', 'audit', 'standard', 'strict'] as const).includes(envMode as never)
+    isModeValue(envMode)
   ) {
     mergedSettings.mode = envMode;
   }
@@ -2033,7 +2057,7 @@ export function getConfig(cwd?: string): Config {
     (cloudManagedShields.length > 0 || cloudMandatesEnforcement) &&
     !modeCloudControlled &&
     !modeCloudStaged &&
-    (mergedSettings.mode === 'observe' || mergedSettings.mode === 'audit')
+    isRecordOnly(mergedSettings.mode)
   ) {
     mergedSettings.mode = 'standard';
   }
@@ -2052,10 +2076,14 @@ export function getConfig(cwd?: string): Config {
   // egress (but not strict, and no shields) was skippable with one line of
   // local config: `ignoredTools:['Bash']`. Measured at the gate, and reachable
   // in production because the SaaS ships an egress mandate with no mode.
+  // A cloud-controlled Strict or Block all is an enforcement floor, as the
+  // old strict was (Block all is what strict meant before the levels).
+  const cloudStrictLevel =
+    levelOf(mergedSettings.mode) === 'strict' || levelOf(mergedSettings.mode) === 'block-all';
   const managedFloorActive =
     cloudManagedShields.length > 0 ||
     cloudMandatesEnforcement ||
-    (modeCloudControlled && mergedSettings.mode === 'strict');
+    (modeCloudControlled && cloudStrictLevel);
 
   // Vector A (task #16): under a managed strict, neutralise the engine's strict
   // ESCAPE (`activeEnvironment.requireApproval === false` at policy/index.ts,
@@ -2063,7 +2091,7 @@ export function getConfig(cwd?: string): Config {
   // node9.config.json must not be able to define an environment that disables a
   // cloud-mandated strict. Strip the escape from every merged environment; a
   // locally-chosen strict is untouched (modeCloudControlled is false there).
-  if (modeCloudControlled && mergedSettings.mode === 'strict') {
+  if (modeCloudControlled && cloudStrictLevel) {
     for (const name of Object.keys(mergedEnvironments)) {
       if (mergedEnvironments[name]?.requireApproval === false) {
         const cleaned = { ...mergedEnvironments[name] };
@@ -2095,6 +2123,45 @@ export function getConfig(cwd?: string): Config {
   // widened local resets the narrowing TS infers across the closure above.
   const resolvedSsrfStrictSource: Config['ssrfStrictSource'] =
     keyed && (ssrfStrictSource as string) === 'local' ? 'default' : ssrfStrictSource;
+
+  // ── Protection levels (node9Firewall#385 item 5) ─────────────────────────
+  // The level is a set of defaults. A map-governed check takes its level value
+  // in resolveCheck; a knob-governed one is written into its knob here, once
+  // the mode is final, for every check no layer stated. The global file, the
+  // workspace and the managed config win outright; a project file may raise a
+  // level value, never lower it (the same law as the rest of its policy).
+  {
+    const level = levelOf(mergedSettings.mode);
+    const policyOf = (layer: Record<string, unknown> | null): LegacyPolicyKnobs =>
+      (layer?.policy as LegacyPolicyKnobs | undefined) ?? {};
+    const trusted = new Set<string>([...managedStatedChecks, ...Object.keys(workspaceChecks)]);
+    const trustedSignals = new Set<string>(managedStatedSignals);
+    const project = new Set<string>();
+    const projectSignals = new Set<string>();
+    if (!keyed) {
+      for (const id of knobStatedChecks(policyOf(globalConfig))) trusted.add(id);
+      for (const k of statedSignalFields(policyOf(globalConfig))) trustedSignals.add(k);
+      for (const id of knobStatedChecks(policyOf(projectConfig))) project.add(id);
+      for (const k of statedSignalFields(policyOf(projectConfig))) projectSignals.add(k);
+    }
+    // What the knobs say before the level writes them (the project's raise
+    // included); read once, since the writes below change only unstated rows.
+    const before = resolveCheckMap(catalogSettingsFromConfig({}, mergedPolicy));
+    for (const [id, v] of Object.entries(levelChecks(level))) {
+      if (!isKnobGoverned(id) || trusted.has(id)) continue;
+      if (project.has(id) && CHECK_VERDICT_RANK[v] <= CHECK_VERDICT_RANK[before[id] ?? 'off'])
+        continue;
+      checkToLegacyPolicy(mergedPolicy as Record<string, unknown>, id, v);
+    }
+    const signals = levelPackageSignals(level);
+    if (signals) {
+      for (const key of ['newPackage', 'installScript'] as const) {
+        // Soft only turns a signal off, so any layer that stated it keeps it.
+        if (trustedSignals.has(key) || projectSignals.has(key)) continue;
+        mergedPolicy.packageCheck[key] = signals[key];
+      }
+    }
+  }
 
   // ── The checks map (catalog phase 2) ─────────────────────────────────────
   // Explicit per-check values from v2 files overlay the legacy resolution. A

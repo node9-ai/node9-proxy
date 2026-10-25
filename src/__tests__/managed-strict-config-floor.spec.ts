@@ -1,6 +1,7 @@
 // src/__tests__/managed-strict-config-floor.spec.ts
 //
-// Task #16 — a CLOUD-managed strict mode must not be silently disabled by
+// Task #16 — a CLOUD-managed Block all (the level that was called strict
+// before the protection levels, node9Firewall#385) must not be silently disabled by
 // local/repo config. Two confirmed bypass vectors, both closed here:
 //
 //   A. environments.requireApproval:false — the engine's strict escape
@@ -58,7 +59,7 @@ describe('managed strict floor is not weakened by local/repo config (task #16)',
     _resetConfigCache();
   });
 
-  const STRICT_CACHE = { managedConfig: { mode: 'strict' }, shields: [], rules: [] };
+  const STRICT_CACHE = { managedConfig: { mode: 'block-all' }, shields: [], rules: [] };
 
   it('vector A: managed strict strips environments.requireApproval:false (the engine escape)', () => {
     writeHome(tmpHome, {
@@ -69,7 +70,7 @@ describe('managed strict floor is not weakened by local/repo config (task #16)',
       cache: STRICT_CACHE,
     });
     const cfg = getConfig();
-    expect(cfg.settings.mode).toBe('strict'); // sanity: managed strict applied
+    expect(cfg.settings.mode).toBe('block-all'); // sanity: managed strict applied
     // The escape must be gone → the engine can never be handed requireApproval:false.
     expect(getActiveEnvironment(cfg)?.requireApproval).not.toBe(false);
   });
@@ -80,26 +81,46 @@ describe('managed strict floor is not weakened by local/repo config (task #16)',
       cache: STRICT_CACHE,
     });
     const cfg = getConfig();
+    expect(cfg.settings.mode).toBe('block-all');
+    expect(cfg.policy.ignoredTools).not.toContain('Bash');
+  });
+
+  it('a managed Strict is a floor too: it resets local ignoredTools', () => {
+    writeHome(tmpHome, {
+      local: { policy: { ignoredTools: ['Bash'] } },
+      cache: { managedConfig: { mode: 'strict' }, shields: [], rules: [] },
+    });
+    const cfg = getConfig();
     expect(cfg.settings.mode).toBe('strict');
     expect(cfg.policy.ignoredTools).not.toContain('Bash');
+  });
+
+  it('a managed Soft is not a floor: local ignoredTools stay', () => {
+    writeHome(tmpHome, {
+      local: { settings: { mode: 'soft' }, policy: { ignoredTools: ['Bash'] } },
+      cache: { managedConfig: { mode: 'soft' }, shields: [], rules: [] },
+    });
+    const cfg = getConfig();
+    expect(cfg.settings.mode).toBe('soft');
+    expect(cfg.policy.ignoredTools).toContain('Bash');
   });
 
   it('does NOT over-tighten: a LOCALLY-chosen strict keeps the requireApproval:false escape', () => {
     writeHome(tmpHome, {
       // No managed cache → mode is local, dev convenience preserved.
       local: {
-        settings: { mode: 'strict', environment: 'development' },
+        settings: { mode: 'block-all', environment: 'development' },
         environments: { development: { requireApproval: false } },
       },
     });
     const cfg = getConfig();
-    expect(cfg.settings.mode).toBe('strict');
+    expect(cfg.settings.mode).toBe('block-all');
     expect(getActiveEnvironment(cfg)?.requireApproval).toBe(false);
   });
 
   it('does NOT over-tighten: a LOCALLY-chosen strict keeps local ignoredTools', () => {
     writeHome(tmpHome, {
-      local: { settings: { mode: 'strict' }, policy: { ignoredTools: ['Bash'] } },
+      local: { settings: { mode: 'block-all' }, policy: { ignoredTools: ['Bash'] } },
     });
     const cfg = getConfig();
     expect(cfg.policy.ignoredTools).toContain('Bash');

@@ -15,6 +15,7 @@ import type { McpToolsConfig, McpToolAnnotations } from '../daemon/mcp-tools.js'
 import type { McpStatusEntry } from '../mcp-status.js';
 import type { SyncHealth } from '../daemon/sync.js';
 import type { AppsFile } from '../apps/state.js';
+import { isRecordOnly } from '@node9/policy-engine';
 
 const MAX_RULES = 500;
 const MAX_EGRESS = 200;
@@ -188,9 +189,9 @@ export function buildPolicySnapshot(
   return {
     mode: config.settings.mode,
     panicMode: config.settings.panicMode === true,
-    // The proxy expresses shadow/observe as mode === 'observe' (cloud shadowMode
-    // forces it); there's no separate settings flag.
-    shadowMode: config.settings.mode === 'observe',
+    // The proxy expresses shadow/observe as the Audit level (cloud shadowMode
+    // forces `observe`, its older name); there's no separate settings flag.
+    shadowMode: isRecordOnly(config.settings.mode),
     activeShields,
     shieldOverrides: overrides,
     smartRuleCount: p.smartRules.length,

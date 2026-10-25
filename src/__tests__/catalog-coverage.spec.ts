@@ -107,8 +107,8 @@ describe('every non-allow verdict names a catalog check (shipped defaults)', () 
 });
 
 describe('config-driven checks', () => {
-  it('strict mode: the catch-all is commands.unknown', async () => {
-    withConfig({ version: '1.0', settings: { mode: 'strict' } });
+  it('block-all: the catch-all is commands.unknown', async () => {
+    withConfig({ version: '1.0', settings: { mode: 'block-all' } });
     const verdict = await evaluatePolicy('bash', { command: 'ls -la' });
     expect(verdict.decision).toBe('review');
     expect(verdict.checkId).toBe('commands.unknown');
