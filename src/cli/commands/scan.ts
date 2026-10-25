@@ -220,6 +220,19 @@ export interface ScanResult {
   /** What the calls were judged under (the user's configuration and mode).
    *  Set by the history parsers; merged scans keep the first. */
   policy?: ScanPolicy;
+  /** MCP tool calls (`mcp__<server>__<tool>`) in the window, from the same
+   *  tally as `bashCalls` (fw#403), and the calls per server. */
+  mcpCalls?: number;
+  mcpByServer?: Record<string, number>;
+}
+
+/** Count one MCP call against the tally when the name is namespaced. */
+function countMcpCall(result: ScanResult, toolName: string): void {
+  const m = /^mcp__(.+?)__/.exec(toolName);
+  if (!m) return;
+  result.mcpCalls = (result.mcpCalls ?? 0) + 1;
+  result.mcpByServer ??= {};
+  result.mcpByServer[m[1]] = (result.mcpByServer[m[1]] ?? 0) + 1;
 }
 
 /** Per-session totals. `toolCalls` counts tool_use blocks, matching the
@@ -1101,6 +1114,7 @@ async function processClaudeFile(
       session.toolCalls++;
 
       const toolName = block.name ?? '';
+      countMcpCall(result, toolName);
       const toolNameLower = toolName.toLowerCase();
       const input = block.input ?? {};
 
@@ -1572,6 +1586,7 @@ export async function scanGeminiHistory(
         for (const tc of msg.toolCalls ?? []) {
           result.totalToolCalls++;
           const toolName = tc.name ?? '';
+          countMcpCall(result, toolName);
           const toolNameLower = toolName.toLowerCase();
           const input = tc.args ?? {};
 
@@ -1794,6 +1809,7 @@ export async function scanAntigravityHistory(
         for (const tc of step.tool_calls) {
           result.totalToolCalls++;
           const toolName = tc.name ?? '';
+          countMcpCall(result, toolName);
           const toolNameLower = toolName.toLowerCase();
           // Normalise agy's arg shape (CommandLine/Cwd → command/cwd) so
           // DLP, AST and smart-rule evaluation see Claude vocabulary —
@@ -2027,6 +2043,7 @@ export async function scanCopilotHistory(
       const input = (ev.data?.arguments ?? {}) as Record<string, unknown>;
 
       result.totalToolCalls++;
+      countMcpCall(result, toolName);
       sessionCalls.push({ toolName, input, timestamp });
 
       const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
@@ -2203,6 +2220,7 @@ export async function scanCodexHistory(
 
       result.totalToolCalls++;
       const toolName = String(payload['name'] ?? '');
+      countMcpCall(result, toolName);
       const toolNameLower = toolName.toLowerCase();
 
       let input: Record<string, unknown> = {};
@@ -2322,7 +2340,18 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     sessionsWithEarlySecrets: a.sessionsWithEarlySecrets + b.sessionsWithEarlySecrets,
     perSession: [...a.perSession, ...b.perSession],
     ...((a.policy ?? b.policy) && { policy: mergePolicy(a.policy, b.policy) }),
+    mcpCalls: (a.mcpCalls ?? 0) + (b.mcpCalls ?? 0),
+    mcpByServer: mergeCounts(a.mcpByServer, b.mcpByServer),
   };
+}
+
+function mergeCounts(
+  a: Record<string, number> | undefined,
+  b: Record<string, number> | undefined
+): Record<string, number> {
+  const out: Record<string, number> = { ...(a ?? {}) };
+  for (const [k, v] of Object.entries(b ?? {})) out[k] = (out[k] ?? 0) + v;
+  return out;
 }
 
 function mergePolicy(a: ScanPolicy | undefined, b: ScanPolicy | undefined): ScanPolicy {

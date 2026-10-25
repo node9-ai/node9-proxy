@@ -83,6 +83,8 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
       totalCostUSD: 0,
       firstDate: null,
       lastDate: null,
+      mcpCalls: 0,
+      mcpByServer: {},
     },
     byVerdict: { blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0, loggedOnly: 0 },
     byAgent: [],
@@ -192,6 +194,8 @@ function richFixture(): CompactInput {
       totalCostUSD: 9025.15,
       firstDate: '2026-04-06T00:00:00Z',
       lastDate: '2026-05-07T00:00:00Z',
+      mcpCalls: 0,
+      mcpByServer: {},
     },
     byVerdict: { blocked: 8, supervised: 56, leaks: 4, canaries: 0, loops: 289, loggedOnly: 0 },
     sections: [
@@ -356,6 +360,8 @@ function cleanFixture(): CompactInput {
       totalCostUSD: 1.5,
       firstDate: '2026-05-01T00:00:00Z',
       lastDate: '2026-05-07T00:00:00Z',
+      mcpCalls: 0,
+      mcpByServer: {},
     },
   });
   return {
@@ -449,6 +455,8 @@ function panelFixture(): CompactInput {
       totalCostUSD: 14_500,
       firstDate: '2026-02-12T00:00:00Z',
       lastDate: '2026-05-12T00:00:00Z',
+      mcpCalls: 0,
+      mcpByServer: {},
     },
     byVerdict: { blocked: 2, supervised: 36, leaks: 2, canaries: 0, loops: 1, loggedOnly: 0 },
     sections: [

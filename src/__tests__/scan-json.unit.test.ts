@@ -42,6 +42,8 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
       totalCostUSD: 0,
       firstDate: null,
       lastDate: null,
+      mcpCalls: 0,
+      mcpByServer: {},
     },
     byVerdict: { blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0, loggedOnly: 0 },
     byAgent: [],

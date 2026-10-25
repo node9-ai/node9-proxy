@@ -97,6 +97,10 @@ export interface ScanSummary {
     totalCostUSD: number;
     firstDate: string | null;
     lastDate: string | null;
+    /** MCP tool calls in the window and the calls per server, from the same
+     *  tally as `bashCalls` (fw#403). */
+    mcpCalls: number;
+    mcpByServer: Record<string, number>;
   };
   byVerdict: {
     blocked: number; // any verdict === 'block' (regardless of source)
@@ -297,11 +301,16 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     totalCostUSD: 0,
     firstDate: null as string | null,
     lastDate: null as string | null,
+    mcpCalls: 0,
+    mcpByServer: {} as Record<string, number>,
   };
   for (const a of agents) {
     stats.sessions += a.scan.sessions;
     stats.totalToolCalls += a.scan.totalToolCalls;
     stats.bashCalls += a.scan.bashCalls;
+    stats.mcpCalls += a.scan.mcpCalls ?? 0;
+    for (const [server, n] of Object.entries(a.scan.mcpByServer ?? {}))
+      stats.mcpByServer[server] = (stats.mcpByServer[server] ?? 0) + n;
     stats.totalCostUSD += a.scan.totalCostUSD;
     if (a.scan.firstDate && (!stats.firstDate || a.scan.firstDate < stats.firstDate)) {
       stats.firstDate = a.scan.firstDate;
