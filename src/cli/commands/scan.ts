@@ -886,8 +886,10 @@ async function processClaudeFile(
   onLine?: () => void
 ): Promise<void> {
   result.filesScanned++;
-  result.sessions++;
   onProgress?.(result.filesScanned);
+  // A session counts when its first event inside the window is seen (fw#401);
+  // a file is not a session.
+  let sessionCounted = false;
 
   // basename, not the whole relative path: a nested transcript would
   // otherwise get a session id like 'subagents/agent-x'.
@@ -934,6 +936,10 @@ async function processClaudeFile(
     // Date filter
     if (startDate && entry.timestamp) {
       if (new Date(entry.timestamp) < startDate) continue;
+    }
+    if (!sessionCounted) {
+      sessionCounted = true;
+      result.sessions++;
     }
 
     // Track date range
@@ -1487,7 +1493,7 @@ export async function scanGeminiHistory(
         continue;
       }
 
-      result.sessions++;
+      let sessionCounted = false;
 
       for (const msg of session.messages ?? []) {
         onLine?.();
@@ -1534,6 +1540,10 @@ export async function scanGeminiHistory(
         if (msg.type !== 'gemini') continue;
 
         if (startDate && msg.timestamp && new Date(msg.timestamp) < startDate) continue;
+        if (!sessionCounted) {
+          sessionCounted = true;
+          result.sessions++;
+        }
 
         if (msg.timestamp) {
           if (!result.firstDate || msg.timestamp < result.firstDate)
@@ -1711,7 +1721,7 @@ export async function scanAntigravityHistory(
         timestamp: string;
       }> = [];
 
-      result.sessions++;
+      let sessionCounted = false;
 
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue;
@@ -1726,6 +1736,10 @@ export async function scanAntigravityHistory(
 
         const timestamp = step.created_at ?? '';
         if (startDate && timestamp && new Date(timestamp) < startDate) continue;
+        if (!sessionCounted) {
+          sessionCounted = true;
+          result.sessions++;
+        }
 
         // ── User prompt DLP scan ─────────────────────────────────────────
         if (step.type === 'USER_INPUT') {
@@ -1913,7 +1927,7 @@ export async function scanCopilotHistory(
       timestamp: string;
     }> = [];
 
-    result.sessions++;
+    let sessionCounted = false;
 
     // Cost via the SHARED parseCopilotSession — the same function the upload
     // path uses, so scan agrees with report and the cloud instead of inventing
@@ -1958,6 +1972,10 @@ export async function scanCopilotHistory(
       }
 
       if (startDate && timestamp && new Date(timestamp) < startDate) continue;
+      if (!sessionCounted) {
+        sessionCounted = true;
+        result.sessions++;
+      }
 
       // ── User prompt DLP scan ─────────────────────────────────────────
       if (ev.type === 'user.message') {
@@ -2096,7 +2114,7 @@ export async function scanCodexHistory(
     let startTime = '';
     let projLabel = '';
     let sessionCwd: string | undefined;
-    result.sessions++;
+    let sessionCounted = false;
 
     const sessionCalls: Array<{
       toolName: string;
@@ -2165,6 +2183,10 @@ export async function scanCodexHistory(
 
       const ts = startTime;
       if (startDate && ts && new Date(ts) < startDate) continue;
+      if (!sessionCounted) {
+        sessionCounted = true;
+        result.sessions++;
+      }
 
       if (ts) {
         if (!result.firstDate || ts < result.firstDate) result.firstDate = ts;
