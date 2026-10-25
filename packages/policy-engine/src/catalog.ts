@@ -510,7 +510,10 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     catches:
       'a refund, payout, transfer, charge or withdrawal through an app with no protection of its own',
     values: ALL,
-    defaultValue: 'review',
+    // Founder decision 2026-10-25: a transfer the user asked for is ordinary
+    // work. Standard records it; Strict asks (levels.ts); a user who wants to
+    // be asked states review.
+    defaultValue: 'log',
     legacy: generalActionRuleNames('finance'),
   },
   {

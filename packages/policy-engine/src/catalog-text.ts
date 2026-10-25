@@ -87,7 +87,7 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
       'The agent moves money (a refund, a payout, a transfer, a charge) through an app node9 has no protection for, such as an internal billing server.',
     example: 'refund_order on a server called acme-billing',
     advice:
-      'Keep Review. When the app is Stripe or PayPal, turn on its own protection instead: it covers the CLI, the API and scripts too, and a call from it no longer comes here.',
+      'Standard records these and Strict asks. Set Review to be asked before every money move at any level. When the app is Stripe or PayPal, turn on its own protection instead: it covers the CLI, the API and scripts too, and a call from it no longer comes here.',
   },
   'actions.access': {
     plain:

@@ -574,7 +574,8 @@ export const DEFAULT_CONFIG: Config = {
       // ── Actions in apps (node9Firewall#390) ───────────────────────────────
       // actions.money / actions.access / actions.publish: the action templates
       // on every MCP server no app shield claims, plus the shell publishing
-      // rules. Review by default; the check value governs them.
+      // rules. Review on the rule; the check value governs them (money is
+      // recorded at Standard, asked at Strict).
       ...GENERAL_ACTION_RULES,
     ],
     dlp: { enabled: true, scanIgnoredTools: true, pii: 'block' },

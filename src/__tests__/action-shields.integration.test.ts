@@ -11,17 +11,19 @@ import fs from 'fs';
 import { CLI, makeHome, runCli, probe, cleanup, writeConfig } from './helpers/gauntlet';
 
 const homes: string[] = [];
-function home(opts: { shield?: string; checks?: Record<string, string> } = {}): string {
+function home(
+  opts: { shield?: string; checks?: Record<string, string>; mode?: string } = {}
+): string {
   const h = makeHome('node9-action-shield-');
   homes.push(h);
   // A check value lives in the v2 file (`node9 checks` prints that shape).
   writeConfig(
     h,
-    opts.checks
+    opts.checks || opts.mode
       ? {
           version: '2',
-          mode: 'standard',
-          checks: opts.checks,
+          mode: opts.mode ?? 'standard',
+          checks: opts.checks ?? {},
           approvals: { channels: [], timeoutSeconds: 0 },
         }
       : {
@@ -49,13 +51,31 @@ afterEach(() => {
 });
 
 describe.skipIf(process.platform === 'win32')('actions at the real gate', () => {
-  it('by default: money on an unknown server is held by the Money check; a read passes', () => {
+  // Founder decision 2026-10-25: a transfer the user asked for is ordinary
+  // work, so at Standard the Money check records it; Strict asks, and so does
+  // any level once the user stated they want to be asked.
+  it('by default (Standard): money on an unknown server is recorded, not held; a read passes', () => {
     const h = home();
+    const refund = probe(h, 'mcp__acme_billing__refund_order', { order: 'o1', amount: 1200 });
+    expect(refund.error).toBeUndefined();
+    expect(refund.verdict, refund.stdout).toBe('allow');
+    expect(probe(h, 'mcp__acme_billing__list_orders', { limit: 5 }).verdict).toBe('allow');
+  });
+
+  it('Strict: money on an unknown server is held by the Money check', () => {
+    const h = home({ mode: 'strict' });
     const refund = probe(h, 'mcp__acme_billing__refund_order', { order: 'o1', amount: 1200 });
     expect(refund.error).toBeUndefined();
     expect(refund.verdict, refund.stdout).toBe('review');
     expect(refund.stdout).toContain('Money check');
-    expect(probe(h, 'mcp__acme_billing__list_orders', { limit: 5 }).verdict).toBe('allow');
+  });
+
+  it('a user who asked to be consulted about money is asked at Standard', () => {
+    const h = home({ checks: { 'actions.money': 'review' } });
+    const refund = probe(h, 'mcp__acme_billing__refund_order', { order: 'o1', amount: 1200 });
+    expect(refund.error).toBeUndefined();
+    expect(refund.verdict, refund.stdout).toBe('review');
+    expect(refund.stdout).toContain('Money check');
   });
 
   it('by default: a server an app shield claims is quiet while that shield is off', () => {
@@ -90,7 +110,8 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
   });
 
   it('square on: a refund on its server is held; a Squarespace server stays with the general checks', () => {
-    const h = home({ shield: 'square' });
+    // The user asked to be consulted about money, so the general check asks.
+    const h = home({ shield: 'square', checks: { 'actions.money': 'review' } });
     const mcp = probe(h, 'mcp__square__create_refund', { payment_id: 'p1' });
     expect(mcp.verdict, mcp.stdout).toBe('review');
     expect(mcp.stdout).toContain('Square');
@@ -127,7 +148,7 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
   });
 
   it('a server named after an Object property is judged, not failed open', () => {
-    const h = home();
+    const h = home({ checks: { 'actions.money': 'review' } });
     const r = probe(h, 'mcp__constructor__create_refund', { amount: 1200 });
     expect(r.error).toBeUndefined();
     expect(r.verdict, r.stdout).toBe('review');
