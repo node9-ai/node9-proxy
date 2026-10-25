@@ -760,7 +760,29 @@ export function detectLoops(
 // JSONL scanner
 // ---------------------------------------------------------------------------
 
-function countScanFiles(): number {
+/**
+ * The Gemini session files of one `chats` directory, one per session. Gemini
+ * CLI migrated from a single-object `.json` per session to line-delimited
+ * `.jsonl`; both are read, `.jsonl` preferred when a session has both. One
+ * function for the parser and the progress total (fw#402).
+ */
+function geminiChatFiles(chatsDir: string): string[] {
+  const files = fs
+    .readdirSync(chatsDir)
+    .filter((f) => f.endsWith('.json') || f.endsWith('.jsonl'))
+    .sort((a, b) => Number(b.endsWith('.jsonl')) - Number(a.endsWith('.jsonl')));
+  const seen = new Set<string>();
+  return files.filter((f) => {
+    const id = f.replace(/\.jsonl?$/, '');
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+/** The progress-bar total: the same walkers the parsers use, so the bar can
+ *  never show more files scanned than mapped (fw#402: 583/281). */
+export function countScanFiles(): number {
   let total = 0;
   const claudeDir = path.join(os.homedir(), '.claude', 'projects');
   if (fs.existsSync(claudeDir)) {
@@ -769,9 +791,7 @@ function countScanFiles(): number {
         const p = path.join(claudeDir, proj);
         try {
           if (!fs.statSync(p).isDirectory()) continue;
-          total += fs
-            .readdirSync(p)
-            .filter((f) => f.endsWith('.jsonl') && !f.startsWith('agent-')).length;
+          total += listSessionFiles(p).length;
         } catch {
           continue;
         }
@@ -790,7 +810,7 @@ function countScanFiles(): number {
           const chatsDir = path.join(p, 'chats');
           if (fs.existsSync(chatsDir)) {
             try {
-              total += fs.readdirSync(chatsDir).filter((f) => f.endsWith('.json')).length;
+              total += geminiChatFiles(chatsDir).length;
             } catch {
               /* ignore */
             }
@@ -1433,25 +1453,13 @@ export async function scanGeminiHistory(
 
     let chatFiles: string[];
     try {
-      // Gemini CLI migrated from a single-object `.json` per session to the
-      // current line-delimited `.jsonl`. Read BOTH — reading only `.json`
-      // silently missed every current-format session (cost AND findings),
-      // which is why scan's Gemini cost was $0 while `node9 report` (reads
-      // `.jsonl`) showed it. Prefer `.jsonl` so the dedup keeps it if a
-      // session somehow has both.
-      chatFiles = fs
-        .readdirSync(chatsDir)
-        .filter((f) => f.endsWith('.json') || f.endsWith('.jsonl'))
-        .sort((a, b) => Number(b.endsWith('.jsonl')) - Number(a.endsWith('.jsonl')));
+      chatFiles = geminiChatFiles(chatsDir);
     } catch {
       continue;
     }
 
-    const seenSessions = new Set<string>();
     for (const chatFile of chatFiles) {
       const sessionId = chatFile.replace(/\.jsonl?$/, '');
-      if (seenSessions.has(sessionId)) continue; // same session in both formats
-      seenSessions.add(sessionId);
       result.filesScanned++;
       onProgress?.(result.filesScanned);
 
