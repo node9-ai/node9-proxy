@@ -147,15 +147,22 @@ describe('explain shows the package check (fw#395)', () => {
     expect(r.steps.filter((s) => s.isFinal)).toEqual([stepOf(r)]);
   });
 
-  it('the protected-file gate returns before the package check, as in the hook', async () => {
-    runPackageCheck.mockResolvedValue(MALICIOUS);
-    const r = await explainPolicy('bash', { command: 'pip install litellm==1.107.0 && rm -rf /' });
-    expect(runPackageCheck).not.toHaveBeenCalled();
-    expect(r.decision).toBe('block');
-    expect(r.blockedByLabel).not.toBe('📦 Node9 Package Check (Malicious)');
-    expect(stepOf(r)).toMatchObject({ outcome: 'skip' });
-    expect(stepOf(r)?.detail).toContain('protected-file');
-  });
+  // `rm -rf /` touches protected system files only on a POSIX root; on Windows
+  // the same function (and so the hook) finds no protected file in it.
+  it.skipIf(process.platform === 'win32')(
+    'the protected-file gate returns before the package check, as in the hook',
+    async () => {
+      runPackageCheck.mockResolvedValue(MALICIOUS);
+      const r = await explainPolicy('bash', {
+        command: 'pip install litellm==1.107.0 && rm -rf /',
+      });
+      expect(runPackageCheck).not.toHaveBeenCalled();
+      expect(r.decision).toBe('block');
+      expect(r.blockedByLabel).not.toBe('📦 Node9 Package Check (Malicious)');
+      expect(stepOf(r)).toMatchObject({ outcome: 'skip' });
+      expect(stepOf(r)?.detail).toContain('protected-file');
+    }
+  );
 
   it('a DLP block the engine reports returns before the package check', async () => {
     runPackageCheck.mockResolvedValue(MALICIOUS);
