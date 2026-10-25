@@ -164,6 +164,18 @@ describe('node9 explain --json', () => {
     expect(doc.decision).toBeUndefined();
   });
 
+  it('includes the package check step (fw#395)', () => {
+    // A command that installs nothing: no registry or OSV lookup is needed,
+    // so this stays offline and still proves the step reaches the output.
+    const r = run(['bash', 'ls -la', '--json']);
+    expect(r.status).toBe(0);
+    const doc = JSON.parse(r.stdout);
+    expect(doc.steps).toContainEqual(
+      expect.objectContaining({ name: 'Package check', outcome: 'skip' })
+    );
+    expect(doc.decision).toBe('allow');
+  });
+
   it('redacts a secret in input and step details', () => {
     const r = run(['bash', `psql ${DB_URL}`, '--json']);
     expect(r.status).toBe(0);

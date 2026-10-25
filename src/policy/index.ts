@@ -15,6 +15,7 @@ import path from 'path';
 import os from 'os';
 import { scanArgumentSecrets, scanFilePath } from '../dlp';
 import { prepareFileAccesses, type PreparedFileAccess } from './file-access';
+import { runPackageCheck, type PackageCheckConfig } from '../supply-chain/check';
 import { getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
@@ -200,6 +201,112 @@ export async function explainPolicy(
     process.cwd(),
     inspectionLayers(config.policy)
   );
+  const result = await explainEngineVerdict(toolName, args, agent, config, prepared);
+  // The hook skips the package check for a manual (Terminal) call.
+  if (agent === 'Terminal') return result;
+  return withPackageCheck(result, toolName, args, config.policy.packageCheck, prepared.cwd);
+}
+
+const PACKAGE_STEP = 'Package check';
+const PACKAGE_BLOCK_LABEL = '📦 Node9 Package Check (Malicious)';
+const PACKAGE_REVIEW_LABEL = '📦 Node9 Package Check (Review)';
+
+/**
+ * The package check runs in the hook (auth/orchestrator.ts), not in the
+ * engine, so the engine verdict above cannot include it (fw#395). Mirror the
+ * hook's order: a DLP block returns first; a package block returns before the
+ * engine runs; a package review turns an engine allow into a review, and an
+ * engine block wins over it. Lookups fail open in both places.
+ */
+async function withPackageCheck(
+  result: ExplainResult,
+  toolName: string,
+  args: unknown,
+  cfg: PackageCheckConfig | undefined,
+  cwd: string | undefined
+): Promise<ExplainResult> {
+  const place = (step: ExplainStep, patch: Partial<ExplainResult> = {}): ExplainResult => {
+    const earlier = step.isFinal
+      ? result.steps.map((s) => (s.isFinal ? { ...s, isFinal: false } : s))
+      : [...result.steps];
+    const dlp = earlier.findIndex((s) => s.name === 'DLP Content Scanner');
+    earlier.splice(dlp + 1, 0, step);
+    return { ...result, ...patch, steps: earlier };
+  };
+
+  if (result.steps.some((s) => s.name === 'DLP Content Scanner' && s.outcome === 'block')) {
+    return place({
+      name: PACKAGE_STEP,
+      outcome: 'skip',
+      detail: 'Not reached: the DLP scanner blocks first',
+    });
+  }
+  if (!cfg?.enabled) {
+    return place({
+      name: PACKAGE_STEP,
+      outcome: 'skip',
+      detail: 'Package check is off (policy.packageCheck.enabled is false)',
+    });
+  }
+
+  const pkg = await runPackageCheck(toolName, args, cfg, cwd);
+  const misses =
+    pkg.misses.length > 0
+      ? ` Lookups that failed, which the hook lets through: ${pkg.misses.join('; ')}`
+      : '';
+
+  if (pkg.verdict === 'block' && pkg.reason) {
+    return place(
+      { name: PACKAGE_STEP, outcome: 'block', detail: pkg.reason + misses, isFinal: true },
+      {
+        decision: 'block',
+        blockedByLabel: PACKAGE_BLOCK_LABEL,
+        ruleDescription: pkg.reason,
+        matchedToken: undefined,
+      }
+    );
+  }
+  if (pkg.verdict === 'review' && pkg.reason) {
+    const step: ExplainStep = {
+      name: PACKAGE_STEP,
+      outcome: 'review',
+      detail: pkg.reason + misses,
+    };
+    if (result.decision === 'block') return place(step);
+    if (result.decision === 'review') {
+      return place(step, {
+        ruleDescription: result.ruleDescription
+          ? `${result.ruleDescription}\n${pkg.reason}`
+          : pkg.reason,
+      });
+    }
+    return place(
+      { ...step, isFinal: true },
+      { decision: 'review', blockedByLabel: PACKAGE_REVIEW_LABEL, ruleDescription: pkg.reason }
+    );
+  }
+  if (pkg.checked === 0) {
+    return place({
+      name: PACKAGE_STEP,
+      outcome: 'skip',
+      detail: `No package install or run in this command.${misses}`,
+    });
+  }
+  return place({
+    name: PACKAGE_STEP,
+    outcome: 'checked',
+    detail: `${pkg.checked} package${pkg.checked === 1 ? '' : 's'} checked, no findings.${misses}`,
+  });
+}
+
+/** The engine verdict, reconciled with the human-readable trace. */
+async function explainEngineVerdict(
+  toolName: string,
+  args: unknown,
+  agent: string,
+  config: ReturnType<typeof getConfig>,
+  prepared: PreparedFileAccess
+): Promise<ExplainResult> {
   const derived = await deriveExplainTrace(toolName, args, prepared);
   const engine = await evaluatePolicy(toolName, args, agent, prepared.cwd, {
     fileAccess: prepared,
