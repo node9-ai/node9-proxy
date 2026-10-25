@@ -522,17 +522,6 @@ export function buildRecurringPatternSet(
   return recurring;
 }
 
-// AST_FS_REGEX_RULES lives in @node9/policy-engine so the live hook and the
-// CLI scan share one source of truth (see shell/index.ts).
-
-/**
- * Run analyzeFsOperation on a bash command and, if it returns a verdict,
- * append a synthetic finding to `result.findings`. Returns true when a
- * verdict was emitted (so the caller can mark the call ruleMatched).
- *
- * Used by all three agent scan paths (claude/gemini/codex) so the AST-based
- * fs-op rules fire identically regardless of which agent emitted the call.
- */
 /**
  * Per-walker dedup index. The walkers used to call result.findings.some(...)
  * and result.dlpFindings.some(...) inside their per-line loops to suppress
