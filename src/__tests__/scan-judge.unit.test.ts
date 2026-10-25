@@ -250,7 +250,9 @@ describe('scanClaudeHistory through the judge', () => {
         timestamp: t(1),
         cwd: '/tmp/proj',
         message: {
-          content: [{ type: 'tool_result', tool_use_id: 'u1', content: `AWS_ACCESS_KEY_ID=${token}` }],
+          content: [
+            { type: 'tool_result', tool_use_id: 'u1', content: `AWS_ACCESS_KEY_ID=${token}` },
+          ],
         },
       },
       {
