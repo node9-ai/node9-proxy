@@ -42,8 +42,8 @@ function writeSession(id: string, startedMsAgo: number, tokens: number): void {
   );
 }
 
-function costFor(startDate: Date | null): number {
-  return scanCodexHistory(startDate).totalCostUSD;
+async function costFor(startDate: Date | null) {
+  return (await scanCodexHistory(startDate)).totalCostUSD;
 }
 
 beforeEach(() => {
@@ -58,45 +58,45 @@ afterEach(() => {
 });
 
 describe('scanCodexHistory — cost window', () => {
-  it('excludes a session that started before the window', () => {
+  it('excludes a session that started before the window', async () => {
     writeSession('old', 60 * DAY, 1_000_000);
-    const cost = costFor(new Date(Date.now() - 30 * DAY));
+    const cost = await costFor(new Date(Date.now() - 30 * DAY));
     expect(cost).toBe(0);
   });
 
-  it('includes a session that started inside the window', () => {
+  it('includes a session that started inside the window', async () => {
     writeSession('recent', 5 * DAY, 1_000_000);
-    const cost = costFor(new Date(Date.now() - 30 * DAY));
+    const cost = await costFor(new Date(Date.now() - 30 * DAY));
     expect(cost).toBeGreaterThan(0);
   });
 
-  it('counts only the in-window session when both exist', () => {
+  it('counts only the in-window session when both exist', async () => {
     writeSession('old', 60 * DAY, 1_000_000);
     writeSession('recent', 5 * DAY, 1_000_000);
-    const windowed = costFor(new Date(Date.now() - 30 * DAY));
+    const windowed = await costFor(new Date(Date.now() - 30 * DAY));
 
     // Same window, with the old session removed: the totals must match, which
     // proves the excluded session contributed exactly nothing rather than a
     // little less.
     fs.rmSync(path.join(home, '.codex'), { recursive: true, force: true });
     writeSession('recent', 5 * DAY, 1_000_000);
-    const only = costFor(new Date(Date.now() - 30 * DAY));
+    const only = await costFor(new Date(Date.now() - 30 * DAY));
 
     expect(windowed).toBeCloseTo(only, 10);
     expect(only).toBeGreaterThan(0); // the comparison must not be 0 === 0
   });
 
-  it('counts EVERYTHING when there is no window — `--all` must not regress', () => {
+  it('counts EVERYTHING when there is no window — `--all` must not regress', async () => {
     // The obvious way to write this filter also silences the full-history
     // scan, which is the one place the whole lifetime is the right answer.
     writeSession('old', 60 * DAY, 1_000_000);
     writeSession('recent', 5 * DAY, 1_000_000);
-    const all = costFor(null);
-    const windowed = costFor(new Date(Date.now() - 30 * DAY));
+    const all = await costFor(null);
+    const windowed = await costFor(new Date(Date.now() - 30 * DAY));
     expect(all).toBeGreaterThan(windowed);
   });
 
-  it('drops a session with no start timestamp, exactly as report does', () => {
+  it('drops a session with no start timestamp, exactly as report does', async () => {
     // No session_meta, so startTime stays ''. Found by mutation testing: the
     // first version of this test only asserted "did not crash", which every
     // variant passed. It cannot be placed in time, and report-audit.ts:656
@@ -123,8 +123,8 @@ describe('scanCodexHistory — cost window', () => {
         }),
       ].join('\n')
     );
-    expect(costFor(new Date(Date.now() - 30 * DAY))).toBe(0);
+    expect(await costFor(new Date(Date.now() - 30 * DAY))).toBe(0);
     // Without any timestamp the usage cannot be assigned to a reporting day.
-    expect(costFor(null)).toBe(0);
+    expect(await costFor(null)).toBe(0);
   });
 });

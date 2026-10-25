@@ -91,7 +91,7 @@ describe('node9 scan — golden corpus', () => {
     const expectedPath = path.join(FIXTURES_DIR, `${sessionId}.expected.json`);
     const expected: Expected = JSON.parse(fs.readFileSync(expectedPath, 'utf-8'));
 
-    it(`${sessionId}: ${expected.description ?? ''}`.trim(), () => {
+    it(`${sessionId}: ${expected.description ?? ''}`.trim(), async () => {
       const projectsDir = path.join(tmpHome, '.claude', 'projects', '-tmp-test');
       fs.mkdirSync(projectsDir, { recursive: true });
       const raw = fs.readFileSync(path.join(FIXTURES_DIR, fixture), 'utf-8');
@@ -100,7 +100,7 @@ describe('node9 scan — golden corpus', () => {
         expandFixturePlaceholders(raw)
       );
 
-      const result = scanClaudeHistory(null);
+      const result = await scanClaudeHistory(null);
 
       expect(result.filesScanned).toBe(expected.filesScanned);
       expect(result.sessions).toBe(expected.sessions);

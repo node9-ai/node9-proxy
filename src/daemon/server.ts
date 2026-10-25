@@ -977,17 +977,17 @@ export function startDaemon(): void {
         let codex: ScanResult = EMPTY_SCAN;
 
         try {
-          claude = scanClaudeHistory(d);
+          claude = await scanClaudeHistory(d);
         } catch (e) {
           console.error('Claude scan failed:', e);
         }
         try {
-          gemini = scanGeminiHistory(d);
+          gemini = await scanGeminiHistory(d);
         } catch (e) {
           console.error('Gemini scan failed:', e);
         }
         try {
-          codex = scanCodexHistory(d);
+          codex = await scanCodexHistory(d);
         } catch (e) {
           console.error('Codex scan failed:', e);
         }

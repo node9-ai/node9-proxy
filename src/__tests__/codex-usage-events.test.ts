@@ -58,7 +58,7 @@ function write(lines: string[], base = path.join(home, '.codex', 'sessions')): s
 }
 
 describe('Codex request accounting', () => {
-  it('prices each model at the event date and clears the old final-model start-day row', () => {
+  it('prices each model at the event date and clears the old final-model start-day row', async () => {
     const rows = parseCodexSession(mixedSession());
     // First request: 600K * 1.25/M + 400K * .125/M + 10K * 10/M = .90.
     // Second request uses mini: 600K * .25/M + 400K * .025/M + 10K * 2/M = .18.
@@ -81,7 +81,7 @@ describe('Codex request accounting', () => {
     expect([...stored.values()].reduce((a, b) => a + b, 0)).toBeCloseTo(1.08, 10);
   });
 
-  it('does not rebill repeated totals even when timestamp and model change', () => {
+  it('does not rebill repeated totals even when timestamp and model change', async () => {
     const total = tokens(1000, 200, 100);
     const usage = parseCodexUsage([
       meta,
@@ -95,7 +95,7 @@ describe('Codex request accounting', () => {
     expect(usage.events[0].model).toBe('gpt-5');
   });
 
-  it('retains usage before a reset and counts the new epoch exactly once', () => {
+  it('retains usage before a reset and counts the new epoch exactly once', async () => {
     const usage = parseCodexUsage([
       meta,
       model('gpt-5'),
@@ -108,7 +108,7 @@ describe('Codex request accounting', () => {
     expect(sum(usage.events)).toBeCloseTo(1300 * 1.25e-6 + 130 * 10e-6, 10);
   });
 
-  it('uses the baseline before the window and excludes events after its end', () => {
+  it('uses the baseline before the window and excludes events after its end', async () => {
     const parsed = parseCodexUsage([
       ...mixedSession(),
       event('2026-09-03T00:00:00Z', tokens(3_000_000, 1_200_000, 30_000)),
@@ -121,7 +121,7 @@ describe('Codex request accounting', () => {
     expect(sum(rows)).toBeCloseTo(0.18, 10);
   });
 
-  it('counts reasoning only as part of output, clamps cached input, and tolerates bad records', () => {
+  it('counts reasoning only as part of output, clamps cached input, and tolerates bad records', async () => {
     const rows = parseCodexUsage([
       meta,
       model('gpt-5'),
@@ -136,13 +136,13 @@ describe('Codex request accounting', () => {
     expect(rows[0].costUSD).toBeCloseTo(100 * 0.125e-6 + 50 * 10e-6, 10);
   });
 
-  it('keeps equal-size standalone requests while removing exact replays', () => {
+  it('keeps equal-size standalone requests while removing exact replays', async () => {
     const first = event('2026-09-01T23:01:00Z', undefined, tokens(100));
     const second = event('2026-09-01T23:02:00Z', undefined, tokens(100));
     expect(parseCodexUsage([meta, model('gpt-5'), first, first, second]).events).toHaveLength(2);
   });
 
-  it('does not double count when cumulative usage returns after a last-only event', () => {
+  it('does not double count when cumulative usage returns after a last-only event', async () => {
     const parsed = parseCodexUsage([
       meta,
       model('gpt-5'),
@@ -154,7 +154,7 @@ describe('Codex request accounting', () => {
     expect(parsed.events.map((e) => e.inputTokens)).toEqual([100, 100, 100]);
   });
 
-  it('retains partial cumulative counters and skips invalid values', () => {
+  it('retains partial cumulative counters and skips invalid values', async () => {
     const parsed = parseCodexUsage([
       meta,
       model('gpt-5'),
@@ -166,7 +166,7 @@ describe('Codex request accounting', () => {
     expect(parsed.events.map((e) => e.cacheReadTokens)).toEqual([20, 0]);
   });
 
-  it('uses request input, not cumulative input, for long-context pricing', () => {
+  it('uses request input, not cumulative input, for long-context pricing', async () => {
     const parsed = parseCodexUsage([
       meta,
       model('gpt-6-astra'),
@@ -179,7 +179,7 @@ describe('Codex request accounting', () => {
     }
   });
 
-  it('applies recorded Astra fast pricing and resets the tier on a new context', () => {
+  it('applies recorded Astra fast pricing and resets the tier on a new context', async () => {
     const parsed = parseCodexUsage([
       meta,
       json({ type: 'turn_context', payload: { model: 'gpt-6-astra', service_tier: 'fast' } }),
@@ -190,7 +190,7 @@ describe('Codex request accounting', () => {
     expect(parsed.events.map((e) => e.costUSD)).toEqual([0.02, 0.01]);
   });
 
-  it('uses exact offline model rates instead of a shorter model prefix', () => {
+  it('uses exact offline model rates instead of a shorter model prefix', async () => {
     const parsed = parseCodexUsage([
       meta,
       model('gpt-5.3-codex'),
@@ -199,7 +199,7 @@ describe('Codex request accounting', () => {
     expect(parsed.events[0].costUSD).toBeCloseTo(0.00315, 10);
   });
 
-  it('uses the event timestamp even without session metadata', () => {
+  it('uses the event timestamp even without session metadata', async () => {
     const parsed = parseCodexUsage([
       model('gpt-5'),
       event('2026-09-02T03:00:00+03:00', tokens(100)),
@@ -207,7 +207,7 @@ describe('Codex request accounting', () => {
     expect(parsed.events[0].timestamp).toBe('2026-09-02T00:00:00.000Z');
   });
 
-  it('prices cache writes separately from uncached input', () => {
+  it('prices cache writes separately from uncached input', async () => {
     fs.mkdirSync(path.join(home, '.node9'));
     fs.writeFileSync(
       path.join(home, '.node9', 'model-pricing.json'),
@@ -242,7 +242,7 @@ describe('Codex collection and surface reconciliation', () => {
         0.18,
         10
       );
-      expect(scanCodexHistory(start).totalCostUSD).toBeCloseTo(0.18, 10);
+      expect((await scanCodexHistory(start)).totalCostUSD).toBeCloseTo(0.18, 10);
       expect(buildSessions(1).find((r) => r.agent === 'codex')?.costUSD).toBeCloseTo(0.18, 10);
     } finally {
       vi.useRealTimers();
@@ -253,7 +253,7 @@ describe('Codex collection and surface reconciliation', () => {
     const base = write(mixedSession());
     write(mixedSession(), path.join(home, '.codex', 'archived_sessions'));
     expect(sum(codexSource.collect())).toBeCloseTo(1.08, 10);
-    expect(scanCodexHistory(null).totalCostUSD).toBeCloseTo(1.08, 10);
+    expect((await scanCodexHistory(null)).totalCostUSD).toBeCloseTo(1.08, 10);
     expect(
       (await loadCodexCostAsync(new Date('2026-09-01'), new Date('2026-09-03'), base)).total
     ).toBeCloseTo(1.08, 10);
@@ -265,7 +265,7 @@ describe('Codex collection and surface reconciliation', () => {
     write(mixedSession(), path.join(custom, 'archived_sessions'));
     expect(codexSource.available()).toBe(true);
     expect(sum(codexSource.collect())).toBeCloseTo(1.08, 10);
-    expect(scanCodexHistory(null).totalCostUSD).toBeCloseTo(1.08, 10);
+    expect((await scanCodexHistory(null)).totalCostUSD).toBeCloseTo(1.08, 10);
     expect(buildSessions(null).find((r) => r.agent === 'codex')?.costUSD).toBeCloseTo(1.08, 10);
     expect(
       (

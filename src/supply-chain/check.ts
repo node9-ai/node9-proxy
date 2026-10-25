@@ -391,7 +391,11 @@ export async function runPackageCheck(
   args: unknown,
   cfg: PackageCheckConfig,
   /** The hook's validated absolute working directory; where `npx` looks for node_modules. */
-  cwd?: string
+  cwd?: string,
+  /** No request leaves the machine: the local OSV index and node_modules only.
+   *  A forecast over history runs this way; what the index cannot answer is a
+   *  miss, never an allow. */
+  opts: { offline?: boolean } = {}
 ): Promise<PackageCheckResult> {
   if (!cfg.enabled) return ALLOW;
   try {
@@ -404,7 +408,9 @@ export async function runPackageCheck(
     const misses: string[] = [];
     const checked = requests;
     const settled = await Promise.allSettled(
-      checked.map((p, i) => checkOne(p, cfg, misses, i >= MAX_NETWORK_PACKAGES, cwd))
+      checked.map((p, i) =>
+        checkOne(p, cfg, misses, opts.offline === true || i >= MAX_NETWORK_PACKAGES, cwd)
+      )
     );
     const findings: PackageFinding[] = [];
     settled.forEach((s, i) => {

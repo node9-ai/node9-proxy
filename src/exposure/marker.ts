@@ -14,6 +14,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { SESSION_EXPOSURE_TTL_MS } from '../daemon/exposure-store';
+import { forecastRun } from '../auth/forecast-context';
 
 function dir(): string {
   return path.join(os.homedir(), '.node9', 'exposure-sessions');
@@ -27,6 +28,8 @@ function file(sessionId: string): string {
 /** Note that `sessionId` read outside content. Best-effort, never throws. */
 export function markSessionExposed(sessionId: string): void {
   if (!sessionId) return;
+  // The replayed state is the record in a forecast; no marker file.
+  if (forecastRun()) return;
   try {
     fs.mkdirSync(dir(), { recursive: true, mode: 0o700 });
     const f = file(sessionId);
@@ -59,6 +62,8 @@ export function markSessionExposed(sessionId: string): void {
  */
 export function maybeSessionExposed(sessionId: string): boolean {
   if (!sessionId) return false;
+  const forecast = forecastRun();
+  if (forecast) return forecast.session.checkExposure(forecast.now) !== null;
   try {
     const st = fs.statSync(file(sessionId));
     return Date.now() - st.mtimeMs < SESSION_EXPOSURE_TTL_MS;

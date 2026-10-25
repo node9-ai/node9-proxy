@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { evaluateLoopWindow, type ToolCallRecord } from '@node9/policy-engine';
+import { forecastRun } from './auth/forecast-context';
 
 export { computeArgsHash } from '@node9/policy-engine';
 
@@ -49,6 +50,20 @@ export function recordAndCheck(
   windowMs = 120_000
 ): LoopCheckResult {
   try {
+    // A forecast keeps the window in the replayed session, at the call's clock.
+    const forecast = forecastRun();
+    if (forecast) {
+      const r = evaluateLoopWindow(
+        forecast.session.loopRecords,
+        tool,
+        args,
+        threshold,
+        windowMs,
+        forecast.now
+      );
+      forecast.session.loopRecords = r.nextRecords;
+      return { looping: r.looping, count: r.count };
+    }
     const result = evaluateLoopWindow(readState(), tool, args, threshold, windowMs, Date.now());
     writeState(result.nextRecords);
     return { looping: result.looping, count: result.count };

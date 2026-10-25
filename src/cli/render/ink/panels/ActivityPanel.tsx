@@ -8,12 +8,8 @@
 // scorecard's header line ("scanned last 90 days") so duplicating
 // it in this panel is noise.
 //
-// MCP counts: scan.findings carry a toolName per finding. Any tool
-// matching the `mcp__*` naming convention counts as MCP. This is
-// approximate (only counts findings that matched a rule), but it's
-// the best we can do without instrumenting the JSONL walker to
-// track MCP separately. TODO: thread total MCP call count through
-// ScanResult so this panel can show a true count.
+// MCP: the number of `mcp__<server>__*` tool calls in the window, from the
+// same tally as Shell (fw#403), with the busiest server beside it.
 
 import React from 'react';
 import { Box, Text } from 'ink';
@@ -33,22 +29,14 @@ function fmtNum(n: number): string {
   return n.toLocaleString();
 }
 
-/** Approximate MCP call count from findings (tools matching mcp__*).
- *  Under-counts since findings only include rule-matches, not all
- *  MCP calls. Returns 0 if none. */
-function countMcpFindings(scan: ScanResult): number {
-  let n = 0;
-  for (const f of scan.findings) {
-    if (f.toolName.startsWith('mcp__')) n++;
-  }
-  return n;
-}
-
 export function ActivityPanel({ summary, scan, width }: Props): React.ReactElement {
-  const { sessions, totalToolCalls, bashCalls, totalCostUSD } = summary.stats;
+  const { sessions, totalToolCalls, bashCalls, totalCostUSD, mcpCalls, mcpByServer } =
+    summary.stats;
   const perSession = sessions > 0 ? totalCostUSD / sessions : 0;
   const toolsPerSession = sessions > 0 ? Math.round(totalToolCalls / sessions) : 0;
-  const mcpCount = countMcpFindings(scan);
+  const mcpCount = mcpCalls ?? 0;
+  const topServer = Object.entries(mcpByServer ?? {}).sort((a, b) => b[1] - a[1])[0];
+  void scan;
   // Find the most-active agent (by sessions). Surfaces "Claude
   // dominates" / "Codex took over" without needing a dedicated panel.
   const topAgent = summary.byAgent.slice().sort((a, b) => b.sessions - a.sessions)[0];
@@ -82,7 +70,10 @@ export function ActivityPanel({ summary, scan, width }: Props): React.ReactEleme
           <Box width={LABEL_W}>
             <Text dimColor>{'  MCP'}</Text>
           </Box>
-          <Text dimColor>{fmtNum(mcpCount)}</Text>
+          <Text dimColor>
+            {fmtNum(mcpCount)}
+            {topServer ? `  (${topServer[0]} ${fmtNum(topServer[1])})` : ''}
+          </Text>
         </Box>
       ) : null}
 

@@ -58,28 +58,28 @@ function jsonSession(model: string, input: number): string {
 }
 
 describe('scanGeminiHistory — reads current .jsonl format (not just legacy .json)', () => {
-  it('prices a .jsonl Gemini session (gemini-2.5-flash, $0.30/M) — was $0 before', () => {
+  it('prices a .jsonl Gemini session (gemini-2.5-flash, $0.30/M) — was $0 before', async () => {
     fs.writeFileSync(
       path.join(chatsDir(), 'session-a.jsonl'),
       jsonlSession('gemini-2.5-flash', 1_000_000)
     );
-    const res = scanGeminiHistory(null);
+    const res = await scanGeminiHistory(null);
     expect(res.sessions).toBe(1);
     // 1,000,000 input * $0.30/M = $0.30.
     expect(res.totalCostUSD).toBeCloseTo(0.3, 6);
   });
 
-  it('still reads the legacy .json single-object format (no regression)', () => {
+  it('still reads the legacy .json single-object format (no regression)', async () => {
     fs.writeFileSync(
       path.join(chatsDir(), 'session-b.json'),
       jsonSession('gemini-2.5-flash', 1_000_000)
     );
-    const res = scanGeminiHistory(null);
+    const res = await scanGeminiHistory(null);
     expect(res.sessions).toBe(1);
     expect(res.totalCostUSD).toBeCloseTo(0.3, 6);
   });
 
-  it('counts a session once when it exists in BOTH formats (prefers .jsonl)', () => {
+  it('counts a session once when it exists in BOTH formats (prefers .jsonl)', async () => {
     const dir = chatsDir();
     // Same basename, both extensions — e.g. a migrated session.
     fs.writeFileSync(path.join(dir, 'session-c.json'), jsonSession('gemini-2.5-flash', 1_000_000));
@@ -87,7 +87,7 @@ describe('scanGeminiHistory — reads current .jsonl format (not just legacy .js
       path.join(dir, 'session-c.jsonl'),
       jsonlSession('gemini-2.5-flash', 1_000_000)
     );
-    const res = scanGeminiHistory(null);
+    const res = await scanGeminiHistory(null);
     expect(res.sessions).toBe(1); // not double-counted
     expect(res.totalCostUSD).toBeCloseTo(0.3, 6);
   });

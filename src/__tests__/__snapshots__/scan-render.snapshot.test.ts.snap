@@ -124,14 +124,17 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
       "bashCalls": 6123,
       "totalCostUSD": 9025.15,
       "firstDate": "2026-04-06T00:00:00Z",
-      "lastDate": "2026-05-07T00:00:00Z"
+      "lastDate": "2026-05-07T00:00:00Z",
+      "mcpCalls": 0,
+      "mcpByServer": {}
     },
     "byVerdict": {
       "blocked": 8,
       "supervised": 56,
       "leaks": 4,
       "canaries": 0,
-      "loops": 289
+      "loops": 289,
+      "loggedOnly": 0
     },
     "byAgent": [],
     "sections": [

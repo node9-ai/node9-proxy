@@ -67,7 +67,7 @@ describe('scan vs report reconcile — shared subset', () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it('single allowed Bash call appears in both sources with matching counts', () => {
+  it('single allowed Bash call appears in both sources with matching counts', async () => {
     const sessionId = 'session-bash-allow';
     const ts = '2026-06-01T12:00:00.000Z';
 
@@ -109,7 +109,7 @@ describe('scan vs report reconcile — shared subset', () => {
       },
     ]);
 
-    const scan = scanClaudeHistory(null);
+    const scan = await scanClaudeHistory(null);
     const { data: report } = aggregateReportFromAudit('90d', {
       now: new Date('2026-06-02T00:00:00.000Z'),
       auditLogPath,
@@ -127,11 +127,11 @@ describe('scan vs report reconcile — shared subset', () => {
     expect(scan.bashCalls).toBe(report.toolMap.get('Bash')?.calls ?? 0);
   });
 
-  it('zero events: both sources empty agree on zero', () => {
+  it('zero events: both sources empty agree on zero', async () => {
     // No JSONL files, no audit.log entries (file missing is fine).
     fs.mkdirSync(claudeProjectsDir, { recursive: true });
 
-    const scan = scanClaudeHistory(null);
+    const scan = await scanClaudeHistory(null);
     const { data: report, hasAuditFile } = aggregateReportFromAudit('90d', {
       now: new Date('2026-06-02T00:00:00.000Z'),
       auditLogPath,

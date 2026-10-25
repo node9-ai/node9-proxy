@@ -208,7 +208,10 @@ describe('S. node9 scan report', () => {
     fs.rmSync(path.join(home, '.node9', 'canaries.json'));
     const after = scanJson().out;
     expect(after.totals.canaries).toBe(0);
-    expect(after.totals.leaks).toBe(0);
+    // With the registry gone the value is a credential-shaped string written
+    // into a code file, and the live hook blocks that write (DLP). The scan
+    // judges through the same gate (fw#399), so it is a leak, as the hook says.
+    expect(after.totals.leaks).toBe(1);
   });
 
   it('S7 the PEM body line, which no regex matches: reported only because it is a decoy', () => {

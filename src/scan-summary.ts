@@ -16,6 +16,7 @@
 // This module is PURE: no fs, no network. Any I/O (scanning JSONL) lives
 // in cli/commands/scan.ts; this module only consumes ScanResult instances.
 import type { ScanResult, SessionCost } from './cli/commands/scan';
+import type { ScanPolicy } from './cli/commands/scan-judge';
 import { SHIELDS } from './shields';
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,10 @@ export interface ScanSummary {
     totalCostUSD: number;
     firstDate: string | null;
     lastDate: string | null;
+    /** MCP tool calls in the window and the calls per server, from the same
+     *  tally as `bashCalls` (fw#403). */
+    mcpCalls: number;
+    mcpByServer: Record<string, number>;
   };
   byVerdict: {
     blocked: number; // any verdict === 'block' (regardless of source)
@@ -106,7 +111,14 @@ export interface ScanSummary {
      *  inflate the leak count and the scan-history delta. */
     canaries: number;
     loops: number;
+    /** Findings the gate would record without stopping: observe mode, or a
+     *  check set to log. Counted inside `blocked` / `supervised` too; this
+     *  says how many of those nothing enforces (fw#399). */
+    loggedOnly: number;
   };
+  /** What the calls were judged under: the user's mode and policy source.
+   *  Absent on a summary built from scans that carried none. */
+  policy?: ScanPolicy;
   byAgent: AgentSummary[];
   sections: Section[];
   leaks: LeakRef[];
@@ -155,9 +167,14 @@ export interface FindingRef {
   sessionId: string;
   agent: AgentId;
   toolName: string;
+  /** The call's working directory and its git repository, when known (fw#404). */
+  cwd?: string;
+  repo?: string;
 }
 
 export interface LeakRef {
+  cwd?: string;
+  repo?: string;
   patternName: string;
   redactedSample: string;
   toolName: string;
@@ -289,11 +306,16 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     totalCostUSD: 0,
     firstDate: null as string | null,
     lastDate: null as string | null,
+    mcpCalls: 0,
+    mcpByServer: {} as Record<string, number>,
   };
   for (const a of agents) {
     stats.sessions += a.scan.sessions;
     stats.totalToolCalls += a.scan.totalToolCalls;
     stats.bashCalls += a.scan.bashCalls;
+    stats.mcpCalls += a.scan.mcpCalls ?? 0;
+    for (const [server, n] of Object.entries(a.scan.mcpByServer ?? {}))
+      stats.mcpByServer[server] = (stats.mcpByServer[server] ?? 0) + n;
     stats.totalCostUSD += a.scan.totalCostUSD;
     if (a.scan.firstDate && (!stats.firstDate || a.scan.firstDate < stats.firstDate)) {
       stats.firstDate = a.scan.firstDate;
@@ -314,6 +336,8 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
       project: f.project,
       sessionId: f.sessionId,
       agent: f.agent,
+      ...(f.cwd && { cwd: f.cwd }),
+      ...(f.repo && { repo: f.repo }),
     }))
   );
   const allCanaries: CanaryRef[] = agents.flatMap((a) =>
@@ -352,7 +376,9 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     leaks: allLeaks.length,
     canaries: allCanaries.length,
     loops: allLoops.length,
+    loggedOnly: allFindings.filter((f) => f.enforced === false).length,
   };
+  const policy = agents.map((a) => a.scan.policy).find((p) => p !== undefined);
 
   // Per-agent summary
   const byAgent: AgentSummary[] = agents
@@ -382,6 +408,7 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
   return {
     stats,
     byVerdict,
+    ...(policy && { policy }),
     byAgent,
     sections,
     leaks: allLeaks,
@@ -390,6 +417,16 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
     loopWastedUSD,
     loopWaste,
   };
+}
+
+/**
+ * The verb for the block column. A machine in observe / audit mode enforces
+ * nothing, and `node9 posture` says so; the scan must say the same (fw#399).
+ */
+export function wouldHaveVerb(summary: ScanSummary, past = 'would have blocked'): string {
+  return summary.policy?.recordOnly
+    ? `logged only (${summary.policy.mode} mode, nothing enforced)`
+    : past;
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +526,8 @@ function buildSections(findings: any[]): Section[] {
         sessionId: f.sessionId,
         agent: f.agent,
         toolName: f.toolName,
+        ...(f.cwd && { cwd: f.cwd }),
+        ...(f.repo && { repo: f.repo }),
       });
     }
 
