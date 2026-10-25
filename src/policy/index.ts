@@ -15,6 +15,7 @@ import path from 'path';
 import os from 'os';
 import { scanArgumentSecrets, scanFilePath } from '../dlp';
 import { prepareFileAccesses, type PreparedFileAccess } from './file-access';
+import { runPackageCheck, type PackageCheckConfig } from '../supply-chain/check';
 import { getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
@@ -30,6 +31,8 @@ import {
   shellRuleArgs,
   inspectionEntry,
   inspectionLayers,
+  evaluateProtectedFileAccess,
+  catalogSettingsFromConfig,
   type PolicyVerdict,
 } from '@node9/policy-engine';
 
@@ -200,13 +203,181 @@ export async function explainPolicy(
     process.cwd(),
     inspectionLayers(config.policy)
   );
+  const { result, engine } = await explainEngineVerdict(toolName, args, agent, config, prepared);
+  // The hook skips the package check for a manual (Terminal) call.
+  if (agent === 'Terminal') return result;
+  return withPackageCheck(
+    result,
+    toolName,
+    args,
+    config.policy.packageCheck,
+    prepared.cwd,
+    gateBeforePackageCheck(result, engine, config, prepared)
+  );
+}
+
+const PACKAGE_STEP = 'Package check';
+const PACKAGE_BLOCK_LABEL = '📦 Node9 Package Check (Malicious)';
+const PACKAGE_REVIEW_LABEL = '📦 Node9 Package Check (Review)';
+const ENGINE_STEP = 'Engine verdict (authoritative)';
+
+/**
+ * The hook gate that returns before the package check runs, if any. In the
+ * hook (auth/orchestrator.ts) the protected-file gate returns first (a block,
+ * or a review under panic mode), then the DLP scanner on a block. The file
+ * verdict is computed here with the same function and inputs the hook uses,
+ * so explain does not infer it from the engine's labels.
+ */
+function gateBeforePackageCheck(
+  result: ExplainResult,
+  engine: PolicyVerdict | null,
+  config: ReturnType<typeof getConfig>,
+  prepared: PreparedFileAccess
+): string | null {
+  try {
+    const file = evaluateProtectedFileAccess(
+      prepared.accesses,
+      prepared,
+      catalogSettingsFromConfig(config.settings, config.policy)
+    );
+    if (
+      file &&
+      (file.decision === 'block' || (file.decision === 'review' && config.settings.panicMode))
+    ) {
+      return 'the protected-file check';
+    }
+  } catch {
+    // The hook holds such a call for approval; explain reports what it can.
+  }
+  const traceDlpBlock = result.steps.some(
+    (s) => s.name === 'DLP Content Scanner' && s.outcome === 'block'
+  );
+  const engineDlpBlock =
+    engine?.decision === 'block' && (engine.checkId?.startsWith('data.secrets') ?? false);
+  return traceDlpBlock || engineDlpBlock ? 'the DLP scanner' : null;
+}
+
+/**
+ * The package check runs in the hook (auth/orchestrator.ts), not in the
+ * engine, so the engine verdict above cannot include it (fw#395). Mirror the
+ * hook's order: the file gate and a DLP block return first; a package block
+ * returns before the engine runs; a package review turns an engine allow into
+ * a review, and an engine block wins over it. Lookups fail open in both places.
+ */
+async function withPackageCheck(
+  result: ExplainResult,
+  toolName: string,
+  args: unknown,
+  cfg: PackageCheckConfig | undefined,
+  cwd: string | undefined,
+  preemptedBy: string | null
+): Promise<ExplainResult> {
+  const place = (step: ExplainStep, patch: Partial<ExplainResult> = {}): ExplainResult => {
+    const earlier = step.isFinal
+      ? result.steps.map((s) => (s.isFinal ? { ...s, isFinal: false } : s))
+      : [...result.steps];
+    const dlp = earlier.findIndex((s) => s.name === 'DLP Content Scanner');
+    earlier.splice(dlp + 1, 0, step);
+    return { ...result, ...patch, steps: earlier };
+  };
+
+  if (preemptedBy) {
+    return place({
+      name: PACKAGE_STEP,
+      outcome: 'skip',
+      detail: `Not reached: ${preemptedBy} blocks first`,
+    });
+  }
+  if (!cfg?.enabled) {
+    return place({
+      name: PACKAGE_STEP,
+      outcome: 'skip',
+      detail: 'Package check is off (policy.packageCheck.enabled is false)',
+    });
+  }
+
+  const pkg = await runPackageCheck(toolName, args, cfg, cwd);
+  const failed = pkg.misses.join('; ');
+  const misses =
+    pkg.misses.length === 0
+      ? ''
+      : pkg.verdict === 'block'
+        ? ` Some lookups failed: ${failed}`
+        : ` Some lookups failed, and a failed lookup does not stop the call: ${failed}`;
+
+  if (pkg.verdict === 'block' && pkg.reason) {
+    // The hook returns here, so the engine never runs: its step, if shown,
+    // must not still claim to be the enforced verdict.
+    const blocked = place(
+      { name: PACKAGE_STEP, outcome: 'block', detail: pkg.reason + misses, isFinal: true },
+      {
+        decision: 'block',
+        blockedByLabel: PACKAGE_BLOCK_LABEL,
+        ruleDescription: pkg.reason,
+        matchedToken: undefined,
+      }
+    );
+    return {
+      ...blocked,
+      steps: blocked.steps.map((s) =>
+        s.name === ENGINE_STEP
+          ? {
+              ...s,
+              outcome: 'skip',
+              detail: 'Not reached: the package check blocks before the policy engine runs',
+            }
+          : s
+      ),
+    };
+  }
+  if (pkg.verdict === 'review' && pkg.reason) {
+    const step: ExplainStep = {
+      name: PACKAGE_STEP,
+      outcome: 'review',
+      detail: pkg.reason + misses,
+    };
+    if (result.decision === 'block') return place(step);
+    if (result.decision === 'review') {
+      return place(step, {
+        ruleDescription: result.ruleDescription
+          ? `${result.ruleDescription}\n${pkg.reason}`
+          : pkg.reason,
+      });
+    }
+    return place(
+      { ...step, isFinal: true },
+      { decision: 'review', blockedByLabel: PACKAGE_REVIEW_LABEL, ruleDescription: pkg.reason }
+    );
+  }
+  if (pkg.checked === 0) {
+    return place({
+      name: PACKAGE_STEP,
+      outcome: 'skip',
+      detail: `No package install or run in this command.${misses}`,
+    });
+  }
+  return place({
+    name: PACKAGE_STEP,
+    outcome: 'checked',
+    detail: `${pkg.checked} package${pkg.checked === 1 ? '' : 's'} checked, no findings.${misses}`,
+  });
+}
+
+/** The engine verdict, reconciled with the human-readable trace. */
+async function explainEngineVerdict(
+  toolName: string,
+  args: unknown,
+  agent: string,
+  config: ReturnType<typeof getConfig>,
+  prepared: PreparedFileAccess
+): Promise<{ result: ExplainResult; engine: PolicyVerdict }> {
   const derived = await deriveExplainTrace(toolName, args, prepared);
   const engine = await evaluatePolicy(toolName, args, agent, prepared.cwd, {
     fileAccess: prepared,
     config,
   });
   const fileVerdict = engine.checkId?.startsWith('files.');
-  if (derived.decision === engine.decision && !fileVerdict) return derived;
+  if (derived.decision === engine.decision && !fileVerdict) return { result: derived, engine };
 
   // Drift canary — a gate the engine runs (and the re-derivation models
   // differently) decided this. Loud in debug so the next added gate can't
@@ -219,7 +390,7 @@ export async function explainPolicy(
   }
 
   const engineStep: ExplainStep = {
-    name: fileVerdict ? 'Protected file access' : 'Engine verdict (authoritative)',
+    name: fileVerdict ? 'Protected file access' : ENGINE_STEP,
     outcome: engine.decision,
     detail: fileVerdict
       ? (engine.reason ?? engine.ruleDescription ?? 'Protected file access')
@@ -231,11 +402,14 @@ export async function explainPolicy(
   };
 
   return {
-    ...derived,
-    steps: [...derived.steps, engineStep],
-    decision: engine.decision,
-    blockedByLabel: engine.blockedByLabel ?? derived.blockedByLabel,
-    ruleDescription: engine.ruleDescription ?? derived.ruleDescription,
+    engine,
+    result: {
+      ...derived,
+      steps: [...derived.steps, engineStep],
+      decision: engine.decision,
+      blockedByLabel: engine.blockedByLabel ?? derived.blockedByLabel,
+      ruleDescription: engine.ruleDescription ?? derived.ruleDescription,
+    },
   };
 }
 
