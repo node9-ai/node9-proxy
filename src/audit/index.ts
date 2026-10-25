@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
+import { forecastRun } from '../auth/forecast-context';
 import {
   checkIdForRule,
   checkIdForCheckedBy,
@@ -106,6 +107,8 @@ export function truncateAuditPreview(text: string): string {
 }
 
 export function appendToLog(logPath: string, entry: object): void {
+  // A forecast run writes nothing; its rows are recorded in appendLocalAudit.
+  if (forecastRun()) return;
   try {
     const dir = path.dirname(logPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -279,6 +282,27 @@ export function appendLocalAudit(
   // second taxonomy beside checkedBy and ruleName.
   const checkId = meta?.checkId ?? checkIdForRule(meta?.ruleName) ?? checkIdForCheckedBy(checkedBy);
   const checkIdField = checkId ? { checkId } : {};
+  // A forecast run keeps the row in memory: same attribution, no file.
+  const forecast = forecastRun();
+  if (forecast) {
+    forecast.rows.push({
+      decision,
+      checkedBy,
+      ...(meta?.ruleName && { ruleName: meta.ruleName }),
+      ...checkIdField,
+      ...(meta?.dlpPattern && { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }),
+      ...(meta?.piiPatterns && { piiPatterns: meta.piiPatterns }),
+      ...(meta?.canaryId && {
+        canaryId: meta.canaryId,
+        canaryKind: meta.canaryKind,
+        canaryPath: meta.canaryPath,
+        canaryView: meta.canaryView,
+      }),
+      ...(typeof meta?.loopCount === 'number' && { loopCount: meta.loopCount }),
+      ...(meta?.exposure && { exposure: meta.exposure }),
+    });
+    return generateEventId();
+  }
   const agentToolNameField = meta?.agentToolName ? { agentToolName: meta.agentToolName } : {};
   const dlpFields = meta?.dlpPattern
     ? { dlpPattern: meta.dlpPattern, dlpSample: meta.dlpSample }

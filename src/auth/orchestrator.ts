@@ -55,6 +55,7 @@ import { toolRole, splitMcpToolName, sourceWord, EXPOSURE_LABEL } from '../expos
 import { isTrustedRecipient, addTrustedRecipient } from './trusted-recipients';
 import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
 import { getConfig, getCredentials } from '../config';
+import { forecastRun, noteForecastUnknown } from './forecast-context';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
 import {
   checkPause,
@@ -203,6 +204,9 @@ export interface AuthResult {
   redirect?: string;
   /** Name of the smart rule that fired (for HUD lastRuleHit tracking). */
   ruleHit?: string;
+  /** The catalog check behind a policy verdict (`commands.sudo`), when the
+   *  engine named one. The other gates name theirs through the audit tag. */
+  checkId?: string;
   /** fw#318: the keys an exposure review held, for the inline-ask marker. */
   exposureKeys?: string[];
   /** fw#318 2b: the eid of the read a held send followed (the audit edge). */
@@ -505,7 +509,7 @@ export function approvalTimeoutReason(approvalTimeoutMs: number): string {
   );
 }
 
-async function _authorizeHeadlessCore(
+export async function _authorizeHeadlessCore(
   toolName: string,
   args: unknown,
   metaArg?: {
@@ -547,7 +551,10 @@ async function _authorizeHeadlessCore(
   if (pauseState.paused) return { approved: true, checkedBy: 'paused' };
 
   const creds = getCredentials();
-  const config = getConfig(options?.cwd);
+  // A forecast run (forecast.ts) judges under the configuration its caller
+  // resolved once per project; everything else below is the live gate.
+  const forecast = forecastRun();
+  const config = forecast?.config ?? getConfig(options?.cwd);
   // `let`: forced on once the DLP gate flags a credential, so no row written
   // for that call -- flagged, persistent, trust, race outcome, no-channel deny
   // -- carries the args in clear. The block row already forces it (`true`
@@ -590,13 +597,19 @@ async function _authorizeHeadlessCore(
   const isManual = meta?.agent === 'Terminal';
   // Audit (and `observe`, its older name): nothing is stopped; every check
   // records what it would have done.
-  const isObserveMode = isRecordOnly(config.settings.mode);
+  // A forecast reports the enforcing verdict and labels it not enforced
+  // itself; the checks run as they would at an enforcing level.
+  const isObserveMode = isRecordOnly(config.settings.mode) && !forecast;
 
   let explainableLabel = 'Local Config';
   let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
   let packageReview: string | null = null; // the package check asked for review
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
+  // The engine verdict behind a review, for the inline-ask result and the
+  // forecast: the rule and the catalog check that asked.
+  let policyReviewRule: string | undefined;
+  let policyReviewCheckId: string | undefined;
   let policyRuleDescription: string | undefined;
   let riskMetadata: RiskMetadata | undefined;
   // Set when a stateful block's predicates are NOT met and we fall through to the
@@ -1265,8 +1278,16 @@ async function _authorizeHeadlessCore(
       ssrfStrict: config.policy.egress?.ssrfStrict,
     });
     if (dest && !isObserveMode) {
+      const ssrfRule = `ssrf:${dest.tier}:${toolName}:${dest.host}`;
       if (!isManual)
-        appendLocalAudit(toolName, args, 'deny', 'ssrf-destination', meta, hashAuditArgs);
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          'ssrf-destination',
+          { ...meta, ruleName: ssrfRule },
+          hashAuditArgs
+        );
       return {
         approved: false,
         checkedBy: 'local-policy',
@@ -1274,7 +1295,7 @@ async function _authorizeHeadlessCore(
         reason: dest.reason,
         // AuthResult carries no ruleName; the rule identity the audit row needs
         // travels in ruleHit, as it does for a smart-rule block.
-        ruleHit: `ssrf:${dest.tier}:${toolName}:${dest.host}`,
+        ruleHit: ssrfRule,
         ruleDescription: dest.reason,
       };
     }
@@ -1433,8 +1454,11 @@ async function _authorizeHeadlessCore(
   // into a fail-CLOSED engine error in the gateway.
   const packageCheck = config.policy.packageCheck;
   if (packageCheck?.enabled && !isManual) {
-    const pkg = await runPackageCheck(toolName, args, packageCheck, options?.cwd);
+    const pkg = await runPackageCheck(toolName, args, packageCheck, options?.cwd, {
+      offline: !!forecast,
+    });
     if (pkg.misses.length > 0) {
+      noteForecastUnknown('package-registry');
       appendToLog(HOOK_DEBUG_LOG, {
         ts: new Date().toISOString(),
         event: 'package-check-miss',
@@ -1726,10 +1750,17 @@ async function _authorizeHeadlessCore(
           args,
           'allow',
           'local-policy',
-          { ...ownRowMeta(true), ruleName: policyResult.ruleName },
+          { ...ownRowMeta(true), ruleName: policyResult.ruleName, checkId: policyResult.checkId },
           hashAuditArgs
         );
-      return { approved: true, checkedBy: 'local-policy' };
+      return {
+        approved: true,
+        checkedBy: 'local-policy',
+        ...(policyResult.logged && {
+          ruleHit: policyResult.ruleName,
+          checkId: policyResult.checkId,
+        }),
+      };
     }
 
     // Hard block from smart rules — skip the race engine entirely
@@ -1773,6 +1804,7 @@ async function _authorizeHeadlessCore(
         blockedBy: 'local-config',
         blockedByLabel: policyResult.blockedByLabel,
         ruleHit: policyResult.ruleName,
+        ...(policyResult.checkId && { checkId: policyResult.checkId }),
         ...(policyResult.recoveryCommand && { recoveryCommand: policyResult.recoveryCommand }),
         ...(policyResult.ruleDescription && { ruleDescription: policyResult.ruleDescription }),
         ...protectedPathFields(policyResult.ruleName, toolName, args, dlpReviewFlagged),
@@ -1891,6 +1923,10 @@ async function _authorizeHeadlessCore(
     // label replaces the DLP one, as before; combining the two, the way the
     // app-permission branch does, is not done here.
     explainableLabel = policyResult.blockedByLabel || explainableLabel;
+    if (policyResult.decision === 'review') {
+      policyReviewRule = policyResult.ruleName;
+      policyReviewCheckId = policyResult.checkId;
+    }
     policyMatchedField = policyResult.matchedField;
     policyMatchedWord = policyResult.matchedWord;
     // B1 (#6): the tier-7 strict fallback reviews with NO ruleName (it is a
@@ -2181,7 +2217,11 @@ async function _authorizeHeadlessCore(
   // managed reviewChannel:'approver' (workspace, one click).
   // Set by check.ts (`deferReview: askMode`) for ask-capable agents (Claude
   // Code / Copilot), default-on.
-  if (options?.deferReview && !hardBlockDowngraded) {
+  // A forecast ends here too: the handshake, the card and the race are the
+  // consequences it must not have. Nothing downgrades a block in a forecast
+  // (no human is reachable), so `hardBlockDowngraded` is never set there.
+  if (forecast && approvers.cloud && !!creds?.apiKey) noteForecastUnknown('cloud-gate');
+  if ((options?.deferReview && !hardBlockDowngraded) || forecast) {
     return {
       approved: false,
       review: true,
@@ -2196,6 +2236,8 @@ async function _authorizeHeadlessCore(
         'Node9 flagged this action for review.',
       ...(exposureReview && exposureKeys.length > 0 ? { exposureKeys } : {}),
       ...(exposureReview && exposureFromEid ? { exposureFromEid } : {}),
+      ...(policyReviewRule && { ruleHit: policyReviewRule }),
+      ...(policyReviewCheckId && { checkId: policyReviewCheckId }),
       ruleDescription: policyRuleDescription,
       blockedByLabel: explainableLabel,
     };

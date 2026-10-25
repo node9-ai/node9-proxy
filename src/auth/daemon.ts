@@ -6,6 +6,7 @@ import net from 'net';
 import path from 'path';
 import os from 'os';
 import { type RiskMetadata } from '../context-sniper';
+import { forecastRun } from './forecast-context';
 import {
   CARD_PROTOCOL,
   legacyWaitFields,
@@ -26,6 +27,8 @@ const ACTIVITY_SOCKET_PATH =
  * if it's false, pass fromCLI=false so the daemon emits the activity event itself.
  */
 export function notifyActivitySocket(data: Record<string, unknown>): Promise<boolean> {
+  // A forecast run never opens the socket.
+  if (forecastRun()) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
     try {
       const payload = JSON.stringify(data);
@@ -49,6 +52,8 @@ export async function checkStatePredicates(
   predicates: string[]
 ): Promise<Record<string, boolean> | null> {
   if (predicates.length === 0) return {};
+  // A forecast has no daemon state to ask: fail open, as a down daemon does.
+  if (forecastRun()) return null;
   try {
     const qs = predicates.map(encodeURIComponent).join(',');
     const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/state/check?predicates=${qs}`, {
@@ -93,6 +98,7 @@ export const DAEMON_HOST = '127.0.0.1';
  * register and clear viewer-mode cards without needing the CSRF token.
  */
 export function getInternalToken(): string | null {
+  if (forecastRun()) return null;
   try {
     const pidFile = path.join(os.homedir(), '.node9', 'daemon.pid');
     if (!fs.existsSync(pidFile)) return null;
@@ -105,6 +111,9 @@ export function getInternalToken(): string | null {
 }
 
 export function isDaemonRunning(): boolean {
+  // A forecast run is served by a virtual daemon: every query below answers
+  // from the replayed session state, and no human approver is reachable.
+  if (forecastRun()) return true;
   const pidFile = path.join(os.homedir(), '.node9', 'daemon.pid');
 
   if (fs.existsSync(pidFile)) {
@@ -229,6 +238,7 @@ export async function probeDaemonHealth(timeoutMs = 800): Promise<DaemonHealthPr
  * review in a non-interactive context.
  */
 export async function daemonHasInteractiveApprover(timeoutMs = 400): Promise<boolean> {
+  if (forecastRun()) return false;
   try {
     const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/approver`, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -504,6 +514,11 @@ export async function notifyTaint(
   source: string,
   fromEid?: string
 ): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    forecast.session.taintPath(filePath, source, forecast.now, fromEid);
+    return;
+  }
   if (!isDaemonRunning()) return;
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -528,6 +543,13 @@ export async function notifyTaintPropagate(
   dest: string,
   clearSource = false
 ): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    const r = forecast.session.taintedPaths.get(src);
+    if (r) forecast.session.taintPath(dest, r.source, forecast.now, r.fromEid);
+    if (r && clearSource) forecast.session.taintedPaths.delete(src);
+    return;
+  }
   if (!isDaemonRunning()) return;
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -578,6 +600,11 @@ export interface TaintCheckResult {
  */
 export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
   if (paths.length === 0) return { tainted: false };
+  const forecast = forecastRun();
+  if (forecast) {
+    const record = forecast.session.checkTaint(paths, forecast.now);
+    return record ? { tainted: true, record } : { tainted: false };
+  }
   if (!isDaemonRunning()) return { tainted: false, daemonUnavailable: true };
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -611,6 +638,11 @@ export async function checkTaint(paths: string[]): Promise<TaintCheckResult> {
  * judged from its content (fw#372 A3). Best-effort, like notifyTaint.
  */
 export async function notifyWritten(paths: readonly string[]): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    forecast.session.noteWritten(paths);
+    return;
+  }
   if (paths.length === 0 || !isDaemonRunning()) return;
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -634,6 +666,8 @@ export interface WrittenCheckResult {
 /** Which of these paths an agent session wrote. Fail-open: no daemon, none. */
 export async function checkWritten(paths: readonly string[]): Promise<WrittenCheckResult> {
   if (paths.length === 0) return { written: [] };
+  const forecast = forecastRun();
+  if (forecast) return { written: forecast.session.written(paths) };
   if (!isDaemonRunning()) return { written: [], daemonUnavailable: true };
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -659,6 +693,11 @@ export async function checkWritten(paths: readonly string[]): Promise<WrittenChe
  * awaited before the PostToolUse hook exits (same reason as notifyTaint).
  */
 export async function notifySessionTaint(sessionId: string, source: string): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    forecast.session.noteOutputSecret(source.replace(/^output-secret:/, ''), forecast.now);
+    return;
+  }
   if (!sessionId || !isDaemonRunning()) return;
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -679,6 +718,12 @@ export async function notifySessionTaint(sessionId: string, source: string): Pro
  * checkTaint.
  */
 export async function checkSessionTaint(sessionId: string): Promise<SessionTaintCheckResult> {
+  const forecast = forecastRun();
+  if (forecast) {
+    const record = forecast.session.checkSessionTaint(forecast.now);
+    const exposed = forecast.session.checkExposure(forecast.now) !== null;
+    return record ? { tainted: true, record, exposed } : { tainted: false, exposed };
+  }
   if (!sessionId || !isDaemonRunning()) return { tainted: false };
   const base = `http://${DAEMON_HOST}:${DAEMON_PORT}`;
   try {
@@ -778,6 +823,11 @@ export async function notifySessionExposure(
   source: { tool: string; server?: string; word?: string; eid?: string },
   destinations: readonly string[]
 ): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    forecast.session.noteOutsideContent({ ...source, at: forecast.now }, [...destinations]);
+    return;
+  }
   if (!sessionId || !isDaemonRunning()) return;
   try {
     await exposurePost('/session-exposure', { sessionId, source, destinations }, 1000);
@@ -791,6 +841,14 @@ export async function notifyUserMentions(
   sessionId: string,
   destinations: readonly string[]
 ): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    if (forecast.session.exposure)
+      for (const d of destinations)
+        if (!forecast.session.exposure.userMentioned.includes(d))
+          forecast.session.exposure.userMentioned.push(d);
+    return;
+  }
   if (!sessionId || destinations.length === 0 || !isDaemonRunning()) return;
   try {
     await exposurePost('/session-exposure/user-mentioned', { sessionId, destinations }, 1000);
@@ -801,6 +859,11 @@ export async function notifyUserMentions(
 
 /** Fail-open: a daemon blip returns { exposed: false }. */
 export async function checkSessionExposure(sessionId: string): Promise<SessionExposureCheckResult> {
+  const forecast = forecastRun();
+  if (forecast) {
+    const record = forecast.session.checkExposure(forecast.now);
+    return record ? { exposed: true, record } : { exposed: false };
+  }
   if (!sessionId || !isDaemonRunning()) return { exposed: false };
   try {
     return (await exposurePost(
@@ -818,6 +881,11 @@ export async function approveSessionExposure(
   sessionId: string,
   keys: readonly string[]
 ): Promise<void> {
+  const forecast = forecastRun();
+  if (forecast) {
+    forecast.session.approveExposure(keys);
+    return;
+  }
   if (!sessionId || keys.length === 0 || !isDaemonRunning()) return;
   try {
     await exposurePost('/session-exposure/approve', { sessionId, keys }, 1000);

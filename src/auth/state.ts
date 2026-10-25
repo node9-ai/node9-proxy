@@ -5,6 +5,7 @@ import path from 'path';
 import os from 'os';
 import { matchesPattern } from '../policy';
 import { atomicWriteSync } from '../utils/atomic-write';
+import { forecastRun } from './forecast-context';
 
 const PAUSED_FILE = path.join(os.homedir(), '.node9', 'PAUSED');
 const TRUST_FILE = path.join(os.homedir(), '.node9', 'trust.json');
@@ -37,6 +38,8 @@ export function extractCommandPattern(toolName: string, args: unknown): string |
 }
 
 export function checkPause(): { paused: boolean; expiresAt?: number; duration?: string } {
+  // A pause is a moment, not a setting: a forecast judges as if none were on.
+  if (forecastRun()) return { paused: false };
   try {
     if (!fs.existsSync(PAUSED_FILE)) return { paused: false };
     const state = JSON.parse(fs.readFileSync(PAUSED_FILE, 'utf-8')) as PauseState;
@@ -64,6 +67,8 @@ export function resumeNode9(): void {
 }
 
 export function getActiveTrustSession(toolName: string, args?: unknown): boolean {
+  // Same for a trust session (and the read below rewrites trust.json).
+  if (forecastRun()) return false;
   try {
     if (!fs.existsSync(TRUST_FILE)) return false;
     const trust = JSON.parse(fs.readFileSync(TRUST_FILE, 'utf-8')) as TrustFile;
