@@ -10,6 +10,7 @@ import fs from 'fs';
 import net from 'net';
 import http from 'http';
 import https from 'https';
+import childProcess from 'child_process';
 import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -117,6 +118,9 @@ describe('a forecast run has no consequences', () => {
     const httpsReq = vi.spyOn(https, 'request');
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const popup = vi.spyOn(native, 'askNativePopup');
+    const procs = (
+      ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync'] as const
+    ).map((name) => vi.spyOn(childProcess, name));
 
     const state = new ForecastSessionState(SESSION);
     state.noteOutputSecret('GitHub Token', Date.now() - 1000);
@@ -145,6 +149,7 @@ describe('a forecast run has no consequences', () => {
     expect(httpsReq).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(popup).not.toHaveBeenCalled();
+    for (const spy of procs) expect(spy).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(tmp, 'node9-activity.sock'))).toBe(false);
     expect(fs.existsSync(path.join(home, '.node9', 'audit.log'))).toBe(false);
     expect(fs.existsSync(path.join(home, '.node9', 'hook-debug.log'))).toBe(false);

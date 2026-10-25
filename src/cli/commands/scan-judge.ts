@@ -16,6 +16,7 @@ import { SHIELDS } from '../../shields';
 import { forecastDecision, type ForecastVerdict } from '../../auth/forecast';
 import { ForecastSessionState } from '../../auth/forecast-state';
 import { toolRole } from '../../exposure/roles';
+import { configHashOf } from './scan-cache';
 import { scanArgs } from '../../dlp';
 import fs from 'fs';
 import os from 'os';
@@ -63,8 +64,19 @@ const PREVIEW_LEN = 120;
 export class HistoryJudge {
   private readonly configs = new Map<string, Config>();
   private readonly sessions = new Map<string, ForecastSessionState>();
-  private readonly unknownInputs: Record<string, number> = {};
   private readonly repos = new Map<string, string | undefined>();
+  private readonly hashes = new Map<string, string>();
+
+  /** The cache key of the configuration a call in `cwd` is judged under. */
+  configHashFor(cwd: string | undefined): string {
+    const key = cwd ?? '';
+    let h = this.hashes.get(key);
+    if (!h) {
+      h = configHashOf(this.configFor(cwd));
+      this.hashes.set(key, h);
+    }
+    return h;
+  }
 
   /** The nearest git repository at or above `cwd` (a `.git` directory or
    *  file, so worktrees count), home-relative; undefined when none. Cached per
@@ -136,13 +148,24 @@ export class HistoryJudge {
 
   async judge(call: HistoricalCall, result: ScanResult, dedup: ScanDedup): Promise<JudgedCall> {
     const config = this.configFor(call.cwd);
+    // Only Claude transcripts carry tool results, so only their session state
+    // can be fed; the other agents' state-dependent layers run blind and the
+    // verdict says so (`session-state` in `unknown`).
+    const session = this.session(call.sessionId, { blind: call.agent !== 'claude' });
     const verdict = await forecastDecision(
       call.toolName,
       call.input,
       { agent: call.agent, sessionId: call.sessionId },
-      { cwd: call.cwd, config, session: this.session(call.sessionId), at: clockOf(call.timestamp) }
+      { cwd: call.cwd, config, session, at: clockOf(call.timestamp) }
     );
-    for (const u of verdict.unknown) this.unknownInputs[u] = (this.unknownInputs[u] ?? 0) + 1;
+    for (const u of verdict.unknown) {
+      result.unknownInputs ??= {};
+      result.unknownInputs[u] = (result.unknownInputs[u] ?? 0) + 1;
+    }
+    if (call.cwd) {
+      result.configCwds ??= [];
+      if (!result.configCwds.includes(call.cwd)) result.configCwds.push(call.cwd);
+    }
     const repo = this.repoOf(call.cwd);
     const where = call.cwd ? { cwd: call.cwd, ...(repo && { repo }) } : {};
 
@@ -203,7 +226,9 @@ export class HistoryJudge {
         result.findings.push({
           source,
           toolName: call.toolName,
-          input: call.input,
+          // The report shows the command, the query or the path; file contents
+          // and edit bodies are not kept (the per-file cache persists findings).
+          input: reportInput(call.input),
           timestamp: call.timestamp,
           project: call.project,
           sessionId: call.sessionId,
@@ -221,7 +246,7 @@ export class HistoryJudge {
     return { verdict, dlpMatched };
   }
 
-  policy(): ScanPolicy {
+  policy(unknownInputs: Record<string, number> = {}): ScanPolicy {
     const home = this.configFor(undefined);
     const mode = home.settings.mode ?? 'standard';
     return {
@@ -229,7 +254,7 @@ export class HistoryJudge {
       mode,
       recordOnly: mode === 'observe' || mode === 'audit',
       policySource: home.policySource,
-      unknownInputs: { ...this.unknownInputs },
+      unknownInputs: { ...unknownInputs },
     };
   }
 }
@@ -243,6 +268,16 @@ export function findingDedupKey(f: Finding): string {
 /** The run-wide key of a leak: one row per pattern, sample and project. */
 export function dlpDedupKey(d: DlpFinding): string {
   return `${d.patternName}|${d.redactedSample}|${d.project}`;
+}
+
+/** The content fields a Write / Edit / notebook call carries are not part of
+ *  a finding's report row and are not kept. */
+const CONTENT_FIELDS = new Set(['content', 'new_string', 'old_string', 'new_source', 'text']);
+
+export function reportInput(input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input)) if (!CONTENT_FIELDS.has(k)) out[k] = v;
+  return out;
 }
 
 function clockOf(timestamp: string): number {

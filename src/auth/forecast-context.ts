@@ -33,6 +33,8 @@ export interface ForecastRow {
   canaryView?: string;
   loopCount?: number;
   exposure?: { kind: 'source' | 'logged'; destinations: number };
+  /** The engine's `log` verdict: an allow that records the check. */
+  logged?: boolean;
 }
 
 export interface ForecastRun {

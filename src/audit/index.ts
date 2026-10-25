@@ -187,6 +187,8 @@ export function appendLocalAudit(
      *  caller had it on the verdict. Absent, the row still gets one when
      *  `ruleName` or `checkedBy` translates (catalog.ts). */
     checkId?: string;
+    /** An allow that records a finding: the check is set to `log`. */
+    logged?: boolean;
     /** Agent-native tool name when canonicalisation rewrote it (e.g.
      *  Hermes `terminal` → canonical `Bash`). Audit row's `tool` field
      *  stays canonical so report aggregation works; this field lets
@@ -300,6 +302,7 @@ export function appendLocalAudit(
       }),
       ...(typeof meta?.loopCount === 'number' && { loopCount: meta.loopCount }),
       ...(meta?.exposure && { exposure: meta.exposure }),
+      ...(meta?.logged && { logged: true }),
     });
     return generateEventId();
   }

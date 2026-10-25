@@ -232,6 +232,12 @@ export interface ScanResult {
    *  tally as `bashCalls` (fw#403), and the calls per server. */
   mcpCalls?: number;
   mcpByServer?: Record<string, number>;
+  /** Inputs the forecast could not reproduce, per call count (`package-registry`,
+   *  `session-state`, `cloud-gate`). Per file, so a cached file keeps its own. */
+  unknownInputs?: Record<string, number>;
+  /** The working directories the judge resolved a configuration for while
+   *  judging this file: the cache re-checks their hashes before a hit. */
+  configCwds?: string[];
 }
 
 /** Count one MCP call against the tally when the name is namespaced. */
@@ -924,7 +930,7 @@ async function processClaudeFile(
   dedup: ScanDedup,
   canaryVals: readonly CanaryScanValue[],
   onLine?: () => void
-): Promise<void> {
+): Promise<boolean> {
   // A session counts when its first event inside the window is seen (fw#401);
   // a file is not a session. The caller counts the file.
   let sessionCounted = false;
@@ -940,7 +946,7 @@ async function processClaudeFile(
   try {
     raw = fs.readFileSync(path.join(projPath, file), 'utf-8');
   } catch {
-    return;
+    return false;
   }
 
   const sessionCalls: Array<{
@@ -1194,6 +1200,7 @@ async function processClaudeFile(
   // this session priced at nothing", which a consumer must be able to tell
   // apart from "we have no record of this session at all".
   result.perSession.push(session);
+  return true;
 }
 
 /**
@@ -1234,14 +1241,14 @@ async function processClaudeProject(
     result.filesScanned++;
     onProgress?.(result.filesScanned);
     const stamp = fileStamp(filePath);
-    const cached = stamp ? cache.get(filePath, stamp, window) : null;
+    const cached = stamp ? cache.get(filePath, stamp, window, judge) : null;
     if (cached) {
       mergeFileScan(result, cached, dedup);
       continue;
     }
     const fileResult = emptyScan();
     const fileDedup = emptyScanDedup();
-    await processClaudeFile(
+    const read = await processClaudeFile(
       file,
       projPath,
       projLabel,
@@ -1252,7 +1259,7 @@ async function processClaudeProject(
       canaryVals,
       onLine
     );
-    if (stamp) cache.put(filePath, stamp, window, 'claude', fileResult);
+    if (read && stamp) cache.put(filePath, stamp, window, 'claude', fileResult, judge);
     mergeFileScan(result, fileResult, dedup);
   }
 }
@@ -1298,14 +1305,14 @@ async function processClaudeProjectAsync(
     result.filesScanned++;
     onProgress?.(result.filesScanned);
     const stamp = fileStamp(filePath);
-    const cached = stamp ? cache.get(filePath, stamp, window) : null;
+    const cached = stamp ? cache.get(filePath, stamp, window, judge) : null;
     if (cached) {
       mergeFileScan(result, cached, dedup);
       continue;
     }
     const fileResult = emptyScan();
     const fileDedup = emptyScanDedup();
-    await processClaudeFile(
+    const read = await processClaudeFile(
       file,
       projPath,
       projLabel,
@@ -1316,7 +1323,7 @@ async function processClaudeProjectAsync(
       canaryVals,
       onLine
     );
-    if (stamp) cache.put(filePath, stamp, window, 'claude', fileResult);
+    if (read && stamp) cache.put(filePath, stamp, window, 'claude', fileResult, judge);
     mergeFileScan(result, fileResult, dedup);
     await yieldTick();
   }
@@ -1401,6 +1408,10 @@ export function mergeFileScan(result: ScanResult, file: ScanResult, dedup: ScanD
     result.mcpByServer ??= {};
     result.mcpByServer[server] = (result.mcpByServer[server] ?? 0) + n;
   }
+  for (const [what, n] of Object.entries(file.unknownInputs ?? {})) {
+    result.unknownInputs ??= {};
+    result.unknownInputs[what] = (result.unknownInputs[what] ?? 0) + n;
+  }
   for (const f of file.findings) {
     const k = findingDedupKey(f);
     if (dedup.findingsKeys.has(k)) continue;
@@ -1469,7 +1480,7 @@ export async function scanClaudeHistory(
   }
 
   cache.flush();
-  result.policy = judge.policy();
+  result.policy = judge.policy(result.unknownInputs ?? {});
   return result;
 }
 
@@ -1522,7 +1533,7 @@ export async function scanClaudeHistoryAsync(
   }
 
   cache.flush();
-  result.policy = judge.policy();
+  result.policy = judge.policy(result.unknownInputs ?? {});
   return result;
 }
 
@@ -1601,7 +1612,7 @@ export async function scanGeminiHistory(
       onProgress?.(result.filesScanned);
       const filePath = path.join(chatsDir, chatFile);
       const stamp = fileStamp(filePath);
-      const cached = stamp ? cache.get(filePath, stamp, window) : null;
+      const cached = stamp ? cache.get(filePath, stamp, window, judge) : null;
       if (cached) {
         mergeFileScan(result, cached, dedup);
         continue;
@@ -1719,7 +1730,7 @@ export async function scanGeminiHistory(
         for (const tc of msg.toolCalls ?? []) {
           fileResult.totalToolCalls++;
           const toolName = tc.name ?? '';
-          countMcpCall(result, toolName);
+          countMcpCall(fileResult, toolName);
           const toolNameLower = toolName.toLowerCase();
           const input = tc.args ?? {};
 
@@ -1762,13 +1773,13 @@ export async function scanGeminiHistory(
         }
       }
       fileResult.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'gemini'));
-      if (stamp) cache.put(filePath, stamp, window, 'gemini', fileResult);
+      if (stamp) cache.put(filePath, stamp, window, 'gemini', fileResult, judge);
       mergeFileScan(result, fileResult, dedup);
     }
   }
 
   cache.flush();
-  result.policy = judge.policy();
+  result.policy = judge.policy(result.unknownInputs ?? {});
   return result;
 }
 
@@ -1865,7 +1876,7 @@ export async function scanAntigravityHistory(
       result.filesScanned++;
       onProgress?.(result.filesScanned);
       const stamp = fileStamp(transcriptFile);
-      const cached = stamp ? cache.get(transcriptFile, stamp, window) : null;
+      const cached = stamp ? cache.get(transcriptFile, stamp, window, judge) : null;
       if (cached) {
         mergeFileScan(result, cached, dedup);
         continue;
@@ -1958,7 +1969,7 @@ export async function scanAntigravityHistory(
         for (const tc of step.tool_calls) {
           fileResult.totalToolCalls++;
           const toolName = tc.name ?? '';
-          countMcpCall(result, toolName);
+          countMcpCall(fileResult, toolName);
           const toolNameLower = toolName.toLowerCase();
           // Normalise agy's arg shape (CommandLine/Cwd → command/cwd) so
           // DLP, AST and smart-rule evaluation see Claude vocabulary —
@@ -2014,13 +2025,13 @@ export async function scanAntigravityHistory(
       fileResult.loopFindings.push(
         ...detectLoops(sessionCalls, projLabel, sessionId, 'antigravity')
       );
-      if (stamp) cache.put(transcriptFile, stamp, window, 'antigravity', fileResult);
+      if (stamp) cache.put(transcriptFile, stamp, window, 'antigravity', fileResult, judge);
       mergeFileScan(result, fileResult, dedup);
     }
   }
 
   cache.flush();
-  result.policy = judge.policy();
+  result.policy = judge.policy(result.unknownInputs ?? {});
   return result;
 }
 
@@ -2093,7 +2104,7 @@ export async function scanCopilotHistory(
     result.filesScanned++;
     onProgress?.(result.filesScanned);
     const stamp = fileStamp(eventsPath);
-    const cached = stamp ? cache.get(eventsPath, stamp, window) : null;
+    const cached = stamp ? cache.get(eventsPath, stamp, window, judge) : null;
     if (cached) {
       mergeFileScan(result, cached, dedup);
       continue;
@@ -2208,7 +2219,7 @@ export async function scanCopilotHistory(
       const input = (ev.data?.arguments ?? {}) as Record<string, unknown>;
 
       fileResult.totalToolCalls++;
-      countMcpCall(result, toolName);
+      countMcpCall(fileResult, toolName);
       sessionCalls.push({ toolName, input, timestamp });
 
       const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
@@ -2254,12 +2265,12 @@ export async function scanCopilotHistory(
       void judged;
     }
     fileResult.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'copilot'));
-    if (stamp) cache.put(eventsPath, stamp, window, 'copilot', fileResult);
+    if (stamp) cache.put(eventsPath, stamp, window, 'copilot', fileResult, judge);
     mergeFileScan(result, fileResult, dedup);
   }
 
   cache.flush();
-  result.policy = judge.policy();
+  result.policy = judge.policy(result.unknownInputs ?? {});
   return result;
 }
 
@@ -2301,7 +2312,7 @@ export async function scanCodexHistory(
     result.filesScanned++;
     onProgress?.(result.filesScanned);
     const stamp = fileStamp(filePath);
-    const cached = stamp ? cache.get(filePath, stamp, window) : null;
+    const cached = stamp ? cache.get(filePath, stamp, window, judge) : null;
     if (cached) {
       mergeFileScan(result, cached, dedup);
       continue;
@@ -2401,7 +2412,7 @@ export async function scanCodexHistory(
 
       fileResult.totalToolCalls++;
       const toolName = String(payload['name'] ?? '');
-      countMcpCall(result, toolName);
+      countMcpCall(fileResult, toolName);
       const toolNameLower = toolName.toLowerCase();
 
       let input: Record<string, unknown> = {};
@@ -2441,7 +2452,10 @@ export async function scanCodexHistory(
           toolName,
           input,
           scrubbed: decoysHere10.length ? scrubDecoys(input, decoysHere10) : undefined,
-          timestamp: ts,
+          // The window filter uses the session start (ts); the gate's clock
+          // (loop window, taint expiry) is the call's own time when the line
+          // carries one.
+          timestamp: typeof entry.timestamp === 'string' ? entry.timestamp : ts,
           sessionId,
           project: projLabel,
           cwd: sessionCwd,
@@ -2457,12 +2471,12 @@ export async function scanCodexHistory(
     }
 
     fileResult.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
-    if (stamp) cache.put(filePath, stamp, window, 'codex', fileResult);
+    if (stamp) cache.put(filePath, stamp, window, 'codex', fileResult, judge);
     mergeFileScan(result, fileResult, dedup);
   }
 
   cache.flush();
-  result.policy = judge.policy();
+  result.policy = judge.policy(result.unknownInputs ?? {});
   return result;
 }
 
@@ -2526,6 +2540,7 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     ...((a.policy ?? b.policy) && { policy: mergePolicy(a.policy, b.policy) }),
     mcpCalls: (a.mcpCalls ?? 0) + (b.mcpCalls ?? 0),
     mcpByServer: mergeCounts(a.mcpByServer, b.mcpByServer),
+    unknownInputs: mergeCounts(a.unknownInputs, b.unknownInputs),
   };
 }
 
@@ -3460,7 +3475,10 @@ export function registerScanCommand(program: Command): void {
     .description('Forecast: scan agent history and show what node9 would catch if installed')
     .option('--all', 'Scan all history (default: last 90 days)')
     .option('--days <n>', 'Scan last N days of history', '90')
-    .option('--no-cache', 'Re-read and re-judge every transcript (ignore ~/.node9/scan-cache)')
+    .option(
+      '--no-cache',
+      'Re-read and re-judge every transcript; the per-file results otherwise kept under ~/.node9/scan-cache are not read or written'
+    )
     .option('--top <n>', 'Max findings to show per rule (default: 5)', '5')
     .option('--drill-down', 'Show all findings with full commands and session IDs')
     .option('--compact', 'Compact one-screen scorecard — for screenshots and sharing')

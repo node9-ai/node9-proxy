@@ -49,7 +49,7 @@ export function BlockedPanel({
   // and the footer say so, in the words `node9 posture` uses.
   const recordOnly = summary.policy?.recordOnly === true;
   const footer = recordOnly
-    ? `→ ${summary.policy?.mode} mode: these were logged, not stopped · node9 config set mode standard`
+    ? `→ ${summary.policy?.mode} mode: these were logged, not stopped · nothing here was enforced`
     : enabled.size === 0
       ? '→ install node9 + enable shields above'
       : anyNeeds

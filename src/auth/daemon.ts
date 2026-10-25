@@ -111,9 +111,10 @@ export function getInternalToken(): string | null {
 }
 
 export function isDaemonRunning(): boolean {
-  // A forecast run is served by a virtual daemon: every query below answers
-  // from the replayed session state, and no human approver is reachable.
-  if (forecastRun()) return true;
+  // A forecast run has no daemon: every state query in this module answers
+  // from the replayed session state before it gets here, and with no daemon
+  // the gate reaches no human, so a hard block stays a block (review item 1).
+  if (forecastRun()) return false;
   const pidFile = path.join(os.homedir(), '.node9', 'daemon.pid');
 
   if (fs.existsSync(pidFile)) {

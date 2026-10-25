@@ -109,15 +109,14 @@ const LOGGED_TAGS = new Set([
   'file-protection-log',
   'dlp-review-flagged',
   'package-review-flagged',
-  'exposure-logged',
 ]);
 
+/** An allow row that records a finding: the engine's `logged` flag, a log
+ *  tag, or an exposure the untrusted-content check only logged. A matched
+ *  allow rule also names its rule on the row and is NOT a finding. */
 function loggedRow(row: ForecastRow): boolean {
   if (row.decision !== 'allow') return false;
-  if (LOGGED_TAGS.has(row.checkedBy)) return true;
-  // The engine's `log` verdict lands as a `local-policy` allow that names the
-  // rule; a plain allow names none.
-  return row.checkedBy === 'local-policy' && !!row.ruleName;
+  return row.logged === true || LOGGED_TAGS.has(row.checkedBy) || row.exposure?.kind === 'logged';
 }
 
 /** The layer behind a soft review the core expresses only through its label. */

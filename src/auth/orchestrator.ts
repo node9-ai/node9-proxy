@@ -1285,7 +1285,9 @@ export async function _authorizeHeadlessCore(
           args,
           'deny',
           'ssrf-destination',
-          { ...meta, ruleName: ssrfRule },
+          // The row names the tier and the tool; the host stays in the reason,
+          // so a report grouping by rule sees one rule per tier, not per host.
+          { ...meta, ruleName: `ssrf:${dest.tier}:${toolName}` },
           hashAuditArgs
         );
       return {
@@ -1750,7 +1752,12 @@ export async function _authorizeHeadlessCore(
           args,
           'allow',
           'local-policy',
-          { ...ownRowMeta(true), ruleName: policyResult.ruleName, checkId: policyResult.checkId },
+          {
+            ...ownRowMeta(true),
+            ruleName: policyResult.ruleName,
+            checkId: policyResult.checkId,
+            logged: policyResult.logged,
+          },
           hashAuditArgs
         );
       return {
@@ -1923,7 +1930,7 @@ export async function _authorizeHeadlessCore(
     // label replaces the DLP one, as before; combining the two, the way the
     // app-permission branch does, is not done here.
     explainableLabel = policyResult.blockedByLabel || explainableLabel;
-    if (policyResult.decision === 'review') {
+    if (policyResult.decision === 'review' && explainableLabel === policyResult.blockedByLabel) {
       policyReviewRule = policyResult.ruleName;
       policyReviewCheckId = policyResult.checkId;
     }
@@ -2218,8 +2225,8 @@ export async function _authorizeHeadlessCore(
   // Set by check.ts (`deferReview: askMode`) for ask-capable agents (Claude
   // Code / Copilot), default-on.
   // A forecast ends here too: the handshake, the card and the race are the
-  // consequences it must not have. Nothing downgrades a block in a forecast
-  // (no human is reachable), so `hardBlockDowngraded` is never set there.
+  // consequences it must not have. Nothing downgrades a block in a forecast:
+  // isDaemonRunning() is false there, so `hardBlockDowngraded` is never set.
   if (forecast && approvers.cloud && !!creds?.apiKey) noteForecastUnknown('cloud-gate');
   if ((options?.deferReview && !hardBlockDowngraded) || forecast) {
     return {

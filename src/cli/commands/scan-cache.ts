@@ -24,6 +24,7 @@ import { createHash } from 'crypto';
 import { CANONICAL_EXTRACTOR_VERSION } from '@node9/policy-engine';
 import type { Config } from '../../config';
 import type { ScanResult } from './scan';
+import { PROXY_VERSION } from '../../version';
 
 /** Bump when the per-file result shape or the parsers' semantics change. */
 export const SCAN_CACHE_VERSION = 1;
@@ -36,13 +37,28 @@ interface IndexEntry {
   agent: string;
   /** Cached result file, relative to the cache root. */
   result: string;
+  /** Hash of the configuration of every working directory the file's calls
+   *  were judged under; a project file that changed misses the cache. */
+  configHashes?: Record<string, string>;
+  /** When the entry was written; old windows are pruned. */
+  at: number;
 }
 
 interface IndexFile {
   cacheVersion: number;
   engineVersion: string;
+  proxyVersion: string;
   configHash: string;
+  /** Keyed by `<file path>|<window>`. */
   files: Record<string, IndexEntry>;
+}
+
+/** Windows kept beside the current one before their entries are pruned. */
+const KEPT_WINDOWS = 3;
+
+/** What the cache needs from the judge: the hash of a directory's configuration. */
+export interface ConfigHasher {
+  configHashFor(cwd: string | undefined): string;
 }
 
 export interface FileStamp {
@@ -54,12 +70,33 @@ export function scanCacheRoot(): string {
   return path.join(os.homedir(), '.node9', 'scan-cache');
 }
 
-/** A hash of everything the judge reads that can change a verdict. */
+/** Files beside config.json that the gate reads on every call and that are
+ *  not part of the resolved configuration object: the decoy registry, the
+ *  shield state, jail paths, standing decisions, trusted hosts and
+ *  recipients, the workspace policy cache and the OSV index metadata. */
+const SIDECAR_FILES = [
+  'canaries.json',
+  'shields.json',
+  'jail-paths.json',
+  'decisions.json',
+  'trusted-hosts.json',
+  'trusted-recipients.json',
+  'rules-cache.json',
+  path.join('osv', 'npm', 'meta.json'),
+  path.join('osv', 'PyPI', 'meta.json'),
+];
+
+/** A hash of everything the judge reads that can change a verdict: the
+ *  resolved configuration and the size and mtime of every sidecar file. */
 export function configHashOf(config: Config): string {
   const h = createHash('sha256');
   h.update(JSON.stringify(config.settings.mode ?? ''));
   h.update(JSON.stringify(config.policySource));
   h.update(JSON.stringify(config.policy));
+  for (const name of SIDECAR_FILES) {
+    const st = fileStamp(path.join(os.homedir(), '.node9', name));
+    h.update(`|${name}:${st ? `${st.size}:${st.mtimeMs}` : 'absent'}`);
+  }
   return h.digest('hex').slice(0, 16);
 }
 
@@ -91,6 +128,7 @@ export class ScanCache {
     const fresh: IndexFile = {
       cacheVersion: SCAN_CACHE_VERSION,
       engineVersion: CANONICAL_EXTRACTOR_VERSION,
+      proxyVersion: PROXY_VERSION,
       configHash,
       files: {},
     };
@@ -102,6 +140,7 @@ export class ScanCache {
       if (
         raw.cacheVersion !== SCAN_CACHE_VERSION ||
         raw.engineVersion !== CANONICAL_EXTRACTOR_VERSION ||
+        raw.proxyVersion !== PROXY_VERSION ||
         raw.configHash !== configHash ||
         typeof raw.files !== 'object'
       ) {
@@ -123,13 +162,25 @@ export class ScanCache {
     }
   }
 
-  /** The cached result for an unchanged file in this window, or null. */
-  get(filePath: string, stamp: FileStamp, window: string): ScanResult | null {
+  /** The cached result for an unchanged file in this window, judged under
+   *  configurations that have not changed either, or null. */
+  get(
+    filePath: string,
+    stamp: FileStamp,
+    window: string,
+    hasher?: ConfigHasher
+  ): ScanResult | null {
     if (!this.enabled) return null;
-    const e = this.index.files[filePath];
-    if (!e || e.size !== stamp.size || e.mtimeMs !== stamp.mtimeMs || e.window !== window) {
+    const e = this.index.files[`${filePath}|${window}`];
+    if (!e || e.size !== stamp.size || e.mtimeMs !== stamp.mtimeMs) {
       this.misses++;
       return null;
+    }
+    for (const [cwd, hash] of Object.entries(e.configHashes ?? {})) {
+      if (hasher && hasher.configHashFor(cwd) !== hash) {
+        this.misses++;
+        return null;
+      }
     }
     try {
       const r = JSON.parse(fs.readFileSync(path.join(this.root, e.result), 'utf8')) as ScanResult;
@@ -141,24 +192,68 @@ export class ScanCache {
     }
   }
 
-  put(filePath: string, stamp: FileStamp, window: string, agent: string, result: ScanResult): void {
+  put(
+    filePath: string,
+    stamp: FileStamp,
+    window: string,
+    agent: string,
+    result: ScanResult,
+    hasher?: ConfigHasher
+  ): void {
     if (!this.enabled) return;
     const name = createHash('sha1').update(`${agent}|${filePath}|${window}`).digest('hex');
     const rel = path.join('files', name.slice(0, 2), `${name}.json`);
+    const configHashes: Record<string, string> = {};
+    if (hasher)
+      for (const cwd of result.configCwds ?? []) configHashes[cwd] = hasher.configHashFor(cwd);
     try {
       const abs = path.join(this.root, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
       fs.writeFileSync(abs, JSON.stringify(result), { mode: 0o600 });
-      this.index.files[filePath] = { ...stamp, window, agent, result: rel };
+      this.index.files[`${filePath}|${window}`] = {
+        ...stamp,
+        window,
+        agent,
+        result: rel,
+        configHashes,
+        at: Date.now(),
+      };
       this.dirty = true;
     } catch {
       /* best effort: a cache write failure costs the next run time, not truth */
     }
   }
 
+  /** Drop the entries and files of every window but the most recent few: a
+   *  daily `--days 30` moves the window every day and would otherwise leave
+   *  one orphan set per day. */
+  private prune(): void {
+    const byWindow = new Map<string, number>();
+    for (const e of Object.values(this.index.files))
+      byWindow.set(e.window, Math.max(byWindow.get(e.window) ?? 0, e.at ?? 0));
+    const keep = new Set(
+      [...byWindow.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, KEPT_WINDOWS)
+        .map(([w]) => w)
+    );
+    for (const [key, e] of Object.entries(this.index.files)) {
+      if (keep.has(e.window)) continue;
+      try {
+        fs.rmSync(path.join(this.root, e.result), { force: true });
+      } catch {
+        /* the index entry goes either way */
+      }
+      delete this.index.files[key];
+      this.dirty = true;
+    }
+  }
+
   /** Write the index once per run. */
   flush(): void {
-    if (!this.enabled || !this.dirty) return;
+    if (!this.enabled) return;
+    this.prune();
+    if (!this.dirty) return;
     try {
       fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
       const tmp = path.join(this.root, `index.${process.pid}.tmp`);
