@@ -181,13 +181,13 @@ describe('server scope: server and notServer', () => {
 });
 
 describe('the general action checks', () => {
-  it('are catalog checks in their own group, on by default at review', () => {
+  it('are catalog checks in their own group, on by default (money records, the others review)', () => {
     expect(CHECK_GROUPS.map((g) => g.id)).toContain('actions');
     for (const id of ['actions.money', 'actions.access', 'actions.publish']) {
       const def = getCheck(id);
       expect(def, id).toBeDefined();
       expect(def!.group).toBe('actions');
-      expect(def!.defaultValue).toBe('review');
+      expect(def!.defaultValue).toBe(id === 'actions.money' ? 'log' : 'review');
       expect(def!.plain, id).toBeTruthy();
       expect(def!.legacy?.length, id).toBeGreaterThan(0);
     }

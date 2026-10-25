@@ -81,6 +81,8 @@ const STRICT: Readonly<Record<string, Verdict>> = {
   'network.internal-addresses': 'block',
   'behavior.prompt-injection': 'log',
   'loading.skill-tamper': 'block',
+  // Standard records money moves (catalog default log); Strict asks.
+  'actions.money': 'review',
 };
 
 // Block all is Strict plus what strict meant before the levels: the catch-all

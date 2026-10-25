@@ -70,13 +70,31 @@ describe('the level table', () => {
     });
   });
 
-  it('a level never touches an app protection or a dangerous action', () => {
+  it('a level never touches an app protection; of the action checks only Strict raises money', () => {
     for (const level of LEVELS) {
       for (const id of Object.keys(levelChecks(level))) {
         expect(id.startsWith('packs.')).toBe(false);
-        expect(id.startsWith('actions.')).toBe(false);
+        if (id.startsWith('actions.')) expect(id).toBe('actions.money');
       }
     }
+  });
+
+  it('money: recorded at Audit, Soft and Standard, asked at Strict and Block all', () => {
+    // Founder decision 2026-10-25 (bench "option A").
+    for (const level of ['audit', 'soft', 'standard'])
+      expect(resolveCheck({ mode: level }, 'actions.money')!.value, level).toBe('log');
+    for (const level of ['strict', 'block-all'])
+      expect(resolveCheck({ mode: level }, 'actions.money')!.value, level).toBe('review');
+    // A user who asked to be consulted is asked at every level.
+    for (const level of LEVELS)
+      expect(
+        resolveCheck({ mode: level, checks: { 'actions.money': 'review' } }, 'actions.money')!
+          .value,
+        level
+      ).toBe('review');
+    // Access and publishing were not part of the decision: still review.
+    expect(resolveCheck({ mode: 'standard' }, 'actions.access')!.value).toBe('review');
+    expect(resolveCheck({ mode: 'standard' }, 'actions.publish')!.value).toBe('review');
   });
 
   it('what Soft blocks is the same at every level: Soft lowers no block', () => {

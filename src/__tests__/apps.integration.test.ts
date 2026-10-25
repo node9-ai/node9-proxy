@@ -110,9 +110,10 @@ describe.skipIf(process.platform === 'win32')('node9 apps', () => {
   it('a server linked to Stripe meets Stripe rules, not the general check', () => {
     const { home } = seededHome();
     expect(runCli(home, ['apps', 'stripe', 'on']).status).toBe(0);
+    // Before the link the general Money check holds it; at Standard it
+    // records money moves (founder decision 2026-10-25), so the call passes.
     const before = probe(home, 'mcp__acme_billing__create_refund', { id: 'o1' });
-    expect(before.verdict).toBe('review');
-    expect(before.stdout).toContain('Money check');
+    expect(before.verdict).toBe('allow');
     const link = runCli(home, ['apps', 'link', 'acme_billing', 'stripe']);
     expect(link.status, link.stderr).toBe(0);
     const after = probe(home, 'mcp__acme_billing__create_refund', { id: 'o1' });
