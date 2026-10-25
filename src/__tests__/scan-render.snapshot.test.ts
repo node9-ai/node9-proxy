@@ -84,7 +84,7 @@ function emptySummary(overrides: Partial<ScanSummary> = {}): ScanSummary {
       firstDate: null,
       lastDate: null,
     },
-    byVerdict: { blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0 },
+    byVerdict: { blocked: 0, supervised: 0, leaks: 0, canaries: 0, loops: 0, loggedOnly: 0 },
     byAgent: [],
     sections: [],
     leaks: [],
@@ -193,7 +193,7 @@ function richFixture(): CompactInput {
       firstDate: '2026-04-06T00:00:00Z',
       lastDate: '2026-05-07T00:00:00Z',
     },
-    byVerdict: { blocked: 8, supervised: 56, leaks: 4, canaries: 0, loops: 289 },
+    byVerdict: { blocked: 8, supervised: 56, leaks: 4, canaries: 0, loops: 289, loggedOnly: 0 },
     sections: [
       {
         id: 'user',
@@ -450,7 +450,7 @@ function panelFixture(): CompactInput {
       firstDate: '2026-02-12T00:00:00Z',
       lastDate: '2026-05-12T00:00:00Z',
     },
-    byVerdict: { blocked: 2, supervised: 36, leaks: 2, canaries: 0, loops: 1 },
+    byVerdict: { blocked: 2, supervised: 36, leaks: 2, canaries: 0, loops: 1, loggedOnly: 0 },
     sections: [
       {
         id: 'default',

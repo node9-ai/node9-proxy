@@ -19,25 +19,12 @@ import os from 'os';
 import { SHIELDS } from '../../shields';
 import { DEFAULT_CONFIG, getConfig } from '../../config';
 
-// Scan forecasts DEFAULT protection (see the note in the rule-source builder),
-// so rule/tool matching keys off the DEFAULT toolInspection map. Shared with the
-// gate via toolMatchesRule so `node9 scan` and the live gate agree on which
-// rules cover which tool spelling (/code-review 2026-08-13).
+// Every historical call is judged by the live gate through the forecast
+// entry (scan-judge.ts, fw#399). The default inspection map below serves the
+// shell-call COUNT only; the judgement reads the user's own configuration.
 const toolInspectionMap: ToolInspection = DEFAULT_CONFIG.policy.toolInspection;
-import {
-  evaluateSmartConditions,
-  matchesPattern,
-  detectDangerousShellExec,
-} from '../../policy/index';
-import {
-  analyzeFsOperation,
-  AST_FS_REGEX_RULES,
-  BUILTIN_SHIELDS,
-  APP_SHIELD_NAMES,
-  toolMatchesRule,
-  resolveShellInput,
-  shellRuleArgs,
-} from '@node9/policy-engine';
+import { BUILTIN_SHIELDS, APP_SHIELD_NAMES, resolveShellInput } from '@node9/policy-engine';
+import { HistoryJudge, type ScanPolicy } from './scan-judge';
 import { scanArgs } from '../../dlp';
 import { matchCanaryArgs } from '../../dlp';
 import { canaryCtxValues } from '../../canary/registry';
@@ -61,6 +48,7 @@ import {
   type FindingRef,
   type RuleGroup,
   type ScanSummary,
+  wouldHaveVerb,
 } from '../../scan-summary';
 import { getAgentsStatus } from '../../setup';
 import { runBlast, type BlastFinding } from './blast';
@@ -91,14 +79,14 @@ import {
 
 type RuleSourceType = 'default' | 'shield' | 'user';
 
-interface RuleSource {
+export interface RuleSource {
   shieldName: string;
   shieldLabel: string;
   sourceType: RuleSourceType;
   rule: SmartRule;
 }
 
-interface Finding {
+export interface Finding {
   source: RuleSource;
   toolName: string;
   input: Record<string, unknown>;
@@ -106,9 +94,21 @@ interface Finding {
   project: string;
   sessionId: string;
   agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot';
+  /** The catalog check behind the verdict (`commands.sudo`), when known. */
+  checkId?: string;
+  /** What the live gate decides for this call at the user's settings. */
+  decision: 'log' | 'review' | 'block';
+  /** False when nothing would stop the call: observe mode, or a check in log. */
+  enforced: boolean;
+  /** `settings.mode=observe` or `checks.<id>=log`, when not enforced. */
+  notEnforcedBecause?: string;
+  /** The gate layer that produced the verdict (policy, dlp, package, ...). */
+  layer: string;
+  /** Inputs the forecast could not reproduce for this call. */
+  unknown: string[];
 }
 
-interface DlpFinding {
+export interface DlpFinding {
   patternName: string;
   redactedSample: string;
   toolName: string;
@@ -167,6 +167,8 @@ export interface LoopFinding {
 interface JournalEntry {
   type: string;
   timestamp?: string;
+  /** Working directory of the call; Claude Code writes it on every line. */
+  cwd?: string;
   message?: {
     model?: string;
     content?: Array<{
@@ -215,6 +217,9 @@ export interface ScanResult {
    * unknown, not cheap — and callers must render that difference.
    */
   perSession: SessionCost[];
+  /** What the calls were judged under (the user's configuration and mode).
+   *  Set by the history parsers; merged scans keep the first. */
+  policy?: ScanPolicy;
 }
 
 /** Per-session totals. `toolCalls` counts tool_use blocks, matching the
@@ -513,7 +518,7 @@ export function buildRecurringPatternSet(
  * sample|project for DLP). Set.has is O(1); the walk is now linear in the
  * number of input entries instead of quadratic in the output size.
  */
-interface ScanDedup {
+export interface ScanDedup {
   findingsKeys: Set<string>;
   dlpKeys: Set<string>;
   /** canary|<id>|<sessionId>|<agent> -> the finding, so repeats bump count. */
@@ -522,10 +527,6 @@ interface ScanDedup {
 
 function emptyScanDedup(): ScanDedup {
   return { findingsKeys: new Set(), dlpKeys: new Set(), canaryIndex: new Map() };
-}
-
-function findingKey(ruleName: string | undefined, inputPreview: string, projLabel: string): string {
-  return `${ruleName ?? '<unnamed>'}|${inputPreview}|${projLabel}`;
 }
 
 /** `~`-relative display for a plant path: the report names the file, not the
@@ -653,57 +654,6 @@ function scrubDecoys<T>(subject: T, values: readonly string[]): T {
   return walk(subject, 0) as T;
 }
 
-function pushFsOpAstFinding(
-  command: string,
-  toolName: string,
-  input: Record<string, unknown>,
-  timestamp: string,
-  projLabel: string,
-  sessionId: string,
-  agent: 'claude' | 'gemini' | 'codex' | 'antigravity' | 'copilot',
-  result: ScanResult,
-  dedup: ScanDedup
-): boolean {
-  const fsVerdict = analyzeFsOperation(command);
-  if (!fsVerdict) return false;
-  const synthRule: SmartRule = {
-    name: fsVerdict.ruleName,
-    tool: 'bash',
-    conditions: [],
-    verdict: fsVerdict.verdict,
-    reason: fsVerdict.reason,
-  };
-  const isShieldRule = fsVerdict.ruleName.startsWith('shield:');
-  const synthSource = isShieldRule
-    ? {
-        shieldName: 'project-jail',
-        shieldLabel: 'project-jail (AST)',
-        sourceType: 'shield' as const,
-        rule: synthRule,
-      }
-    : {
-        shieldName: '',
-        shieldLabel: 'default (AST)',
-        sourceType: 'default' as const,
-        rule: synthRule,
-      };
-  const inputPreview = preview(input, 120);
-  const k = findingKey(synthRule.name, inputPreview, projLabel);
-  if (!dedup.findingsKeys.has(k)) {
-    dedup.findingsKeys.add(k);
-    result.findings.push({
-      source: synthSource,
-      toolName,
-      input,
-      timestamp,
-      project: projLabel,
-      sessionId,
-      agent,
-    });
-  }
-  return true;
-}
-
 /**
  * Returns true when the finding's timestamp is older than STALE_AGE_DAYS.
  * Defensive about parse failures: unparseable timestamps are treated as
@@ -804,52 +754,6 @@ export function detectLoops(
     }
   }
   return findings.sort((a, b) => b.count - a.count);
-}
-
-// ---------------------------------------------------------------------------
-// Build the rule set for scan
-// ---------------------------------------------------------------------------
-
-export function buildRuleSources(): RuleSource[] {
-  const sources: RuleSource[] = [];
-
-  // 1. All shields (builtin + user-installed)
-  for (const [shieldName, shield] of Object.entries(SHIELDS)) {
-    for (const rule of shield.smartRules) {
-      sources.push({ shieldName, shieldLabel: shieldName, sourceType: 'shield', rule });
-    }
-  }
-
-  // 2. Default built-in rules only — sourced directly from DEFAULT_CONFIG.
-  //
-  // Scan is a pre-install forecast: it answers "what would node9 catch
-  // if you installed it with default protection?". Two consequences:
-  //
-  // 1. User-custom rules from node9.config.json and cloud-synced rules
-  //    are skipped entirely. A fresh user doesn't have those, so
-  //    surfacing them would misrepresent what node9 itself catches.
-  // 2. Defaults are loaded from DEFAULT_CONFIG directly, not from the
-  //    user-merged getConfig() result. Otherwise a user who modified
-  //    a default rule (different verdict, extra condition) would see
-  //    their MODIFIED version fired against history — not the canonical
-  //    default. Forecast must reflect the out-of-the-box defaults.
-  //
-  // Installed users who want to see their OWN rule fires (including
-  // customized defaults) use `node9 report`, which reads the audit log.
-  //
-  // (Decision locked 2026-05-12 — see scan-redesign discussion.)
-  for (const rule of DEFAULT_CONFIG.policy.smartRules) {
-    if (!rule.name) continue;
-    if (rule.name.startsWith('shield:')) continue;
-    sources.push({
-      shieldName: 'default',
-      shieldLabel: 'Default Rules',
-      sourceType: 'default',
-      rule,
-    });
-  }
-
-  return sources;
 }
 
 // ---------------------------------------------------------------------------
@@ -969,18 +873,18 @@ function renderProgressBar(done: number, total: number, lines: number): void {
  * an in-flight [2] walk from ~1 s (one project of work) to ~10-30 ms
  * (one file of work).
  */
-function processClaudeFile(
+async function processClaudeFile(
   file: string,
   projPath: string,
   projLabel: string,
-  ruleSources: RuleSource[],
+  judge: HistoryJudge,
   startDate: Date | null,
   result: ScanResult,
   dedup: ScanDedup,
   canaryVals: readonly CanaryScanValue[],
   onProgress?: (done: number) => void,
   onLine?: () => void
-): void {
+): Promise<void> {
   result.filesScanned++;
   result.sessions++;
   onProgress?.(result.filesScanned);
@@ -1007,6 +911,8 @@ function processClaudeFile(
 
   // Maps tool_use id → file extension so tool_result scanning can skip code files
   const toolUseFilePaths = new Map<string, string>();
+  // Maps tool_use id → tool name, so a tool result can feed the session state.
+  const toolUseNames = new Map<string, string>();
 
   // Metric: secrets before first useful edit
   let firstDlpTs: string | null = null;
@@ -1098,6 +1004,9 @@ function processClaudeFile(
           // (DLP verdict struct, security alert text). Otherwise the
           // scanner re-detects its own redactor output as a "leak".
           if (isNode9SelfOutput(resultText)) continue;
+          const resultTool = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : undefined;
+          if (resultTool)
+            judge.noteToolResult(sessionId, resultTool, entry.timestamp ?? '', entry.cwd);
           const decoysHere1 = recordCanaries(
             { text: resultText },
             'tool-result',
@@ -1120,6 +1029,7 @@ function processClaudeFile(
             // attempted is done one layer down and on the RAW value, by DLP_STOPWORDS
             // in the engine, before scanArgs returns at all.
             if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
+            judge.noteOutputSecret(sessionId, dlpMatch.patternName, entry.timestamp ?? '');
             const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
             if (!dedup.dlpKeys.has(k)) {
               dedup.dlpKeys.add(k);
@@ -1172,6 +1082,7 @@ function processClaudeFile(
       if (block.id && typeof input.file_path === 'string') {
         toolUseFilePaths.set(block.id, input.file_path);
       }
+      if (block.id) toolUseNames.set(block.id, toolName);
 
       sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
 
@@ -1195,15 +1106,9 @@ function processClaudeFile(
       const rawCmd = String(input.command ?? '').trimStart();
       if (/^node9\s+(scan|explain|report|tail|dlp|status|sessions|audit)\b/.test(rawCmd)) continue;
 
-      // ── DLP scan ───────────────────────────────────────────────────
-      // Skip code files — Edit/Write pass full source in old_string/new_string
-      // which contains auth patterns that are not real secrets.
-      const inputFilePath = typeof input.file_path === 'string' ? input.file_path : '';
-      const inputFileExt = inputFilePath ? path.extname(inputFilePath).toLowerCase() : '';
-      // The canary pass runs BEFORE the code-file skip. That skip exists
-      // because source contains auth-SHAPED text which is not a secret; a
-      // decoy is not a shape, it is the exact value node9 planted, so the
-      // skip must not hide it (corpus S6/S6b).
+      // ── Decoys in the arguments ────────────────────────────────────
+      // The registry pass counts every planted value the call carried; the
+      // gate below stops at the first (corpus S6/S6b, S9).
       const canaryInInput = recordCanaries(
         input,
         toolName,
@@ -1215,119 +1120,22 @@ function processClaudeFile(
         dedup,
         canaryVals
       );
-      if (canaryInInput.length === 0 && CODE_EXTENSIONS.has(inputFileExt)) continue;
-
-      const dlpMatch = scanArgs(scrubDecoys(input, canaryInInput));
-      if (dlpMatch) {
-        if (firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
-        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-        if (!dedup.dlpKeys.has(k)) {
-          dedup.dlpKeys.add(k);
-          result.dlpFindings.push({
-            patternName: dlpMatch.patternName,
-            redactedSample: dlpMatch.redactedSample,
-            toolName,
-            timestamp: entry.timestamp ?? '',
-            project: projLabel,
-            sessionId,
-            agent: 'claude',
-          });
-        }
-      }
-
-      // ── AST filesystem-operation detection ─────────────────────────
-      // Runs FIRST so AST-resolved verdicts win over the regex rules,
-      // which can FP on JSON args, heredocs, and chained commands.
-      let astFsMatched = false;
-      // isShellShapedTool — the SAME predicate toolMatchesRule uses, so a rule
-      // matching a tool and the AST suppression for that tool can never
-      // disagree. Hardcoded per-agent literal lists drifted from the rule
-      // matcher and resurrected the `grep "drop table"` false positive that
-      // AST_FS_REGEX_RULES exists to suppress (/code-review round 3).
-      const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
-      const astRanForBash = shellInput.kind === 'shell';
-      if (astRanForBash) {
-        astFsMatched = pushFsOpAstFinding(
-          shellInput.kind === 'shell' ? shellInput.command : '',
+      // One judgement path: the live gate through the forecast entry (fw#399).
+      const judged = await judge.judge(
+        {
+          agent: 'claude',
           toolName,
           input,
-          entry.timestamp ?? '',
-          projLabel,
+          scrubbed: canaryInInput.length ? scrubDecoys(input, canaryInInput) : undefined,
+          timestamp: entry.timestamp ?? '',
           sessionId,
-          'claude',
-          result,
-          dedup
-        );
-      }
-
-      // ── Smart rule matching ────────────────────────────────────────
-      let ruleMatched = astFsMatched;
-      for (const source of ruleSources) {
-        const { rule } = source;
-
-        if (rule.verdict === 'allow') continue;
-        if (!toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
-        // Suppress regex rules that AST already covers (correctly).
-        if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
-        if (
-          !evaluateSmartConditions(
-            shellRuleArgs(toolNameLower, input, rule.tool, toolInspectionMap),
-            rule
-          )
-        )
-          continue;
-
-        const inputPreview = preview(input, 120);
-        const k = findingKey(rule.name, inputPreview, projLabel);
-        if (!dedup.findingsKeys.has(k)) {
-          dedup.findingsKeys.add(k);
-          result.findings.push({
-            source,
-            toolName,
-            input,
-            timestamp: entry.timestamp ?? '',
-            project: projLabel,
-            sessionId,
-            agent: 'claude',
-          });
-        }
-
-        ruleMatched = true;
-        break; // First matching rule wins per tool call
-      }
-
-      // ── AST shell exec detection (catches eval/bash -c with remote download)
-      if (!ruleMatched && (toolNameLower === 'bash' || toolNameLower === 'execute_bash')) {
-        const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
-        if (shellVerdict) {
-          const astRule: SmartRule = {
-            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
-            tool: 'bash',
-            conditions: [],
-            verdict: shellVerdict,
-            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
-          };
-          const inputPreview = preview(input, 120);
-          const k = findingKey(astRule.name, inputPreview, projLabel);
-          if (!dedup.findingsKeys.has(k)) {
-            dedup.findingsKeys.add(k);
-            result.findings.push({
-              source: {
-                shieldName: 'bash-safe',
-                shieldLabel: 'bash-safe (AST)',
-                sourceType: 'shield',
-                rule: astRule,
-              },
-              toolName,
-              input,
-              timestamp: entry.timestamp ?? '',
-              project: projLabel,
-              sessionId,
-              agent: 'claude',
-            });
-          }
-        }
-      }
+          project: projLabel,
+          cwd: entry.cwd,
+        },
+        result,
+        dedup
+      );
+      if (judged.dlpMatched && firstDlpTs === null) firstDlpTs = entry.timestamp ?? null;
     }
   }
   result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'claude'));
@@ -1347,63 +1155,10 @@ function processClaudeFile(
  * Sync wrapper used by the CLI (`node9 scan`) and the daemon. Walks every
  * project under ~/.claude/projects, applying processClaudeFile per session.
  */
-function processClaudeProject(
+async function processClaudeProject(
   proj: string,
   projectsDir: string,
-  ruleSources: RuleSource[],
-  startDate: Date | null,
-  result: ScanResult,
-  dedup: ScanDedup,
-  canaryVals: readonly CanaryScanValue[],
-  onProgress?: (done: number) => void,
-  onLine?: () => void
-): void {
-  const projPath = path.join(projectsDir, proj);
-  try {
-    if (!fs.statSync(projPath).isDirectory()) return;
-  } catch {
-    return;
-  }
-
-  const projLabel = stripTerminalEscapes(decodeURIComponent(proj).replace(os.homedir(), '~')).slice(
-    0,
-    40
-  );
-
-  let files: string[];
-  try {
-    files = listSessionFiles(projPath);
-  } catch {
-    return;
-  }
-
-  for (const file of files) {
-    processClaudeFile(
-      file,
-      projPath,
-      projLabel,
-      ruleSources,
-      startDate,
-      result,
-      dedup,
-      canaryVals,
-      onProgress,
-      onLine
-    );
-  }
-}
-
-/**
- * Async variant used by the dashboard. Mirrors processClaudeProject but
- * awaits yieldTick() between FILES (not projects) so the event loop's
- * Poll phase can dispatch stdin keypresses (q / Ctrl+C / view switch)
- * with at most one file of latency (~10-30 ms) instead of one project
- * (~100-500 ms).
- */
-async function processClaudeProjectAsync(
-  proj: string,
-  projectsDir: string,
-  ruleSources: RuleSource[],
+  judge: HistoryJudge,
   startDate: Date | null,
   result: ScanResult,
   dedup: ScanDedup,
@@ -1431,11 +1186,64 @@ async function processClaudeProjectAsync(
   }
 
   for (const file of files) {
-    processClaudeFile(
+    await processClaudeFile(
       file,
       projPath,
       projLabel,
-      ruleSources,
+      judge,
+      startDate,
+      result,
+      dedup,
+      canaryVals,
+      onProgress,
+      onLine
+    );
+  }
+}
+
+/**
+ * Async variant used by the dashboard. Mirrors processClaudeProject but
+ * awaits yieldTick() between FILES (not projects) so the event loop's
+ * Poll phase can dispatch stdin keypresses (q / Ctrl+C / view switch)
+ * with at most one file of latency (~10-30 ms) instead of one project
+ * (~100-500 ms).
+ */
+async function processClaudeProjectAsync(
+  proj: string,
+  projectsDir: string,
+  judge: HistoryJudge,
+  startDate: Date | null,
+  result: ScanResult,
+  dedup: ScanDedup,
+  canaryVals: readonly CanaryScanValue[],
+  onProgress?: (done: number) => void,
+  onLine?: () => void
+): Promise<void> {
+  const projPath = path.join(projectsDir, proj);
+  try {
+    if (!fs.statSync(projPath).isDirectory()) return;
+  } catch {
+    return;
+  }
+
+  const projLabel = stripTerminalEscapes(decodeURIComponent(proj).replace(os.homedir(), '~')).slice(
+    0,
+    40
+  );
+
+  let files: string[];
+  try {
+    files = listSessionFiles(projPath);
+  } catch {
+    return;
+  }
+
+  for (const file of files) {
+    await processClaudeFile(
+      file,
+      projPath,
+      projLabel,
+      judge,
       startDate,
       result,
       dedup,
@@ -1471,11 +1279,11 @@ function emptyClaudeScan(): ScanResult {
   };
 }
 
-export function scanClaudeHistory(
+export async function scanClaudeHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
   onLine?: () => void
-): ScanResult {
+): Promise<ScanResult> {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   const result = emptyClaudeScan();
 
@@ -1488,16 +1296,16 @@ export function scanClaudeHistory(
     return result;
   }
 
-  const ruleSources = buildRuleSources();
+  const judge = new HistoryJudge();
   const dedup = emptyScanDedup();
   // Read the registry ONCE per scan invocation and pass it down (never per line).
   const canaryVals = safeCanaryScanValues();
 
   for (const proj of projDirs) {
-    processClaudeProject(
+    await processClaudeProject(
       proj,
       projectsDir,
-      ruleSources,
+      judge,
       startDate,
       result,
       dedup,
@@ -1507,6 +1315,7 @@ export function scanClaudeHistory(
     );
   }
 
+  result.policy = judge.policy();
   return result;
 }
 
@@ -1534,7 +1343,7 @@ export async function scanClaudeHistoryAsync(
     return result;
   }
 
-  const ruleSources = buildRuleSources();
+  const judge = new HistoryJudge();
   const dedup = emptyScanDedup();
   // Read the registry ONCE per scan invocation and pass it down (never per line).
   const canaryVals = safeCanaryScanValues();
@@ -1543,7 +1352,7 @@ export async function scanClaudeHistoryAsync(
     await processClaudeProjectAsync(
       proj,
       projectsDir,
-      ruleSources,
+      judge,
       startDate,
       result,
       dedup,
@@ -1553,6 +1362,7 @@ export async function scanClaudeHistoryAsync(
     );
   }
 
+  result.policy = judge.policy();
   return result;
 }
 
@@ -1560,11 +1370,11 @@ export async function scanClaudeHistoryAsync(
 // Gemini history scanner
 // ---------------------------------------------------------------------------
 
-export function scanGeminiHistory(
+export async function scanGeminiHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
   onLine?: () => void
-): ScanResult {
+): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const tmpDir = path.join(os.homedir(), '.gemini', 'tmp');
   const result: ScanResult = {
@@ -1593,7 +1403,7 @@ export function scanGeminiHistory(
     return result;
   }
 
-  const ruleSources = buildRuleSources();
+  const judge = new HistoryJudge();
 
   for (const slug of slugDirs) {
     const slugPath = path.join(tmpDir, slug);
@@ -1768,114 +1578,28 @@ export function scanGeminiHistory(
             dedup,
             canaryVals
           );
-          const dlpMatch = scanArgs(scrubDecoys(input, decoysHere4));
-          if (dlpMatch) {
-            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-            if (!dedup.dlpKeys.has(k)) {
-              dedup.dlpKeys.add(k);
-              result.dlpFindings.push({
-                patternName: dlpMatch.patternName,
-                redactedSample: dlpMatch.redactedSample,
-                toolName,
-                timestamp: msg.timestamp ?? '',
-                project: projLabel,
-                sessionId,
-                agent: 'gemini',
-              });
-            }
-          }
-
-          // ── AST filesystem-operation detection (gemini) ────────────────
-          let astFsMatched = false;
-          const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
-          const astRanForBash = shellInput.kind === 'shell';
-          if (astRanForBash) {
-            astFsMatched = pushFsOpAstFinding(
-              shellInput.kind === 'shell' ? shellInput.command : '',
+          // One judgement path: the live gate through the forecast entry (fw#399).
+          const judged = await judge.judge(
+            {
+              agent: 'gemini',
               toolName,
               input,
-              msg.timestamp ?? '',
-              projLabel,
+              scrubbed: decoysHere4.length ? scrubDecoys(input, decoysHere4) : undefined,
+              timestamp: msg.timestamp ?? '',
               sessionId,
-              'gemini',
-              result,
-              dedup
-            );
-          }
-
-          let ruleMatched = astFsMatched;
-          for (const source of ruleSources) {
-            const { rule } = source;
-            if (rule.verdict === 'allow') continue;
-            if (!toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
-            if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
-            if (
-              !evaluateSmartConditions(
-                shellRuleArgs(toolNameLower, input, rule.tool, toolInspectionMap),
-                rule
-              )
-            )
-              continue;
-
-            const inputPreview = preview(input, 120);
-            const k = findingKey(rule.name, inputPreview, projLabel);
-            if (!dedup.findingsKeys.has(k)) {
-              dedup.findingsKeys.add(k);
-              result.findings.push({
-                source,
-                toolName,
-                input,
-                timestamp: msg.timestamp ?? '',
-                project: projLabel,
-                sessionId,
-                agent: 'gemini',
-              });
-            }
-            ruleMatched = true;
-            break;
-          }
-
-          // ── AST shell exec detection (catches eval/bash -c with remote download)
-          const isShellTool = ['bash', 'execute_bash', 'run_shell_command', 'shell'].includes(
-            toolNameLower
+              project: projLabel,
+            },
+            result,
+            dedup
           );
-          if (!ruleMatched && isShellTool) {
-            const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
-            if (shellVerdict) {
-              const astRule: SmartRule = {
-                name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
-                tool: 'bash',
-                conditions: [],
-                verdict: shellVerdict,
-                reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
-              };
-              const inputPreview = preview(input, 120);
-              const k = findingKey(astRule.name, inputPreview, projLabel);
-              if (!dedup.findingsKeys.has(k)) {
-                dedup.findingsKeys.add(k);
-                result.findings.push({
-                  source: {
-                    shieldName: 'bash-safe',
-                    shieldLabel: 'bash-safe (AST)',
-                    sourceType: 'shield',
-                    rule: astRule,
-                  },
-                  toolName,
-                  input,
-                  timestamp: msg.timestamp ?? '',
-                  project: projLabel,
-                  sessionId,
-                  agent: 'gemini',
-                });
-              }
-            }
-          }
+          void judged;
         }
       }
       result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'gemini'));
     }
   }
 
+  result.policy = judge.policy();
   return result;
 }
 
@@ -1919,11 +1643,11 @@ function antigravityTranscriptPath(convPath: string): string | null {
   return null;
 }
 
-export function scanAntigravityHistory(
+export async function scanAntigravityHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
   onLine?: () => void
-): ScanResult {
+): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const result: ScanResult = {
     filesScanned: 0,
@@ -1945,7 +1669,7 @@ export function scanAntigravityHistory(
   const brainDirs = antigravityBrainDirs();
   if (brainDirs.length === 0) return result;
 
-  const ruleSources = buildRuleSources();
+  const judge = new HistoryJudge();
 
   for (const brainDir of brainDirs) {
     let convDirs: string[];
@@ -2081,112 +1805,30 @@ export function scanAntigravityHistory(
             dedup,
             canaryVals
           );
-          const dlpMatch = scanArgs(scrubDecoys(input, decoysHere6));
-          if (dlpMatch) {
-            const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-            if (!dedup.dlpKeys.has(k)) {
-              dedup.dlpKeys.add(k);
-              result.dlpFindings.push({
-                patternName: dlpMatch.patternName,
-                redactedSample: dlpMatch.redactedSample,
-                toolName,
-                timestamp,
-                project: projLabel,
-                sessionId,
-                agent: 'antigravity',
-              });
-            }
-          }
-
-          // ── AST filesystem-operation detection ─────────────────────────
-          let astFsMatched = false;
-          if (isShellTool) {
-            astFsMatched = pushFsOpAstFinding(
-              shellInput.kind === 'shell' ? shellInput.command : '',
+          // One judgement path: the live gate through the forecast entry (fw#399).
+          const judged = await judge.judge(
+            {
+              agent: 'antigravity',
               toolName,
               input,
-              timestamp,
-              projLabel,
+              scrubbed: decoysHere6.length ? scrubDecoys(input, decoysHere6) : undefined,
+              timestamp: timestamp,
               sessionId,
-              'antigravity',
-              result,
-              dedup
-            );
-          }
-
-          let ruleMatched = astFsMatched;
-          for (const source of ruleSources) {
-            const { rule } = source;
-            if (rule.verdict === 'allow') continue;
-            // Rules target Claude vocabulary ('bash') — match the
-            // canonical name for the shell tool, the native name otherwise.
-            const ruleToolName = isShellTool ? 'bash' : toolNameLower;
-            if (rule.tool && !matchesPattern(ruleToolName, rule.tool)) continue;
-            if (isShellTool && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
-            if (
-              !evaluateSmartConditions(
-                shellRuleArgs(toolNameLower, input, rule.tool, toolInspectionMap),
-                rule
-              )
-            )
-              continue;
-
-            const inputPreview = preview(input, 120);
-            const k = findingKey(rule.name, inputPreview, projLabel);
-            if (!dedup.findingsKeys.has(k)) {
-              dedup.findingsKeys.add(k);
-              result.findings.push({
-                source,
-                toolName,
-                input,
-                timestamp,
-                project: projLabel,
-                sessionId,
-                agent: 'antigravity',
-              });
-            }
-            ruleMatched = true;
-            break;
-          }
-
-          // ── AST shell exec detection (eval/bash -c with remote download)
-          if (!ruleMatched && isShellTool) {
-            const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
-            if (shellVerdict) {
-              const astRule: SmartRule = {
-                name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
-                tool: 'bash',
-                conditions: [],
-                verdict: shellVerdict,
-                reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
-              };
-              const inputPreview = preview(input, 120);
-              const k = findingKey(astRule.name, inputPreview, projLabel);
-              if (!dedup.findingsKeys.has(k)) {
-                dedup.findingsKeys.add(k);
-                result.findings.push({
-                  source: {
-                    shieldName: 'bash-safe',
-                    shieldLabel: 'bash-safe (AST)',
-                    sourceType: 'shield',
-                    rule: astRule,
-                  },
-                  toolName,
-                  input,
-                  timestamp,
-                  project: projLabel,
-                  sessionId,
-                  agent: 'antigravity',
-                });
-              }
-            }
-          }
+              project: projLabel,
+              cwd:
+                typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? input.cwd : undefined,
+            },
+            result,
+            dedup
+          );
+          void judged;
         }
       }
       result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'antigravity'));
     }
   }
 
+  result.policy = judge.policy();
   return result;
 }
 
@@ -2214,11 +1856,11 @@ interface CopilotEvent {
   };
 }
 
-export function scanCopilotHistory(
+export async function scanCopilotHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
   onLine?: () => void
-): ScanResult {
+): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const sessionDir = path.join(os.homedir(), '.copilot', 'session-state');
   const result: ScanResult = {
@@ -2247,7 +1889,7 @@ export function scanCopilotHistory(
     return result;
   }
 
-  const ruleSources = buildRuleSources();
+  const judge = new HistoryJudge();
 
   for (const sessionId of sessionIds) {
     const eventsPath = path.join(sessionDir, sessionId, 'events.jsonl');
@@ -2264,6 +1906,7 @@ export function scanCopilotHistory(
     }
 
     let projLabel = sessionId.slice(0, 8);
+    let sessionCwd: string | undefined;
     const sessionCalls: Array<{
       toolName: string;
       input: Record<string, unknown>;
@@ -2309,6 +1952,7 @@ export function scanCopilotHistory(
         const cwd = ev.data?.context?.cwd;
         if (typeof cwd === 'string' && cwd) {
           projLabel = stripTerminalEscapes(cwd).replace(os.homedir(), '~').slice(0, 40);
+          if (path.isAbsolute(cwd)) sessionCwd = cwd;
         }
         continue;
       }
@@ -2382,107 +2026,27 @@ export function scanCopilotHistory(
         dedup,
         canaryVals
       );
-      const dlpMatch = scanArgs(scrubDecoys(input, decoysHere8));
-      if (dlpMatch) {
-        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-        if (!dedup.dlpKeys.has(k)) {
-          dedup.dlpKeys.add(k);
-          result.dlpFindings.push({
-            patternName: dlpMatch.patternName,
-            redactedSample: dlpMatch.redactedSample,
-            toolName,
-            timestamp,
-            project: projLabel,
-            sessionId,
-            agent: 'copilot',
-          });
-        }
-      }
-
-      // ── AST filesystem-operation detection ───────────────────────────
-      let astFsMatched = false;
-      if (isShellTool) {
-        astFsMatched = pushFsOpAstFinding(
-          shellInput.kind === 'shell' ? shellInput.command : '',
+      // One judgement path: the live gate through the forecast entry (fw#399).
+      const judged = await judge.judge(
+        {
+          agent: 'copilot',
           toolName,
           input,
-          timestamp,
-          projLabel,
+          scrubbed: decoysHere8.length ? scrubDecoys(input, decoysHere8) : undefined,
+          timestamp: timestamp,
           sessionId,
-          'copilot',
-          result,
-          dedup
-        );
-      }
-
-      let ruleMatched = astFsMatched;
-      for (const source of ruleSources) {
-        const { rule } = source;
-        if (rule.verdict === 'allow') continue;
-        if (!toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
-        if (isShellTool && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
-        if (
-          !evaluateSmartConditions(
-            shellRuleArgs(toolNameLower, input, rule.tool, toolInspectionMap),
-            rule
-          )
-        )
-          continue;
-
-        const inputPreview = preview(input, 120);
-        const k = findingKey(rule.name, inputPreview, projLabel);
-        if (!dedup.findingsKeys.has(k)) {
-          dedup.findingsKeys.add(k);
-          result.findings.push({
-            source,
-            toolName,
-            input,
-            timestamp,
-            project: projLabel,
-            sessionId,
-            agent: 'copilot',
-          });
-        }
-        ruleMatched = true;
-        break;
-      }
-
-      // ── AST shell exec detection (eval/bash -c with remote download) ──
-      if (!ruleMatched && isShellTool) {
-        const shellVerdict = detectDangerousShellExec(String(input.command ?? ''));
-        if (shellVerdict) {
-          const astRule: SmartRule = {
-            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
-            tool: 'bash',
-            conditions: [],
-            verdict: shellVerdict,
-            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
-          };
-          const inputPreview = preview(input, 120);
-          const k = findingKey(astRule.name, inputPreview, projLabel);
-          if (!dedup.findingsKeys.has(k)) {
-            dedup.findingsKeys.add(k);
-            result.findings.push({
-              source: {
-                shieldName: 'bash-safe',
-                shieldLabel: 'bash-safe (AST)',
-                sourceType: 'shield',
-                rule: astRule,
-              },
-              toolName,
-              input,
-              timestamp,
-              project: projLabel,
-              sessionId,
-              agent: 'copilot',
-            });
-          }
-        }
-      }
+          project: projLabel,
+          cwd: sessionCwd,
+        },
+        result,
+        dedup
+      );
+      void judged;
     }
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'copilot'));
   }
 
+  result.policy = judge.policy();
   return result;
 }
 
@@ -2490,11 +2054,11 @@ export function scanCopilotHistory(
 // Codex history scanner
 // ---------------------------------------------------------------------------
 
-export function scanCodexHistory(
+export async function scanCodexHistory(
   startDate: Date | null,
   onProgress?: (done: number) => void,
   onLine?: () => void
-): ScanResult {
+): Promise<ScanResult> {
   const canaryVals = safeCanaryScanValues();
   const result: ScanResult = {
     filesScanned: 0,
@@ -2515,7 +2079,7 @@ export function scanCodexHistory(
 
   const jsonlFiles = listCodexSessionFiles();
 
-  const ruleSources = buildRuleSources();
+  const judge = new HistoryJudge();
 
   for (const filePath of jsonlFiles) {
     result.filesScanned++;
@@ -2531,6 +2095,7 @@ export function scanCodexHistory(
     let sessionId = '';
     let startTime = '';
     let projLabel = '';
+    let sessionCwd: string | undefined;
     result.sessions++;
 
     const sessionCalls: Array<{
@@ -2556,6 +2121,7 @@ export function scanCodexHistory(
         startTime = String(payload['timestamp'] ?? '');
         const cwd = String(payload['cwd'] ?? '');
         projLabel = stripTerminalEscapes(cwd.replace(os.homedir(), '~')).slice(0, 40);
+        if (path.isAbsolute(cwd)) sessionCwd = cwd;
         continue;
       }
 
@@ -2639,104 +2205,22 @@ export function scanCodexHistory(
         dedup,
         canaryVals
       );
-      const dlpMatch = scanArgs(scrubDecoys(input, decoysHere10));
-      if (dlpMatch) {
-        const k = dlpKey(dlpMatch.patternName, dlpMatch.redactedSample, projLabel);
-        if (!dedup.dlpKeys.has(k)) {
-          dedup.dlpKeys.add(k);
-          result.dlpFindings.push({
-            patternName: dlpMatch.patternName,
-            redactedSample: dlpMatch.redactedSample,
-            toolName,
-            timestamp: ts,
-            project: projLabel,
-            sessionId,
-            agent: 'codex',
-          });
-        }
-      }
-
-      // ── AST filesystem-operation detection (codex) ─────────────────────
-      let astFsMatched = false;
-      const shellInput = resolveShellInput(toolNameLower, input, toolInspectionMap);
-      const astRanForBash = shellInput.kind === 'shell';
-      if (astRanForBash) {
-        astFsMatched = pushFsOpAstFinding(
-          shellInput.kind === 'shell' ? shellInput.command : '',
+      // One judgement path: the live gate through the forecast entry (fw#399).
+      const judged = await judge.judge(
+        {
+          agent: 'codex',
           toolName,
           input,
-          ts,
-          projLabel,
+          scrubbed: decoysHere10.length ? scrubDecoys(input, decoysHere10) : undefined,
+          timestamp: ts,
           sessionId,
-          'codex',
-          result,
-          dedup
-        );
-      }
-
-      let ruleMatched = astFsMatched;
-      for (const source of ruleSources) {
-        const { rule } = source;
-        if (rule.verdict === 'allow') continue;
-        if (rule.tool && !toolMatchesRule(toolNameLower, rule.tool, toolInspectionMap)) continue;
-        if (astRanForBash && rule.name && AST_FS_REGEX_RULES.has(rule.name)) continue;
-        if (
-          !evaluateSmartConditions(
-            shellRuleArgs(toolNameLower, input, rule.tool, toolInspectionMap),
-            rule
-          )
-        )
-          continue;
-
-        const inputPreview = preview(input, 120);
-        const k = findingKey(rule.name, inputPreview, projLabel);
-        if (!dedup.findingsKeys.has(k)) {
-          dedup.findingsKeys.add(k);
-          result.findings.push({
-            source,
-            toolName,
-            input,
-            timestamp: ts,
-            project: projLabel,
-            sessionId,
-            agent: 'codex',
-          });
-        }
-        ruleMatched = true;
-        break;
-      }
-
-      if (!ruleMatched && (toolNameLower === 'exec_command' || toolNameLower === 'shell')) {
-        const shellVerdict = detectDangerousShellExec(String(input['command'] ?? ''));
-        if (shellVerdict) {
-          const astRule: SmartRule = {
-            name: `ast:bash-safe:${shellVerdict}-shell-exec-remote`,
-            tool: 'bash',
-            conditions: [],
-            verdict: shellVerdict,
-            reason: `Shell execution of remote download detected by AST analysis (bash-safe)`,
-          };
-          const inputPreview = preview(input, 120);
-          const k = findingKey(astRule.name, inputPreview, projLabel);
-          if (!dedup.findingsKeys.has(k)) {
-            dedup.findingsKeys.add(k);
-            result.findings.push({
-              source: {
-                shieldName: 'bash-safe',
-                shieldLabel: 'bash-safe (AST)',
-                sourceType: 'shield',
-                rule: astRule,
-              },
-              toolName,
-              input,
-              timestamp: ts,
-              project: projLabel,
-              sessionId,
-              agent: 'codex',
-            });
-          }
-        }
-      }
+          project: projLabel,
+          cwd: sessionCwd,
+        },
+        result,
+        dedup
+      );
+      void judged;
     }
 
     for (const event of codexUsageInWindow(parseCodexUsage(lines), startDate)) {
@@ -2746,6 +2230,7 @@ export function scanCodexHistory(
     result.loopFindings.push(...detectLoops(sessionCalls, projLabel, sessionId, 'codex'));
   }
 
+  result.policy = judge.policy();
   return result;
 }
 
@@ -2806,7 +2291,16 @@ function mergeScans(a: ScanResult, b: ScanResult): ScanResult {
     lastDate: lastDates.length ? lastDates.sort().at(-1)! : null,
     sessionsWithEarlySecrets: a.sessionsWithEarlySecrets + b.sessionsWithEarlySecrets,
     perSession: [...a.perSession, ...b.perSession],
+    ...((a.policy ?? b.policy) && { policy: mergePolicy(a.policy, b.policy) }),
   };
+}
+
+function mergePolicy(a: ScanPolicy | undefined, b: ScanPolicy | undefined): ScanPolicy {
+  const base = (a ?? b)!;
+  const unknownInputs = { ...base.unknownInputs };
+  for (const [k, v] of Object.entries((a && b ? b : undefined)?.unknownInputs ?? {}))
+    unknownInputs[k] = (unknownInputs[k] ?? 0) + v;
+  return { ...base, unknownInputs };
 }
 
 // ---------------------------------------------------------------------------
@@ -2998,7 +2492,7 @@ export function renderCompactScorecard(input: CompactInput): void {
     console.log(
       chalk.red('🛑  ') +
         chalk.red.bold(String(blockedCount).padEnd(4)) +
-        chalk.dim('would have blocked'.padEnd(20)) +
+        chalk.dim(wouldHaveVerb(summary).padEnd(20)) +
         chalk.dim(`(${topBlocked})`)
     );
   }
@@ -3359,7 +2853,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
     topLines.push(
       mkLine(
         ['🛑 ', chalk.red],
-        [`${blockedCount} ops node9 would have blocked  `, chalk.bold],
+        [`${blockedCount} ops node9 ${wouldHaveVerb(summary)}  `, chalk.bold],
         [`(${topBlocked})`, chalk.dim]
       )
     );
@@ -3482,7 +2976,7 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
         )
       );
     }
-    const title = `BLOCKED  ·  ${blockedCount} ops node9 would have stopped`;
+    const title = `BLOCKED  ·  ${blockedCount} ops node9 ${wouldHaveVerb(summary, 'would have stopped')}`;
     for (const ln of boxPanel(title, blockedLines)) console.log('  ' + ln);
     console.log('');
   }
@@ -3857,18 +3351,18 @@ export function registerScanCommand(program: Command): void {
           }
         };
         if (useTTY) renderProgressBar(0, totalFiles, 0);
-        const claudeScan = scanClaudeHistory(startDate, onProgress, onLine);
-        const geminiScan = scanGeminiHistory(
+        const claudeScan = await scanClaudeHistory(startDate, onProgress, onLine);
+        const geminiScan = await scanGeminiHistory(
           startDate,
           (done) => onProgress(claudeScan.filesScanned + done),
           onLine
         );
-        const antigravityScan = scanAntigravityHistory(
+        const antigravityScan = await scanAntigravityHistory(
           startDate,
           (done) => onProgress(claudeScan.filesScanned + geminiScan.filesScanned + done),
           onLine
         );
-        const copilotScan = scanCopilotHistory(
+        const copilotScan = await scanCopilotHistory(
           startDate,
           (done) =>
             onProgress(
@@ -3879,7 +3373,7 @@ export function registerScanCommand(program: Command): void {
             ),
           onLine
         );
-        const codexScan = scanCodexHistory(
+        const codexScan = await scanCodexHistory(
           startDate,
           (done) =>
             onProgress(
@@ -4367,7 +3861,7 @@ export function registerScanCommand(program: Command): void {
                 chalk.red.bold('🛑  Blocked') +
                 chalk.dim('  ·  ') +
                 chalk.red(
-                  `${blockedCount} operation${blockedCount !== 1 ? 's' : ''} node9 would have stopped`
+                  `${blockedCount} operation${blockedCount !== 1 ? 's' : ''} node9 ${wouldHaveVerb(summary, 'would have stopped')}`
                 )
             );
             for (const section of blockedRuleSections) {

@@ -92,7 +92,9 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
       // "would be blocked", never "blocked": the panel beneath is WOULD HAVE
       // BLOCKED (shields not yet enabled). The header must not claim an action
       // node9 did not take.
-      parts.push(`${blockedCount} op${blockedCount !== 1 ? 's' : ''} would be blocked`);
+      parts.push(
+        `${blockedCount} op${blockedCount !== 1 ? 's' : ''} ${summary.policy?.recordOnly ? 'logged only' : 'would be blocked'}`
+      );
     }
     return `Critical (${parts.join(' + ')})`;
   })();

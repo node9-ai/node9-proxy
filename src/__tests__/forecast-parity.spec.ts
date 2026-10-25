@@ -23,7 +23,7 @@ const live = vi.hoisted(() => ({
 
 vi.mock('../auth/daemon', async (original) => {
   const real = await original<typeof import('../auth/daemon')>();
-  const { forecastRun } = await import('../auth/forecast-context');
+  const { forecastRun } = await import('../auth/forecast-context.js');
   return {
     ...real,
     isDaemonRunning: () => (forecastRun() ? real.isDaemonRunning() : false),
@@ -58,7 +58,7 @@ vi.mock('../auth/daemon', async (original) => {
 });
 vi.mock('../audit', async (original) => {
   const real = await original<typeof import('../audit')>();
-  const { forecastRun } = await import('../auth/forecast-context');
+  const { forecastRun } = await import('../auth/forecast-context.js');
   return {
     ...real,
     appendLocalAudit: (...a: Parameters<typeof real.appendLocalAudit>) => {

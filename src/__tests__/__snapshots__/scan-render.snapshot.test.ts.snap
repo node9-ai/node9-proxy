@@ -131,7 +131,8 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
       "supervised": 56,
       "leaks": 4,
       "canaries": 0,
-      "loops": 289
+      "loops": 289,
+      "loggedOnly": 0
     },
     "byAgent": [],
     "sections": [

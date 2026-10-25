@@ -61,40 +61,40 @@ afterEach(() => {
 });
 
 describe('scanCopilotHistory — cost', () => {
-  it('prices a session from its token rollup instead of reporting zero', () => {
+  it('prices a session from its token rollup instead of reporting zero', async () => {
     writeSession('s1', 5 * DAY, 1_000_000);
-    expect(scanCopilotHistory(null).totalCostUSD).toBeGreaterThan(0);
+    expect((await scanCopilotHistory(null)).totalCostUSD).toBeGreaterThan(0);
   });
 
-  it('does not take Copilot at its word that the session cost nothing', () => {
+  it('does not take Copilot at its word that the session cost nothing', async () => {
     // requests.cost is 0 in the fixture, as it is in real transcripts. The
     // tokens are what we measure.
     writeSession('s1', 5 * DAY, 1_000_000);
-    const cost = scanCopilotHistory(null).totalCostUSD;
+    const cost = (await scanCopilotHistory(null)).totalCostUSD;
     expect(cost).not.toBe(0);
   });
 
-  it('excludes a session outside the window', () => {
+  it('excludes a session outside the window', async () => {
     writeSession('old', 60 * DAY, 1_000_000);
-    expect(scanCopilotHistory(new Date(Date.now() - 30 * DAY)).totalCostUSD).toBe(0);
+    expect((await scanCopilotHistory(new Date(Date.now() - 30 * DAY))).totalCostUSD).toBe(0);
   });
 
-  it('counts everything when there is no window', () => {
+  it('counts everything when there is no window', async () => {
     writeSession('old', 60 * DAY, 1_000_000);
     writeSession('recent', 5 * DAY, 1_000_000);
-    const all = scanCopilotHistory(null).totalCostUSD;
-    const windowed = scanCopilotHistory(new Date(Date.now() - 30 * DAY)).totalCostUSD;
+    const all = (await scanCopilotHistory(null)).totalCostUSD;
+    const windowed = (await scanCopilotHistory(new Date(Date.now() - 30 * DAY))).totalCostUSD;
     expect(all).toBeGreaterThan(windowed);
     expect(windowed).toBeGreaterThan(0);
   });
 
-  it('stays at zero when a session never shut down, so there is no rollup', () => {
+  it('stays at zero when a session never shut down, so there is no rollup', async () => {
     const d = path.join(home, '.copilot', 'session-state', 'live');
     fs.mkdirSync(d, { recursive: true });
     fs.writeFileSync(
       path.join(d, 'events.jsonl'),
       JSON.stringify({ type: 'session.start', data: { sessionId: 'live' } })
     );
-    expect(scanCopilotHistory(null).totalCostUSD).toBe(0);
+    expect((await scanCopilotHistory(null)).totalCostUSD).toBe(0);
   });
 });

@@ -37,18 +37,18 @@ function writeCodexSession(model: string, inputTokens: number): void {
 }
 
 describe('scanCodexHistory cost — per-model via codexPriceFor (not flat gpt-5)', () => {
-  it('prices a gpt-5-codex session at $1.25/M input, not the old flat $5/M', () => {
+  it('prices a gpt-5-codex session at $1.25/M input, not the old flat $5/M', async () => {
     writeCodexSession('gpt-5-codex', 1_000_000);
-    const res = scanCodexHistory(null);
+    const res = await scanCodexHistory(null);
     // 1,000,000 input * $1.25/M = $1.25. The old flat formula read $5.00.
     expect(res.totalCostUSD).toBeCloseTo(1.25, 6);
     expect(res.totalCostUSD).not.toBeCloseTo(5.0, 6);
   });
 
-  it('reads the session model rather than assuming gpt-5 — gpt-5-mini is cheaper', () => {
+  it('reads the session model rather than assuming gpt-5 — gpt-5-mini is cheaper', async () => {
     // gpt-5-mini is $0.25/M input; a flat assumption would mis-bill it.
     writeCodexSession('gpt-5-mini', 1_000_000);
-    const res = scanCodexHistory(null);
+    const res = await scanCodexHistory(null);
     expect(res.totalCostUSD).toBeCloseTo(0.25, 6);
   });
 });
@@ -60,7 +60,7 @@ describe('scanCodexHistory cost — per-model via codexPriceFor (not flat gpt-5)
 // AND sessions.ts (sessions' loop isn't exported, so this guards it).
 describe('no command re-implements flat Codex pricing', () => {
   for (const rel of ['src/cli/commands/scan.ts', 'src/cli/commands/sessions.ts']) {
-    it(`${rel} delegates to parseCodexUsage (no flat output*15e-6 formula)`, () => {
+    it(`${rel} delegates to parseCodexUsage (no flat output*15e-6 formula)`, async () => {
       const src = fs.readFileSync(rel, 'utf8');
       expect(src).toContain('parseCodexUsage');
       // The exact signature of the old flat Codex formula.

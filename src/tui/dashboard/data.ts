@@ -881,12 +881,12 @@ export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void 
       await yieldToEventLoop();
       if (cancelled) return;
 
-      const gemini = scanGeminiHistory(lookbackStart);
+      const gemini = await scanGeminiHistory(lookbackStart);
       if (cancelled) return;
       await yieldToEventLoop();
       if (cancelled) return;
 
-      const codex = scanCodexHistory(lookbackStart);
+      const codex = await scanCodexHistory(lookbackStart);
       if (cancelled) return;
 
       onUpdate({

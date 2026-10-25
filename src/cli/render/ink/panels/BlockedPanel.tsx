@@ -45,8 +45,12 @@ export function BlockedPanel({
   // rows enforced (or default) with shields on → state the coverage.
   const origins = rules.map((r) => originForRule(r.name, summary.sections, enabled));
   const anyNeeds = origins.some((o) => o.startsWith('needs shield:'));
-  const footer =
-    enabled.size === 0
+  // A machine in observe / audit mode enforces nothing (fw#399): the title
+  // and the footer say so, in the words `node9 posture` uses.
+  const recordOnly = summary.policy?.recordOnly === true;
+  const footer = recordOnly
+    ? `→ ${summary.policy?.mode} mode: these were logged, not stopped · node9 config set mode standard`
+    : enabled.size === 0
       ? '→ install node9 + enable shields above'
       : anyNeeds
         ? '→ ✓ marks rules from enabled shields · enable the rest above'
@@ -55,7 +59,7 @@ export function BlockedPanel({
   return (
     <Box borderStyle="round" borderColor="red" paddingX={1} flexDirection="column" width={width}>
       <Text bold color="red">
-        WOULD HAVE BLOCKED
+        {recordOnly ? 'LOGGED ONLY (not enforced)' : 'WOULD HAVE BLOCKED'}
         <Text dimColor>{topOf(rules.length, allRules.length)}</Text>
       </Text>
 
