@@ -457,6 +457,21 @@ function commandReadingsImpl(command: string): CommandReadings {
  *  its own rules; their heredoc body is not shell text. */
 const STDIN_CODE_INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua)$/;
 
+/** The flags with which each interpreter still reads its stdin as a program.
+ *  Anything else (`perl -n`, `node -p`, `python3 -i`, `php -a`, a script
+ *  operand, `-c CODE`) makes the stdin data or runs it another way: no strip. */
+function readsStdinAsCode(interp: string, rest: Array<string | null>): boolean {
+  const ok = (w: string | null): boolean => {
+    if (w === null) return false;
+    if (w === '-') return true;
+    if (/^python/.test(interp))
+      return ['-u', '-B', '-E', '-I', '-s', '-q', '-O', '-OO'].includes(w) || /^-[WX]\S/.test(w);
+    if (interp === 'perl' || interp === 'ruby') return w === '-w' || w === '-W';
+    return false;
+  };
+  return rest.every(ok);
+}
+
 /** Heads that run text as shell or hand it to another machine or engine: when
  *  any statement of the command has one, no heredoc body is stripped. */
 const RUNS_TEXT_ELSEWHERE = new Set([
@@ -539,26 +554,30 @@ function interpreterHeredocSpans(f: any, at: (byte: number) => number): Array<[n
     if (!st?.Cmd || syntax.NodeType(st.Cmd) !== 'CallExpr') continue;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const words = (st.Cmd.Args || []).map((a: any) => resolveWordLiteral(a));
-    const head = unwrapCommandHead(words);
-    const name = (words[head] ?? '').split('/').pop()?.toLowerCase() ?? '';
+    // The interpreter must be the FIRST word: a wrapper before it (`env -S`,
+    // `sudo -s`, `nice`, ...) can start something else that reads the body.
+    const name = (words[0] ?? '').toLowerCase();
     if (!STDIN_CODE_INTERPRETERS.test(name)) continue;
-    const rest = words.slice(head + 1);
-    const flagsOnly = rest.every(
-      (w: string | null) => w !== null && w.startsWith('-') && !/^-[cem]/.test(w)
-    );
-    if (!flagsOnly) continue;
+    if (!readsStdinAsCode(name, words.slice(1))) continue;
     candidates.push(st);
   }
   const spans: Array<[number, number]> = [];
   for (const st of candidates) {
+    // Only the one heredoc on stdin is the program; a second one, or one on
+    // another descriptor (`3<<X`), is data the code may pass on. (One read of
+    // Redirs: every GopherJS access yields new wrapper objects.)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    for (const r of (st.Redirs || []) as any[]) {
-      if (!r?.Hdoc || heredocText(r.Hdoc) === null) continue;
-      const hs = at(r.Hdoc.Pos().Offset());
-      const he = at(r.Hdoc.End().Offset());
-      if (hs < 0 || he < 0 || he <= hs) continue;
-      spans.push([hs, he]);
-    }
+    const heredocs = ((st.Redirs || []) as any[]).filter((r: any) => r?.Hdoc);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stdin = heredocs.filter((r: any) => r.N == null || r.N.Value === '0');
+    const others = heredocs.length - stdin.length;
+    if (stdin.length !== 1 || others > 0) continue;
+    const r = stdin[0];
+    if (heredocText(r.Hdoc) === null) continue;
+    const hs = at(r.Hdoc.Pos().Offset());
+    const he = at(r.Hdoc.End().Offset());
+    if (hs < 0 || he < 0 || he <= hs) continue;
+    spans.push([hs, he]);
   }
   return spans;
 }
