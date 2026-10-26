@@ -113,12 +113,21 @@ jobs:
           # Discard npm stdout (it's multi-line in workspaces and would break
           # captures); the disk write is the source of truth.
           (cd packages/policy-engine && npm version "$PROXY_VERSION" --no-git-tag-version --allow-same-version >/dev/null)
+          # The lock records the workspace's version too; leaving it behind made
+          # every `npm install` in a checkout rewrite it (fw#411). Only that one
+          # field changes: no resolution, no network.
+          node -e '
+            const fs = require("fs");
+            const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+            lock.packages["packages/policy-engine"].version = process.argv[1];
+            fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
+          ' "$PROXY_VERSION"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          git add packages/policy-engine/package.json
+          git add packages/policy-engine/package.json package-lock.json
           git commit -m "chore(engine): sync to $PROXY_VERSION [skip ci]"
           git tag "policy-engine-v$PROXY_VERSION"
           # --atomic so commit + tag land together or not at all

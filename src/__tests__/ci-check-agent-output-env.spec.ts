@@ -149,7 +149,8 @@ describe('gap 4: reading the shell', () => {
       ],
       /claude\s+-p/
     );
-    expect(Date.now() - t).toBeLessThan(3_000);
+    // Guards against a regex or walk blow-up (minutes), not machine load (fw#411).
+    expect(Date.now() - t).toBeLessThan(10_000);
   });
 });
 
@@ -226,7 +227,8 @@ describe('gap 4: review fixes (2026-10-24)', () => {
     ];
     const t = Date.now();
     agentOutputSinks(steps, cli);
-    expect(Date.now() - t).toBeLessThan(3_000);
+    // Guards against a regex or walk blow-up (minutes), not machine load (fw#411).
+    expect(Date.now() - t).toBeLessThan(10_000);
   });
 });
 
@@ -364,6 +366,7 @@ describe('gap 4: independent review fixes (2026-10-24)', () => {
       [agent('claude -p "x" > out.txt'), ...Array.from({ length: 5 }, () => step(run))],
       cli
     );
-    expect(Date.now() - t).toBeLessThan(3_000);
+    // Guards against a regex or walk blow-up (minutes), not machine load (fw#411).
+    expect(Date.now() - t).toBeLessThan(10_000);
   });
 });

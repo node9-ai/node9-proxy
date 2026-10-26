@@ -76,7 +76,9 @@ describe('file policy: arguments bound at the call', () => {
     const calls = Array.from({ length: 500 }, (_, i) => `f ./dir${i}/file`).join('\n');
     const start = performance.now();
     files(`f() { rm -f "$1"; }\n${calls}`);
-    expect(performance.now() - start).toBeLessThan(2000);
+    // A guard against explosive growth, not a benchmark: 3 s under a loaded
+    // full-suite run (fw#411); an exponential walk is minutes.
+    expect(performance.now() - start).toBeLessThan(8000);
   });
 });
 
@@ -130,7 +132,7 @@ describe('credential jail: arguments bound at the call', () => {
     );
     const start = performance.now();
     analyzeFsOperation(command);
-    expect(performance.now() - start).toBeLessThan(5000);
+    expect(performance.now() - start).toBeLessThan(10_000);
   });
 
   it('an ordinary file through the same function stays allowed', () => {
