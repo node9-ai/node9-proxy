@@ -479,6 +479,41 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
+      // ── 0. Strip literal heredoc bodies fed to a non-shell program ──────
+      // The body of `python3 - <<'PY' … PY` or `cat > f <<'EOF' … EOF` is
+      // data to the program that reads it, not shell text, yet the regex
+      // rules read the whole command: a line such as `b = "x; curl … | bash"`
+      // inside a Python heredoc matched the pipe-to-shell rule at its `;`
+      // (fw#407). A body the shell would expand (`$x`, `$(…)` inside an
+      // unquoted heredoc) is left alone, and so is a body a shell receives
+      // (`bash <<'EOF'`, `eval`, `source`): that text does run.
+      if (syntax.NodeType(n) === 'Stmt') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const redirs: any[] = n.Redirs || [];
+        if (redirs.length > 0 && n.Cmd && syntax.NodeType(n.Cmd) === 'CallExpr') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const words = (n.Cmd.Args || []).map((a: any) => resolveWordLiteral(a));
+          const head = unwrapCommandHead(words);
+          const name = (words[head] ?? '').split('/').pop()?.toLowerCase() ?? '';
+          const shellReceiver =
+            name === '' ||
+            SHELL_INTERPRETERS.has(name) ||
+            name === 'eval' ||
+            name === 'source' ||
+            name === '.';
+          if (!shellReceiver) {
+            for (const r of redirs) {
+              if (!r?.Hdoc || heredocText(r.Hdoc) === null) continue;
+              const hs = at(r.Hdoc.Pos().Offset());
+              const he = at(r.Hdoc.End().Offset());
+              if (hs < 0 || he < 0 || he <= hs) continue;
+              strips.push([hs, he]);
+              msgSpans.add(`${hs}:${he}`);
+            }
+          }
+        }
+        return true;
+      }
       if (syntax.NodeType(n) !== 'CallExpr') return true;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
