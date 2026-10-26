@@ -115,7 +115,10 @@ jobs:
           (cd packages/policy-engine && npm version "$PROXY_VERSION" --no-git-tag-version --allow-same-version >/dev/null)
           # The lock records the workspace's version too; leaving it behind made
           # every `npm install` in a checkout rewrite it (fw#411). Only that one
-          # field changes: no resolution, no network.
+          # field changes: `npm version` above rewrites the whole lock with the
+          # runner's npm (it dropped the `libc` fields in 2.41.1), so the lock is
+          # restored first and then edited.
+          git checkout -- package-lock.json
           node -e '
             const fs = require("fs");
             const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
