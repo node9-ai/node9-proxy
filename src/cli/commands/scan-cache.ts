@@ -8,9 +8,11 @@
 // `~/.node9/scan-cache/` and hands it back when the file has not changed.
 //
 // Granularity: one transcript file, which is one session for every agent the
-// scan reads, judged WHOLE and stored with its activity split by day; the
-// window is applied when the file is merged, so the result never depends on
-// the window it was first scanned for (fw#406). A grown file is re-read whole,
+// scan reads, judged from the window start less a state lookback (or whole)
+// and stored with its activity split by day; the window is applied when the
+// file is merged. An entry records where judging started: any window starting
+// at or after it is served from the entry, so a daily run whose window moves
+// forward stays warm, and only a wider window re-judges (fw#406). A grown file is re-read whole,
 // not from an offset: loop analytics and the early-secrets metric look at the
 // whole session, and the growing files are the few live sessions. The whole
 // cache is dropped when the configuration hash, the engine version, the proxy
@@ -54,6 +56,8 @@ interface IndexEntry {
   configHashes?: Record<string, string>;
   /** When the entry was written. */
   at: number;
+  /** ISO instant judging started from; absent = the whole file. */
+  judgedFrom?: string;
 }
 
 interface IndexFile {
@@ -176,10 +180,21 @@ export class ScanCache {
 
   /** The cached whole-file result for an unchanged file, judged under
    *  configurations that have not changed either, or null. */
-  get(filePath: string, stamp: FileStamp, hasher?: ConfigHasher): ScanResult | null {
+  get(
+    filePath: string,
+    stamp: FileStamp,
+    hasher?: ConfigHasher,
+    judgeFrom: Date | null = null
+  ): ScanResult | null {
     if (!this.enabled) return null;
     const e = this.index.files[filePath];
     if (!e || e.size !== stamp.size || e.mtimeMs !== stamp.mtimeMs) {
+      this.misses++;
+      return null;
+    }
+    // The entry must cover the span this window judges: a whole-file entry
+    // covers every window, a partial one only windows starting at or after it.
+    if (e.judgedFrom && (!judgeFrom || judgeFrom.getTime() < Date.parse(e.judgedFrom))) {
       this.misses++;
       return null;
     }
@@ -204,7 +219,8 @@ export class ScanCache {
     stamp: FileStamp,
     agent: string,
     result: ScanResult,
-    hasher?: ConfigHasher
+    hasher?: ConfigHasher,
+    judgeFrom: Date | null = null
   ): void {
     if (!this.enabled) return;
     const name = createHash('sha256').update(`${agent}|${filePath}`).digest('hex').slice(0, 40);
@@ -216,7 +232,14 @@ export class ScanCache {
       const abs = path.join(this.root, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
       fs.writeFileSync(abs, JSON.stringify(result), { mode: 0o600 });
-      this.index.files[filePath] = { ...stamp, agent, result: rel, configHashes, at: Date.now() };
+      this.index.files[filePath] = {
+        ...stamp,
+        agent,
+        result: rel,
+        configHashes,
+        at: Date.now(),
+        ...(judgeFrom && { judgedFrom: judgeFrom.toISOString() }),
+      };
       this.dirty = true;
       this.pendingPuts++;
       if (this.pendingPuts >= FLUSH_EVERY_FILES || Date.now() - this.lastFlush > FLUSH_EVERY_MS)

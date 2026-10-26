@@ -200,6 +200,21 @@ describe('the incremental scan', () => {
     expect(r.dlpFindings.filter((d) => d.toolName === 'tool-result')).toHaveLength(0);
   });
 
+  it('a window that starts later (the next day) is served from the cache; an earlier one re-judges', async () => {
+    const day = 86400_000;
+    const start = new Date(Date.now() - 7 * day);
+    await scanClaudeHistory(start);
+    const reads = vi.spyOn(fs, 'readFileSync');
+    const fromTranscript = () => reads.mock.calls.filter((c) => String(c[0]) === transcript).length;
+    await scanClaudeHistory(new Date(start.getTime() + day)); // tomorrow's --days 7
+    expect(fromTranscript()).toBe(0);
+    await scanClaudeHistory(new Date(start.getTime() - 30 * day)); // a wider window
+    expect(fromTranscript()).toBe(1);
+    await scanClaudeHistory(start); // now covered by the wider entry
+    expect(fromTranscript()).toBe(1);
+    reads.mockRestore();
+  });
+
   it('a transcript last written before the window is neither opened nor counted', async () => {
     const old = path.join(path.dirname(transcript), 'old.jsonl');
     const ago = new Date(Date.now() - 60 * 86400_000);
