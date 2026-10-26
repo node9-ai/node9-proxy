@@ -68,7 +68,7 @@ afterEach(() => {
 
 describe('node9 scan --json', () => {
   it('emits valid JSON to stdout with the documented envelope', () => {
-    const r = runScan(['--json', '--days=0'], { HOME: tmpHome });
+    const r = runScan(['--json', '--all'], { HOME: tmpHome });
 
     expect(r.status).toBe(0);
 
@@ -113,5 +113,11 @@ describe('node9 scan --json', () => {
     const r = runScan(['--json', '--upload-history'], { HOME: tmpHome });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('--json cannot be combined');
+  });
+
+  it('--days 0 is an error, not a 90-day default', () => {
+    const r = runScan(['--json', '--days=0'], { HOME: tmpHome });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('--days must be a positive whole number');
   });
 });

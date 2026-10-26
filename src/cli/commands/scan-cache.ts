@@ -8,11 +8,15 @@
 // `~/.node9/scan-cache/` and hands it back when the file has not changed.
 //
 // Granularity: one transcript file, which is one session for every agent the
-// scan reads. A grown file is re-read whole, not from an offset: loop
-// analytics and the early-secrets metric look at the whole session, and the
-// growing files are the few live sessions. The whole cache is dropped when the
-// configuration hash, the engine version or the cache version changes: a
-// changed setting must change every row.
+// scan reads, judged WHOLE and stored with its activity split by day; the
+// window is applied when the file is merged, so the result never depends on
+// the window it was first scanned for (fw#406). A grown file is re-read whole,
+// not from an offset: loop analytics and the early-secrets metric look at the
+// whole session, and the growing files are the few live sessions. The whole
+// cache is dropped when the configuration hash, the engine version, the proxy
+// version or the cache version changes: a changed setting must change every
+// row. The index is flushed every few files and on an interrupt, so a run
+// stopped with Ctrl-C keeps what it judged.
 //
 // Nothing here changes `--json`: the merged result is the same object a cold
 // run builds, which the snapshot test proves.
@@ -27,20 +31,28 @@ import type { ScanResult } from './scan';
 import { PROXY_VERSION } from '../../version';
 
 /** Bump when the per-file result shape or the parsers' semantics change. */
-export const SCAN_CACHE_VERSION = 1;
+export const SCAN_CACHE_VERSION = 2;
+
+/** Flush the index after this many new entries, or after this long. */
+const FLUSH_EVERY_FILES = 25;
+const FLUSH_EVERY_MS = 10_000;
+
+/** Every cache opened in this process, so an interrupt can flush them all. */
+const activeCaches = new Set<ScanCache>();
+export function flushScanCaches(): void {
+  for (const c of activeCaches) c.flush();
+}
 
 interface IndexEntry {
   size: number;
   mtimeMs: number;
-  /** The window the result was computed for (`all` or an ISO date). */
-  window: string;
   agent: string;
   /** Cached result file, relative to the cache root. */
   result: string;
   /** Hash of the configuration of every working directory the file's calls
    *  were judged under; a project file that changed misses the cache. */
   configHashes?: Record<string, string>;
-  /** When the entry was written; old windows are pruned. */
+  /** When the entry was written. */
   at: number;
 }
 
@@ -49,12 +61,9 @@ interface IndexFile {
   engineVersion: string;
   proxyVersion: string;
   configHash: string;
-  /** Keyed by `<file path>|<window>`. */
+  /** Keyed by the transcript's absolute path. */
   files: Record<string, IndexEntry>;
 }
-
-/** Windows kept beside the current one before their entries are pruned. */
-const KEPT_WINDOWS = 3;
 
 /** What the cache needs from the judge: the hash of a directory's configuration. */
 export interface ConfigHasher {
@@ -117,11 +126,14 @@ export class ScanCache {
   /** Counters for the run, so a caller can say what was reused. */
   hits = 0;
   misses = 0;
+  private pendingPuts = 0;
+  private lastFlush = Date.now();
 
   constructor(opts: { configHash: string; enabled?: boolean; root?: string }) {
     this.root = opts.root ?? scanCacheRoot();
     this.enabled = opts.enabled ?? process.env.NODE9_SCAN_CACHE !== '0';
     this.index = this.load(opts.configHash);
+    activeCaches.add(this);
   }
 
   private load(configHash: string): IndexFile {
@@ -162,16 +174,11 @@ export class ScanCache {
     }
   }
 
-  /** The cached result for an unchanged file in this window, judged under
+  /** The cached whole-file result for an unchanged file, judged under
    *  configurations that have not changed either, or null. */
-  get(
-    filePath: string,
-    stamp: FileStamp,
-    window: string,
-    hasher?: ConfigHasher
-  ): ScanResult | null {
+  get(filePath: string, stamp: FileStamp, hasher?: ConfigHasher): ScanResult | null {
     if (!this.enabled) return null;
-    const e = this.index.files[`${filePath}|${window}`];
+    const e = this.index.files[filePath];
     if (!e || e.size !== stamp.size || e.mtimeMs !== stamp.mtimeMs) {
       this.misses++;
       return null;
@@ -195,16 +202,12 @@ export class ScanCache {
   put(
     filePath: string,
     stamp: FileStamp,
-    window: string,
     agent: string,
     result: ScanResult,
     hasher?: ConfigHasher
   ): void {
     if (!this.enabled) return;
-    const name = createHash('sha256')
-      .update(`${agent}|${filePath}|${window}`)
-      .digest('hex')
-      .slice(0, 40);
+    const name = createHash('sha256').update(`${agent}|${filePath}`).digest('hex').slice(0, 40);
     const rel = path.join('files', name.slice(0, 2), `${name}.json`);
     const configHashes: Record<string, string> = {};
     if (hasher)
@@ -213,35 +216,20 @@ export class ScanCache {
       const abs = path.join(this.root, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
       fs.writeFileSync(abs, JSON.stringify(result), { mode: 0o600 });
-      this.index.files[`${filePath}|${window}`] = {
-        ...stamp,
-        window,
-        agent,
-        result: rel,
-        configHashes,
-        at: Date.now(),
-      };
+      this.index.files[filePath] = { ...stamp, agent, result: rel, configHashes, at: Date.now() };
       this.dirty = true;
+      this.pendingPuts++;
+      if (this.pendingPuts >= FLUSH_EVERY_FILES || Date.now() - this.lastFlush > FLUSH_EVERY_MS)
+        this.flush();
     } catch {
       /* best effort: a cache write failure costs the next run time, not truth */
     }
   }
 
-  /** Drop the entries and files of every window but the most recent few: a
-   *  daily `--days 30` moves the window every day and would otherwise leave
-   *  one orphan set per day. */
+  /** Drop the entries of transcripts that no longer exist, and their files. */
   private prune(): void {
-    const byWindow = new Map<string, number>();
-    for (const e of Object.values(this.index.files))
-      byWindow.set(e.window, Math.max(byWindow.get(e.window) ?? 0, e.at ?? 0));
-    const keep = new Set(
-      [...byWindow.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, KEPT_WINDOWS)
-        .map(([w]) => w)
-    );
     for (const [key, e] of Object.entries(this.index.files)) {
-      if (keep.has(e.window)) continue;
+      if (fs.existsSync(key)) continue;
       try {
         fs.rmSync(path.join(this.root, e.result), { force: true });
       } catch {
@@ -252,10 +240,12 @@ export class ScanCache {
     }
   }
 
-  /** Write the index once per run. */
+  /** Write the index: every few files, on an interrupt, and at the end. */
   flush(): void {
     if (!this.enabled) return;
-    this.prune();
+    if (this.pendingPuts === 0) this.prune();
+    this.pendingPuts = 0;
+    this.lastFlush = Date.now();
     if (!this.dirty) return;
     try {
       fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
@@ -267,9 +257,4 @@ export class ScanCache {
       /* same: best effort */
     }
   }
-}
-
-/** The window key: the start date at day precision, or `all`. */
-export function windowKey(startDate: Date | null): string {
-  return startDate ? startDate.toISOString().slice(0, 10) : 'all';
 }

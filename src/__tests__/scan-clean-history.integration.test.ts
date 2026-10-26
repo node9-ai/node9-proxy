@@ -65,7 +65,7 @@ function seedCleanClaudeSession(home: string): void {
 
   // A benign exchange: one user text prompt, one assistant text reply.
   // No tool_use blocks, no Bash, no secrets. Timestamps are recent so
-  // the default --days=90 window includes them.
+  // the default --days=30 window includes them.
   const now = new Date().toISOString();
   const lines = [
     JSON.stringify({

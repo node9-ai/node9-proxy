@@ -63,7 +63,7 @@ const transcript = (lines: string[], file = 'sess.jsonl') => {
   fs.writeFileSync(path.join(proj, file), lines.join('\n') + '\n');
 };
 const scan = () => {
-  const r = run(['scan', '--json', '--days=0']);
+  const r = run(['scan', '--json', '--all']);
   expect([0, 2], r.stderr.slice(0, 300)).toContain(r.status);
   return JSON.parse(r.stdout) as { totals: Record<string, number> };
 };
