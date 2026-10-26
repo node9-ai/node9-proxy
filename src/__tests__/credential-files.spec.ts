@@ -49,7 +49,8 @@ describe('one list of credential files', () => {
         '~/.ssh/id_dsa',
       ])
     );
-    for (const c of homeCredentialFiles('/h')) expect(c.full.startsWith('/h/')).toBe(true);
+    const root = path.join('/h') + path.sep;
+    for (const c of homeCredentialFiles('/h')) expect(c.full.startsWith(root)).toBe(true);
   });
 
   it('the DLP gate recognises a read of every credential entry but ~/.netrc', () => {
