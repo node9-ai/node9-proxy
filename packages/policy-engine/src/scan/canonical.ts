@@ -717,7 +717,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // command as a file access (fileAccessView), so a script's interpreter line
 // and the program a command runs no longer meet a jail of /usr or /bin.
 // Histories scanned under v29 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v30';
+// canonical-v31 (fw#407): normalizeCommandForPolicy strips the body of a literal
+// heredoc fed to a non-shell program (`python3 - <<'PY'`, `cat > f <<'EOF'`), so
+// smart rules and the destructive-op regex no longer match text inside it. That
+// removes findings from history, hence a version bump and a re-scan.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v31';
 
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
 // rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
@@ -772,7 +776,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v30';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'd55f1f9e5bee7e41';
+export const CANONICAL_EXTRACTOR_HASH = '2cd37ded4f58f6db';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
