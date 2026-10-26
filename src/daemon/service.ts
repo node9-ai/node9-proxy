@@ -566,6 +566,60 @@ export function ensureAutostartHealthy(
   return decision === 'ok' ? 'ok' : decision === 'unsupported' ? 'unsupported' : 'skipped';
 }
 
+/** How often the running daemon re-checks its own autostart unit. */
+export const AUTOSTART_HEAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The running daemon keeps its autostart healthy (fw#409): once shortly after
+ * start and once a day, re-enable an installed-but-DISABLED unit for the next
+ * boot, without touching the running process. Before, the repair ran only at
+ * `login` / `connect`, so a unit disabled later stayed disabled until a reboot
+ * silently left the policy stale. Never runs under test, never installs a
+ * missing unit (`ensureAutostartHealthy`'s rule), timers are unref'd.
+ */
+export function scheduleAutostartSelfHeal(autoStartDaemon: () => boolean): void {
+  if (process.env.NODE9_TESTING === '1') return;
+  const run = () => {
+    try {
+      ensureAutostartHealthy(autoStartDaemon());
+    } catch {
+      /* never let the heal touch the daemon */
+    }
+  };
+  setTimeout(run, 60_000).unref();
+  setInterval(run, AUTOSTART_HEAL_INTERVAL_MS).unref();
+}
+
+/**
+ * Restart the daemon through the service manager when its unit is enabled, so
+ * the new process is the one systemd / launchd supervises (fw#409). Returns
+ * false when no enabled unit exists, or the restart failed: the caller then
+ * spawns the daemon itself, as before. Never throws.
+ */
+export function restartDaemonService(): boolean {
+  try {
+    if (!isDaemonServiceEnabled()) return false;
+    if (process.platform === 'linux') {
+      const r = spawnSync('systemctl', ['--user', 'restart', 'node9-daemon'], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      return r.status === 0;
+    }
+    if (process.platform === 'darwin') {
+      const uid = process.getuid?.() ?? 0;
+      const r = spawnSync('launchctl', ['kickstart', '-k', `gui/${uid}/${LAUNCHD_LABEL}`], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      return r.status === 0;
+    }
+  } catch {
+    /* fall back to the plain spawn */
+  }
+  return false;
+}
+
 /** Advice line for the daemon-autostart health, rendered by `doctor` and `status`.
  *  Pure (no I/O) so it's testable without the host's real systemd state. */
 export type AutostartAdvice = { level: 'warn'; message: string; hint: string } | null;
