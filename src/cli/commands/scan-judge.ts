@@ -21,7 +21,14 @@ import { scanArgs } from '../../dlp';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { DlpFinding, Finding, RuleSource, ScanDedup, ScanResult } from './scan';
+import {
+  dayKey,
+  type DlpFinding,
+  type Finding,
+  type RuleSource,
+  type ScanDedup,
+  type ScanResult,
+} from './scan';
 
 export type ScanAgent = Finding['agent'];
 
@@ -184,7 +191,7 @@ export class HistoryJudge {
         agent: call.agent,
         ...where,
       };
-      const k = `${finding.patternName}|${finding.redactedSample}|${call.project}`;
+      const k = `${finding.patternName}|${finding.redactedSample}|${call.project}|${dayKey(call.timestamp || undefined)}`;
       if (!dedup.dlpKeys.has(k)) {
         dedup.dlpKeys.add(k);
         result.dlpFindings.push(finding);
@@ -198,7 +205,7 @@ export class HistoryJudge {
       const m = scanArgs(call.scrubbed);
       if (m) {
         dlpMatched = true;
-        const k = `${m.patternName}|${m.redactedSample}|${call.project}`;
+        const k = `${m.patternName}|${m.redactedSample}|${call.project}|${dayKey(call.timestamp || undefined)}`;
         if (!dedup.dlpKeys.has(k)) {
           dedup.dlpKeys.add(k);
           result.dlpFindings.push({
@@ -220,7 +227,9 @@ export class HistoryJudge {
     if (verdict.decision !== 'allow' && verdict.layer !== 'dlp' && verdict.layer !== 'canary') {
       const source = ruleSourceFor(verdict, call.toolName, config);
       // The same command in two repositories is two findings (fw#404).
-      const k = `${source.rule.name ?? '<unnamed>'}|${preview(call.input)}|${call.project}|${repo ?? ''}`;
+      // Per day per file: the merge dedups across days, after the window
+      // has picked the days it keeps (fw#406 review).
+      const k = `${source.rule.name ?? '<unnamed>'}|${preview(call.input)}|${call.project}|${repo ?? ''}|${dayKey(call.timestamp || undefined)}`;
       if (!dedup.findingsKeys.has(k)) {
         dedup.findingsKeys.add(k);
         result.findings.push({

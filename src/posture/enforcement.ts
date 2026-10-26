@@ -122,7 +122,9 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
         // Every listed file is already recognised by the gate. Advising to
         // enable project-jail then contradicts the jail row beside it (fw#408);
         // when nothing is stopped, the mode is what is missing.
-        if (!env.enforcing && f.fix?.includes('shield enable project-jail')) {
+        // Only for a record-only mode: when the gap is an unwired agent, the
+        // mode is not the fix (fw#408 review).
+        if (isRecordOnly(mode) && f.fix?.includes('shield enable project-jail')) {
           f.fix =
             'node9 already recognises reads of these files, but it is in ' +
             `${mode ?? 'audit'} mode, which logs them and lets them through. ` +

@@ -85,6 +85,15 @@ describe('one list of credential files', () => {
 describe('posture advice follows the state', () => {
   const ctx = () => ({ home: home(), cwd: home() }) as CheckContext;
 
+  it('standard mode with no agent wired: the advice is not about the mode', async () => {
+    plant(['.ssh', 'id_rsa']);
+    writeConfig({ mode: 'standard' });
+    const findings = checkSecrets(ctx());
+    await annotateCoverage(findings, ctx());
+    const row = findings.find((f) => f.title.includes('credential file'));
+    expect(row?.fix).not.toContain('set mode to');
+  });
+
   it('audit mode: the files are recognised, the advice is the mode, not the shield', async () => {
     plant(['.ssh', 'id_rsa']);
     writeConfig({ mode: 'audit' });

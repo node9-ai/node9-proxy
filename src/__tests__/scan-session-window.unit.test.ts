@@ -97,3 +97,37 @@ describe('sessions follow the window', () => {
     expect(r.sessions).toBe(1);
   });
 });
+
+describe('Codex is judged by the call clock (fw#406 review)', () => {
+  it('a session that started before the window, with a call inside it: cold and cached agree', async () => {
+    const dir = path.join(home(), '.codex', 'sessions', '2026', '01', '02');
+    fs.mkdirSync(dir, { recursive: true });
+    const started = new Date(Date.now() - 3 * DAY).toISOString();
+    const recent = new Date(Date.now() - 3600_000).toISOString();
+    fs.writeFileSync(
+      path.join(dir, 'rollout-long.jsonl'),
+      [
+        { type: 'session_meta', payload: { id: 'long', timestamp: started, cwd: '/tmp/p' } },
+        {
+          type: 'response_item',
+          timestamp: recent,
+          payload: {
+            type: 'function_call',
+            name: 'shell',
+            arguments: JSON.stringify({ cmd: 'ls' }),
+          },
+        },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n')
+    );
+    const start = new Date(Date.now() - DAY);
+    const cold = await scanCodexHistory(start, undefined, undefined, { cache: false });
+    expect(cold.totalToolCalls).toBe(1);
+    expect(cold.sessions).toBe(1);
+    await scanCodexHistory(null); // a whole-file cache entry
+    const warm = await scanCodexHistory(start);
+    expect(warm.totalToolCalls).toBe(cold.totalToolCalls);
+    expect(warm.sessions).toBe(cold.sessions);
+  });
+});

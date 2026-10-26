@@ -215,6 +215,28 @@ describe('the incremental scan', () => {
     reads.mockRestore();
   });
 
+  it('a finding repeated before and inside the window is kept from inside (per-day dedup)', async () => {
+    const other = path.join(path.dirname(transcript), 'sess-4.jsonl');
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const early = new Date(start.getTime() - 12 * 3600_000).toISOString(); // in the lookback
+    const late = new Date(Math.max(start.getTime() + 60_000, Date.now() - 60_000)).toISOString();
+    const key = 'AKIA' + 'J2XZKZMV' + 'P3NQRSTU';
+    fs.writeFileSync(
+      other,
+      [
+        line('e1', 'git push --force origin main', early),
+        line('e2', `echo ${key}`, early),
+        line('l1', 'git push --force origin main', late),
+        line('l2', `echo ${key}`, late),
+      ].join('\n') + '\n'
+    );
+    const r = await scanClaudeHistory(start, undefined, undefined, { cache: false });
+    const push = r.findings.find((f) => String(f.input.command).startsWith('git push --force'));
+    expect(push?.timestamp).toBe(late);
+    expect(r.dlpFindings.some((d) => d.timestamp === late)).toBe(true);
+  });
+
   it('a transcript last written before the window is neither opened nor counted', async () => {
     const old = path.join(path.dirname(transcript), 'old.jsonl');
     const ago = new Date(Date.now() - 60 * 86400_000);
@@ -237,19 +259,31 @@ describe('the incremental scan', () => {
     fs.rmSync(root, { recursive: true, force: true });
     const cache = new ScanCache({ configHash: 'x', enabled: true, root });
     const stamp = { size: 1, mtimeMs: 1 };
-    for (let i = 0; i < 24; i++) cache.put(`/t/f${i}.jsonl`, stamp, 'claude', emptyScan());
+    // Real files, so the quiet-flush prune keeps their entries.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-t-'));
+    const f = (i: number) => {
+      const p = path.join(dir, `f${i}.jsonl`);
+      fs.writeFileSync(p, '');
+      return p;
+    };
+    for (let i = 0; i < 24; i++) cache.put(f(i), stamp, 'claude', emptyScan());
     expect(fs.existsSync(path.join(root, 'index.json'))).toBe(false);
-    cache.put('/t/f24.jsonl', stamp, 'claude', emptyScan());
-    expect(fs.existsSync(path.join(root, 'index.json'))).toBe(true);
-    cache.put('/t/f25.jsonl', stamp, 'claude', emptyScan());
-    flushScanCaches();
-    const idx = JSON.parse(fs.readFileSync(path.join(root, 'index.json'), 'utf8')) as {
+    cache.put(f(24), stamp, 'claude', emptyScan());
+    const after25 = JSON.parse(fs.readFileSync(path.join(root, 'index.json'), 'utf8')) as {
       files: Record<string, unknown>;
     };
-    // Entries for transcripts that do not exist are pruned on a quiet flush;
-    // the index itself survived the interrupt.
-    expect(Object.keys(idx.files).length).toBeGreaterThanOrEqual(0);
+    expect(Object.keys(after25.files)).toHaveLength(25);
+    cache.put(f(25), stamp, 'claude', emptyScan());
+    flushScanCaches();
+    const after26 = JSON.parse(fs.readFileSync(path.join(root, 'index.json'), 'utf8')) as {
+      files: Record<string, unknown>;
+    };
+    expect(Object.keys(after26.files)).toHaveLength(26);
+    // A reader with the same configuration sees the entries.
+    const again = new ScanCache({ configHash: 'x', enabled: true, root });
+    expect(again.get(f(3), stamp)).not.toBeNull();
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('a changed configuration drops the cache: the rows change with the setting', async () => {

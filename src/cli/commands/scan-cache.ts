@@ -33,7 +33,7 @@ import type { ScanResult } from './scan';
 import { PROXY_VERSION } from '../../version';
 
 /** Bump when the per-file result shape or the parsers' semantics change. */
-export const SCAN_CACHE_VERSION = 2;
+export const SCAN_CACHE_VERSION = 3;
 
 /** Flush the index after this many new entries, or after this long. */
 const FLUSH_EVERY_FILES = 25;
@@ -205,9 +205,19 @@ export class ScanCache {
       }
     }
     try {
-      const r = JSON.parse(fs.readFileSync(path.join(this.root, e.result), 'utf8')) as ScanResult;
+      // The file carries where its judging started: two processes with
+      // different windows writing the same transcript must not pair one's
+      // index entry with the other's content (fw#406 review).
+      const stored = JSON.parse(fs.readFileSync(path.join(this.root, e.result), 'utf8')) as {
+        judgedFrom: string | null;
+        result: ScanResult;
+      };
+      if ((stored.judgedFrom ?? null) !== (e.judgedFrom ?? null) || !stored.result) {
+        this.misses++;
+        return null;
+      }
       this.hits++;
-      return r;
+      return stored.result;
     } catch {
       this.misses++;
       return null;
@@ -231,7 +241,11 @@ export class ScanCache {
     try {
       const abs = path.join(this.root, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(abs, JSON.stringify(result), { mode: 0o600 });
+      fs.writeFileSync(
+        abs,
+        JSON.stringify({ judgedFrom: judgeFrom ? judgeFrom.toISOString() : null, result }),
+        { mode: 0o600 }
+      );
       this.index.files[filePath] = {
         ...stamp,
         agent,
@@ -261,6 +275,13 @@ export class ScanCache {
       delete this.index.files[key];
       this.dirty = true;
     }
+  }
+
+  /** The final flush of a run: the cache leaves the interrupt registry, so a
+   *  long-lived daemon does not keep every index it ever opened. */
+  close(): void {
+    this.flush();
+    activeCaches.delete(this);
   }
 
   /** Write the index: every few files, on an interrupt, and at the end. */
