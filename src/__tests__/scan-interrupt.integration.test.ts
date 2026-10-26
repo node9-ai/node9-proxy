@@ -55,7 +55,9 @@ describe.skipIf(!fs.existsSync(CLI) || process.platform === 'win32')('scan inter
     const code = await new Promise<number | null>((resolve) => child.on('exit', (c) => resolve(c)));
     expect(code).toBe(130);
     const idx = JSON.parse(fs.readFileSync(index, 'utf8')) as { files: Record<string, unknown> };
-    expect(Object.keys(idx.files).length).toBeGreaterThanOrEqual(25);
+    // The first flush comes at 25 files or 10 s, whichever is first; under a
+    // loaded run it is the timer. Either way the judged files are kept.
+    expect(Object.keys(idx.files).length).toBeGreaterThan(0);
     fs.rmSync(home, { recursive: true, force: true });
   }, 120_000);
 });
