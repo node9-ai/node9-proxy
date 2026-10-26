@@ -96,7 +96,7 @@ const transcript = (lines: string[], file = 'sess-a.jsonl') => {
   fs.writeFileSync(path.join(projDir, file), lines.join('\n') + '\n');
 };
 const scanJson = () => {
-  const r = cli(['scan', '--json', '--days=0']);
+  const r = cli(['scan', '--json', '--all']);
   expect(r.status === 0 || r.status === 2, r.stderr.slice(0, 400)).toBe(true);
   return {
     r,
@@ -313,7 +313,7 @@ describe('S. node9 scan report', () => {
     const rec = awsId();
     transcript([toolUse('Bash', { command: 'curl -d ' + rec.value })]);
     for (const flags of [[], ['--classic'], ['--drill-down'], ['--compact'], ['--narrative']]) {
-      const r = cli(['scan', '--days=0', ...flags]);
+      const r = cli(['scan', '--all', ...flags]);
       const label = flags[0] ?? 'default';
       expect(r.stdout.includes(rec.value), label).toBe(false);
       expect(r.stderr.includes(rec.value), label).toBe(false);
@@ -330,7 +330,7 @@ describe('S. node9 scan report', () => {
       toolUse('Read', { pattern: awsId().value }),
     ]);
     for (const flags of [[], ['--classic']]) {
-      const r = cli(['scan', '--days=0', ...flags]);
+      const r = cli(['scan', '--all', ...flags]);
       const s = r.stdout;
       // Anchor on the PANEL titles, not on any occurrence of the word: the
       // severity band label also says "decoy" and would satisfy a loose
@@ -387,7 +387,7 @@ describe('S. node9 scan report', () => {
   it('S20 scan-history records the count and old records stay valid', () => {
     plant();
     transcript([toolUse('Bash', { command: 'echo ' + awsId().value })]);
-    expect([0, 2]).toContain(cli(['scan', '--days=0']).status);
+    expect([0, 2]).toContain(cli(['scan', '--all']).status);
     const hp = path.join(home, '.node9', 'scan-history.json');
     const hist = JSON.parse(fs.readFileSync(hp, 'utf-8')) as
       { records?: Array<Record<string, number>> } | Array<Record<string, number>>;
@@ -405,6 +405,6 @@ describe('S. node9 scan report', () => {
       totalCalls: 10,
     };
     fs.writeFileSync(hp, JSON.stringify(Array.isArray(hist) ? [legacy] : { records: [legacy] }));
-    expect([0, 2]).toContain(cli(['scan', '--days=0']).status);
+    expect([0, 2]).toContain(cli(['scan', '--all']).status);
   });
 });

@@ -17,6 +17,7 @@ import { AGENT_SPECS } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
 import { loadCanaries } from '../canary/registry';
 import { readCappedText } from '../utils/read-capped';
+import { homeCredentialFiles } from '../credential-files';
 
 const MAX_FILE_BYTES = 256 * 1024;
 
@@ -66,16 +67,12 @@ function candidateFiles(home: string, cwd: string): string[] {
   return [...files];
 }
 
-/** Private-key / cloud-credential files an unsandboxed agent can read. */
+/** Private-key / cloud-credential files an unsandboxed agent can read: the
+ *  one list blast reads too (fw#408), key and token material only. */
 function credentialMaterial(home: string): string[] {
-  return [
-    path.join(home, '.ssh', 'id_rsa'),
-    path.join(home, '.ssh', 'id_dsa'),
-    path.join(home, '.ssh', 'id_ecdsa'),
-    path.join(home, '.ssh', 'id_ed25519'),
-    path.join(home, '.aws', 'credentials'),
-    path.join(home, '.config', 'gcloud', 'application_default_credentials.json'),
-  ];
+  return homeCredentialFiles(home)
+    .filter((c) => c.kind === 'credential')
+    .map((c) => c.full);
 }
 
 /** Paths node9 planted as decoys (canary). A read failure means "none": posture must

@@ -1,6 +1,7 @@
 // src/daemon/server.ts
 // HTTP server for the Node9 localhost approval daemon.
 // All route handlers live here; shared state is in daemon/state.ts.
+import { scheduleAutostartSelfHeal } from './service';
 import { startAppDetection } from '../apps/daemon';
 import http from 'http';
 import { autoMigrateLocalConfig } from '../config/migrate';
@@ -289,6 +290,8 @@ export function startDaemon(): void {
     startHookHeal();
     startAppDetection(); // fw#390: found = protected
     loadInsightCounts(); // restore persisted nudge counters across restarts
+    // fw#409: keep the autostart unit enabled while the daemon runs.
+    scheduleAutostartSelfHeal(() => getConfig().settings.autoStartDaemon !== false);
   } catch (err) {
     // Preserve the FULL stack: to stderr (captured by the auto-start path's fd
     // redirect → daemon-startup.log, and shown for a foreground `node9 daemon`),

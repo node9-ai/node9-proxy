@@ -234,10 +234,18 @@ describe('isDaemonRunning — stale PID file', () => {
   it('returns false when PID file exists but process is dead', () => {
     const pidPath = path.join('/mock/home', '.node9', 'daemon.pid');
     existsSpy.mockImplementation((p) => String(p) === pidPath);
-    // Use PID 999999 which is virtually guaranteed to not exist
     readSpy.mockImplementation((p) =>
       String(p) === pidPath ? JSON.stringify({ pid: 999999, port: 7391 }) : ''
     );
-    expect(isDaemonRunning()).toBe(false);
+    // A constant PID is not "virtually guaranteed" free: on a busy machine with
+    // pid_max 4194304 it exists now and then (fw#411). The probe answers ESRCH.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
+    });
+    try {
+      expect(isDaemonRunning()).toBe(false);
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 });

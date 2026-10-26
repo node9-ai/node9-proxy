@@ -13,6 +13,8 @@ import {
   installDaemonService,
   uninstallDaemonService,
 } from '../../daemon/index';
+import { ensureAutostartHealthy, restartDaemonService } from '../../daemon/service';
+import { getConfig } from '../../config';
 const VALID_ACTIONS = 'start | stop | restart | status | install | uninstall';
 
 export function registerDaemonCommand(program: Command): void {
@@ -70,6 +72,30 @@ export function registerDaemonCommand(program: Command): void {
           for (let i = 0; i < 15; i++) {
             if (!(await isDaemonReachable(300))) break;
             await new Promise((r) => setTimeout(r, 200));
+          }
+          // An installed service owns the daemon (fw#409): re-enable it if it
+          // was disabled, and restart through it, so the new process survives
+          // a reboot and is the one the service manager supervises.
+          ensureAutostartHealthy(getConfig().settings.autoStartDaemon !== false);
+          if (restartDaemonService()) {
+            // systemctl returns 0 for a unit whose ExecStart then fails (a node
+            // path that moved): confirm the daemon answers before saying so,
+            // and fall back to the plain spawn when it does not (fw#409 review).
+            let up = false;
+            for (let i = 0; i < 25 && !up; i++) {
+              up = await isDaemonReachable(300);
+              if (!up) await new Promise((r) => setTimeout(r, 200));
+            }
+            if (up) {
+              console.log(chalk.green('✓ Daemon restarted by the background service'));
+              console.log(chalk.gray('   Confirm with: node9 status'));
+              process.exit(0);
+            }
+            console.error(
+              chalk.yellow(
+                '⚠ The background service did not bring the daemon up; starting it directly'
+              )
+            );
           }
           // Same spawner contract as --background: capture the child's stderr, mark
           // the attempt, and ALWAYS attach an 'error' listener (an 'error' event with

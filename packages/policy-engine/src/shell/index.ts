@@ -453,6 +453,135 @@ function commandReadingsImpl(command: string): CommandReadings {
   return cachedNormalize(command, () => normalizeCommandForPolicyImpl(command));
 }
 
+/** Programs that read CODE from stdin and whose code inline-exec judges by
+ *  its own rules; their heredoc body is not shell text. */
+const STDIN_CODE_INTERPRETERS = /^(python[0-9.]*|node|nodejs|perl|ruby|php|lua)$/;
+
+/** The flags with which each interpreter still reads its stdin as a program.
+ *  Anything else (`perl -n`, `node -p`, `python3 -i`, `php -a`, a script
+ *  operand, `-c CODE`) makes the stdin data or runs it another way: no strip. */
+function readsStdinAsCode(interp: string, rest: Array<string | null>): boolean {
+  const ok = (w: string | null): boolean => {
+    if (w === null) return false;
+    if (w === '-') return true;
+    if (/^python/.test(interp))
+      return ['-u', '-B', '-E', '-I', '-s', '-q', '-O', '-OO'].includes(w) || /^-[WX]\S/.test(w);
+    if (interp === 'perl' || interp === 'ruby') return w === '-w' || w === '-W';
+    return false;
+  };
+  return rest.every(ok);
+}
+
+/** Heads that run text as shell or hand it to another machine or engine: when
+ *  any statement of the command has one, no heredoc body is stripped. */
+const RUNS_TEXT_ELSEWHERE = new Set([
+  ...SHELL_INTERPRETERS,
+  'csh',
+  'tcsh',
+  'ash',
+  'mksh',
+  'busybox',
+  'eval',
+  'source',
+  '.',
+  'exec',
+  'xargs',
+  'ssh',
+  'scp',
+  'docker',
+  'podman',
+  'kubectl',
+  'su',
+  'nsenter',
+  'at',
+  'batch',
+  'crontab',
+  'flock',
+  'psql',
+  'mysql',
+  'mongo',
+  'mongosh',
+  'redis-cli',
+  'sqlite3',
+]);
+
+/**
+ * The byte spans of literal heredoc bodies that are CODE for a stdin code
+ * interpreter (`python3 - <<'PY' … PY`), which the regex rules must not read
+ * as shell text (fw#407). Narrow on purpose:
+ *  - only top-level statements whose command is the interpreter itself, with
+ *    flags only (no script, no `-c` / `-e` / `-m`): not inside a pipe, a
+ *    process substitution or a command substitution;
+ *  - only literal bodies (a heredoc the shell expands keeps its text);
+ *  - and none at all when another statement runs a shell, a path, a remote
+ *    executor or a database client, or defines a function: the body could
+ *    reach a shell through them.
+ * The body is still judged as code by the inline-exec check, which reads the
+ * raw command.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function interpreterHeredocSpans(f: any, at: (byte: number) => number): Array<[number, number]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stmts: any[] = f?.Stmts || [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const candidates: any[] = [];
+  let unsafe = false;
+  syntax.Walk(f, (node: unknown) => {
+    if (!node || unsafe) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    const t = syntax.NodeType(n);
+    if (t === 'FuncDecl') {
+      unsafe = true;
+      return false;
+    }
+    if (t !== 'CallExpr') return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = (n.Args || []).map((a: any) => resolveWordLiteral(a));
+    const head = unwrapCommandHead(words);
+    const raw = words[head];
+    if (raw === null || raw === undefined) {
+      unsafe = true; // a dynamic command word could be anything
+      return false;
+    }
+    const name = raw.split('/').pop()?.toLowerCase() ?? '';
+    if (raw.includes('/') && !STDIN_CODE_INTERPRETERS.test(name)) unsafe = true;
+    if (RUNS_TEXT_ELSEWHERE.has(name)) unsafe = true;
+    return !unsafe;
+  });
+  if (unsafe) return [];
+  for (const st of stmts) {
+    if (!st?.Cmd || syntax.NodeType(st.Cmd) !== 'CallExpr') continue;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = (st.Cmd.Args || []).map((a: any) => resolveWordLiteral(a));
+    // The interpreter must be the FIRST word: a wrapper before it (`env -S`,
+    // `sudo -s`, `nice`, ...) can start something else that reads the body.
+    const name = (words[0] ?? '').toLowerCase();
+    if (!STDIN_CODE_INTERPRETERS.test(name)) continue;
+    if (!readsStdinAsCode(name, words.slice(1))) continue;
+    candidates.push(st);
+  }
+  const spans: Array<[number, number]> = [];
+  for (const st of candidates) {
+    // Only the one heredoc on stdin is the program; a second one, or one on
+    // another descriptor (`3<<X`), is data the code may pass on. (One read of
+    // Redirs: every GopherJS access yields new wrapper objects.)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const heredocs = ((st.Redirs || []) as any[]).filter((r: any) => r?.Hdoc);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stdin = heredocs.filter((r: any) => r.N == null || r.N.Value === '0');
+    const others = heredocs.length - stdin.length;
+    if (stdin.length !== 1 || others > 0) continue;
+    const r = stdin[0];
+    if (heredocText(r.Hdoc) === null) continue;
+    const hs = at(r.Hdoc.Pos().Offset());
+    const he = at(r.Hdoc.End().Offset());
+    if (hs < 0 || he < 0 || he <= hs) continue;
+    spans.push([hs, he]);
+  }
+  return spans;
+}
+
 function normalizeCommandForPolicyImpl(command: string): CommandReadings {
   const f = parseShared(command);
   // fail open for FPs, not FNs — every reading falls back to the raw text
@@ -474,6 +603,11 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
     // commandReadings() for why one reading is not enough.
     const quoteOnlyRewrites: Array<[number, number, string]> = [];
     const msgSpans = new Set<string>();
+    // ── 0. The code body of a stdin code interpreter (fw#407) ──────────
+    for (const [hs, he] of interpreterHeredocSpans(f, at)) {
+      strips.push([hs, he]);
+      msgSpans.add(`${hs}:${he}`);
+    }
 
     syntax.Walk(f, (node: unknown) => {
       if (!node) return false;
@@ -568,7 +702,18 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
 
     const stripEdits = strips.map(([s, e]): [number, number, string] => [s, e, '""']);
     const apply = (extra: Array<[number, number, string]>): string => {
-      const edits = [...stripEdits, ...extra];
+      // Edits are applied end to start on the ORIGINAL offsets, so an edit
+      // nested inside another (a heredoc inside a stripped message) would
+      // splice with stale offsets and cut the text after it (fw#407 review).
+      // The outer edit wins; inner ones are dropped.
+      const all = [...stripEdits, ...extra];
+      const edits = all.filter(
+        (e, i) =>
+          !all.some(
+            (o, k) =>
+              k !== i && o[0] <= e[0] && e[1] <= o[1] && (o[0] < e[0] || e[1] < o[1] || k < i)
+          )
+      );
       if (edits.length === 0) return command;
       edits.sort((a, b) => b[0] - a[0]); // end→start so earlier offsets stay valid
       let out = command;

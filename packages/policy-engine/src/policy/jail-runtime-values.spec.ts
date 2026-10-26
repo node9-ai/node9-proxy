@@ -262,8 +262,9 @@ describe('JAIL-14a — the table survives a wrapper and an && chain', () => {
     const small = ms(spine(100));
     const large = ms(spine(400));
     // 4x the links must not cost 16x the time. Generous, so a slow machine does
-    // not make this flake; the quadratic shape was 10x over this bound.
-    expect(large).toBeLessThan(Math.max(small * 8, 400));
+    // not make this flake (461 ms on a loaded CI runner against a 400 ms floor,
+    // fw#411); the quadratic shape took 1624 ms, still over this bound.
+    expect(large).toBeLessThan(Math.max(small * 8, 1000));
   });
 });
 
