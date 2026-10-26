@@ -310,7 +310,7 @@ describe('runPackageCheck — newPackage / installScript knobs', () => {
     });
     expect(r.findings.map((f) => f.kind)).toEqual(['new']);
   });
-  it('both off: no registry call at all', async () => {
+  it('both off: one registry call for the version, no age or install-script finding', async () => {
     youngWithScript();
     const r = await runPackageCheck(...bash('npm i node9-canary-both'), {
       ...CFG,
@@ -318,7 +318,35 @@ describe('runPackageCheck — newPackage / installScript knobs', () => {
       installScript: 'off',
     });
     expect(r.verdict).toBe('allow');
-    expect(calls.filter((c) => c.includes('registry.test'))).toEqual([]);
+    expect(r.findings).toEqual([]);
+    expect(calls.filter((c) => c.includes('registry.test'))).toEqual([
+      'http://registry.test/node9-canary-both',
+    ]);
+  });
+  // node9Firewall#412: the Soft level turns both signals off, and the lookup
+  // that resolves the version went with them, so an unpinned install of a
+  // package with an old malicious version was held while Standard allowed it.
+  it('both off: an unpinned install resolves to a clean latest and is allowed', async () => {
+    indexWith('npm', 'node9-canary-past', [{ id: 'MAL-0000-0412', versions: ['1.0.0'] }]);
+    routes['http://registry.test/node9-canary-past'] = () => npmDoc('2.0.0');
+    const r = await runPackageCheck(...bash('npm install node9-canary-past'), {
+      ...CFG,
+      newPackage: 'off',
+      installScript: 'off',
+    });
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('both off: a pinned malicious version still blocks, with no registry call', async () => {
+    indexWith('npm', 'node9-canary-past', [{ id: 'MAL-0000-0412', versions: ['1.0.0'] }]);
+    const r = await runPackageCheck(...bash('npm install node9-canary-past@1.0.0'), {
+      ...CFG,
+      newPackage: 'off',
+      installScript: 'off',
+    });
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('MAL-0000-0412');
+    expect(calls).toEqual([]);
   });
 });
 

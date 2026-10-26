@@ -12,6 +12,9 @@
 //   a release without the provenance its previous release had → review
 //   anything else, and every lookup failure → allow
 //
+// The registry also names the version an unpinned install resolves to, so it
+// is asked for that even when both signals are off (node9Firewall#412).
+//
 // Contract: never throws, never blocks because a lookup failed. Failures are
 // returned as `misses` for the caller to record.
 import picomatch from 'picomatch';
@@ -239,9 +242,12 @@ async function checkOne(
   let info: RegistryInfo | null = null;
   // Registry metadata exists for npm and PyPI only; the other ecosystems are
   // checked against OSV alone, and no request leaves for a registry that
-  // would answer for a different ecosystem.
+  // would answer for a different ecosystem. With both signals off the
+  // registry is still asked for an unpinned install: it names the version the
+  // install gets, and without it a record on any old version reads as "has
+  // known malicious versions" (node9Firewall#412, the Soft level).
   const wantsRegistry =
-    (cfg.newPackage !== 'off' || cfg.installScript !== 'off') &&
+    (cfg.newPackage !== 'off' || cfg.installScript !== 'off' || !p.version) &&
     HAS_REGISTRY_CLIENT.has(p.ecosystem);
   if (wantsRegistry && !networkCapped) {
     try {
