@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { scanArgs } from '../../dlp';
+import { homeCredentialFiles } from '../../credential-files';
 
 // ---------------------------------------------------------------------------
 // Sensitive path definitions
@@ -23,77 +24,25 @@ interface SensitivePath {
 }
 
 function buildSensitivePaths(home: string, cwd: string): Array<SensitivePath & { full: string }> {
+  // The home files come from the one list posture reads too (fw#408).
+  const homeFiles = homeCredentialFiles(home).map(({ full, label, description, score }) => ({
+    full,
+    label,
+    description,
+    score,
+  }));
   return [
-    {
-      full: path.join(home, '.ssh', 'id_rsa'),
-      label: '~/.ssh/id_rsa',
-      description: 'RSA private key — grants SSH access to your servers',
-      score: 20,
-    },
-    {
-      full: path.join(home, '.ssh', 'id_ed25519'),
-      label: '~/.ssh/id_ed25519',
-      description: 'Ed25519 private key — grants SSH access to your servers',
-      score: 20,
-    },
-    {
-      full: path.join(home, '.ssh', 'id_ecdsa'),
-      label: '~/.ssh/id_ecdsa',
-      description: 'ECDSA private key — grants SSH access to your servers',
-      score: 20,
-    },
-    {
-      full: path.join(home, '.aws', 'credentials'),
-      label: '~/.aws/credentials',
-      description: 'AWS access keys — full cloud account access',
-      score: 20,
-    },
-    {
-      full: path.join(home, '.aws', 'config'),
-      label: '~/.aws/config',
-      description: 'AWS configuration — account and region settings',
-      score: 5,
-    },
-    {
-      full: path.join(home, '.config', 'gcloud', 'credentials.db'),
-      label: '~/.config/gcloud/credentials.db',
-      description: 'Google Cloud credentials',
-      score: 15,
-    },
-    {
-      full: path.join(home, '.docker', 'config.json'),
-      label: '~/.docker/config.json',
-      description: 'Docker registry auth tokens',
-      score: 10,
-    },
-    {
-      full: path.join(home, '.netrc'),
-      label: '~/.netrc',
-      description: 'FTP/HTTP credentials in plain text',
-      score: 15,
-    },
-    {
-      full: path.join(home, '.npmrc'),
-      label: '~/.npmrc',
-      description: 'npm auth token — can publish packages as you',
-      score: 10,
-    },
-    {
-      full: path.join(home, '.node9', 'credentials.json'),
-      label: '~/.node9/credentials.json',
-      description: 'Node9 cloud API key',
-      score: 10,
-    },
+    ...homeFiles,
     {
       full: path.join(cwd, '.env'),
       label: '.env  (current folder)',
-      description: 'App secrets — database passwords, API keys',
+      description: 'App secrets: database passwords, API keys',
       score: 20,
     },
     {
       full: path.join(cwd, '.env.local'),
       label: '.env.local  (current folder)',
-      description: 'Local overrides — often contains real credentials',
+      description: 'Local overrides: often contains real credentials',
       score: 15,
     },
     {
