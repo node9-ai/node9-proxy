@@ -20,6 +20,7 @@ import type { FileAccess, FileAccessContext } from './paths';
 import { normalizeFilePath } from './paths';
 import { writtenTexts } from './written-texts';
 import { shellWriteUnseen } from '../shell/write-source';
+import { hookTextRunsNothing } from './git-hooks';
 
 const CHECK_ID = 'files.agent-instructions';
 
@@ -27,6 +28,7 @@ export type AgentFileKind =
   'instructions' | 'memory' | 'agents' | 'commands' | 'skills' | 'settings';
 
 export type AgentFileVerdict = PolicyVerdict & {
+  ruleName: string;
   path: string;
   operation: FileAccess['operation'];
   kind: AgentFileKind;
@@ -35,6 +37,14 @@ export type AgentFileVerdict = PolicyVerdict & {
 /** What the host supplies: the settings file as it is on disk now. */
 export interface AgentFileHooks {
   readAgentSettings?: (absPath: string) => string | null;
+  /**
+   * The settings file as it was before the call cannot be known (a history
+   * scan reads a write long after the file moved on). A whole write then
+   * counts only when its own hooks run nothing; the gate's fallback, any
+   * mention of hooks, would report every write of a settings file that has
+   * hooks at all.
+   */
+  settingsUnknown?: boolean;
 }
 
 const INSTRUCTION_NAMES = new Set([
@@ -90,6 +100,35 @@ function sortKeys(v: unknown): unknown {
   return v;
 }
 
+/** The hook commands of a settings file, or null when it has no `hooks` object. */
+function hookCommands(text: string): string[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const root = (parsed as { hooks?: unknown } | null)?.hooks;
+  if (!root || typeof root !== 'object') return null;
+  const out: string[] = [];
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 8 || !v || typeof v !== 'object') return;
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (k === 'command' && typeof x === 'string') out.push(x);
+      else walk(x, depth + 1);
+    }
+  };
+  walk(root, 0);
+  return out;
+}
+
+/** Hooks that run nothing: an empty `hooks` object, or a command like `true` or `exit 0`. */
+function hooksDisarmed(text: string): boolean {
+  const commands = hookCommands(text);
+  if (commands === null) return false;
+  return commands.length === 0 || commands.some(hookTextRunsNothing);
+}
+
 /** The edits a file tool carries, in order. */
 function editPairs(args: unknown): Array<{ from: string; to: string }> | null {
   if (!args || typeof args !== 'object') return null;
@@ -119,7 +158,9 @@ function editPairs(args: unknown): Array<{ from: string; to: string }> | null {
  * is compared with the file on disk; an edit is applied to the file on disk
  * and compared; without the file (no reader, unreadable, not JSON) or with
  * an edit whose old text is not found, any mention of hooks in the new text
- * counts.
+ * counts. With `settingsUnknown` and no file, a whole write counts only when
+ * its hooks run nothing; one that drops the `hooks` key or swaps a command for
+ * another real one is not seen there.
  */
 function hooksChange(
   args: unknown,
@@ -132,7 +173,9 @@ function hooksChange(
   if (texts.whole.length > 0) {
     for (const t of texts.whole) {
       const after = stableHooks(t);
-      if (before === undefined || after === undefined) {
+      if (before === undefined && after !== undefined && hooks.settingsUnknown) {
+        if (hooksDisarmed(t)) return true;
+      } else if (before === undefined || after === undefined) {
         if (HOOK_WORDS_RE.test(t)) return true;
       } else if (after !== before) return true;
     }

@@ -22,6 +22,7 @@ const CHECK_ID = 'commands.git-hooks-bypass';
 const RULE_NAME = 'review-git-hooks-bypass';
 
 export type GitHooksFileVerdict = PolicyVerdict & {
+  ruleName: string;
   path: string;
   operation: FileAccess['operation'];
 };

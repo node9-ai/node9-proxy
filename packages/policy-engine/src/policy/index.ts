@@ -8,11 +8,8 @@ import { inspectionEntry, inspectionLayers } from '../shell/tool-input';
 // to touch the host system arrives via the hooks parameter.
 
 import type { SmartRule, DlpMatch } from '../types';
-import {
-  collectFileAccesses,
-  evaluateProtectedFileAccess,
-  incompleteFileVerdict,
-} from '../files/protected-access';
+import { collectFileAccesses, incompleteFileVerdict } from '../files/protected-access';
+import { evaluateFileChecks } from '../files/file-checks';
 import type { FileAccessContext } from '../files/paths';
 import { extractShellDestTokens } from '../shell/index';
 import { reviewsEveryInline, isBlockAll } from '../levels';
@@ -38,8 +35,6 @@ import {
   type ShellCommandAnalysis,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
-import { evaluateGitHooksFileAccess } from '../files/git-hooks';
-import { evaluateAgentFileWrite } from '../files/agent-files';
 import {
   matchesPattern,
   evaluateSmartConditions,
@@ -367,13 +362,6 @@ function pipeChainVerdict(
   });
 }
 
-/** `a` outranks `b`: block over review over a logged allow over allow. */
-function stricterFileVerdict(a: PolicyVerdict, b: PolicyVerdict): boolean {
-  const rank = (v: PolicyVerdict): number =>
-    v.decision === 'block' ? 3 : v.decision === 'review' ? 2 : v.logged ? 1 : 0;
-  return rank(a) > rank(b);
-}
-
 /**
  * Apply a check's value to the verdict its detector built. `off` drops the
  * finding, `log` turns it into an allow that still names the check (the
@@ -442,20 +430,11 @@ export async function evaluatePolicy(
       const accesses = context.accesses ?? collectFileAccesses(toolName, args, context, layers);
       const settings = catalogSettings(config);
       const fromShell = resolveShellInput(toolName, args, layers).kind === 'shell';
-      protectedVerdict = evaluateProtectedFileAccess(accesses, context, settings);
-      // A git hook disarmed through a file operation (node9Firewall#413 part
-      // 2): the stricter of the two file verdicts stands.
-      const hooks = evaluateGitHooksFileAccess(args, accesses, context, settings, fromShell);
-      if (hooks && (!protectedVerdict || stricterFileVerdict(hooks, protectedVerdict)))
-        protectedVerdict = hooks;
-      // The agent's own instruction and memory files (part 4): a write
-      // there is at least recorded; one that carries an instruction or
-      // changes the hooks is asked about.
-      const agentFile = evaluateAgentFileWrite(args, accesses, context, settings, fromShell, {
+      // Protected files, git hooks (node9Firewall#413 part 2) and the
+      // agent's own files (part 4); the history scan runs the same function.
+      protectedVerdict = evaluateFileChecks(args, accesses, context, settings, fromShell, {
         readAgentSettings: hostHooks.readAgentSettings,
       });
-      if (agentFile && (!protectedVerdict || stricterFileVerdict(agentFile, protectedVerdict)))
-        protectedVerdict = agentFile;
     } catch {
       // An exception while inspecting file operands must never fail open.
       protectedVerdict = incompleteFileVerdict();
