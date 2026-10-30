@@ -100,6 +100,19 @@ export {
   parseDestHost,
 } from './shell';
 
+// The agent's own instruction and memory files (node9Firewall#413 part 4).
+export { agentFileKind, type AgentFileKind } from './files/agent-files';
+export { scanInstructionWrite } from './dlp/instruction-write';
+
+// Git, read from the parsed command (node9Firewall#413).
+export {
+  analyzeGit,
+  gitInvocations,
+  type GitAnalysis,
+  type GitFinding,
+  type GitInvocation,
+} from './shell/git';
+
 // Package-install extraction (supply-chain check; the host does the lookups).
 export {
   extractPackageInstalls,

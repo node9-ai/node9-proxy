@@ -381,6 +381,36 @@ function safeCanaryCtxValues(): ReturnType<typeof canaryCtxValues> {
   }
 }
 
+/**
+ * The extractor context for one Claude Code JSONL line. The line's `cwd`
+ * (validated absolute) and the user's home let the file checks resolve a
+ * path the way the gate did when the call ran.
+ */
+export function canonicalContextForLine(
+  obj: Record<string, unknown>,
+  sessionId: string,
+  lineIndex: number,
+  canaryVals: ReturnType<typeof canaryCtxValues> = []
+): ExtractContext {
+  const cwd = typeof obj.cwd === 'string' && path.isAbsolute(obj.cwd) ? obj.cwd : undefined;
+  return {
+    sessionId,
+    lineIndex,
+    project: '',
+    agent: 'claude',
+    rules: [],
+    // Must match the DEFAULT toolInspection the gate uses, or a shell-shaped
+    // tool (notably `terminal.execute`) is invisible to the extractor here
+    // while the live gate enforces on it — the CLI scan and the dashboard then
+    // disagree with each other (/code-review round 3).
+    toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
+    dlpEnabled: false, // line-level DLP runs above already
+    canaryValues: canaryVals,
+    ...(cwd && { cwd }),
+    homeDirs: [os.homedir()],
+  };
+}
+
 export function extractFindingsFromLine(
   line: unknown,
   sessionId: string,
@@ -447,20 +477,7 @@ export function extractFindingsFromLine(
   // tool_result blocks aren't tool calls but they carry the size signal
   // for long-output-redacted; we encode that as outputBytes on a synthetic
   // ToolCallEntry whose name attribution is still useful.
-  const ctx: ExtractContext = {
-    sessionId,
-    lineIndex,
-    project: '',
-    agent: 'claude',
-    rules: [],
-    // Must match the DEFAULT toolInspection the gate uses, or a shell-shaped
-    // tool (notably `terminal.execute`) is invisible to the extractor here
-    // while the live gate enforces on it — the CLI scan and the dashboard then
-    // disagree with each other (/code-review round 3).
-    toolInspection: { ...DEFAULT_CONFIG.policy.toolInspection },
-    dlpEnabled: false, // line-level DLP runs above already
-    canaryValues: canaryVals,
-  };
+  const ctx = canonicalContextForLine(obj, sessionId, lineIndex, canaryVals);
   const message = (line as Record<string, unknown>).message;
   if (message && typeof message === 'object') {
     const content = (message as Record<string, unknown>).content;

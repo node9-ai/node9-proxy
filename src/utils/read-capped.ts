@@ -30,12 +30,18 @@ export interface CappedRead {
  * total, and allocating that per file would be absurd).
  *
  * Returns null when the path cannot be opened or is not a regular file.
+ * `openFlags` lets a caller on a hook path pass O_NONBLOCK, so a FIFO swapped
+ * in at the path cannot hang the open.
  */
-export function readCapped(file: string, maxBytes: number): CappedRead | null {
+export function readCapped(
+  file: string,
+  maxBytes: number,
+  openFlags: string | number = 'r'
+): CappedRead | null {
   if (maxBytes < 0) return null;
   let fd: number;
   try {
-    fd = fs.openSync(file, 'r');
+    fd = fs.openSync(file, openFlags);
   } catch {
     return null;
   }
@@ -71,8 +77,9 @@ export function readCapped(file: string, maxBytes: number): CappedRead | null {
 /** `readCapped` as UTF-8 text. Same contract; null when unreadable. */
 export function readCappedText(
   file: string,
-  maxBytes: number
+  maxBytes: number,
+  openFlags: string | number = 'r'
 ): { text: string; truncated: boolean } | null {
-  const r = readCapped(file, maxBytes);
+  const r = readCapped(file, maxBytes, openFlags);
   return r ? { text: r.bytes.toString('utf8'), truncated: r.truncated } : null;
 }

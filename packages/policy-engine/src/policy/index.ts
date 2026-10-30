@@ -8,11 +8,8 @@ import { inspectionEntry, inspectionLayers } from '../shell/tool-input';
 // to touch the host system arrives via the hooks parameter.
 
 import type { SmartRule, DlpMatch } from '../types';
-import {
-  collectFileAccesses,
-  evaluateProtectedFileAccess,
-  incompleteFileVerdict,
-} from '../files/protected-access';
+import { collectFileAccesses, incompleteFileVerdict } from '../files/protected-access';
+import { evaluateFileChecks } from '../files/file-checks';
 import type { FileAccessContext } from '../files/paths';
 import { extractShellDestTokens } from '../shell/index';
 import { reviewsEveryInline, isBlockAll } from '../levels';
@@ -37,6 +34,7 @@ import {
   extractShellDestinations,
   type ShellCommandAnalysis,
 } from '../shell';
+import { analyzeGit } from '../shell/git';
 import {
   matchesPattern,
   evaluateSmartConditions,
@@ -162,6 +160,9 @@ export interface PolicyHostHooks {
   checkProvenance?: (binary: string, cwd?: string) => ProvenanceLookup;
   /** Returns true if the host is on the user's trusted-hosts allowlist. */
   isTrustedHost?: (host: string) => boolean;
+  /** The agent settings file at `absPath` as it is on disk now (a regular
+   *  file within the host's size cap), or null (node9Firewall#413 part 4). */
+  readAgentSettings?: (absPath: string) => string | null;
 }
 
 export interface PolicyVerdict {
@@ -420,14 +421,20 @@ export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
   context: PolicyContext = {},
-  hooks: PolicyHostHooks = {}
+  hostHooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
   let protectedVerdict: PolicyVerdict | null = null;
   const layers = inspectionLayers(config.policy);
   if (context.agent !== 'Terminal') {
     try {
       const accesses = context.accesses ?? collectFileAccesses(toolName, args, context, layers);
-      protectedVerdict = evaluateProtectedFileAccess(accesses, context, catalogSettings(config));
+      const settings = catalogSettings(config);
+      const fromShell = resolveShellInput(toolName, args, layers).kind === 'shell';
+      // Protected files, git hooks (node9Firewall#413 part 2) and the
+      // agent's own files (part 4); the history scan runs the same function.
+      protectedVerdict = evaluateFileChecks(args, accesses, context, settings, fromShell, {
+        readAgentSettings: hostHooks.readAgentSettings,
+      });
     } catch {
       // An exception while inspecting file operands must never fail open.
       protectedVerdict = incompleteFileVerdict();
@@ -468,7 +475,7 @@ export async function evaluatePolicy(
       ...context,
       skipIgnoredFastPath: context.skipIgnoredFastPath || protectedVerdict?.decision === 'review',
     },
-    hooks
+    hostHooks
   );
   if (result.decision === 'block') return result;
   if (
@@ -484,7 +491,12 @@ export async function evaluatePolicy(
   }
   if (protectedVerdict?.decision === 'review') return protectedVerdict;
   if (dlpVerdict) return dlpVerdict;
-  return result.decision === 'allow' && protectedVerdict?.logged ? protectedVerdict : result;
+  // A logged file finding stands in for a plain allow; a logged finding the
+  // core already made (a Soft git or sudo finding) is kept, since the audit
+  // row names one check and the command's own is the one it was asked about.
+  return result.decision === 'allow' && protectedVerdict?.logged && !result.logged
+    ? protectedVerdict
+    : result;
 }
 
 async function evaluatePolicyCore(
@@ -683,6 +695,45 @@ async function evaluatePolicyCore(
       if (v?.logged) noteLogged(v);
       else if (v) return v;
     }
+
+    // Git, read from the parsed command (node9Firewall#413): `-C`, env,
+    // wrappers, variables and aliases defined in the same command, `sh -c`
+    // payloads; `--dry-run` and `clean -n` honoured, `branch -d` is not `-D`,
+    // a plain rebase is not destruction. The regex twins are suppressed for a
+    // command that parsed (AST_FS_REGEX_RULES) and keep speaking for one that
+    // did not.
+    // The hooks-bypass check (part 2) rides the same walk: one finding per
+    // check, each through its own value.
+    const gitChecks = [
+      'commands.git-destructive',
+      'commands.git-hooks-bypass',
+      // Part 3, off at every level; its finding is dropped unless a person set it.
+      'commands.git-stage-all',
+    ] as const;
+    if (gitChecks.some((id) => cv(id) !== 'off')) {
+      const git = analyzeGit(bashCommand);
+      for (const id of gitChecks) {
+        const action = cv(id);
+        const finding = action === 'off' ? undefined : git.findings.find((f) => f.checkId === id);
+        if (!finding) continue;
+        const v = applyCheckValue(action, {
+          decision: 'review',
+          blockedByLabel: `Node9 (AST): ${finding.ruleName}`,
+          reason: finding.reason,
+          tier: 2,
+          ruleName: finding.ruleName,
+          ruleDescription: finding.description,
+          checkId: finding.checkId,
+        });
+        // A REVIEW is carried to the tier-3 candidates, not returned here: a
+        // user's own `block-force-push` rule (the commonest git rule people
+        // write) must still win over it, as for the credential-copy review
+        // above. A `block` value set on the check returns at once.
+        if (v?.logged) noteLogged(v);
+        else if (v?.decision === 'block') return v;
+        else if (v && !pendingAstReview) pendingAstReview = v;
+      }
+    }
   }
 
   // 2. Smart Rules — raw args matching before tokenization.
@@ -710,13 +761,19 @@ async function evaluatePolicyCore(
     // pinned rule is the only remaining guard and must speak.
     const astSuppressed = (rule: SmartRule): boolean => {
       if (bashCommand === null || !rule.name || !AST_FS_REGEX_RULES.has(rule.name)) return false;
+      const isGitRule = rule.name === 'review-force-push' || rule.name === 'review-git-destructive';
       const knob =
         rule.name === 'review-drop-truncate-shell'
           ? cv('commands.sql-ddl')
           : rule.name === 'shield:filesystem:review-chmod-777'
             ? cv('commands.chmod')
-            : undefined;
+            : isGitRule
+              ? cv('commands.git-destructive')
+              : undefined;
       if (knob === 'off' && rule.pinned) return false;
+      // The git AST tier judged nothing for a command that did not parse; the
+      // regex is then the only reader and keeps speaking (fw#413).
+      if (isGitRule && !analyzeGit(bashCommand).parsed) return false;
       return true;
     };
     // Bypass-by-spelling closure: rules written for `bash` (the six default

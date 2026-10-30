@@ -266,3 +266,32 @@ describe('a pinned, mandated pack rule', () => {
     expect(v.decision).toBe('review');
   });
 });
+
+describe('an opt-in check is silent until a person sets it (node9Firewall#413 part 3)', () => {
+  it('git add -A is allowed at the default (off at every level)', async () => {
+    expect(await bash(cfg(), 'git add -A')).toEqual({ decision: 'allow' });
+    const strict = cfg();
+    strict.settings.mode = 'strict';
+    expect(await bash(strict, 'git add -A')).toEqual({ decision: 'allow' });
+  });
+  it('set to review, the resolved command is asked about', async () => {
+    const v = await bash(cfg({ 'commands.git-stage-all': 'review' }), 'git add -A');
+    expect(v).toMatchObject({
+      decision: 'review',
+      checkId: 'commands.git-stage-all',
+      ruleName: 'review-git-stage-all',
+    });
+    const named = await bash(cfg({ 'commands.git-stage-all': 'review' }), 'git add src/x.ts');
+    expect(named).toEqual({ decision: 'allow' });
+  });
+  it('set to log, an allow that names the check; block blocks', async () => {
+    const log = await bash(cfg({ 'commands.git-stage-all': 'log' }), 'git commit -am wip');
+    expect(log).toMatchObject({
+      decision: 'allow',
+      logged: true,
+      checkId: 'commands.git-stage-all',
+    });
+    const block = await bash(cfg({ 'commands.git-stage-all': 'block' }), 'git commit -am wip');
+    expect(block.decision).toBe('block');
+  });
+});

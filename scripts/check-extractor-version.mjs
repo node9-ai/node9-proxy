@@ -50,6 +50,23 @@ const SOURCES = [
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/checksums.ts',
   'packages/policy-engine/src/scan/destructive-regex.ts',
+  // canonical.ts runs analyzeGit (node9Firewall#413 part 1) and the gate's
+  // file checks for file tools (files/file-checks.ts, #413 review finding 5).
+  // The checks' values come from the catalog and the levels, the content
+  // rule of files.agent-instructions from dlp/instruction-write.ts and the
+  // injection signals it reads, and the finding severity from severity/.
+  'packages/policy-engine/src/shell/git.ts',
+  'packages/policy-engine/src/files/file-checks.ts',
+  'packages/policy-engine/src/files/protected-access.ts',
+  'packages/policy-engine/src/files/git-hooks.ts',
+  'packages/policy-engine/src/files/agent-files.ts',
+  'packages/policy-engine/src/files/written-texts.ts',
+  'packages/policy-engine/src/dlp/instruction-write.ts',
+  'packages/policy-engine/src/dlp/injection.ts',
+  'packages/policy-engine/src/dlp/normalize.ts',
+  'packages/policy-engine/src/catalog.ts',
+  'packages/policy-engine/src/levels.ts',
+  'packages/policy-engine/src/severity/index.ts',
 ];
 
 const VERSION_FILE = path.join(ROOT, 'packages/policy-engine/src/scan/canonical.ts');

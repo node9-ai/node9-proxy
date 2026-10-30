@@ -18,6 +18,7 @@ import {
 } from './paths';
 
 export type ProtectedFileVerdict = PolicyVerdict & {
+  ruleName: string;
   path: string;
   operation: FileAccess['operation'];
 };
