@@ -37,12 +37,12 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
 
-export type GitCheckId = 'commands.git-destructive';
+export type GitCheckId = 'commands.git-destructive' | 'commands.git-hooks-bypass';
 
 export interface GitFinding {
   checkId: GitCheckId;
   /** The rule name the audit log and the catalog's legacy table know. */
-  ruleName: 'review-force-push' | 'review-git-destructive';
+  ruleName: 'review-force-push' | 'review-git-destructive' | 'review-git-hooks-bypass';
   reason: string;
   description: string;
   /** The invocation as resolved, for the reason and the explain trace. */
@@ -69,7 +69,8 @@ export interface GitInvocation {
   shown: string;
 }
 
-const GIT_PRESCREEN_RE = /git/i;
+/** `git` in any spelling, or a husky hook (`.husky/` holds no "git"). */
+const GIT_PRESCREEN_RE = /git|husky/i;
 const MAX_PAYLOAD_DEPTH = 8;
 const MAX_ALIAS_DEPTH = 5;
 const CACHE_MAX = 2_000;
@@ -102,7 +103,10 @@ export function analyzeGit(command: string): GitAnalysis {
 /** The git invocations a command makes, resolved. Exposed for the explain trace and tests. */
 export function gitInvocations(command: string): GitInvocation[] {
   const out: GitInvocation[] = [];
-  const walk = new GitWalk((inv) => out.push(inv));
+  const walk = new GitWalk(
+    (inv) => out.push(inv),
+    () => undefined
+  );
   walk.run(command, 0);
   return out;
 }
@@ -110,14 +114,13 @@ export function gitInvocations(command: string): GitInvocation[] {
 function analyzeGitImpl(command: string): GitAnalysis {
   const findings: GitFinding[] = [];
   const seen = new Set<string>();
-  const walk = new GitWalk((inv) => {
-    for (const f of classify(inv)) {
-      const key = `${f.ruleName}\u0000${f.shown}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      findings.push(f);
-    }
-  });
+  const found = (f: GitFinding): void => {
+    const key = `${f.ruleName}\u0000${f.shown}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    findings.push(f);
+  };
+  const walk = new GitWalk((inv) => classify(inv).forEach(found), found);
   const parsed = walk.run(command, 0);
   return { parsed, findings };
 }
@@ -181,7 +184,11 @@ class GitWalk {
   /** `for NAME in a b c`: the literal items, or null when one is dynamic. */
   private loopVars = new Map<string, string[] | null>();
 
-  constructor(private readonly emit: (inv: GitInvocation) => void) {}
+  constructor(
+    private readonly emit: (inv: GitInvocation) => void,
+    /** A finding made outside an invocation (a chmod on a hook file). */
+    private readonly found: (f: GitFinding) => void
+  ) {}
 
   /** Walk one command string. Returns false when it did not parse. */
   run(command: string, depth: number): boolean {
@@ -274,6 +281,11 @@ class GitWalk {
 
     if (headWord === 'git') {
       this.visitGit(words.slice(head + 1), env, depth, viaXargs, fromAlias, shownOf(words));
+      return;
+    }
+    if (headWord === 'chmod') {
+      const f = chmodDisarmsHook(words.slice(head + 1), shownOf(words));
+      if (f) this.found(f);
       return;
     }
     // A string-wrapped command: `sh -c "git …"`, `eval "git …"`, also behind
@@ -730,6 +742,7 @@ function classify(inv: GitInvocation): GitFinding[] {
   const found = (f: GitFinding): void => {
     out.push({ ...f, shown: inv.shown, reason: `${f.reason}: ${inv.shown}` });
   };
+  if (hooksBypass(inv)) found(HOOKS_BYPASS);
   if (inv.sub === null) {
     found(UNREADABLE);
     return out;
@@ -781,4 +794,163 @@ function classify(inv: GitInvocation): GitFinding[] {
       break;
   }
   return out;
+}
+
+// ── Part 2: the hooks bypassed ───────────────────────────────────────────────
+//
+// The agent switches off a check meant to oversee its own work (OWASP ASI10):
+// `--no-verify`, a hook path pointed elsewhere, the husky / lefthook /
+// pre-commit kill switches on the git call, or a hook file disarmed. A
+// developer who does the same from the terminal is not judged here (the
+// AST tier runs for agent calls only).
+
+const HOOKS_BYPASS: GitFinding = {
+  checkId: 'commands.git-hooks-bypass',
+  ruleName: 'review-git-hooks-bypass',
+  reason: 'Git hooks bypassed — the agent switches off a check on its own work',
+  description:
+    'The AI wants to commit or push without the git hooks that check its work (--no-verify, core.hooksPath, HUSKY=0 and the like, or a hook file disarmed). Hooks are the review you set up; confirm this is intentional.',
+  shown: '',
+};
+
+/** Subcommands whose `--no-verify` skips a hook. On push `-n` is dry-run. */
+const NO_VERIFY_SUBS = new Set(['push', 'merge', 'rebase', 'am', 'cherry-pick', 'revert']);
+/** Kill switches of the hook managers, read on the git call they apply to. */
+const HOOK_KILL_SWITCHES = ['HUSKY', 'HUSKY_SKIP_HOOKS', 'LEFTHOOK', 'SKIP'] as const;
+
+function killSwitchSet(name: (typeof HOOK_KILL_SWITCHES)[number], value: string | null): boolean {
+  if (value === null) return false; // unknown value: not claimed
+  switch (name) {
+    case 'HUSKY':
+    case 'LEFTHOOK':
+      return value === '0';
+    case 'HUSKY_SKIP_HOOKS':
+      return value !== '' && value !== '0';
+    case 'SKIP':
+      return value !== '';
+  }
+}
+
+/**
+ * The value a name has at this point of the command: applied to the call
+ * (`HUSKY=0 git …`, `env HUSKY=0 git …`), else exported earlier in the
+ * command (`export HUSKY=0; git …`), read through the walk's table.
+ */
+function appliedValue(env: Map<string, string | null>, name: string): string | null {
+  if (env.has(name)) return env.get(name) ?? null;
+  const f = parseShared(`x $${name}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const word: any = f?.Stmts?.[0]?.Cmd?.Args?.[1];
+  return word ? resolveWordLiteral(word) : null;
+}
+
+function hooksBypass(inv: GitInvocation): boolean {
+  if (inv.config.has('core.hookspath')) return true;
+  for (const [name, value] of inv.env) {
+    if (name === 'GIT_CONFIG_PARAMETERS' && value !== null && /core\.hookspath/i.test(value))
+      return true;
+    if (
+      /^GIT_CONFIG_KEY_\d+$/.test(name) &&
+      value !== null &&
+      value.toLowerCase() === 'core.hookspath'
+    )
+      return true;
+  }
+  for (const name of HOOK_KILL_SWITCHES) {
+    if (killSwitchSet(name, appliedValue(inv.env, name))) return true;
+  }
+  const sub = inv.sub?.toLowerCase();
+  if (sub === 'commit') {
+    const o = parseOptions(inv.args, 'mFCcut', COMMIT_LONG_VALUE);
+    return o.flags.has('-n') || o.flags.has('--no-verify');
+  }
+  if (sub !== undefined && NO_VERIFY_SUBS.has(sub)) {
+    return inv.args.some((a) => a === '--no-verify');
+  }
+  if (sub === 'config') return configWritesHooksPath(inv.args);
+  return false;
+}
+
+const COMMIT_LONG_VALUE = new Set([
+  '--message',
+  '--file',
+  '--author',
+  '--date',
+  '--reuse-message',
+  '--reedit-message',
+  '--fixup',
+  '--squash',
+  '--template',
+  '--cleanup',
+  '--trailer',
+  '--pathspec-from-file',
+  '--gpg-sign',
+]);
+
+/** `git config [scope] core.hooksPath V`, `set`, `--add`, `--unset`: a write. */
+function configWritesHooksPath(args: (string | null)[]): boolean {
+  let i = 0;
+  if (args[0] === 'set' || args[0] === 'unset') i = 1;
+  let write = i === 1;
+  while (i < args.length) {
+    const w = args[i];
+    if (w === null) return false;
+    if (CONFIG_VALUE_FLAGS.has(w)) {
+      i += 2;
+      continue;
+    }
+    if (w === '--unset' || w === '--unset-all' || w === '--add' || w === '--replace-all') {
+      write = true;
+      i++;
+      continue;
+    }
+    if (CONFIG_SCOPE_FLAGS.has(w) || w.startsWith('--file=') || w.startsWith('--type=')) {
+      i++;
+      continue;
+    }
+    if (w.startsWith('-')) return false; // --get, --list, --show-origin: a read
+    break;
+  }
+  const key = args[i];
+  if (key === null || key === undefined || key.toLowerCase() !== 'core.hookspath') return false;
+  // A bare `git config core.hooksPath` reads; with a value it writes.
+  return write || i + 1 < args.length;
+}
+
+/** A path under a hook directory, read off the word as written. */
+export function isHookPath(word: string): boolean {
+  return /(^|[\\/])(\.git[\\/]hooks|\.husky)([\\/]|$)/.test(word);
+}
+
+/** chmod's options; anything else in the first slot is the mode. */
+const CHMOD_OPTION_RE = /^-[RvcfHLP]+$/;
+
+/** A mode that takes execute away: `-x`, `a-x`, `ugo-x`, `644`, `600`. */
+function modeRemovesExecute(mode: string): boolean {
+  if (/^[0-7]{3,4}$/.test(mode)) {
+    const bits = mode.slice(-3);
+    return [...bits].every((d) => (Number(d) & 1) === 0);
+  }
+  return mode.split(',').some((part) => /^[ugoa]*-[rwst]*x/.test(part));
+}
+
+function chmodDisarmsHook(args: (string | null)[], shown: string): GitFinding | null {
+  let i = 0;
+  while (i < args.length) {
+    const w = args[i];
+    if (w === null) return null;
+    if (w === '--') {
+      i++;
+      break;
+    }
+    if (w.startsWith('--') || CHMOD_OPTION_RE.test(w)) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  const mode = args[i];
+  if (mode === null || mode === undefined || !modeRemovesExecute(mode)) return null;
+  const hit = args.slice(i + 1).some((w) => w !== null && isHookPath(w));
+  return hit ? { ...HOOKS_BYPASS, shown, reason: `${HOOKS_BYPASS.reason}: ${shown}` } : null;
 }

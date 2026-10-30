@@ -56,6 +56,7 @@ const SOFT: Readonly<Record<string, Verdict>> = {
   'commands.chmod': 'log',
   'commands.sudo': 'log',
   'commands.git-destructive': 'log',
+  'commands.git-hooks-bypass': 'log',
   'commands.sql-ddl': 'log',
   'commands.sql-no-where': 'log',
   'commands.temp-binary': 'log',
@@ -70,6 +71,8 @@ const SOFT: Readonly<Record<string, Verdict>> = {
 
 const STRICT: Readonly<Record<string, Verdict>> = {
   'commands.sql-ddl': 'block',
+  // The agent disarming a check on its own work (node9Firewall#413 part 2).
+  'commands.git-hooks-bypass': 'block',
   'commands.disk-destroy': 'block',
   'commands.node9-disarm': 'block',
   'files.system-dirs': 'block',

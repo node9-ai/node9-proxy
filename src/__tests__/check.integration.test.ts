@@ -469,10 +469,54 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   });
 
   it.each([
+    ['git commit --no-verify -m wip', 'hooks'],
+    ['HUSKY=0 git commit -m wip', 'hooks'],
+    ['rm .husky/pre-commit', 'disarms a git hook'],
+  ])('%s → asked (hooks bypassed, part 2)', (command, phrase) => {
+    const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('ask');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason.toLowerCase()).toContain(phrase);
+  });
+
+  it('a hook emptied through the Write tool is asked; written with content it is not', () => {
+    const emptied = runCheck(
+      {
+        tool_name: 'Write',
+        tool_input: {
+          file_path: `${tmpHome}/repo/.husky/pre-commit`,
+          content: '#!/bin/sh\nexit 0\n',
+        },
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(emptied.status).toBe(0);
+    expect(JSON.parse(emptied.stdout.trim()).hookSpecificOutput.permissionDecision).toBe('ask');
+    const real = runCheck(
+      {
+        tool_name: 'Write',
+        tool_input: {
+          file_path: `${tmpHome}/repo/.husky/pre-commit`,
+          content: '#!/bin/sh\nnpm test\n',
+        },
+      },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(real.status).toBe(0);
+    expect(real.stdout).toBe('');
+  });
+
+  it.each([
     'git push --dry-run --force origin main',
     'git clean -fn',
     'git branch -d feature/x',
     'git stash push -m wip && git rebase origin/main',
+    'git commit -m "add --no-verify to the docs"',
+    'HUSKY=0 npm ci',
   ])('%s → allowed (the regex rule stopped it)', (command) => {
     const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
     expect(r.status, 'spawn failed').not.toBeNull();

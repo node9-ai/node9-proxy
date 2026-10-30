@@ -113,6 +113,13 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     example: 'git push --force origin main',
     advice: 'Keep Review. Set Block if agents should never touch shared branches.',
   },
+  'commands.git-hooks-bypass': {
+    plain:
+      'The agent commits or pushes without the git hooks that check its work, points the hooks elsewhere, sets HUSKY=0 or LEFTHOOK=0 on the call, or removes, empties or disables a hook file.',
+    example: 'git commit --no-verify -m "wip"',
+    advice:
+      "Keep Review: a hook is a check you set up on the agent's own work. Set Log if your hooks are slow and you skip them on purpose; Strict blocks.",
+  },
   'commands.sql-ddl': {
     plain: 'The agent drops or empties a database table.',
     example: 'psql -c "DROP TABLE users"',

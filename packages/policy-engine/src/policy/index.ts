@@ -38,6 +38,7 @@ import {
   type ShellCommandAnalysis,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
+import { evaluateGitHooksFileAccess } from '../files/git-hooks';
 import {
   matchesPattern,
   evaluateSmartConditions,
@@ -362,6 +363,13 @@ function pipeChainVerdict(
   });
 }
 
+/** `a` outranks `b`: block over review over a logged allow over allow. */
+function stricterFileVerdict(a: PolicyVerdict, b: PolicyVerdict): boolean {
+  const rank = (v: PolicyVerdict): number =>
+    v.decision === 'block' ? 3 : v.decision === 'review' ? 2 : v.logged ? 1 : 0;
+  return rank(a) > rank(b);
+}
+
 /**
  * Apply a check's value to the verdict its detector built. `off` drops the
  * finding, `log` turns it into an allow that still names the check (the
@@ -428,7 +436,19 @@ export async function evaluatePolicy(
   if (context.agent !== 'Terminal') {
     try {
       const accesses = context.accesses ?? collectFileAccesses(toolName, args, context, layers);
-      protectedVerdict = evaluateProtectedFileAccess(accesses, context, catalogSettings(config));
+      const settings = catalogSettings(config);
+      protectedVerdict = evaluateProtectedFileAccess(accesses, context, settings);
+      // A git hook disarmed through a file operation (node9Firewall#413 part
+      // 2): the stricter of the two file verdicts stands.
+      const hooks = evaluateGitHooksFileAccess(
+        args,
+        accesses,
+        context,
+        settings,
+        resolveShellInput(toolName, args, layers).kind === 'shell'
+      );
+      if (hooks && (!protectedVerdict || stricterFileVerdict(hooks, protectedVerdict)))
+        protectedVerdict = hooks;
     } catch {
       // An exception while inspecting file operands must never fail open.
       protectedVerdict = incompleteFileVerdict();
@@ -691,12 +711,16 @@ async function evaluatePolicyCore(
     // a plain rebase is not destruction. The regex twins are suppressed for a
     // command that parsed (AST_FS_REGEX_RULES) and keep speaking for one that
     // did not.
-    const gitAction = cv('commands.git-destructive');
-    if (gitAction !== 'off') {
+    // The hooks-bypass check (part 2) rides the same walk: one finding per
+    // check, each through its own value.
+    const gitChecks = ['commands.git-destructive', 'commands.git-hooks-bypass'] as const;
+    if (gitChecks.some((id) => cv(id) !== 'off')) {
       const git = analyzeGit(bashCommand);
-      const finding = git.findings.find((f) => f.checkId === 'commands.git-destructive');
-      if (finding) {
-        const v = applyCheckValue(gitAction, {
+      for (const id of gitChecks) {
+        const action = cv(id);
+        const finding = action === 'off' ? undefined : git.findings.find((f) => f.checkId === id);
+        if (!finding) continue;
+        const v = applyCheckValue(action, {
           decision: 'review',
           blockedByLabel: `Node9 (AST): ${finding.ruleName}`,
           reason: finding.reason,

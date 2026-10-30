@@ -213,6 +213,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     legacy: ['review-force-push', 'review-git-destructive'],
   },
   {
+    id: 'commands.git-hooks-bypass',
+    group: 'commands',
+    title: 'Git hooks bypassed',
+    catches:
+      'the agent switches off the git hooks that check its own work: --no-verify, core.hooksPath, HUSKY=0 and its peers, or a hook file removed, emptied or made non-executable',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-git-hooks-bypass'],
+  },
+  {
     id: 'commands.node9-disarm',
     group: 'commands',
     title: 'node9 disarmed from the shell',

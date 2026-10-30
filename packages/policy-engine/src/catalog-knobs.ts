@@ -362,6 +362,7 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'commands.chmod',
   'commands.sudo',
   'commands.git-destructive',
+  'commands.git-hooks-bypass',
   'commands.sql-ddl',
   'commands.sql-no-where',
   'commands.temp-binary',
