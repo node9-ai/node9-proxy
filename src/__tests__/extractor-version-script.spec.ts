@@ -38,6 +38,18 @@ const SOURCE_FILES = [
   'packages/policy-engine/src/shell/tool-input.ts',
   'packages/policy-engine/src/policy/pipe-chain.ts',
   'packages/policy-engine/src/files/paths.ts',
+  'packages/policy-engine/src/shell/git.ts',
+  'packages/policy-engine/src/files/file-checks.ts',
+  'packages/policy-engine/src/files/protected-access.ts',
+  'packages/policy-engine/src/files/git-hooks.ts',
+  'packages/policy-engine/src/files/agent-files.ts',
+  'packages/policy-engine/src/files/written-texts.ts',
+  'packages/policy-engine/src/dlp/instruction-write.ts',
+  'packages/policy-engine/src/dlp/injection.ts',
+  'packages/policy-engine/src/dlp/normalize.ts',
+  'packages/policy-engine/src/catalog.ts',
+  'packages/policy-engine/src/levels.ts',
+  'packages/policy-engine/src/severity/index.ts',
 ];
 
 describe('check-extractor-version.mjs', () => {

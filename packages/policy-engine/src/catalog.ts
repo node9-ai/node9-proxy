@@ -126,6 +126,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'review',
     legacy: ['review-system-dir-mutation', 'review-system-file-upload'],
   },
+  {
+    id: 'files.agent-instructions',
+    group: 'files',
+    title: 'Agent instruction and memory files',
+    catches:
+      "writes to the files every later agent session loads as instructions (CLAUDE.md, AGENTS.md, memory, agents, commands) and changes to the agent's hooks; Standard asks only when the text carries an instruction to hide, skip approvals or touch secrets",
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-agent-file-write', 'review-agent-file-content', 'review-agent-hooks-change'],
+  },
   // ── Commands ────────────────────────────────────────────────────────────
   {
     id: 'commands.inline-exec',
@@ -206,10 +216,31 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     id: 'commands.git-destructive',
     group: 'commands',
     title: 'Destructive git operation',
-    catches: 'force push, reset --hard, clean, rebase, branch or tag delete',
+    catches:
+      'force push, reset --hard, clean -f, branch -D or tag delete, also through -C, env, wrappers, variables and aliases',
     values: ALL,
     defaultValue: 'review',
     legacy: ['review-force-push', 'review-git-destructive'],
+  },
+  {
+    id: 'commands.git-hooks-bypass',
+    group: 'commands',
+    title: 'Git hooks bypassed',
+    catches:
+      'the agent switches off the git hooks that check its own work: --no-verify, core.hooksPath, HUSKY=0 and its peers, or a hook file removed, emptied or made non-executable',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-git-hooks-bypass'],
+  },
+  {
+    id: 'commands.git-stage-all',
+    group: 'commands',
+    title: 'Stage everything at once',
+    catches:
+      'git add -A, git add ., git commit -a and other ways to stage every change instead of naming the files; off unless you switch it on',
+    values: ALL,
+    defaultValue: 'off',
+    legacy: ['review-git-stage-all'],
   },
   {
     id: 'commands.node9-disarm',

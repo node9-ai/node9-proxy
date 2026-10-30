@@ -185,6 +185,7 @@ function opOf(sample: string): number {
   return parseShared(sample).Stmts[0].Redirs[0].Op;
 }
 const WRITES = new Set(['>x', '>>x', '>|x', '&>x', '&>>x', '<>x'].map(opOf));
+const APPENDS = new Set(['>>x', '&>>x'].map(opOf));
 const READS = new Set(['<x', '<>x'].map(opOf));
 /** `>&word` with a non-numeric word is `&>word` in bash. */
 const DUP_OUT = opOf('>&x');
@@ -587,8 +588,11 @@ export function collectShellFileAccesses(
         if (name === 'touch' && strings.some((s) => s === '--no-create' || /^-[^-]*c/.test(s)))
           continue;
         const remove = name === 'rm' || name === 'unlink';
+        const append =
+          name === 'tee' && strings.some((s) => s === '--append' || /^-[^-]*a/.test(s));
         add(remove ? 'remove' : name === 'touch' ? 'create' : 'write', token, state, {
           recursive: remove && strings.some((s) => /^-[^-]*[rR]/.test(s) || s === '--recursive'),
+          ...(append ? { append: true } : {}),
         });
       }
       return;
@@ -892,7 +896,8 @@ export function collectShellFileAccesses(
     for (const redir of stmt.Redirs ?? []) {
       substitutions(redir.Word, state, depth);
       for (const word of wordValues(redir.Word, state)) {
-        if (WRITES.has(redir.Op)) add('write', word, state);
+        if (WRITES.has(redir.Op))
+          add('write', word, state, APPENDS.has(redir.Op) ? { append: true } : {});
         if (READS.has(redir.Op)) add('read', word, state, sends ? { upload: true } : {});
         if (redir.Op === DUP_OUT && word.value && !/^\d+$/.test(word.value))
           add('write', word, state);

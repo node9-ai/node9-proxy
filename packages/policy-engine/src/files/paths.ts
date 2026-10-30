@@ -116,6 +116,8 @@ export interface FileAccess {
   dotGlob?: boolean;
   followFinal: boolean;
   recursive?: boolean;
+  /** A write that adds to the file (`>>`, `tee -a`): its content stays. */
+  append?: true;
   /** This basename-joined candidate applies only if this operand is a directory. */
   directoryTarget?: string;
   candidates?: string[];

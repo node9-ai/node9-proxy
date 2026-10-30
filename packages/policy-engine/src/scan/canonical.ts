@@ -9,8 +9,8 @@ import type { InspectionInput } from '../shell/tool-input';
 //   extractCanonicalFindings(call, ctx)
 //     Per-line / per-tool-call. Runs every detector that doesn't need
 //     window state: smart rules + AST suppression + AST FS-op + DLP +
-//     PII + sensitive-file-read + privilege-escalation + destructive-op +
-//     pipe-to-shell + eval-of-remote + long-output-redacted.
+//     PII + sensitive-file-read + the gate's file checks + privilege-escalation +
+//     destructive-op + pipe-to-shell + eval-of-remote + long-output-redacted.
 //
 //   extractSessionLevelFindings(calls, ctx)
 //     Per-session. Runs detectors that need a sliding window across calls
@@ -39,6 +39,10 @@ import {
   toolMatchesRule,
   normalizeCommandForPolicy,
 } from '../shell';
+import { analyzeGit } from '../shell/git';
+import { collectFileAccesses, incompleteFileVerdict } from '../files/protected-access';
+import { evaluateFileChecks, type FileCheckVerdict } from '../files/file-checks';
+import type { CatalogSettings } from '../catalog';
 import { analyzePipeChain } from '../policy/pipe-chain';
 import { classifyRuleSeverity, type Severity } from '../severity';
 import { DESTRUCTIVE_OP_RE, SENSITIVE_PATH_RE, FILE_TOOLS } from './destructive-regex';
@@ -53,6 +57,7 @@ import { stripTerminalEscapes } from '../utils/safe-text';
 export type CanonicalFindingType =
   | 'smart-rule'
   | 'ast-fs-op'
+  | 'file-access'
   | 'dlp'
   | 'pii'
   | 'canary'
@@ -98,6 +103,9 @@ export interface CanonicalFinding {
   sourceType: CanonicalSourceType;
   /** Optional shield/source label for UI. */
   shieldLabel?: string;
+  /** The catalog check the gate names for the same call (`files.system-dirs`,
+   *  `commands.git-hooks-bypass`, ...). Set on 'file-access' findings. */
+  checkId?: string;
   /** When this exact (post-dedupe) finding was first / last seen. */
   firstSeenAt: string;
   lastSeenAt: string;
@@ -157,6 +165,14 @@ export interface ExtractContext {
    *  path for the finding text). Optional: absent or empty means no canary
    *  pass, which keeps extractor output machine-independent in CI (H3). */
   canaryValues?: ReadonlyArray<CanaryValue & { kind?: string; path?: string }>;
+  /** The session's working directory, absolute, when the transcript carries
+   *  one. A relative file_path resolves against it for the file checks. */
+  cwd?: string;
+  /** The user's home directory (first) as the gate's FileAccessContext has it. */
+  homeDirs?: string[];
+  /** Catalog settings for the file checks. Absent means the defaults (the
+   *  Standard level), which keeps extractor output machine-independent. */
+  catalogSettings?: CatalogSettings;
 }
 
 export interface SessionExtractContext {
@@ -721,7 +737,33 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // heredoc fed to a non-shell program (`python3 - <<'PY'`, `cat > f <<'EOF'`), so
 // smart rules and the destructive-op regex no longer match text inside it. That
 // removes findings from history, hence a version bump and a re-scan.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v31';
+// canonical-v32 (2026-10-30, node9Firewall#413): two changes, one re-scan.
+// The git walk (shell/git.ts) owns review-force-push and review-git-destructive
+// for a command that parses, so scan names the rule the gate names. And file
+// tools now run the gate's file checks (files/file-checks.ts, the same function
+// evaluatePolicy calls), reported as type 'file-access' with the gate's ruleName
+// and checkId; before this a Write, Edit or MultiEdit the gate held produced no
+// finding at all. Measured through extractCanonicalFindings:
+//
+//   tool call                                   v31       v32
+//   Write .husky/pre-commit ""                (none)  ->  review-git-hooks-bypass
+//   MultiEdit hook `npm test` -> `exit 0`     (none)  ->  review-git-hooks-bypass
+//   Edit ~/.claude/settings.json hook command (none)  ->  review-agent-hooks-change
+//   Write CLAUDE.md "do not tell the user"    (none)  ->  review-agent-file-content
+//   Write /etc/sudoers                        (none)  ->  block-system-auth-mutation
+//   Edit ~/.bashrc                            (none)  ->  review-shell-startup-mutation
+//   Write .husky/pre-commit `npx lint-staged` (none)  ->  (none)  real hook content
+//   Write CLAUDE.md "Run npm test"            (none)  ->  (none)  logged by the gate
+//   Write settings.json, hook command `true`  (none)  ->  review-agent-hooks-change
+//   Write settings.json, same hooks           (none)  ->  (none)
+//
+// The scan has no settings reader. An edit of a settings file is judged from
+// its own text (any mention of hooks), as the gate does when the file is
+// unreadable; a whole write only by whether its hooks run nothing, because
+// every node9 user's settings file has hooks and the gate's fallback would
+// report each rewrite of it.
+// Shell writes to the same files (`: > .husky/pre-commit`) are not covered yet.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v32';
 
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
 // rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
@@ -776,7 +818,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v31';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '60048df5a64eb7c0';
+export const CANONICAL_EXTRACTOR_HASH = 'bf14326b92bf1718';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -913,6 +955,57 @@ export function extractCanonicalFindings(
     }
   }
 
+  // ── File checks of the gate (file tools) ─────────────────────────────────
+  // The same evaluateFileChecks the gate runs (policy/index.ts): protected
+  // files, a git hook disarmed (node9Firewall#413 part 2) and the agent's own
+  // instruction and memory files (part 4). The scan has no settings reader:
+  // an edit of a settings file is judged from its own text, and a whole write
+  // only by whether its hooks run nothing. A logged allow is not a finding.
+  // The empty-accesses guard skips the check lookups for non-file tools.
+  if (!isShell) {
+    const fileContext = { cwd: ctx.cwd, homeDirs: ctx.homeDirs };
+    let file: FileCheckVerdict | null;
+    try {
+      const accesses = collectFileAccesses(
+        call.toolName,
+        call.args,
+        fileContext,
+        ctx.toolInspection
+      );
+      file =
+        accesses.length === 0
+          ? null
+          : evaluateFileChecks(call.args, accesses, fileContext, ctx.catalogSettings ?? {}, false, {
+              settingsUnknown: true,
+            });
+    } catch {
+      // The gate fails closed on the same throw, so the scan reports it.
+      file = incompleteFileVerdict();
+    }
+    if (file && file.decision !== 'allow') {
+      const ruleName = file.ruleName;
+      out.push(
+        makeFinding({
+          type: 'file-access',
+          ruleName,
+          verdict: file.decision,
+          severity: classifyRuleSeverity(ruleName, file.decision),
+          reason: file.reason ?? ruleName,
+          toolName: call.toolName,
+          ctx,
+          ts,
+          sourceType: 'engine',
+          shieldLabel: 'Node9 Files',
+          subjectPath: file.path,
+          // The path only: a Write's body or an edit's text stays out of the
+          // finding, and the path is what the dedupe preview keys on.
+          input: { file_path: file.path },
+          checkId: file.checkId,
+        })
+      );
+    }
+  }
+
   if (!isShell || command === null) {
     return out;
   }
@@ -944,13 +1037,23 @@ export function extractCanonicalFindings(
     );
   }
 
+  // Git, from the parsed command (node9Firewall#413): read before the smart
+  // rules (it decides which of them are suppressed), emitted after them.
+  const git = analyzeGit(command);
+
   // ── Smart rules (with AST suppression) ───────────────────────────────────
   for (const source of ctx.rules) {
     const r = source.rule;
     if (r.verdict === 'allow') continue;
+    if (r.name && AST_FS_REGEX_RULES.has(r.name)) {
+      // The two git regex rules are owned by the AST walk below for a command
+      // that parsed (node9Firewall#413); a user's own rule by that name and
+      // a command the parser refused keep the regex.
+      const gitRule = r.name === 'review-force-push' || r.name === 'review-git-destructive';
+      if (!gitRule || (source.sourceType !== 'user' && git.parsed)) continue;
+    }
     // Shell-shape alias so scan agrees with the gate about which rules apply.
     if (!toolMatchesRule(toolNameLower, r.tool, ctx.toolInspection)) continue;
-    if (r.name && AST_FS_REGEX_RULES.has(r.name)) continue;
     if (
       !evaluateSmartConditions(
         shellRuleArgs(call.toolName, call.args, r.tool, ctx.toolInspection),
@@ -975,6 +1078,30 @@ export function extractCanonicalFindings(
       })
     );
     break; // first matching rule wins per call
+  }
+
+  // The git findings replace the suppressed regex rules, so the scan and the
+  // gate name the same rule for the same command. A user rule by the same
+  // name that fired above already stands for it.
+  if (git.parsed) {
+    for (const f of git.findings) {
+      if (out.some((o) => o.type === 'smart-rule' && o.ruleName === f.ruleName)) continue;
+      out.push(
+        makeFinding({
+          type: 'smart-rule',
+          ruleName: f.ruleName,
+          verdict: 'review',
+          severity: classifyRuleSeverity(f.ruleName, 'review'),
+          reason: f.reason,
+          toolName: call.toolName,
+          ctx,
+          ts,
+          sourceType: 'engine',
+          shieldLabel: 'Node9 (AST)',
+          input: call.args,
+        })
+      );
+    }
   }
 
   // ── Eval-of-remote (curl | bash, bash -c "$(curl …)" etc.) ───────────────
@@ -1215,6 +1342,7 @@ export function toScanFinding(c: CanonicalFinding): ScanFinding | null {
   const typeMap: Record<CanonicalFindingType, ScanFinding['type'] | null> = {
     'smart-rule': null,
     'ast-fs-op': null,
+    'file-access': null,
     dlp: 'dlp',
     // Ships under the dlp rollup with patternName 'Decoy credential' and a
     // canary:<kind> ruleName until the SaaS wire type gains its own value.
@@ -1267,6 +1395,7 @@ function makeFinding(args: {
   input?: Record<string, unknown>;
   patternName?: string;
   redactedSample?: string;
+  checkId?: string;
 }): CanonicalFinding {
   const f: CanonicalFinding = {
     type: args.type,
@@ -1289,6 +1418,7 @@ function makeFinding(args: {
   if (args.input) f.input = args.input;
   if (args.patternName) f.patternName = args.patternName;
   if (args.redactedSample) f.redactedSample = args.redactedSample;
+  if (args.checkId) f.checkId = args.checkId;
   return f;
 }
 
