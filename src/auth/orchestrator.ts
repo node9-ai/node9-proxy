@@ -286,8 +286,10 @@ function extractFilePaths(toolName: string, args: unknown, shellCommand?: string
     for (const m of cmd.matchAll(/\b(?:scp|rsync)\s+(?:-\S+\s+)*(\S+)\s+\S+@/g)) {
       paths.push(m[1]);
     }
-    // nc / ncat with input redirect: nc host port < file
-    for (const m of cmd.matchAll(/<\s*(\S+)/g)) {
+    // nc / ncat with input redirect: nc host port < file. Only a single `<`:
+    // `<<'EOF'` is a heredoc (its label is no file), `<<<` a here-string,
+    // `<&3` an fd and `<(cmd)` a process substitution. `<>file` reads it too.
+    for (const m of cmd.matchAll(/(?<!<)<>?(?![<&(])\s*(\S+)/g)) {
       paths.push(m[1]);
     }
   }
@@ -311,7 +313,14 @@ function extractFilePaths(toolName: string, args: unknown, shellCommand?: string
 // silently leave the taint tier. The discriminator between the two is a DOT:
 // `.ssh` is a dotfile, while a slash or a quote before the name is just a path
 // or a payload. Measured over 13 shapes, 2026-09-11.
-const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b`);
+//
+// The lookahead is the same reasoning on the other side: a name followed by a
+// slash is a DIRECTORY on a path, not a program (`/etc/ssh/ssh_config`). That
+// was the same false entry into the taint tier, through a Python heredoc
+// copying `/etc/ssh/ssh_config` with /etc jailed: the daemon-down review came
+// back instead of the jail's block. `/usr/bin/curl`, `sh -c "curl …"` and
+// `{curl …;}` are not followed by a slash and still match.
+const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b(?![/\\\\])`);
 
 // ── Flight Recorder — fire-and-forget socket notify ──────────────────────────
 // Returns a Promise so callers can await socket flush before process.exit().

