@@ -97,7 +97,9 @@ const NPM_VARS =
   /^(?:npm_config_registry|NPM_CONFIG_REGISTRY|YARN_REGISTRY|YARN_NPM_REGISTRY_SERVER|BUN_CONFIG_REGISTRY)$/;
 const PIP_VARS =
   /^(?:PIP_INDEX_URL|PIP_EXTRA_INDEX_URL|PIP_FIND_LINKS|UV_INDEX_URL|UV_EXTRA_INDEX_URL|UV_INDEX|UV_DEFAULT_INDEX|PIPENV_PYPI_MIRROR)$/;
-const PRESCREEN_RE = /registry|index|find-links|-i\b|-f\b|PIP_|UV_|BUN_CONFIG|PIPENV_PYPI/i;
+// Narrow on purpose: `rm -f` and `index.js` must not wake the walk.
+const PRESCREEN_RE =
+  /--registry|index-url|--index\b|--default-index|find-links|\s-[if]\s|npm_config_registry|_REGISTRY|PIP_|UV_(?:INDEX|DEFAULT)|PIPENV_PYPI/i;
 const MAX_PAYLOAD_DEPTH = 4;
 
 /**
@@ -180,16 +182,21 @@ function fromCall(
   prefix: Array<[string, string | null]>,
   out: RegistryOverride[]
 ): void {
-  // The manager is the first family word up to the head: the head finder
-  // reads `npx` and `uv run` as runners and would step past them.
-  const head = unwrapCommandHead(words);
-  let at = words.findIndex(
-    (w, i) =>
-      i <= head &&
-      (NPM_FAMILY.has(baseWord(w)) ||
-        PIP_FAMILY.has(baseWord(w)) ||
-        /^python[0-9.]*$/.test(baseWord(w)))
-  );
+  // The manager is the nearest family word at or before the head: the head
+  // finder reads `npx` and `uv run` as runners and steps past them, and a
+  // wrapper's own operand before it (`sudo -u npm npm i`) is not the manager.
+  const head = Math.min(unwrapCommandHead(words), words.length - 1);
+  const isManager = (w: string | null) =>
+    NPM_FAMILY.has(baseWord(w)) ||
+    PIP_FAMILY.has(baseWord(w)) ||
+    /^python[0-9.]*$/.test(baseWord(w));
+  let at = -1;
+  for (let i = head; i >= 0; i--) {
+    if (isManager(words[i])) {
+      at = i;
+      break;
+    }
+  }
   if (at < 0) return;
   // `env K=V npm …`: the wrapper's assignments apply to the call.
   const env = [...prefix];
@@ -212,7 +219,7 @@ function fromCall(
   for (const [name, value] of env) {
     if (value !== null && vars.test(name)) push(out, manager, name, value);
   }
-  for (let i = 0; i < rest.length; i++) {
+  for (let i = 0; i < runnerEnd(manager, rest, flags); i++) {
     const w = rest[i];
     if (w === null) continue;
     const eq = w.indexOf('=');
@@ -221,6 +228,30 @@ function fromCall(
     const value = eq > 0 && w.startsWith('--') ? w.slice(eq + 1) : rest[++i];
     if (value !== null && value !== undefined) push(out, manager, flag, value);
   }
+}
+
+/**
+ * Where the manager's own options end. A runner (`npx`, `uvx`, `pnpm dlx`,
+ * `npm exec`) hands every word after the package to the package:
+ * `npx create-app my-app --registry X` passes `--registry` to the generator.
+ */
+function runnerEnd(manager: string, rest: (string | null)[], flags: Set<string>): number {
+  const runner = ['npx', 'pnpx', 'bunx', 'uvx'].includes(manager);
+  let verb: string | null = null;
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i];
+    if (w === '--') return i;
+    if (w !== null && w.startsWith('-')) {
+      if (flags.has(w)) i++; // its value
+      continue;
+    }
+    // A runner's first operand is the package; after `exec` / `x` / `dlx`,
+    // the second one is.
+    if (runner) return i;
+    if (verb === null) verb = w;
+    else if (['exec', 'x', 'dlx'].includes(verb)) return i;
+  }
+  return rest.length;
 }
 
 /** Does this call fetch packages? Read from its verb, the first operand. */

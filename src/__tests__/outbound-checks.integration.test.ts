@@ -100,6 +100,13 @@ describe('outbound checks at the real hook (node9Firewall#415)', () => {
     }
   );
 
+  // Code review: a review-tier command in front (chmod 777, a SQL DROP) used
+  // to return its review before the reverse-shell block was reached.
+  itUnix('a reverse shell behind a review-tier command is still blocked', () => {
+    expect(check('standard', `chmod 777 run.sh; ${REVERSE}`)).toBe('deny');
+    expect(check('standard', `psql -c "DROP TABLE t"; ${NETCAT}`)).toBe('deny');
+  });
+
   itUnix('ordinary commands are not stopped', () => {
     expect(check('standard', 'env | grep PATH')).toBe('allow');
     expect(check('standard', 'nc -zv localhost 22')).toBe('allow');

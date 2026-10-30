@@ -148,6 +148,10 @@ interface CommandReadings {
 }
 
 const normalizeCache = new Map<string, CommandReadings>();
+// The readings that keep the code body of a stdin interpreter (a path rule's,
+// node9Firewall#414). A map of its own: a prefixed key in the shared one could
+// be spelled by a command itself (a JSON payload may carry any character).
+const codeBodiesCache = new Map<string, CommandReadings>();
 
 // Shared parsed-AST cache. Both normalizeCommandForPolicy and
 // analyzeFsOperation parse the same command via mvdan-sh; without sharing,
@@ -220,21 +224,25 @@ function byteOffsetToCharIndex(command: string): ((byteOffset: number) => number
   return (b: number) => map.get(b) ?? -1;
 }
 
-function cachedNormalize(key: string, compute: () => CommandReadings): CommandReadings {
-  const hit = normalizeCache.get(key);
+function cachedNormalize(
+  key: string,
+  compute: () => CommandReadings,
+  cache: Map<string, CommandReadings> = normalizeCache
+): CommandReadings {
+  const hit = cache.get(key);
   if (hit !== undefined) {
     // Move to most-recent on access (Map iteration order = insertion order).
-    normalizeCache.delete(key);
-    normalizeCache.set(key, hit);
+    cache.delete(key);
+    cache.set(key, hit);
     return hit;
   }
   const result = compute();
-  if (normalizeCache.size >= NORMALIZE_CACHE_MAX) {
+  if (cache.size >= NORMALIZE_CACHE_MAX) {
     // Evict the oldest entry (first in iteration order).
-    const oldest = normalizeCache.keys().next().value;
-    if (oldest !== undefined) normalizeCache.delete(oldest);
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
   }
-  normalizeCache.set(key, result);
+  cache.set(key, result);
   return result;
 }
 
@@ -455,10 +463,11 @@ function foldCommandWords(reading: string): string {
 }
 
 function commandReadingsImpl(command: string, codeBodies = false): CommandReadings {
-  // NUL cannot occur in a command a shell runs, so the prefixed key never meets
-  // a plain one.
-  const key = codeBodies ? `\u0000code\u0000${command}` : command;
-  return cachedNormalize(key, () => normalizeCommandForPolicyImpl(command, codeBodies));
+  return cachedNormalize(
+    command,
+    () => normalizeCommandForPolicyImpl(command, codeBodies),
+    codeBodies ? codeBodiesCache : normalizeCache
+  );
 }
 
 /** Programs that read CODE from stdin and whose code inline-exec judges by
@@ -2236,6 +2245,11 @@ function deriveBinaryOp(sample: string): number {
   }
 }
 let _listOps: Set<number> | null = null;
+/** A BinaryCmd operator that is a list (`&&`, `||`), not a pipe. Exported for
+ *  the outbound detectors (shell/outbound.ts), which read pipelines. */
+export function isListOp(op: number): boolean {
+  return listOps().has(op);
+}
 function listOps(): Set<number> {
   if (_listOps) return _listOps;
   _listOps = new Set<number>(
@@ -3021,7 +3035,7 @@ export function devNetRedirectHost(word: string | null): string | null {
 
 /** The redirect words of a statement, literal-resolved (null = dynamic). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function redirectWords(stmt: any): Array<string | null> {
+export function redirectWords(stmt: any): Array<string | null> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const redirs: any[] = stmt.Redirs || [];
   return redirs.filter((r) => r && r.Word).map((r) => resolveWordLiteral(r.Word));

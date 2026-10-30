@@ -27,6 +27,14 @@ describe('extractRegistryOverrides', () => {
     ['pipenv', 'pipenv install -i https://r.example.test/simple x'],
     ['inside sh -c', 'sh -c "npm i --registry https://r.example.test x"'],
     ['behind sudo', 'sudo npm i -g --registry https://r.example.test x'],
+    [
+      'behind sudo -u with a user named like the manager',
+      'sudo -u npm npm i --registry https://r.example.test x',
+    ],
+    [
+      'pnpm dlx with the flag before the package',
+      'pnpm dlx --registry https://r.example.test create-thing',
+    ],
   ])('%s', (_label, command) => {
     expect(hosts(command)).toEqual(['r.example.test']);
   });
@@ -39,6 +47,13 @@ describe('extractRegistryOverrides', () => {
     ['a value that stays dynamic', 'npm i --registry "$REG" x'],
     ['pipx -f is --force', 'pipx install -f x'],
     ['the word in text', 'echo "npm install --registry https://r.example.test x"'],
+    // Code review: after the package, a runner's words are the package's own.
+    [
+      'an argument of the package npx runs',
+      'npx create-thing my-app --registry https://r.example.test',
+    ],
+    ['an argument after pnpm dlx', 'pnpm dlx create-thing app --registry https://r.example.test'],
+    ['an argument after --', 'npm exec create-thing -- --registry https://r.example.test'],
   ])('none: %s', (_label, command) => {
     expect(hosts(command)).toEqual([]);
   });

@@ -31,9 +31,12 @@
 
 import mvdanSh from 'mvdan-sh';
 import {
+  SHELL_INTERPRETERS,
   baseWord,
+  isListOp,
   literalShellPayload,
   parseShared,
+  redirectWords,
   resolveWordLiteral,
   unwrapCommandHead,
 } from './index';
@@ -57,8 +60,9 @@ export interface OutboundAnalysis {
   findings: OutboundFinding[];
 }
 
-/** Shells that run what they read on stdin. */
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh']);
+/** Shells that run what they read on stdin: the engine's list plus the
+ *  smaller POSIX and C shells a reverse shell is often written with. */
+const SHELLS = new Set([...SHELL_INTERPRETERS, 'mksh', 'ash', 'csh', 'tcsh']);
 const NETCATS = new Set(['nc', 'ncat', 'netcat', 'nc.traditional', 'nc.openbsd']);
 /** Network clients that carry a pipeline's bytes to and from a host. */
 const NET_CLIENTS = new Set([...NETCATS, 'telnet', 'socat']);
@@ -81,8 +85,8 @@ const SENDERS = new Set([
   'invoke-restmethod',
   'openssl',
 ]);
-/** netcat's options that run a program for the connection. */
-const NETCAT_EXEC_FLAGS = new Set(['-e', '-c', '--exec', '--sh-exec', '--lua-exec']);
+/** netcat's long options that run a program for the connection (ncat). */
+const NETCAT_EXEC_LONG = new Set(['--exec', '--sh-exec', '--lua-exec']);
 /** Declaration builtins that print every variable when given no name. */
 const DECL_DUMPS = new Set(['export', 'declare', 'typeset']);
 const PROC_ENVIRON_RE = /^\/proc\/[^/\s]+\/environ$/;
@@ -92,33 +96,38 @@ const SOCAT_PROGRAM_RE = /^(?:exec|system)[:,]/i;
 /** socat address types that open a network connection or listener. */
 const SOCAT_NET_RE =
   /^(?:tcp|tcp4|tcp6|udp|udp4|udp6|ssl|openssl|sctp|tcp-connect|tcp-listen|tcp4-listen|tcp6-listen|udp-listen|openssl-connect|openssl-listen|ssl-l)[:,]/i;
+// Word-bounded, so `sync`, `func`, `venv` and `locate` do not wake the walk.
 const PRESCREEN_RE =
-  /\/dev\/(?:tcp|udp)|nc|cat|telnet|socat|openssl|env|printenv|\bset\b|export|declare|typeset|environ/i;
+  /\/dev\/(?:tcp|udp)|\b(?:nc|ncat|netcat|telnet|socat|s_client|env|printenv|set|export|declare|typeset)\b|environ/i;
 const MAX_PAYLOAD_DEPTH = 4;
 const CACHE_MAX = 1_000;
 const cache = new Map<string, OutboundAnalysis>();
 
-// The pipe operator codes, derived from samples so a parser version that
-// renumbers its tokens cannot silently turn a list into a pipe.
-function binaryOp(sample: string): number {
-  try {
-    const f = parseShared(sample);
-    let op = -1;
-    syntax.Walk(f, (node: unknown) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const n = node as any;
-      if (n && syntax.NodeType(n) === 'BinaryCmd' && op < 0) op = n.Op;
-      return true;
-    });
-    return op;
-  } catch {
-    return -1;
-  }
-}
-let pipeOps: Set<number> | null = null;
+/** A BinaryCmd that is a pipe (`|`, `|&`), not a list (`&&`, `||`). */
 function isPipeOp(op: number): boolean {
-  pipeOps ??= new Set([binaryOp('a | b'), binaryOp('a |& b')].filter((o) => o >= 0));
-  return pipeOps.has(op);
+  return !isListOp(op);
+}
+
+/** The redirect operator of a duplication from an fd (`<&5`), derived from a
+ *  sample so a parser version that renumbers its tokens is followed. */
+let dupInOp: number | null = null;
+function isDupInOp(op: number): boolean {
+  if (dupInOp === null) {
+    let found = -1;
+    try {
+      syntax.Walk(parseShared('cat <&3'), (node: unknown) => {
+        const n = node as Node;
+        if (found === -1 && n && syntax.NodeType(n) === 'Stmt' && n.Redirs?.[0]) {
+          found = n.Redirs[0].Op;
+        }
+        return true;
+      });
+    } catch {
+      found = -1;
+    }
+    dupInOp = found;
+  }
+  return op === dupInOp;
 }
 
 export function analyzeOutbound(command: string): OutboundAnalysis {
@@ -166,32 +175,51 @@ function shellReadsStdin(words: (string | null)[], at: number): boolean {
   return (rest as string[]).every((w) => w.startsWith('-') && !/^-[a-z]*c/i.test(w));
 }
 
-/** netcat told to run a program: `-e PROG`, `-c CMD`, `--exec`, or `e` in a bundle. */
+/** A program a reverse shell hands the connection to: a shell, by name or path. */
+function isShellProgram(word: string | null | undefined): boolean {
+  if (!word) return false;
+  const first = word
+    .trim()
+    .split(/[\s,]/)[0]
+    .replace(/^["']|["']$/g, '');
+  return SHELLS.has(baseWord(first)) || /(?:^|[\\/])cmd(?:\.exe)?$/i.test(first);
+}
+
+/**
+ * netcat told to run a program: `--exec`/`--sh-exec`/`--lua-exec`, or `-e` /
+ * `-c` (alone or ending a short bundle, `-nve`) followed by a shell. The
+ * program must be a shell because OpenBSD's nc reads `-c` as "use TLS" and
+ * `-e NAME` as the peer's certificate name: `nc -c -e api.example api 443`
+ * connects, it runs nothing.
+ */
 function netcatRunsProgram(words: (string | null)[], at: number): boolean {
-  return words.slice(at + 1).some((w) => {
+  const rest = words.slice(at + 1);
+  return rest.some((w, i) => {
     if (w === null) return false;
-    const flag = w.split('=')[0];
-    if (NETCAT_EXEC_FLAGS.has(flag)) return true;
-    return /^-[a-zA-Z]+$/.test(w) && !w.startsWith('--') && w.slice(1).includes('e');
+    if (NETCAT_EXEC_LONG.has(w.split('=')[0])) return true;
+    if (!/^-[a-zA-Z]*[ec]$/.test(w)) return false;
+    // `-c 'bash -i'`: the value is a command line, its first word the program.
+    return isShellProgram(rest[i + 1]);
   });
 }
 
+/** socat joining a shell (`exec:bash`, `system:sh`) to a network address. A
+ *  program that is not a shell (`TCP-LISTEN:8080,fork EXEC:./serve.sh`) is
+ *  an inetd-style server, not a reverse shell. */
 function socatRunsProgram(words: (string | null)[], at: number): boolean {
   const addrs = words.slice(at + 1).filter((w): w is string => w !== null && !w.startsWith('-'));
-  return addrs.some((a) => SOCAT_PROGRAM_RE.test(a)) && addrs.some((a) => SOCAT_NET_RE.test(a));
-}
-
-/** Every redirect word of a statement, resolved (null = dynamic). */
-function redirectWords(stmt: Node): (string | null)[] {
-  return ((stmt?.Redirs || []) as Node[])
-    .filter((r) => r?.Word)
-    .map((r) => resolveWordLiteral(r.Word));
+  const runsShell = addrs.some(
+    (a) => SOCAT_PROGRAM_RE.test(a) && isShellProgram(a.slice(a.search(/[:,]/) + 1))
+  );
+  return runsShell && addrs.some((a) => SOCAT_NET_RE.test(a));
 }
 
 /** An env dump: what the call prints is the whole environment. */
 function callDumpsEnv(words: (string | null)[], redirs: (string | null)[]): boolean {
   const name = baseWord(words[0]);
-  if (name === 'printenv') return true;
+  // `printenv NAME` prints one variable; only a bare `printenv` (`-0` at most)
+  // prints the environment.
+  if (name === 'printenv') return words.slice(1).every((w) => w !== null && w.startsWith('-'));
   if (name === 'env') {
     // `env` with only options and assignments prints; with a command it runs it.
     let i = 1;
@@ -359,7 +387,8 @@ class OutboundWalk {
       const args: Node[] = call.Args || [];
       for (let i = at + 1; i < args.length; i++) {
         const w = words[i];
-        if (w !== null && PROC_ENVIRON_RE.test(w.replace(/^[^@]*@/, ''))) {
+        // `@/proc/self/environ`, `--post-file=/proc/self/environ`.
+        if (w !== null && PROC_ENVIRON_RE.test(w.replace(/^.*[@=]/, ''))) {
           this.found('data.env-exfil', `${head} sends /proc/…/environ`);
         } else if (this.carriesEnv(args[i])) {
           this.found('data.env-exfil', `the output of an env dump is an argument of ${head}`);
@@ -417,10 +446,15 @@ class OutboundWalk {
     }
   }
 
-  /** A redirect of this statement duplicates a socket fd `exec` opened (`<&5`). */
+  /** This statement READS a socket fd `exec` opened (`<&5`). Writing to one
+   *  (`>&5`) only sends data; the commands must come from the socket. */
   private readsNetFd(stmt: Node): boolean {
     if (this.netFds.size === 0) return false;
-    return redirectWords(stmt).some((w) => w !== null && this.netFds.has(w.replace(/-$/, '')));
+    return ((stmt?.Redirs || []) as Node[]).some((r) => {
+      if (!r?.Word || !isDupInOp(r.Op)) return false;
+      const w = resolveWordLiteral(r.Word);
+      return w !== null && this.netFds.has(w.replace(/-$/, ''));
+    });
   }
 
   /** A word (or assignment value) whose text includes an env dump's output. */

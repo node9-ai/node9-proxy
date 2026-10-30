@@ -50,6 +50,15 @@ const ENV_VARS = [
   'UV_DEFAULT_INDEX',
   'PIPENV_PYPI_MIRROR',
 ];
+/** Variables that move a config file. */
+const PATH_VARS = [
+  'NPM_CONFIG_USERCONFIG',
+  'npm_config_userconfig',
+  'XDG_CONFIG_HOME',
+  'PIP_CONFIG_FILE',
+  'VIRTUAL_ENV',
+  'UV_CONFIG_FILE',
+];
 const REGISTRY_LINE_RE = /registry|index|url|source|mirror|find-links/i;
 const URL_RE = /https?:\/\/[^\s"'<>,;]+/gi;
 
@@ -103,7 +112,13 @@ export function configuredRegistryHosts(
   env: NodeJS.ProcessEnv = process.env,
   home: string = os.homedir()
 ): Set<string> {
-  const key = `${cwd ?? ''}\u0000${home}`;
+  // Everything the answer depends on: the directories and every variable read.
+  const key = [
+    cwd ?? '',
+    home,
+    ...ENV_VARS.map((n) => env[n] ?? ''),
+    ...PATH_VARS.map((n) => env[n] ?? ''),
+  ].join('\u0000');
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.hosts;
   const hosts = new Set<string>();

@@ -57,6 +57,16 @@ describe('configuredRegistryHosts', () => {
     expect([...hosts].sort()).toEqual(['a.example.test', 'b.example.test', 'c.example.test']);
   });
 
+  it('the cached answer follows the environment (code review)', () => {
+    expect(configuredRegistryHosts(project, {}, home).size).toBe(0);
+    const hosts = configuredRegistryHosts(
+      project,
+      { npm_config_registry: 'https://a.example.test/' },
+      home
+    );
+    expect([...hosts]).toEqual(['a.example.test']);
+  });
+
   it('a commented line and a URL on an unrelated line do not count', () => {
     fs.writeFileSync(
       path.join(project, '.npmrc'),
