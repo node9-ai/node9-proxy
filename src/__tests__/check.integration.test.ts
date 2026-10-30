@@ -440,7 +440,10 @@ describe('ignored tools fast-path', () => {
 
 describe('git from the parsed command (node9Firewall#413)', () => {
   // Through the built CLI, shipped defaults, no approver: a review comes back
-  // as an inline ask on stdout, an allow as a silent exit 0.
+  // as an inline ask on stdout, an allow as a silent exit 0. Every payload
+  // names its hook event: without it the agent is recognised only from
+  // CLAUDECODE in the environment, which CI does not set, and the review
+  // then waits for an approver until the spawn is killed.
   let tmpHome: string;
   beforeEach(() => {
     tmpHome = makeTempHome({
@@ -459,7 +462,11 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     ["git config alias.x 'reset --hard' && git x", 'destructive git operation'],
     ["sh -c 'git clean -fd'", 'destructive git operation'],
   ])('%s → asked, by the resolved form', (command, phrase) => {
-    const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
+    const r = runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
     expect(r.status, 'spawn failed').not.toBeNull();
     expect(r.status).toBe(0);
     const parsed = JSON.parse(r.stdout.trim());
@@ -473,7 +480,11 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     ['HUSKY=0 git commit -m wip', 'hooks'],
     ['rm .husky/pre-commit', 'disarms a git hook'],
   ])('%s → asked (hooks bypassed, part 2)', (command, phrase) => {
-    const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
+    const r = runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
     expect(r.status, 'spawn failed').not.toBeNull();
     expect(r.status).toBe(0);
     const parsed = JSON.parse(r.stdout.trim());
@@ -484,6 +495,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   it('a hook emptied through the Write tool is asked; written with content it is not', () => {
     const emptied = runCheck(
       {
+        hook_event_name: 'PreToolUse',
         tool_name: 'Write',
         tool_input: {
           file_path: `${tmpHome}/repo/.husky/pre-commit`,
@@ -497,6 +509,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     expect(JSON.parse(emptied.stdout.trim()).hookSpecificOutput.permissionDecision).toBe('ask');
     const real = runCheck(
       {
+        hook_event_name: 'PreToolUse',
         tool_name: 'Write',
         tool_input: {
           file_path: `${tmpHome}/repo/.husky/pre-commit`,
@@ -512,7 +525,11 @@ describe('git from the parsed command (node9Firewall#413)', () => {
 
   it('git add -A is silent by default and asked once the user sets the check (part 3)', () => {
     const silent = runCheck(
-      { tool_name: 'Bash', tool_input: { command: 'git add -A && git commit -m wip' } },
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git add -A && git commit -m wip' },
+      },
       { HOME: tmpHome },
       tmpHome
     );
@@ -530,7 +547,11 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     });
     try {
       const asked = runCheck(
-        { tool_name: 'Bash', tool_input: { command: 'git add -A && git commit -m wip' } },
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'git add -A && git commit -m wip' },
+        },
         { HOME: optIn },
         optIn
       );
@@ -547,6 +568,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   it('a plain Write to CLAUDE.md is silent at Standard; one with an instruction to hide is asked', () => {
     const plain = runCheck(
       {
+        hook_event_name: 'PreToolUse',
         tool_name: 'Write',
         tool_input: {
           file_path: `${tmpHome}/repo/CLAUDE.md`,
@@ -560,6 +582,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     expect(plain.stdout).toBe('');
     const hide = runCheck(
       {
+        hook_event_name: 'PreToolUse',
         tool_name: 'Write',
         tool_input: {
           file_path: `${tmpHome}/repo/CLAUDE.md`,
@@ -589,6 +612,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     );
     const hook = runCheck(
       {
+        hook_event_name: 'PreToolUse',
         tool_name: 'Edit',
         tool_input: { file_path: settingsPath, old_string: 'node9 check', new_string: 'true' },
       },
@@ -599,6 +623,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     expect(JSON.parse(hook.stdout.trim()).hookSpecificOutput.permissionDecision).toBe('ask');
     const model = runCheck(
       {
+        hook_event_name: 'PreToolUse',
         tool_name: 'Edit',
         tool_input: {
           file_path: settingsPath,
@@ -624,6 +649,7 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     try {
       const r = runCheck(
         {
+          hook_event_name: 'PreToolUse',
           tool_name: 'Write',
           tool_input: { file_path: `${strict}/repo/AGENTS.md`, content: '# Rules\n' },
         },
@@ -645,7 +671,11 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     'git commit -m "add --no-verify to the docs"',
     'HUSKY=0 npm ci',
   ])('%s → allowed (the regex rule stopped it)', (command) => {
-    const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
+    const r = runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
     expect(r.status, 'spawn failed').not.toBeNull();
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('');

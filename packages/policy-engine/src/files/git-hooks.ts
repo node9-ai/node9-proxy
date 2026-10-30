@@ -27,12 +27,14 @@ export type GitHooksFileVerdict = PolicyVerdict & {
   operation: FileAccess['operation'];
 };
 
-/** A line that runs nothing in a hook. */
-const INERT_LINE_RE = /^\s*(#.*|exit(\s+0)?|true|:|set\s+-[a-z]+)?\s*$/;
+/** A trimmed line that runs nothing in a hook. The line is trimmed first:
+ *  `\s*` on both sides of an optional group is polynomial on a line of
+ *  spaces (CodeQL js/polynomial-redos). */
+const INERT_LINE_RE = /^(#.*|exit(\s+0)?|true|:|set\s+-[a-z]+)?$/;
 
 /** Text that, as a whole hook, runs nothing. */
 export function hookTextRunsNothing(text: string): boolean {
-  return text.split(/\r?\n/).every((line) => INERT_LINE_RE.test(line));
+  return text.split(/\r?\n/).every((line) => INERT_LINE_RE.test(line.trim()));
 }
 
 /** An edit whose new text disarms the hook: empty, or `exit` / `true` alone on a line. */

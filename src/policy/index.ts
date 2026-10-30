@@ -11,6 +11,7 @@ import { reviewsEveryInline, isBlockAll } from '@node9/policy-engine';
 //   - keeps the explainPolicy waterfall (heavy fs/os/process I/O)
 
 import fs from 'fs';
+import { readCappedText } from '../utils/read-capped';
 import path from 'path';
 import os from 'os';
 import { scanArgumentSecrets, scanFilePath } from '../dlp';
@@ -115,13 +116,15 @@ const MAX_AGENT_SETTINGS_BYTES = 256 * 1024;
  * "any mention of hooks in the new text is a change". Never throws.
  */
 export function readAgentSettings(absPath: string): string | null {
-  try {
-    const st = fs.statSync(absPath);
-    if (!st.isFile() || st.size > MAX_AGENT_SETTINGS_BYTES) return null;
-    return fs.readFileSync(absPath, 'utf8');
-  } catch {
-    return null;
-  }
+  // Type and size come from the open descriptor, not a prior stat of the
+  // path (CodeQL js/file-system-race); O_NONBLOCK keeps a FIFO at the path
+  // from hanging the gate on open.
+  const r = readCappedText(
+    absPath,
+    MAX_AGENT_SETTINGS_BYTES,
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)
+  );
+  return r && !r.truncated ? r.text : null;
 }
 
 /** Returns true when toolName matches an ignoredTools pattern (fast-path, silent allow). */

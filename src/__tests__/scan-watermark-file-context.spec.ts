@@ -19,20 +19,26 @@ describe('canonicalContextForLine', () => {
     expect(canonicalContextForLine({ cwd: 42 }, 'sess', 4).cwd).toBeUndefined();
   });
 
-  it('lets the file checks see an Edit of the shell startup file by its absolute path', () => {
-    const ctx = canonicalContextForLine({ cwd: '/work/proj' }, 'sess', 4);
-    const out = extractCanonicalFindings(
-      {
-        toolName: 'Edit',
-        args: { file_path: `${os.homedir()}/.bashrc`, old_string: 'a', new_string: 'b' },
-        timestamp: '2026-10-30T10:00:00Z',
-      },
-      ctx
-    );
-    const f = out.find((x) => x.type === 'file-access');
-    expect(f?.ruleName).toBe('review-shell-startup-mutation');
-    expect(f?.checkId).toBe('files.shell-startup');
-  });
+  // POSIX only: the file checks join and match paths on `/`, and the gate's
+  // own context (src/policy/file-access.ts) passes os.homedir() the same raw
+  // way, so on Windows neither side matches `C:\Users\x/.bashrc`.
+  it.skipIf(process.platform === 'win32')(
+    'lets the file checks see an Edit of the shell startup file by its absolute path',
+    () => {
+      const ctx = canonicalContextForLine({ cwd: '/work/proj' }, 'sess', 4);
+      const out = extractCanonicalFindings(
+        {
+          toolName: 'Edit',
+          args: { file_path: `${os.homedir()}/.bashrc`, old_string: 'a', new_string: 'b' },
+          timestamp: '2026-10-30T10:00:00Z',
+        },
+        ctx
+      );
+      const f = out.find((x) => x.type === 'file-access');
+      expect(f?.ruleName).toBe('review-shell-startup-mutation');
+      expect(f?.checkId).toBe('files.shell-startup');
+    }
+  );
 
   it('resolves a relative file_path against the line cwd', () => {
     const ctx = canonicalContextForLine({ cwd: `${os.homedir()}/proj` }, 'sess', 4);

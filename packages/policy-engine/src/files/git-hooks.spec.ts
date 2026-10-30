@@ -29,6 +29,7 @@ describe('hookTextRunsNothing', () => {
     'exit\n',
     ':\n',
     '#!/bin/sh\nset -e\nexit 0\n',
+    '  exit 0  \r\n\t# indented comment\n   \n',
   ])('%j runs nothing', (text) => {
     expect(hookTextRunsNothing(text)).toBe(true);
   });
@@ -37,8 +38,16 @@ describe('hookTextRunsNothing', () => {
     '#!/bin/sh\n. "$(dirname "$0")/_/husky.sh"\nnpx lint-staged\n',
     'exit 1\n',
     '#!/bin/sh\nexit 0\nnpm test\n',
+    '   npm   test   \n',
   ])('%j runs something', (text) => {
     expect(hookTextRunsNothing(text)).toBe(false);
+  });
+  // CodeQL js/polynomial-redos: a long line of spaces that ends in a word.
+  it('a long run of spaces is judged in linear time', () => {
+    const line = ' '.repeat(50_000) + 'x';
+    const start = performance.now();
+    expect(hookTextRunsNothing(line)).toBe(false);
+    expect(performance.now() - start).toBeLessThan(200);
   });
 });
 
