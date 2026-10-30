@@ -237,7 +237,6 @@ describe('Bash tool — shell command interception', () => {
     { cmd: 'git reset --hard HEAD', desc: 'reset --hard' },
     { cmd: 'git clean -fd', desc: 'clean -fd' },
     { cmd: 'git clean -fdx', desc: 'clean -fdx' },
-    { cmd: 'git rebase main', desc: 'rebase' },
     { cmd: 'git branch -D old-feat', desc: 'branch -D' },
     { cmd: 'git tag -d v1.0', desc: 'tag delete' },
   ])('review-git-destructive: flags "$desc" as review', async ({ cmd }) => {
@@ -250,6 +249,13 @@ describe('Bash tool — shell command interception', () => {
     { cmd: 'git pull --rebase', desc: 'pull --rebase' },
     { cmd: 'git pull --rebase origin main', desc: 'pull --rebase origin main' },
     { cmd: 'git push origin main', desc: 'plain push (review-git-push removed from defaults)' },
+    // node9Firewall#413: a plain rebase is not destruction, and the four
+    // false positives of the regex rule.
+    { cmd: 'git rebase main', desc: 'plain rebase' },
+    { cmd: 'git stash push -m wip && git rebase origin/main', desc: 'stash then rebase' },
+    { cmd: 'git push --dry-run --force origin main', desc: 'force push dry run' },
+    { cmd: 'git clean -fn', desc: 'clean dry run' },
+    { cmd: 'git branch -d feature/x', desc: 'branch -d (refuses an unmerged branch)' },
   ])('review-git-destructive: does NOT flag "$desc"', async ({ cmd }) => {
     const result = await evaluatePolicy('Bash', { command: cmd });
     expect(result.ruleName).not.toBe('review-git-destructive');
@@ -258,7 +264,10 @@ describe('Bash tool — shell command interception', () => {
 
   it.each([
     {
-      cmd: `node -e "const cmd = \`git push --force origin main\`; console.log(cmd)"`,
+      // Single quotes: inside double quotes the backticks would be a command
+      // substitution bash RUNS, and the git AST tier rightly reviews that
+      // (node9Firewall#413).
+      cmd: `node -e 'const cmd = \`git push --force origin main\`; console.log(cmd)'`,
       rule: 'review-force-push',
       desc: 'node -e backtick template containing git push --force',
     },

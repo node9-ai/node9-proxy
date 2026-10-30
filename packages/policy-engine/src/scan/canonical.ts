@@ -39,6 +39,7 @@ import {
   toolMatchesRule,
   normalizeCommandForPolicy,
 } from '../shell';
+import { analyzeGit } from '../shell/git';
 import { analyzePipeChain } from '../policy/pipe-chain';
 import { classifyRuleSeverity, type Severity } from '../severity';
 import { DESTRUCTIVE_OP_RE, SENSITIVE_PATH_RE, FILE_TOOLS } from './destructive-regex';
@@ -721,7 +722,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // heredoc fed to a non-shell program (`python3 - <<'PY'`, `cat > f <<'EOF'`), so
 // smart rules and the destructive-op regex no longer match text inside it. That
 // removes findings from history, hence a version bump and a re-scan.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v31';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v32';
 
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
 // rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
@@ -776,7 +777,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v31';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '60048df5a64eb7c0';
+export const CANONICAL_EXTRACTOR_HASH = '1df6d4c398c092f3';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -944,13 +945,23 @@ export function extractCanonicalFindings(
     );
   }
 
+  // Git, from the parsed command (node9Firewall#413): read before the smart
+  // rules (it decides which of them are suppressed), emitted after them.
+  const git = analyzeGit(command);
+
   // ── Smart rules (with AST suppression) ───────────────────────────────────
   for (const source of ctx.rules) {
     const r = source.rule;
     if (r.verdict === 'allow') continue;
+    if (r.name && AST_FS_REGEX_RULES.has(r.name)) {
+      // The two git regex rules are owned by the AST walk below for a command
+      // that parsed (node9Firewall#413); a user's own rule by that name and
+      // a command the parser refused keep the regex.
+      const gitRule = r.name === 'review-force-push' || r.name === 'review-git-destructive';
+      if (!gitRule || (source.sourceType !== 'user' && git.parsed)) continue;
+    }
     // Shell-shape alias so scan agrees with the gate about which rules apply.
     if (!toolMatchesRule(toolNameLower, r.tool, ctx.toolInspection)) continue;
-    if (r.name && AST_FS_REGEX_RULES.has(r.name)) continue;
     if (
       !evaluateSmartConditions(
         shellRuleArgs(call.toolName, call.args, r.tool, ctx.toolInspection),
@@ -975,6 +986,30 @@ export function extractCanonicalFindings(
       })
     );
     break; // first matching rule wins per call
+  }
+
+  // The git findings replace the suppressed regex rules, so the scan and the
+  // gate name the same rule for the same command. A user rule by the same
+  // name that fired above already stands for it.
+  if (git.parsed) {
+    for (const f of git.findings) {
+      if (out.some((o) => o.type === 'smart-rule' && o.ruleName === f.ruleName)) continue;
+      out.push(
+        makeFinding({
+          type: 'smart-rule',
+          ruleName: f.ruleName,
+          verdict: 'review',
+          severity: classifyRuleSeverity(f.ruleName, 'review'),
+          reason: f.reason,
+          toolName: call.toolName,
+          ctx,
+          ts,
+          sourceType: 'engine',
+          shieldLabel: 'Node9 (AST)',
+          input: call.args,
+        })
+      );
+    }
   }
 
   // ── Eval-of-remote (curl | bash, bash -c "$(curl …)" etc.) ───────────────

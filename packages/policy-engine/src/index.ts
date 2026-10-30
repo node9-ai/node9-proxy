@@ -100,6 +100,15 @@ export {
   parseDestHost,
 } from './shell';
 
+// Git, read from the parsed command (node9Firewall#413).
+export {
+  analyzeGit,
+  gitInvocations,
+  type GitAnalysis,
+  type GitFinding,
+  type GitInvocation,
+} from './shell/git';
+
 // Package-install extraction (supply-chain check; the host does the lookups).
 export {
   extractPackageInstalls,

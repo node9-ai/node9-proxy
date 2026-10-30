@@ -37,6 +37,7 @@ import {
   extractShellDestinations,
   type ShellCommandAnalysis,
 } from '../shell';
+import { analyzeGit } from '../shell/git';
 import {
   matchesPattern,
   evaluateSmartConditions,
@@ -683,6 +684,36 @@ async function evaluatePolicyCore(
       if (v?.logged) noteLogged(v);
       else if (v) return v;
     }
+
+    // Git, read from the parsed command (node9Firewall#413): `-C`, env,
+    // wrappers, variables and aliases defined in the same command, `sh -c`
+    // payloads; `--dry-run` and `clean -n` honoured, `branch -d` is not `-D`,
+    // a plain rebase is not destruction. The regex twins are suppressed for a
+    // command that parsed (AST_FS_REGEX_RULES) and keep speaking for one that
+    // did not.
+    const gitAction = cv('commands.git-destructive');
+    if (gitAction !== 'off') {
+      const git = analyzeGit(bashCommand);
+      const finding = git.findings.find((f) => f.checkId === 'commands.git-destructive');
+      if (finding) {
+        const v = applyCheckValue(gitAction, {
+          decision: 'review',
+          blockedByLabel: `Node9 (AST): ${finding.ruleName}`,
+          reason: finding.reason,
+          tier: 2,
+          ruleName: finding.ruleName,
+          ruleDescription: finding.description,
+          checkId: finding.checkId,
+        });
+        // A REVIEW is carried to the tier-3 candidates, not returned here: a
+        // user's own `block-force-push` rule (the commonest git rule people
+        // write) must still win over it, as for the credential-copy review
+        // above. A `block` value set on the check returns at once.
+        if (v?.logged) noteLogged(v);
+        else if (v?.decision === 'block') return v;
+        else if (v && !pendingAstReview) pendingAstReview = v;
+      }
+    }
   }
 
   // 2. Smart Rules — raw args matching before tokenization.
@@ -710,13 +741,19 @@ async function evaluatePolicyCore(
     // pinned rule is the only remaining guard and must speak.
     const astSuppressed = (rule: SmartRule): boolean => {
       if (bashCommand === null || !rule.name || !AST_FS_REGEX_RULES.has(rule.name)) return false;
+      const isGitRule = rule.name === 'review-force-push' || rule.name === 'review-git-destructive';
       const knob =
         rule.name === 'review-drop-truncate-shell'
           ? cv('commands.sql-ddl')
           : rule.name === 'shield:filesystem:review-chmod-777'
             ? cv('commands.chmod')
-            : undefined;
+            : isGitRule
+              ? cv('commands.git-destructive')
+              : undefined;
       if (knob === 'off' && rule.pinned) return false;
+      // The git AST tier judged nothing for a command that did not parse; the
+      // regex is then the only reader and keeps speaking (fw#413).
+      if (isGitRule && !analyzeGit(bashCommand).parsed) return false;
       return true;
     };
     // Bypass-by-spelling closure: rules written for `bash` (the six default

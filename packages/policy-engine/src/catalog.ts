@@ -206,7 +206,8 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     id: 'commands.git-destructive',
     group: 'commands',
     title: 'Destructive git operation',
-    catches: 'force push, reset --hard, clean, rebase, branch or tag delete',
+    catches:
+      'force push, reset --hard, clean -f, branch -D or tag delete, also through -C, env, wrappers, variables and aliases',
     values: ALL,
     defaultValue: 'review',
     legacy: ['review-force-push', 'review-git-destructive'],

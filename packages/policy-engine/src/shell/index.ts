@@ -1948,6 +1948,12 @@ export const AST_FS_REGEX_RULES = new Set<string>([
   // `node -e` / `python -c` string literal (a detection pattern, not a run
   // command) → false positive.
   'shield:filesystem:review-chmod-777',
+  // The git rules are owned by the AST walk in shell/git.ts (node9Firewall#413):
+  // it resolves `-C`, env, wrappers, variables and aliases and honours
+  // `--dry-run`, which the raw regex could not. For a command that does not
+  // parse the policy lets the regex speak again (astSuppressed).
+  'review-force-push',
+  'review-git-destructive',
 ]);
 
 // Database CLIs that actually execute SQL. Detection requires one of these to be
@@ -3639,6 +3645,32 @@ function withAssignments<T>(f: any, body: () => T): T {
   }
 }
 
+/**
+ * The one scope the credential jail walks in, for a sibling detector
+ * (shell/git.ts, node9Firewall#413): parse through the shared cache, fill the
+ * assignment table from the command's unconditional top-level assignments,
+ * walk every node with called functions inlined and the statement offset
+ * tracked (so `cat $K; K=v` keeps K unknown), and restore the outer state.
+ * A nested call from inside a visit (a `sh -c` payload) inherits the table
+ * the way a nested jail walk does. 'parse-fail' leaves the caller to its
+ * fallback; the visitor's own throw propagates.
+ */
+export function walkCommandScope(
+  command: string,
+  visit: (node: unknown) => boolean
+): 'ok' | 'parse-fail' {
+  const f = parseShared(command);
+  if (f === PARSE_FAIL) return 'parse-fail';
+  withAssignments(f, () => {
+    walkWithCalls(f, (node: unknown) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (node && syntax.NodeType(node as any) === 'Stmt') trackStatement(node);
+      return visit(node);
+    });
+  });
+  return 'ok';
+}
+
 /** The statement offset a visitor sets on each Stmt, so a later assignment stays invisible. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function trackStatement(n: any): void {
@@ -4912,7 +4944,7 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
 // Basenamed, because unwrapCommandHead basenames its head: without it
 // `env /bin/cat KEY` unwrapped to `/bin/cat` and then failed the reader test.
 /** The command name of a word: basename, lowercased; '' for a dynamic word. */
-function baseWord(w: string | null | undefined): string {
+export function baseWord(w: string | null | undefined): string {
   return (w ?? '').split('/').pop()?.toLowerCase() ?? '';
 }
 const isReaderWord = (w: string | null) => w !== null && FS_READ_TOOLS.has(baseWord(w));

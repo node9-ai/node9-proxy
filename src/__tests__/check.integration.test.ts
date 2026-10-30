@@ -438,6 +438,49 @@ describe('ignored tools fast-path', () => {
 
 // ── 2. Smart rules ────────────────────────────────────────────────────────────
 
+describe('git from the parsed command (node9Firewall#413)', () => {
+  // Through the built CLI, shipped defaults, no approver: a review comes back
+  // as an inline ask on stdout, an allow as a silent exit 0.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  it.each([
+    ['cmd="reset --hard"; git $cmd', 'destructive git operation'],
+    ['git -C ../app push -f origin main', 'force push'],
+    ["git config alias.x 'reset --hard' && git x", 'destructive git operation'],
+    ["sh -c 'git clean -fd'", 'destructive git operation'],
+  ])('%s → asked, by the resolved form', (command, phrase) => {
+    const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('ask');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason.toLowerCase()).toContain(phrase);
+    expect(r.stderr).toBe('');
+  });
+
+  it.each([
+    'git push --dry-run --force origin main',
+    'git clean -fn',
+    'git branch -d feature/x',
+    'git stash push -m wip && git rebase origin/main',
+  ])('%s → allowed (the regex rule stopped it)', (command) => {
+    const r = runCheck({ tool_name: 'Bash', tool_input: { command } }, { HOME: tmpHome }, tmpHome);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+});
+
 describe('smart rules', () => {
   let tmpHome: string;
   beforeEach(() => {
