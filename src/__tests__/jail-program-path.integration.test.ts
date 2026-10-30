@@ -103,6 +103,21 @@ describe('a jail of the system directories (fw#385)', () => {
     expect(check('bash /etc/profile.d/x.sh')).toBe('deny');
   });
 
+  // node9Firewall#414: a Python script on stdin is not shell text (fw#407),
+  // but a path in it is a file the program opens, so the jail still meets it.
+  // explain must say the same as the hook. (/etc/hosts, not the issue's
+  // /etc/ssh/ssh_config: with no daemon in this harness, `ssh` in a path wakes
+  // the taint check, whose "service unavailable" review is a separate matter.)
+  itUnix('blocks a stdin Python script that copies a jailed file, and explain agrees', () => {
+    const script =
+      "python3 - <<'PYEOF'\nimport shutil\nshutil.copy('/etc/hosts', '/usr/copy_file')\nPYEOF";
+    expect(check(script)).toBe('deny');
+    const r = cli(['explain', 'bash', script]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Decision:\s*\S*\s*BLOCK/);
+    expect(r.stdout).toMatch(/block-path-(etc|usr)-bash/);
+  });
+
   itUnix('a shield file written before the fix gets the same reading', () => {
     const file = path.join(home, '.node9', 'shields', 'user-jail.json');
     const def = JSON.parse(fs.readFileSync(file, 'utf-8')) as {

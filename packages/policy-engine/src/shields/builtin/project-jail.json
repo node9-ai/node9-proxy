@@ -11,7 +11,8 @@
           "field": "command",
           "op": "matches",
           "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type|grep|egrep|fgrep|rg|ag|ack|awk|gawk|sed|cut|tr|jq|yq|od|xxd|hexdump|strings|base64|sort|uniq|tac|nl|dd)\\s+.*?\\.ssh[\\/\\\\]",
-          "flags": "i"
+          "flags": "i",
+          "reading": "access"
         }
       ],
       "verdict": "block",
@@ -25,7 +26,8 @@
           "field": "command",
           "op": "matches",
           "value": "(cat|less|head|tail|bat|more|open|print|nano|vim|vi|emacs|code|type|grep|egrep|fgrep|rg|ag|ack|awk|gawk|sed|cut|tr|jq|yq|od|xxd|hexdump|strings|base64|sort|uniq|tac|nl|dd)\\s+.*?\\.aws[\\/\\\\]",
-          "flags": "i"
+          "flags": "i",
+          "reading": "access"
         }
       ],
       "verdict": "block",
@@ -39,7 +41,8 @@
           "field": "command",
           "op": "matches",
           "value": "(cat|less|head|tail|bat|more|open|print|nano|vim?|emacs|code|type|[ef]?grep|rg|ag|ack|g?awk|sed|cut|tr|[jy]q|od|xxd|hexdump|strings|base64|sort|uniq|tac|nl|dd)\\s+.*?\\.env(\\.(local|production|staging|development)){0,2}(?=[\\s;&|>)<]|$)",
-          "flags": "i"
+          "flags": "i",
+          "reading": "access"
         }
       ],
       "verdict": "block",
@@ -53,7 +56,8 @@
           "field": "command",
           "op": "matches",
           "value": "(cat|less|head|tail|bat|more|open|print|nano|vim?|emacs|code|type|[ef]?grep|rg|ag|ack|g?awk|sed|cut|tr|[jy]q|od|xxd|hexdump|strings|base64|sort|uniq|tac|nl|dd)\\s+.*(credentials\\.json|\\.netrc|\\.npmrc|\\.docker[\\/\\\\]config\\.json|gcloud[\\/\\\\]credentials)",
-          "flags": "i"
+          "flags": "i",
+          "reading": "access"
         }
       ],
       "verdict": "review",

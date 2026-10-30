@@ -220,12 +220,12 @@ function byteOffsetToCharIndex(command: string): ((byteOffset: number) => number
   return (b: number) => map.get(b) ?? -1;
 }
 
-function cachedNormalize(command: string, compute: () => CommandReadings): CommandReadings {
-  const hit = normalizeCache.get(command);
+function cachedNormalize(key: string, compute: () => CommandReadings): CommandReadings {
+  const hit = normalizeCache.get(key);
   if (hit !== undefined) {
     // Move to most-recent on access (Map iteration order = insertion order).
-    normalizeCache.delete(command);
-    normalizeCache.set(command, hit);
+    normalizeCache.delete(key);
+    normalizeCache.set(key, hit);
     return hit;
   }
   const result = compute();
@@ -234,7 +234,7 @@ function cachedNormalize(command: string, compute: () => CommandReadings): Comma
     const oldest = normalizeCache.keys().next().value;
     if (oldest !== undefined) normalizeCache.delete(oldest);
   }
-  normalizeCache.set(command, result);
+  normalizeCache.set(key, result);
   return result;
 }
 
@@ -353,9 +353,14 @@ function fileAccessViewImpl(command: string): string {
  * in 5985b5a, which exempted whole tokens from de-obfuscation and opened a
  * bypass). Guessing from a prefix and assuming POSIX always are the same
  * mistake in opposite directions; evaluating both readings removes the guess.
+ *
+ * `codeBodies`: keep the code body of a stdin code interpreter
+ * (`python3 - <<'PY' … PY`) that the readings otherwise strip (fw#407). A path
+ * rule passes it (node9Firewall#414): a path in a Python string is not shell
+ * text, but it is a file the program will open, so the jail must still meet it.
  */
-export function commandReadings(command: string): string[] {
-  const r = commandReadingsImpl(command);
+export function commandReadings(command: string, opts: { codeBodies?: boolean } = {}): string[] {
+  const r = commandReadingsImpl(command, opts.codeBodies === true);
   const out = new Set([r.posix, r.separator, r.folded]);
   // What a shell's literal `-c` payload (or `eval "..."`) runs is a command of
   // its own, and a rule written for it must meet it there: since the
@@ -364,7 +369,7 @@ export function commandReadings(command: string): string[] {
   // payloads are read from the POSIX reading, after the message-flag strip,
   // so a payload quoted inside a commit message is not resurrected.
   for (const payload of literalPayloadsOf(r.posix, 0)) {
-    for (const reading of commandReadings(payload)) out.add(reading);
+    for (const reading of commandReadings(payload, opts)) out.add(reading);
   }
   return [...out];
 }
@@ -449,8 +454,11 @@ function foldCommandWords(reading: string): string {
   return out;
 }
 
-function commandReadingsImpl(command: string): CommandReadings {
-  return cachedNormalize(command, () => normalizeCommandForPolicyImpl(command));
+function commandReadingsImpl(command: string, codeBodies = false): CommandReadings {
+  // NUL cannot occur in a command a shell runs, so the prefixed key never meets
+  // a plain one.
+  const key = codeBodies ? `\u0000code\u0000${command}` : command;
+  return cachedNormalize(key, () => normalizeCommandForPolicyImpl(command, codeBodies));
 }
 
 /** Programs that read CODE from stdin and whose code inline-exec judges by
@@ -582,7 +590,7 @@ function interpreterHeredocSpans(f: any, at: (byte: number) => number): Array<[n
   return spans;
 }
 
-function normalizeCommandForPolicyImpl(command: string): CommandReadings {
+function normalizeCommandForPolicyImpl(command: string, codeBodies: boolean): CommandReadings {
   const f = parseShared(command);
   // fail open for FPs, not FNs — every reading falls back to the raw text
   if (f === PARSE_FAIL) return { posix: command, separator: command, folded: command };
@@ -604,7 +612,8 @@ function normalizeCommandForPolicyImpl(command: string): CommandReadings {
     const quoteOnlyRewrites: Array<[number, number, string]> = [];
     const msgSpans = new Set<string>();
     // ── 0. The code body of a stdin code interpreter (fw#407) ──────────
-    for (const [hs, he] of interpreterHeredocSpans(f, at)) {
+    // Kept for a path rule (codeBodies, node9Firewall#414).
+    for (const [hs, he] of codeBodies ? [] : interpreterHeredocSpans(f, at)) {
       strips.push([hs, he]);
       msgSpans.add(`${hs}:${he}`);
     }

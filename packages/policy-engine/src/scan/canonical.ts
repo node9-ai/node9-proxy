@@ -763,7 +763,12 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // every node9 user's settings file has hooks and the gate's fallback would
 // report each rewrite of it.
 // Shell writes to the same files (`: > .husky/pre-commit`) are not covered yet.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v32';
+// canonical-v33 (2026-10-30, node9Firewall#414): a file-access rule (a jail
+// path rule, the project-jail shield's bash rules) reads the code body of a
+// stdin interpreter again, which v31 had stripped for every rule; the
+// project-jail bash rules read the access view. A jailed path in
+// `python3 - <<'PY'` is a finding again; histories scanned under v32 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
 
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
 // rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
@@ -818,7 +823,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v32';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'bf14326b92bf1718';
+export const CANONICAL_EXTRACTOR_HASH = '91d4cd98d65c9c99';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

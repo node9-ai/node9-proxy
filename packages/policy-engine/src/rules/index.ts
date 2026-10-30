@@ -128,8 +128,10 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
   const readingsCache = new Map<string, string[]>();
   const resolveFieldReadings = (field: string, reading?: 'access'): string[] => {
     // A file-access rule (the jail, fw#385) reads the command without its
-    // interpreter line and with each program cut to its name; every other
-    // rule reads the whole text. Only `command` has the access view.
+    // interpreter line and with each program cut to its name, and with the
+    // code body of a stdin interpreter kept (node9Firewall#414: a path in
+    // `python3 - <<'PY'` is a file the program opens); every other rule reads
+    // the whole text. Only `command` has the access view.
     const access = reading === 'access' && field === 'command';
     const key = access ? `${field}\u0000access` : field;
     const cached = readingsCache.get(key);
@@ -144,7 +146,9 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
       const raw = getNestedValue(args, field);
       if (typeof raw === 'string') {
         const text = access ? fileAccessView(raw) : raw;
-        const collapsed = commandReadings(text).map((r) => r.replace(/\s+/g, ' ').trim());
+        const collapsed = commandReadings(text, { codeBodies: access }).map((r) =>
+          r.replace(/\s+/g, ' ').trim()
+        );
         out = access ? [...new Set(collapsed)] : [...new Set([primary, ...collapsed])];
       }
     }
