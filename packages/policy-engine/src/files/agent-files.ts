@@ -19,6 +19,7 @@ import { scanInstructionWrite } from '../dlp/instruction-write';
 import type { FileAccess, FileAccessContext } from './paths';
 import { normalizeFilePath } from './paths';
 import { writtenTexts } from './written-texts';
+import { shellWriteUnseen } from '../shell/write-source';
 
 const CHECK_ID = 'files.agent-instructions';
 
@@ -214,7 +215,7 @@ export function evaluateAgentFileWrite(
       if (hit) {
         signal = 'content';
         detail = hit.signals.join(', ');
-      } else if (!access.append) {
+      } else if (!access.append && shellWriteUnseen(command, access.path)) {
         // The content is not in the command (`cp`, `mv`, a download, `tee < other`).
         signal = 'unseen';
         detail = 'the content written cannot be read from the command';

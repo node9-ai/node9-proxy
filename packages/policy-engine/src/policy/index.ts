@@ -441,29 +441,19 @@ export async function evaluatePolicy(
     try {
       const accesses = context.accesses ?? collectFileAccesses(toolName, args, context, layers);
       const settings = catalogSettings(config);
+      const fromShell = resolveShellInput(toolName, args, layers).kind === 'shell';
       protectedVerdict = evaluateProtectedFileAccess(accesses, context, settings);
       // A git hook disarmed through a file operation (node9Firewall#413 part
       // 2): the stricter of the two file verdicts stands.
-      const hooks = evaluateGitHooksFileAccess(
-        args,
-        accesses,
-        context,
-        settings,
-        resolveShellInput(toolName, args, layers).kind === 'shell'
-      );
+      const hooks = evaluateGitHooksFileAccess(args, accesses, context, settings, fromShell);
       if (hooks && (!protectedVerdict || stricterFileVerdict(hooks, protectedVerdict)))
         protectedVerdict = hooks;
       // The agent's own instruction and memory files (part 4): a write
       // there is at least recorded; one that carries an instruction or
       // changes the hooks is asked about.
-      const agentFile = evaluateAgentFileWrite(
-        args,
-        accesses,
-        context,
-        settings,
-        resolveShellInput(toolName, args, layers).kind === 'shell',
-        { readAgentSettings: hostHooks.readAgentSettings }
-      );
+      const agentFile = evaluateAgentFileWrite(args, accesses, context, settings, fromShell, {
+        readAgentSettings: hostHooks.readAgentSettings,
+      });
       if (agentFile && (!protectedVerdict || stricterFileVerdict(agentFile, protectedVerdict)))
         protectedVerdict = agentFile;
     } catch {
@@ -522,7 +512,12 @@ export async function evaluatePolicy(
   }
   if (protectedVerdict?.decision === 'review') return protectedVerdict;
   if (dlpVerdict) return dlpVerdict;
-  return result.decision === 'allow' && protectedVerdict?.logged ? protectedVerdict : result;
+  // A logged file finding stands in for a plain allow; a logged finding the
+  // core already made (a Soft git or sudo finding) is kept, since the audit
+  // row names one check and the command's own is the one it was asked about.
+  return result.decision === 'allow' && protectedVerdict?.logged && !result.logged
+    ? protectedVerdict
+    : result;
 }
 
 async function evaluatePolicyCore(

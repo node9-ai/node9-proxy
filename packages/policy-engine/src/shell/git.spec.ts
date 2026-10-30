@@ -154,6 +154,9 @@ describe('commands.git-destructive: indirect forms are findings', () => {
     'node -e "const c = `git push --force origin main`; console.log(c)"',
     'cd app && for c in status "reset --hard"; do git $c; done',
     'for r in a b; do git -C $r push -f; done',
+    // clean without -f when the call itself switches the safety off
+    'git -c clean.requireForce=false clean -d',
+    'git -c clean.requireforce=false clean',
     // chains
     'git stash && git reset --hard && git stash pop',
     'git fetch && git reset --hard origin/main',
@@ -236,6 +239,8 @@ describe('commands.git-destructive: ordinary commands stay clean', () => {
     'git config user.name',
     'git config --get core.hooksPath',
     'git config alias.st status',
+    'git config --global alias.st',
+    'git config alias.co',
     'git config alias.co checkout && git co main',
     'git config --global alias.lg "log --oneline --graph"',
     "git config alias.pf 'push --force-with-lease --dry-run'",

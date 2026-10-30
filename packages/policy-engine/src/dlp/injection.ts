@@ -106,6 +106,12 @@ const MENTION_QUOTE_RE = /["'`“‘(]\s*$/;
 const MENTION_WORD_RE =
   /\b(?:say|says|saying|said|such as|like|pattern|patterns|phrase|phrases|string|strings|text|e\.g\.|example|examples|contains?|containing|detects?|filters?|flags?|blocks?|matches|keywords?|wording|marker|markers|quotes?|quoted|quoting)\b/i;
 
+/** Is the text before a match a quoted mention: a quote opens it and a word
+ *  of quoting or classifying stands within the 48 characters before? */
+export function isMention(before: string): boolean {
+  return MENTION_QUOTE_RE.test(before) && MENTION_WORD_RE.test(before);
+}
+
 /** Does `re` match `text` somewhere other than inside a quoted mention? */
 export function matchesOutsideMention(re: RegExp, text: string): boolean {
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
@@ -118,7 +124,7 @@ export function matchesOutsideMention(re: RegExp, text: string): boolean {
     // A mention: the phrase opens with a quote, and a word of quoting or
     // classifying stands within the 48 characters before it.
     const before = text.slice(Math.max(0, m.index - 48), m.index);
-    if (!(MENTION_QUOTE_RE.test(before) && MENTION_WORD_RE.test(before))) return true;
+    if (!isMention(before)) return true;
   }
   return false;
 }

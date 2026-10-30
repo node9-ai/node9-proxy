@@ -474,7 +474,10 @@ class GitWalk {
     if (key === null || key === undefined) return;
     const m = /^alias\.(.+)$/i.exec(key);
     if (!m) return;
-    const value = i + 1 < args.length ? args[i + 1] : null;
+    // `git config alias.st` with no value READS the alias; only a value
+    // (literal or dynamic) is a definition.
+    if (i + 1 >= args.length) return;
+    const value = args[i + 1];
     this.aliases.set(m[1], value);
     // Judge the definition itself.
     this.expandAlias(m[1], value, [], env, depth, 0, `${inv.shown}`);
@@ -781,7 +784,13 @@ function classify(inv: GitInvocation): GitFinding[] {
         o.flags.has('--interactive')
       )
         break;
-      if (o.flags.has('-f') || o.flags.has('--force')) found(DESTRUCTIVE);
+      // Without -f git refuses unless clean.requireForce is off, which the
+      // walk sees when it is given on this call (`-c clean.requireForce=false`).
+      const forced =
+        o.flags.has('-f') ||
+        o.flags.has('--force') ||
+        inv.config.get('clean.requireforce') === 'false';
+      if (forced) found(DESTRUCTIVE);
       break;
     }
     case 'branch': {

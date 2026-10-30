@@ -117,6 +117,7 @@ describe('the lines real instruction files are made of', () => {
     'Read src/config.ts and update the schema.',
     'Send the report to the team channel.',
     'Post the summary at the end of the session.',
+    'Post-v1 gaps deferred at doc/roadmap/deferred/review-ask-inline-followups.md.',
     'Use the example .env.example file for local setup.',
     'Secrets are loaded from the vault, never from the repo.',
     'Keep this file short.',

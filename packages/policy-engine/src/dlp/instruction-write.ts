@@ -21,6 +21,7 @@
 
 import { scanViews } from './normalize';
 import {
+  isMention,
   matchesOutsideMention,
   INJECTION_SIGNALS,
   type InjectionMatch,
@@ -122,7 +123,12 @@ const DESTINATION_RE =
   /\b(send|sent|post(?:ed)?|upload(?:ed)?|exfiltrate[sd]?|forward(?:ed|s)?|transmit(?:ted|s)?|shared|submitted|logged|reported|curl|wget|leak(?:ed|s)?|(?<!\b(?:your|my|the|an|a|this|that|our|their|his|her)\s+)email(?:ed|s)?)\b(?:[^.\n!?]|\.(?=\S)){0,40}\b(to|at|with|into)\b(?:[^.\n!?]|\.(?=\S)){0,24}(https?:\/\/|[\w.-]+@[\w.-]+\.[a-z]{2,}|[\w-]+\.(?:com|net|org|io|ai|dev|co|me|sh|host|xyz|app|cloud|info|biz|us|uk|de|ru|cn|site|online|link|click|top)\b)/i;
 const REUSED_SIGNALS: InjectionSignal[] = INJECTION_SIGNALS.map((sig) =>
   sig.name === 'action-to-destination'
-    ? { ...sig, any: [DESTINATION_RE, ...sig.any.slice(1)] }
+    ? {
+        ...sig,
+        // The host-shaped pattern is the one that names a URL; replaced by
+        // what it matches, not by its position in the list.
+        any: sig.any.map((re) => (re.source.includes('https?:') ? DESTINATION_RE : re)),
+      }
     : sig
 );
 
@@ -159,13 +165,6 @@ function matches(re: RegExp, text: string, signal: Signal): boolean {
     return true;
   }
   return false;
-}
-
-const MENTION_QUOTE_RE = /["'`“‘(]\s*$/;
-const MENTION_WORD_RE =
-  /\b(?:say|says|saying|said|such as|like|pattern|patterns|phrase|phrases|string|strings|text|e\.g\.|example|examples|contains?|containing|detects?|filters?|flags?|blocks?|matches|keywords?|wording|marker|markers|quotes?|quoted|quoting)\b/i;
-function isMention(before: string): boolean {
-  return MENTION_QUOTE_RE.test(before) && MENTION_WORD_RE.test(before);
 }
 
 /**
