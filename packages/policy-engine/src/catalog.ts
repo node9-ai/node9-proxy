@@ -223,6 +223,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     legacy: ['review-git-hooks-bypass'],
   },
   {
+    id: 'commands.git-stage-all',
+    group: 'commands',
+    title: 'Stage everything at once',
+    catches:
+      'git add -A, git add ., git commit -a and other ways to stage every change instead of naming the files; off unless you switch it on',
+    values: ALL,
+    defaultValue: 'off',
+    legacy: ['review-git-stage-all'],
+  },
+  {
     id: 'commands.node9-disarm',
     group: 'commands',
     title: 'node9 disarmed from the shell',

@@ -126,6 +126,9 @@ describe('the level table', () => {
     expect(levelCheckValue('standard', 'commands.git-hooks-bypass')).toBeUndefined();
     expect(levelCheckValue('strict', 'commands.git-hooks-bypass')).toBe('block');
     expect(levelCheckValue('block-all', 'commands.git-hooks-bypass')).toBe('block');
+    // Part 3 is a preference: off at every level (catalog default), never set by one.
+    for (const level of ['audit', 'soft', 'standard', 'strict', 'block-all'])
+      expect(levelCheckValue(level, 'commands.git-stage-all')).toBeUndefined();
     expect(levelCheckValue('strict', 'network.unknown-host')).toBe('review');
     expect(levelCheckValue('strict', 'network.internal-addresses')).toBe('block');
     // Fixed checks keep today's value at every level.

@@ -120,6 +120,13 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     advice:
       "Keep Review: a hook is a check you set up on the agent's own work. Set Log if your hooks are slow and you skip them on purpose; Strict blocks.",
   },
+  'commands.git-stage-all': {
+    plain:
+      'The agent stages every change in the working tree at once instead of naming the files it commits.',
+    example: 'git add -A && git commit -m "wip"',
+    advice:
+      'Off by default: a preference, not harm. Set Review if you want the agent to name the files it stages, so a stray .env or a generated artifact is not committed unnoticed.',
+  },
   'commands.sql-ddl': {
     plain: 'The agent drops or empties a database table.',
     example: 'psql -c "DROP TABLE users"',

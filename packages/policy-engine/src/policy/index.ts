@@ -713,7 +713,12 @@ async function evaluatePolicyCore(
     // did not.
     // The hooks-bypass check (part 2) rides the same walk: one finding per
     // check, each through its own value.
-    const gitChecks = ['commands.git-destructive', 'commands.git-hooks-bypass'] as const;
+    const gitChecks = [
+      'commands.git-destructive',
+      'commands.git-hooks-bypass',
+      // Part 3, off at every level; its finding is dropped unless a person set it.
+      'commands.git-stage-all',
+    ] as const;
     if (gitChecks.some((id) => cv(id) !== 'off')) {
       const git = analyzeGit(bashCommand);
       for (const id of gitChecks) {

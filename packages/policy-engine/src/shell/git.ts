@@ -37,12 +37,17 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
 
-export type GitCheckId = 'commands.git-destructive' | 'commands.git-hooks-bypass';
+export type GitCheckId =
+  'commands.git-destructive' | 'commands.git-hooks-bypass' | 'commands.git-stage-all';
 
 export interface GitFinding {
   checkId: GitCheckId;
   /** The rule name the audit log and the catalog's legacy table know. */
-  ruleName: 'review-force-push' | 'review-git-destructive' | 'review-git-hooks-bypass';
+  ruleName:
+    | 'review-force-push'
+    | 'review-git-destructive'
+    | 'review-git-hooks-bypass'
+    | 'review-git-stage-all';
   reason: string;
   description: string;
   /** The invocation as resolved, for the reason and the explain trace. */
@@ -743,6 +748,7 @@ function classify(inv: GitInvocation): GitFinding[] {
     out.push({ ...f, shown: inv.shown, reason: `${f.reason}: ${inv.shown}` });
   };
   if (hooksBypass(inv)) found(HOOKS_BYPASS);
+  if (stagesEverything(inv)) found(STAGE_ALL);
   if (inv.sub === null) {
     found(UNREADABLE);
     return out;
@@ -953,4 +959,68 @@ function chmodDisarmsHook(args: (string | null)[], shown: string): GitFinding | 
   if (mode === null || mode === undefined || !modeRemovesExecute(mode)) return null;
   const hit = args.slice(i + 1).some((w) => w !== null && isHookPath(w));
   return hit ? { ...HOOKS_BYPASS, shown, reason: `${HOOKS_BYPASS.reason}: ${shown}` } : null;
+}
+
+// ── Part 3: stage everything at once (opt-in) ────────────────────────────────
+//
+// A preference, not harm: `git add -A`, `git add .`, `git commit -a` stage
+// every change instead of the files the agent names, so a stray .env or a
+// generated artifact goes into the commit unnoticed. Off at every level; the
+// user switches it on.
+
+const STAGE_ALL: GitFinding = {
+  checkId: 'commands.git-stage-all',
+  ruleName: 'review-git-stage-all',
+  reason: 'Every change staged at once — the files are not named',
+  description:
+    'The AI stages every change in the working tree (git add -A, git add ., git commit -a) instead of naming the files, so anything lying around goes into the commit. You asked to be told when this happens.',
+  shown: '',
+};
+
+const ADD_LONG_VALUE = new Set(['--chmod', '--pathspec-from-file']);
+/** A pathspec that selects the whole tree. */
+function wholeTree(operand: string): boolean {
+  if (/^:\(top\)\.?$/.test(operand) || operand === ':/' || operand === '*') return true;
+  if (operand.startsWith(':')) return false;
+  // `.`, `./`, `src/..`: lexically the current directory.
+  const parts: string[] = [];
+  for (const part of operand.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return parts.length === 0 && !operand.startsWith('/');
+}
+
+function stagesEverything(inv: GitInvocation): boolean {
+  const sub = inv.sub?.toLowerCase();
+  if (sub === 'add') {
+    const o = parseOptions(inv.args, '', ADD_LONG_VALUE);
+    if (
+      o.flags.has('-n') ||
+      o.flags.has('--dry-run') ||
+      o.flags.has('-i') ||
+      o.flags.has('--interactive') ||
+      o.flags.has('-p') ||
+      o.flags.has('--patch') ||
+      o.flags.has('-e') ||
+      o.flags.has('--edit')
+    )
+      return false;
+    const all =
+      o.flags.has('-A') ||
+      o.flags.has('--all') ||
+      o.flags.has('--no-ignore-removal') ||
+      o.flags.has('-u') ||
+      o.flags.has('--update');
+    if (all && o.operands.length === 0) return true;
+    return o.operands.some(wholeTree);
+  }
+  if (sub === 'commit') {
+    const o = parseOptions(inv.args, 'mFCcut', COMMIT_LONG_VALUE);
+    if (o.flags.has('--dry-run')) return false;
+    if (o.flags.has('-a') || o.flags.has('--all')) return true;
+    return o.operands.some(wholeTree);
+  }
+  return false;
 }

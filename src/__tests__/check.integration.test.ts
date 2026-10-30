@@ -510,6 +510,39 @@ describe('git from the parsed command (node9Firewall#413)', () => {
     expect(real.stdout).toBe('');
   });
 
+  it('git add -A is silent by default and asked once the user sets the check (part 3)', () => {
+    const silent = runCheck(
+      { tool_name: 'Bash', tool_input: { command: 'git add -A && git commit -m wip' } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+    expect(silent.status).toBe(0);
+    expect(silent.stdout).toBe('');
+    // A v2 config file states a check in the catalog's own language.
+    const optIn = makeTempHome({
+      version: '2',
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+      checks: { 'commands.git-stage-all': 'review' },
+    });
+    try {
+      const asked = runCheck(
+        { tool_name: 'Bash', tool_input: { command: 'git add -A && git commit -m wip' } },
+        { HOME: optIn },
+        optIn
+      );
+      expect(asked.status).toBe(0);
+      const parsed = JSON.parse(asked.stdout.trim());
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe('ask');
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain('stages every change');
+    } finally {
+      cleanupHome(optIn);
+    }
+  });
+
   it.each([
     'git push --dry-run --force origin main',
     'git clean -fn',

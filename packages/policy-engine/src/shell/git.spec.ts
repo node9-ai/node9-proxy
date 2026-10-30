@@ -273,7 +273,9 @@ describe('commands.git-destructive: ordinary commands stay clean', () => {
     'legit --force',
     'digit reset --hard',
   ])('%s', (cmd) => {
-    expect(rules(cmd), `${cmd} should be clean`).toEqual([]);
+    // Part 3's opt-in finding (`commit -am`) is not destruction.
+    const destructive = rules(cmd).filter((r) => r !== 'review-git-stage-all');
+    expect(destructive, `${cmd} should be clean`).toEqual([]);
   });
 });
 
@@ -405,5 +407,85 @@ describe('commands.git-hooks-bypass: ordinary work stays clean', () => {
     'git rebase --continue',
   ])('%s', (cmd) => {
     expect(hooks(cmd), `${cmd} should be clean`).toBe(false);
+  });
+});
+
+// ── Part 3: commands.git-stage-all (opt-in) ──────────────────────────────────
+
+const stageAll = (cmd: string): boolean => rules(cmd).includes('review-git-stage-all');
+
+describe('commands.git-stage-all: everything staged at once', () => {
+  it.each([
+    'git add -A',
+    'git add --all',
+    'git add -A .',
+    'git add .',
+    'git add ./',
+    'git add -- .',
+    'git add src/..',
+    'git add ./src/../',
+    'git add :/',
+    'git add ":(top)"',
+    'git add "*"',
+    'git add -u',
+    'git add --update',
+    'git add --no-ignore-removal',
+    'git add -Av',
+    'git add -fA',
+    'git commit -a -m wip',
+    'git commit -am wip',
+    'git commit -anm wip',
+    'git commit --all -m wip',
+    'git commit -a --amend --no-edit',
+    'git commit . -m wip',
+    'git commit -m wip -- :/',
+    'git -C ../app add -A',
+    "sh -c 'git add -A && git commit -m wip'",
+    'f=-A; git add $f',
+    "git config alias.ca 'commit -a' && git ca -m wip",
+    "git config alias.ca 'commit -a'",
+    'git add -A && git commit -m "feat: thing"',
+  ])('%s', (cmd) => {
+    expect(stageAll(cmd), `${cmd} should stage everything`).toBe(true);
+  });
+
+  it('rides the check id of part 3 only', () => {
+    const f = analyzeGit('git add -A').findings;
+    expect(f.map((x) => x.checkId)).toEqual(['commands.git-stage-all']);
+  });
+});
+
+describe('commands.git-stage-all: named files stay clean', () => {
+  it.each([
+    'git add src/index.ts',
+    'git add src/ README.md',
+    'git add -A src/',
+    'git add -u src/',
+    'git add --all -- src/',
+    'git add ./src',
+    'git add .github/',
+    'git add .env.example',
+    'git add -p',
+    'git add -p .',
+    'git add -i',
+    'git add -n .',
+    'git add --dry-run -A',
+    'git add -e src/x.ts',
+    'git add ":(glob)src/**/*.ts"',
+    'git add ":!secrets" src',
+    'git commit -m "wip"',
+    'git commit -m "git add -A is discouraged"',
+    'git commit --amend --no-edit',
+    'git commit --dry-run -a',
+    'git commit -m wip src/index.ts',
+    'git commit --only -m wip src/x.ts',
+    'git status',
+    'git diff .',
+    'git checkout .',
+    'git restore .',
+    'git clean -n .',
+    'npm run add-all',
+  ])('%s', (cmd) => {
+    expect(stageAll(cmd), `${cmd} should be clean`).toBe(false);
   });
 });

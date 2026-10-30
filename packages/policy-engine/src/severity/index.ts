@@ -117,6 +117,7 @@ export function narrativeRuleLabel(name: string): string {
     'reset-hard': 'git reset --hard',
     'git-destructive': 'destructive git operations',
     'git-hooks-bypass': 'git hooks bypassed',
+    'git-stage-all': 'staging everything at once',
     'delete-branch': 'branch deletion',
     'delete-remote': 'remote deletion',
     rebase: 'git rebase',
