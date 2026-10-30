@@ -1667,12 +1667,15 @@ export async function _authorizeHeadlessCore(
   }
 
   // Fast Paths (Ignore, Trust, Policy Allow)
-  // Bypassed entirely when a taint warning is active — taint overrides trust
-  // sessions and policy allows so the user always gets a chance to review.
-  // NOTE: appPermReview does NOT skip this block (fix #3) — the policy must run so
-  // a hard-block verdict still wins. The ALLOW-returns inside are individually
-  // guarded with `!appPermReview` so a review-marked tool can't auto-allow.
-  if (!taintWarning && judge) {
+  // A taint warning overrides trust sessions and policy allows, so the user
+  // always gets a chance to review. Neither it nor appPermReview skips this
+  // block (fix #3; for taint, the taint-order fix): the policy must run so a
+  // hard-block verdict still wins. Before, a taint warning skipped the policy
+  // entirely, and with the daemon down ("Taint service unavailable") a jail
+  // block, a reverse shell or `curl | sh` on the same call became an
+  // approvable question. The ALLOW-returns inside are each guarded by
+  // `!callSpecificReview()`, which includes the taint warning.
+  if (judge) {
     // ── LOOP DETECTION ────────────────────────────────────────────────────
     // Skipped for an org-set review (re-review regression fix): reopening this
     // block for fix #3 re-enabled loop detection, which would hard-deny a
@@ -1686,7 +1689,7 @@ export async function _authorizeHeadlessCore(
     // allow, allow, allow, allow, deny, deny). Egress judges the destination,
     // not the repetition.
     const ld = config.policy.loopDetection;
-    if (ld.enabled && !appPermReview && !isIgnoredTool(toolName)) {
+    if (ld.enabled && !appPermReview && !taintWarning && !isIgnoredTool(toolName)) {
       const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
       if (loopResult.looping) {
         const reason =
@@ -1740,11 +1743,9 @@ export async function _authorizeHeadlessCore(
       };
     }
 
-    // `!appPermReview`: a policy ALLOW must not short-circuit an org-set review
-    // (fix #3) — fall through to the race. A policy BLOCK below still wins.
-    // (No `!taintWarning` term needed: this whole policy block is already inside
-    // `if (!taintWarning && !isIgnoredTool(...))` above, so a tainted call never
-    // reaches here — verified by revert experiment, task #16 vector C.)
+    // `!callSpecificReview()`: a policy ALLOW must not short-circuit an
+    // org-set review (fix #3) or a taint warning — fall through to the race. A
+    // policy BLOCK below still wins.
     // (`!callSpecificReview()`: load-bearing. The engine runs the same scanner
     // (policy/index.ts) and usually reviews whatever the gate flags; the gate's
     // own flags (taint, package, app permission, protected file, uninspectable
@@ -2137,7 +2138,16 @@ export async function _authorizeHeadlessCore(
 
   // Taint warning active — set a high-risk label and fall through to the race engine.
   // The user sees the taint context in the browser dashboard / native popup / Slack.
-  if (taintWarning) {
+  if (taintWarning && hardBlockDowngraded && riskMetadata) {
+    // A policy block softened to a review (a human approver is reachable)
+    // keeps its own rule and label, so the audit row and the report attribute
+    // it to the rule that blocked; the taint warning is added to what the
+    // approver reads, not put in its place.
+    riskMetadata.ruleDescription = [taintWarning, riskMetadata.ruleDescription, appPermReview]
+      .filter((c): c is string => !!c)
+      .join('\n')
+      .slice(0, 1024);
+  } else if (taintWarning) {
     explainableLabel = '🔴 Node9 Taint (Exfiltration Prevention)';
     // tier 7 = highest valid tier; pass taintWarning as ruleName so all
     // approval channels (terminal card, browser dashboard, Slack) can render it.
@@ -2151,6 +2161,17 @@ export async function _authorizeHeadlessCore(
       undefined,
       appPermReview ? `${taintWarning}\n${appPermReview}` : taintWarning
     );
+    // The policy runs under a taint warning now: when it also reviewed the
+    // call, its rule and check stay on the result (the report counts the
+    // check that matched) and its description joins the taint warning, so the
+    // reason, the rule and the description describe the same review.
+    if (policyReviewRule || policyReviewCheckId) {
+      policyRuleDescription = [taintWarning, policyRuleDescription]
+        .filter((c): c is string => !!c)
+        .join('\n')
+        .slice(0, 1024);
+      riskMetadata.ruleDescription = policyRuleDescription;
+    }
   } else if (exposureReview) {
     // fw#318: a send after the session read outside content. Same
     // fall-through-to-race shape as taint. The rule name is the stable
