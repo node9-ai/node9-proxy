@@ -6,6 +6,7 @@ import {
   LEVELS,
   levelOf,
   levelCheckValue,
+  reviewsEveryAgentFileWrite,
   levelChecks,
   levelPackageSignals,
   isRecordOnly,
@@ -126,6 +127,13 @@ describe('the level table', () => {
     expect(levelCheckValue('standard', 'commands.git-hooks-bypass')).toBeUndefined();
     expect(levelCheckValue('strict', 'commands.git-hooks-bypass')).toBe('block');
     expect(levelCheckValue('block-all', 'commands.git-hooks-bypass')).toBe('block');
+    // Part 4: Soft logs every write; Standard keeps the catalog's review (the
+    // evaluator asks only on a signalled write); Strict asks on every write.
+    expect(levelCheckValue('soft', 'files.agent-instructions')).toBe('log');
+    expect(levelCheckValue('standard', 'files.agent-instructions')).toBeUndefined();
+    expect(reviewsEveryAgentFileWrite('standard')).toBe(false);
+    expect(reviewsEveryAgentFileWrite('strict')).toBe(true);
+    expect(reviewsEveryAgentFileWrite('block-all')).toBe(true);
     // Part 3 is a preference: off at every level (catalog default), never set by one.
     for (const level of ['audit', 'soft', 'standard', 'strict', 'block-all'])
       expect(levelCheckValue(level, 'commands.git-stage-all')).toBeUndefined();

@@ -126,6 +126,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'review',
     legacy: ['review-system-dir-mutation', 'review-system-file-upload'],
   },
+  {
+    id: 'files.agent-instructions',
+    group: 'files',
+    title: 'Agent instruction and memory files',
+    catches:
+      "writes to the files every later agent session loads as instructions (CLAUDE.md, AGENTS.md, memory, agents, commands) and changes to the agent's hooks; Standard asks only when the text carries an instruction to hide, skip approvals or touch secrets",
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-agent-file-write', 'review-agent-file-content', 'review-agent-hooks-change'],
+  },
   // ── Commands ────────────────────────────────────────────────────────────
   {
     id: 'commands.inline-exec',

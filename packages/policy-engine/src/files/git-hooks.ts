@@ -16,6 +16,7 @@ import type { PolicyVerdict } from '../policy';
 import { isHookPath } from '../shell/git';
 import type { FileAccess, FileAccessContext } from './paths';
 import { normalizeFilePath } from './paths';
+import { writtenTexts } from './written-texts';
 
 const CHECK_ID = 'commands.git-hooks-bypass';
 const RULE_NAME = 'review-git-hooks-bypass';
@@ -37,31 +38,6 @@ export function hookTextRunsNothing(text: string): boolean {
 function editDisarms(newText: string): boolean {
   if (newText.trim() === '') return true;
   return newText.split(/\r?\n/).some((line) => /^\s*(exit(\s+0)?|true)\s*(;|$)/.test(line));
-}
-
-/** The texts a file tool writes, by the argument names the tools use. */
-function writtenTexts(args: unknown): { whole: string[]; edits: string[] } {
-  const whole: string[] = [];
-  const edits: string[] = [];
-  if (!args || typeof args !== 'object') return { whole, edits };
-  const a = args as Record<string, unknown>;
-  for (const k of ['content', 'contents', 'file_text']) {
-    if (typeof a[k] === 'string') whole.push(a[k] as string);
-  }
-  for (const k of ['new_string', 'new_str']) {
-    if (typeof a[k] === 'string') edits.push(a[k] as string);
-  }
-  if (Array.isArray(a.edits)) {
-    for (const e of a.edits) {
-      if (
-        e &&
-        typeof e === 'object' &&
-        typeof (e as Record<string, unknown>).new_string === 'string'
-      )
-        edits.push((e as Record<string, unknown>).new_string as string);
-    }
-  }
-  return { whole, edits };
 }
 
 function hookAccess(access: FileAccess, context: FileAccessContext): boolean {

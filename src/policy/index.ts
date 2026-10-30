@@ -100,8 +100,28 @@ export async function evaluatePolicy(
       isTrustedHost: config.policy.trustedHostsManaged
         ? (host: string) => matchesTrustedHost(host, config.policy.trustedHosts)
         : isTrustedHost,
+      readAgentSettings,
     }
   );
+}
+
+/** The most an agent settings file is read for the hooks comparison. */
+const MAX_AGENT_SETTINGS_BYTES = 256 * 1024;
+
+/**
+ * The agent settings file as it is on disk now, for the hooks comparison of
+ * files.agent-instructions (node9Firewall#413 part 4). A regular file within
+ * the cap, read as UTF-8; anything else is null and the engine falls back to
+ * "any mention of hooks in the new text is a change". Never throws.
+ */
+export function readAgentSettings(absPath: string): string | null {
+  try {
+    const st = fs.statSync(absPath);
+    if (!st.isFile() || st.size > MAX_AGENT_SETTINGS_BYTES) return null;
+    return fs.readFileSync(absPath, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 /** Returns true when toolName matches an ignoredTools pattern (fast-path, silent allow). */

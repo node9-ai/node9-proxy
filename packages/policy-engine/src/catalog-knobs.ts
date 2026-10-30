@@ -355,6 +355,7 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'files.shell-startup',
   'files.password-hashes',
   'files.system-dirs',
+  'files.agent-instructions',
   'commands.inline-exec',
   'commands.eval-dynamic',
   'commands.curl-pipe-shell',

@@ -37,7 +37,7 @@ const MAX = 100_000; // mirror the DLP truncation bound
 const UNTRUSTED_TOOLS =
   /\b(web_?fetch|web_?search|fetch|curl|wget|browser|http_get|read_url|open_url)\b/i;
 
-interface Signal {
+export interface Signal {
   name: string;
   any: RegExp[];
 }
@@ -48,7 +48,7 @@ interface Signal {
 // the system prompt, "SYSTEM NOTE", "[SYSTEM]", "decode ... and execute",
 // "call X with url", and the exfiltration verbs forward, transmit, share
 // with, log to, submit, whose destination window may run through dots.
-const SIGNALS: Signal[] = [
+export const INJECTION_SIGNALS: Signal[] = [
   {
     name: 'override-instructions',
     any: [
@@ -104,10 +104,10 @@ const SIGNALS: Signal[] = [
  */
 const MENTION_QUOTE_RE = /["'`“‘(]\s*$/;
 const MENTION_WORD_RE =
-  /\b(?:say|says|saying|said|such as|like|pattern|patterns|phrase|phrases|string|strings|text|e\.g\.|example|examples|contains?|containing|detects?|filters?|flags?|blocks?|matches|keywords?|wording|marker|markers)\b/i;
+  /\b(?:say|says|saying|said|such as|like|pattern|patterns|phrase|phrases|string|strings|text|e\.g\.|example|examples|contains?|containing|detects?|filters?|flags?|blocks?|matches|keywords?|wording|marker|markers|quotes?|quoted|quoting)\b/i;
 
 /** Does `re` match `text` somewhere other than inside a quoted mention? */
-function matchesOutsideMention(re: RegExp, text: string): boolean {
+export function matchesOutsideMention(re: RegExp, text: string): boolean {
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
   let m: RegExpExecArray | null;
   while ((m = g.exec(text)) !== null) {
@@ -142,7 +142,7 @@ export function scanInjection(text: string, ctx: InjectionContext = {}): Injecti
   // of an injection would have tripped it.
   const matched: string[] = [];
   for (const view of scanViews(t)) {
-    for (const sig of SIGNALS) {
+    for (const sig of INJECTION_SIGNALS) {
       if (matched.includes(sig.name)) continue;
       const hit =
         sig.name === 'override-instructions'

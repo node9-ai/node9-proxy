@@ -42,6 +42,14 @@ export function reviewsEveryInline(mode: string | undefined): boolean {
   return level === 'strict' || level === 'block-all';
 }
 
+/** Strict and Block all ask about every write to an agent instruction or
+ *  memory file; Standard only about one that carries an instruction or
+ *  changes the hooks (node9Firewall#413 part 4). */
+export function reviewsEveryAgentFileWrite(mode: string | undefined): boolean {
+  const level = levelOf(mode);
+  return level === 'strict' || level === 'block-all';
+}
+
 /** Block all: ask before any call no check recognised (the catch-all,
  *  `commands.unknown`) and about a binary of unknown origin. This is what
  *  `strict` meant before the levels. */
@@ -65,6 +73,7 @@ const SOFT: Readonly<Record<string, Verdict>> = {
   'files.system-dirs': 'log',
   'files.shell-startup': 'log',
   'files.password-hashes': 'log',
+  'files.agent-instructions': 'log',
   'data.pipe-chain': 'log',
   'behavior.untrusted-content': 'log',
 };

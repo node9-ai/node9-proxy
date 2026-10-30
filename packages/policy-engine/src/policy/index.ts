@@ -39,6 +39,7 @@ import {
 } from '../shell';
 import { analyzeGit } from '../shell/git';
 import { evaluateGitHooksFileAccess } from '../files/git-hooks';
+import { evaluateAgentFileWrite } from '../files/agent-files';
 import {
   matchesPattern,
   evaluateSmartConditions,
@@ -164,6 +165,9 @@ export interface PolicyHostHooks {
   checkProvenance?: (binary: string, cwd?: string) => ProvenanceLookup;
   /** Returns true if the host is on the user's trusted-hosts allowlist. */
   isTrustedHost?: (host: string) => boolean;
+  /** The agent settings file at `absPath` as it is on disk now (a regular
+   *  file within the host's size cap), or null (node9Firewall#413 part 4). */
+  readAgentSettings?: (absPath: string) => string | null;
 }
 
 export interface PolicyVerdict {
@@ -429,7 +433,7 @@ export async function evaluatePolicy(
   toolName: string,
   args?: unknown,
   context: PolicyContext = {},
-  hooks: PolicyHostHooks = {}
+  hostHooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
   let protectedVerdict: PolicyVerdict | null = null;
   const layers = inspectionLayers(config.policy);
@@ -449,6 +453,19 @@ export async function evaluatePolicy(
       );
       if (hooks && (!protectedVerdict || stricterFileVerdict(hooks, protectedVerdict)))
         protectedVerdict = hooks;
+      // The agent's own instruction and memory files (part 4): a write
+      // there is at least recorded; one that carries an instruction or
+      // changes the hooks is asked about.
+      const agentFile = evaluateAgentFileWrite(
+        args,
+        accesses,
+        context,
+        settings,
+        resolveShellInput(toolName, args, layers).kind === 'shell',
+        { readAgentSettings: hostHooks.readAgentSettings }
+      );
+      if (agentFile && (!protectedVerdict || stricterFileVerdict(agentFile, protectedVerdict)))
+        protectedVerdict = agentFile;
     } catch {
       // An exception while inspecting file operands must never fail open.
       protectedVerdict = incompleteFileVerdict();
@@ -489,7 +506,7 @@ export async function evaluatePolicy(
       ...context,
       skipIgnoredFastPath: context.skipIgnoredFastPath || protectedVerdict?.decision === 'review',
     },
-    hooks
+    hostHooks
   );
   if (result.decision === 'block') return result;
   if (
