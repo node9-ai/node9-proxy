@@ -40,6 +40,7 @@ import {
   normalizeCommandForPolicy,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
+import { analyzeOutbound } from '../shell/outbound';
 import { collectFileAccesses, incompleteFileVerdict } from '../files/protected-access';
 import { evaluateFileChecks, type FileCheckVerdict } from '../files/file-checks';
 import type { CatalogSettings } from '../catalog';
@@ -767,7 +768,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // path rule, the project-jail shield's bash rules) reads the code body of a
 // stdin interpreter again, which v31 had stripped for every rule; the
 // project-jail bash rules read the access view. A jailed path in
-// `python3 - <<'PY'` is a finding again; histories scanned under v32 re-read.
+// `python3 - <<'PY'` is a finding again. And two new findings
+// (node9Firewall#415): block-reverse-shell and review-env-exfil, from
+// shell/outbound.ts as the gate reads them. Histories scanned under v32 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
 
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
@@ -823,7 +826,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '91d4cd98d65c9c99';
+export const CANONICAL_EXTRACTOR_HASH = 'a0ba90c0546b2066';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -1107,6 +1110,28 @@ export function extractCanonicalFindings(
         })
       );
     }
+  }
+
+  // A reverse shell and the environment sent out (node9Firewall#415), named
+  // as the gate names them. The unknown-registry check needs the user's
+  // package manager configuration, which a history scan does not read.
+  for (const f of analyzeOutbound(command).findings) {
+    const verdict = f.checkId === 'commands.reverse-shell' ? 'block' : 'review';
+    out.push(
+      makeFinding({
+        type: 'smart-rule',
+        ruleName: f.ruleName,
+        verdict,
+        severity: classifyRuleSeverity(f.ruleName, verdict),
+        reason: f.reason,
+        toolName: call.toolName,
+        ctx,
+        ts,
+        sourceType: 'engine',
+        shieldLabel: 'Node9 (AST)',
+        input: call.args,
+      })
+    );
   }
 
   // ── Eval-of-remote (curl | bash, bash -c "$(curl …)" etc.) ───────────────

@@ -137,6 +137,17 @@ describe('the level table', () => {
     // Part 3 is a preference: off at every level (catalog default), never set by one.
     for (const level of ['audit', 'soft', 'standard', 'strict', 'block-all'])
       expect(levelCheckValue(level, 'commands.git-stage-all')).toBeUndefined();
+    // node9Firewall#415: Soft log, Standard review (catalog), Strict block; the
+    // reverse shell blocks at every level (catalog default, no level row).
+    for (const id of ['data.env-exfil', 'loading.unknown-registry']) {
+      expect(levelCheckValue('soft', id)).toBe('log');
+      expect(levelCheckValue('standard', id)).toBeUndefined();
+      expect(levelCheckValue('strict', id)).toBe('block');
+      expect(levelCheckValue('block-all', id)).toBe('block');
+    }
+    for (const level of ['soft', 'standard', 'strict', 'block-all']) {
+      expect(levelCheckValue(level, 'commands.reverse-shell')).toBeUndefined();
+    }
     expect(levelCheckValue('strict', 'network.unknown-host')).toBe('review');
     expect(levelCheckValue('strict', 'network.internal-addresses')).toBe('block');
     // Fixed checks keep today's value at every level.

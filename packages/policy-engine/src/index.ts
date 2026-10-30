@@ -113,6 +113,22 @@ export {
   type GitInvocation,
 } from './shell/git';
 
+// Outbound actions read from the parsed command (node9Firewall#415 items 1, 3).
+export {
+  analyzeOutbound,
+  type OutboundAnalysis,
+  type OutboundFinding,
+  type OutboundCheckId,
+} from './shell/outbound';
+
+// Registries an install names on its command line (node9Firewall#415 item 4).
+export {
+  extractRegistryOverrides,
+  registryHost,
+  isPublicRegistryHost,
+  type RegistryOverride,
+} from './shell/package-registry';
+
 // Package-install extraction (supply-chain check; the host does the lookups).
 export {
   extractPackageInstalls,

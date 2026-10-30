@@ -67,6 +67,9 @@ const SOURCES = [
   'packages/policy-engine/src/catalog.ts',
   'packages/policy-engine/src/levels.ts',
   'packages/policy-engine/src/severity/index.ts',
+  // canonical.ts runs analyzeOutbound (node9Firewall#415): the reverse-shell
+  // and environment-sent-out findings.
+  'packages/policy-engine/src/shell/outbound.ts',
 ];
 
 const VERSION_FILE = path.join(ROOT, 'packages/policy-engine/src/scan/canonical.ts');

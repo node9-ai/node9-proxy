@@ -17,6 +17,7 @@ import os from 'os';
 import { scanArgumentSecrets, scanFilePath } from '../dlp';
 import { prepareFileAccesses, type PreparedFileAccess } from './file-access';
 import { runPackageCheck, type PackageCheckConfig } from '../supply-chain/check';
+import { configuredRegistryHosts } from '../supply-chain/registries';
 import { getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
@@ -102,6 +103,7 @@ export async function evaluatePolicy(
         ? (host: string) => matchesTrustedHost(host, config.policy.trustedHosts)
         : isTrustedHost,
       readAgentSettings,
+      isConfiguredRegistry: (host: string, at?: string) => configuredRegistryHosts(at).has(host),
     }
   );
 }
