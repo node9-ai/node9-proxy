@@ -773,6 +773,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // shell/outbound.ts as the gate reads them. Histories scanned under v32 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
 
+// 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
+// gained the Dropbox App Secret pattern and an Authorization-header reading of
+// HTTP Basic. Both are argumentsOnly, which scanArgs (the extractor's DLP pass)
+// skips, so detector output is identical.
+
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
 // rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
 // gate's server scope. History scans meet smart rules on shell rows only, and
@@ -826,7 +831,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'a0ba90c0546b2066';
+export const CANONICAL_EXTRACTOR_HASH = 'ddc456ab84b5d262';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

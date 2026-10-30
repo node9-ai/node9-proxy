@@ -55,6 +55,79 @@ describe('HTTP Basic Credential', () => {
   });
 });
 
+// node9Firewall#385: behind an Authorization header a person's password counts.
+describe('HTTP Basic Credential in an Authorization header', () => {
+  const WORDS = ['mor', 'ning', 'glory', 'river'].join(''); // letters only
+  const SHORT = ['k3', 'v9', 'xq'].join(''); // six characters
+
+  it('reviews a header whose value decodes to a user and a human password', () => {
+    for (const text of [
+      `Authorization: Basic ${b64(`deploy:${WORDS}`)}`,
+      `curl -H "Authorization: Basic ${b64(`ci:${SHORT}`)}" https://api.example.test`,
+      `{"headers": {"Authorization": "Basic ${b64(`jenkins:${WORDS}7`)}"}}`,
+      `headers = {'authorization': 'Basic ${b64(`bot:${WORDS}`)}'}`,
+    ]) {
+      const m = gate({ content: text });
+      expect(m?.patternName, text).toBe('HTTP Basic Credential');
+      expect(m?.severity).toBe('review');
+    }
+  });
+
+  it('still leaves documentation pairs alone', () => {
+    for (const text of [
+      `Authorization: Basic ${b64('user:password')}`,
+      `Authorization: Basic ${b64('admin:admin123')}`,
+      `Authorization: Basic ${b64('alice:alice')}`,
+      `Authorization: Basic ${b64('svc:qwerty99')}`,
+      `Authorization: Basic ${b64('svc:aaaaaaaa')}`,
+      `Authorization: Basic ${b64('svc:12345678')}`,
+      `Authorization: Basic ${b64('svc:abc')}`,
+      `Authorization: Basic ${b64(`svc:your${WORDS}`)}`,
+    ]) {
+      expect(gate({ content: text }), text).toBeNull();
+    }
+  });
+
+  it('a bare Basic value keeps the generated-password rule', () => {
+    expect(gate({ content: `      - Basic ${b64(`deploy:${WORDS}`)}` })).toBeNull();
+  });
+});
+
+// node9Firewall#385: a Dropbox app secret has no prefix; its name says what it is.
+describe('Dropbox App Secret', () => {
+  const SECRET = ['k7d2q', '9x4m8', 'w1z6p'].join(''); // 15, lower case and digits
+
+  it('blocks the secret under its own names', () => {
+    for (const text of [
+      `DROPBOX_APP_SECRET=${SECRET}`,
+      `dropbox_secret: "${SECRET}"`,
+      `"app_secret": "${SECRET}"`,
+      `dropboxClientSecret = '${SECRET}'`,
+      `APP_SECRET=${SECRET}`,
+      `{"dropbox": {"app_key": "x", "appSecret": "${SECRET}"}}`,
+    ]) {
+      const m = gate({ content: text });
+      expect(m?.patternName, text).toBe('Dropbox App Secret');
+      expect(m?.severity).toBe('block');
+      expect(m?.redactedSample).not.toContain(SECRET.slice(3, -3));
+    }
+  });
+
+  it('leaves other lengths, upper case, words and placeholders alone', () => {
+    for (const text of [
+      `app_secret = "${SECRET}abc"`, // 18
+      `app_secret = "${SECRET.toUpperCase()}"`,
+      'app_secret = "abcdefghijklmno"',
+      'app_secret = "xxxxxxxxxxxxxxx"',
+      'app_secret = "dropboxsecretxy"',
+      `dropbox_app_key = "${SECRET}"`,
+    ]) {
+      const m = gate({ content: text });
+      expect(m?.patternName, text).not.toBe('Dropbox App Secret');
+    }
+  });
+});
+
 describe('OTP Secret', () => {
   it('reviews the secret of an OTP constructor in Ruby, Python and JavaScript', () => {
     for (const text of [

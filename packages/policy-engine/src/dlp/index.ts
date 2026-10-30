@@ -380,9 +380,18 @@ function validateGrafanaApiKey(raw: string): boolean {
 
 const BASIC_VALUE_RE = /([A-Za-z0-9+/]{8,512}={0,2})$/;
 const BASIC_PAIR_RE = /^([^:\s]{1,128}):(\S{8,256})$/;
+// Behind an `Authorization:` header the value IS a credential by the HTTP
+// spec, so a person's password counts too (node9Firewall#385): any length
+// from 6, no letters-and-digits mix, a lower entropy floor.
+// Read on the text ahead of the match (the validator's `before`), so the
+// pattern itself stays one linear regex.
+const BASIC_HEADER_RE = /authorization\\?["']?[ \t]*[:=][ \t]*\\?["']?[ \t]*$/i;
+const BASIC_HEADER_PAIR_RE = /^([^:\s]{1,128}):(\S{6,256})$/;
+/** Passwords that are documentation, not secrets. */
+const BASIC_PLACEHOLDERS = ['pass', 'secret', 'admin', 'letmein', 'qwerty', 'default', 'test'];
 
 /** `Basic <b64>`: a canonical base64 of UTF-8 `user:password`, the password generated. */
-function validateBasicCredential(raw: string): boolean {
+function validateBasicCredential(raw: string, before = ''): boolean {
   const b64 = capturedValue(raw, BASIC_VALUE_RE);
   if (b64 === null) return false;
   const bare = b64.replace(/=+$/, '');
@@ -396,6 +405,7 @@ function validateBasicCredential(raw: string): boolean {
     const c = text.charCodeAt(i);
     if (c < 0x20 || c === 0x7f) return false; // a control character: binary, not a credential
   }
+  if (BASIC_HEADER_RE.test(before)) return headerPairIsCredential(text);
   const pair = BASIC_PAIR_RE.exec(text);
   if (!pair) return false;
   const password = pair[2];
@@ -407,6 +417,29 @@ function validateBasicCredential(raw: string): boolean {
   const lower = password.toLowerCase();
   if (DLP_STOPWORDS.some((sw) => lower.includes(sw)) || hasSequentialRun(password)) return false;
   return shannonEntropy(password) >= 3.0;
+}
+
+/** A decoded `user:password` sent in an Authorization header. */
+function headerPairIsCredential(text: string): boolean {
+  const pair = BASIC_HEADER_PAIR_RE.exec(text);
+  if (!pair) return false;
+  const [, user, password] = pair;
+  const lower = password.toLowerCase();
+  if (lower === user.toLowerCase() || /^(.)\1*$/.test(password)) return false;
+  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
+  if (BASIC_PLACEHOLDERS.some((w) => lower.includes(w)) || hasSequentialRun(password)) return false;
+  return shannonEntropy(password) >= 2.5;
+}
+
+const DROPBOX_SECRET_RE = /([A-Za-z0-9]{15})$/;
+
+/** 15 lower-case letters and digits, both present, not a placeholder or a run. */
+function validateDropboxSecret(raw: string): boolean {
+  const value = capturedValue(raw, DROPBOX_SECRET_RE);
+  if (value === null || value !== value.toLowerCase()) return false;
+  if (!/[0-9]/.test(value) || !/[a-z]/.test(value)) return false;
+  if (DLP_STOPWORDS.some((sw) => value.includes(sw)) || hasSequentialRun(value)) return false;
+  return shannonEntropy(value) >= 3.0;
 }
 
 const OTP_CAPTURE_RE = /["']([A-Z2-7]{16,128}=*)["']$/i;
@@ -1014,6 +1047,21 @@ export const DLP_PATTERNS: DlpPattern[] = [
     severity: 'review',
     keywords: ['app_key'],
     validate: validateLaravelAppKey,
+    redactGroup: 1,
+    argumentsOnly: true,
+  },
+  {
+    // A Dropbox app secret has no prefix: 15 lower-case letters and digits
+    // (node9Firewall#385). So it is recognised by its name: `app_secret` /
+    // `appSecret`, or a name that says dropbox and secret (`DROPBOX_SECRET`,
+    // `dropbox_client_secret`). Another vendor's app secret has another
+    // length (Facebook's is 32 hex) and does not meet the 15-character value.
+    name: 'Dropbox App Secret',
+    regex:
+      /(?:dropbox[A-Za-z0-9_.-]{0,40}?secret|app[_-]?secret)[A-Za-z0-9_]{0,20}\\?["'\]`]?\\?["'\]`]?[ \t]{0,8}(?::=|=>|[:=])[ \t]{0,8}\\?["'`]?([A-Za-z0-9]{15})(?![A-Za-z0-9])/i,
+    severity: 'block',
+    keywords: ['secret'],
+    validate: validateDropboxSecret,
     redactGroup: 1,
     argumentsOnly: true,
   },
