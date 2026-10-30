@@ -66,6 +66,10 @@ describe('HTTP Basic Credential in an Authorization header', () => {
       `curl -H "Authorization: Basic ${b64(`ci:${SHORT}`)}" https://api.example.test`,
       `{"headers": {"Authorization": "Basic ${b64(`jenkins:${WORDS}7`)}"}}`,
       `headers = {'authorization': 'Basic ${b64(`bot:${WORDS}`)}'}`,
+      // Second review: a placeholder word inside a longer password is a password.
+      `Authorization: Basic ${b64(`deploy:la${'test'}2024`)}`,
+      `Authorization: Basic ${b64(`ci:bad${'min'}ton42`)}`,
+      `Authorization: Basic ${b64(`svc:mypass${'phrase'}x`)}`,
     ]) {
       const m = gate({ content: text });
       expect(m?.patternName, text).toBe('HTTP Basic Credential');
@@ -83,6 +87,9 @@ describe('HTTP Basic Credential in an Authorization header', () => {
       `Authorization: Basic ${b64('svc:12345678')}`,
       `Authorization: Basic ${b64('svc:abc')}`,
       `Authorization: Basic ${b64(`svc:your${WORDS}`)}`,
+      `Authorization: Basic ${b64('svc:test!2024')}`,
+      `Authorization: Basic ${b64('svc:Password1')}`,
+      `Authorization: Basic ${b64('svc:${PASSWORD}')}`,
     ]) {
       expect(gate({ content: text }), text).toBeNull();
     }

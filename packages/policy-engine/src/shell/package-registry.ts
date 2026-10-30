@@ -23,6 +23,7 @@ import {
   unwrapCommandHead,
   walkCommandScope,
 } from './index';
+import { packageManagerValueFlags } from './package-install';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { syntax } = mvdanSh as any;
@@ -214,12 +215,15 @@ function fromCall(
   const npm = NPM_FAMILY.has(manager);
   const flags = npm ? NPM_FLAGS : PIP_FLAGS;
   const rest = words.slice(at + 1);
-  if (!fetches(manager, rest, flags)) return;
+  // Every flag that takes a value, the registry ones and the manager's own
+  // (`--prefix DIR`, `-w WS`), so a value is never read as the verb.
+  const valued = new Set([...flags, ...packageManagerValueFlags(manager)]);
+  if (!fetches(manager, rest, valued)) return;
   const vars = npm ? NPM_VARS : PIP_VARS;
   for (const [name, value] of env) {
     if (value !== null && vars.test(name)) push(out, manager, name, value);
   }
-  for (let i = 0; i < runnerEnd(manager, rest, flags); i++) {
+  for (let i = 0; i < runnerEnd(manager, rest, valued); i++) {
     const w = rest[i];
     if (w === null) continue;
     const eq = w.indexOf('=');

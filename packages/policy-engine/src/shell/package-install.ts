@@ -272,6 +272,39 @@ const PIPX_VALUE_FLAGS = new Set([
   '--preinstall',
 ]);
 
+/**
+ * The flags whose next word is their value, for a front-end by name. Shared
+ * with the registry reader (package-registry.ts), so the two parsers agree
+ * on where a verb is: `npm --prefix ./app install` installs.
+ */
+export function packageManagerValueFlags(manager: string): ReadonlySet<string> {
+  switch (manager) {
+    case 'npm':
+    case 'npx':
+      return NPM_VALUE_FLAGS;
+    case 'pnpm':
+    case 'pnpx':
+      return PNPM_VALUE_FLAGS;
+    case 'yarn':
+      return YARN_VALUE_FLAGS;
+    case 'bun':
+    case 'bunx':
+      return BUN_VALUE_FLAGS;
+    case 'pip':
+    case 'pip3':
+      return PIP_VALUE_FLAGS;
+    case 'uv':
+    case 'uvx':
+      return UV_VALUE_FLAGS;
+    case 'pipenv':
+      return PIPENV_VALUE_FLAGS;
+    case 'pipx':
+      return PIPX_VALUE_FLAGS;
+    default:
+      return new Set();
+  }
+}
+
 /** Is `w` a value-taking flag (and not already `--flag=value`)? */
 function takesValue(w: string, valueFlags: Set<string>): boolean {
   return !w.includes('=') && valueFlags.has(w);

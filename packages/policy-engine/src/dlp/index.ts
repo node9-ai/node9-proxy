@@ -387,8 +387,15 @@ const BASIC_PAIR_RE = /^([^:\s]{1,128}):(\S{8,256})$/;
 // pattern itself stays one linear regex.
 const BASIC_HEADER_RE = /authorization\\?["']?[ \t]*[:=][ \t]*\\?["']?[ \t]*$/i;
 const BASIC_HEADER_PAIR_RE = /^([^:\s]{1,128}):(\S{6,256})$/;
-/** Passwords that are documentation, not secrets. */
-const BASIC_PLACEHOLDERS = ['pass', 'secret', 'admin', 'letmein', 'qwerty', 'default', 'test'];
+/**
+ * Passwords that are documentation, not secrets: a placeholder word alone or
+ * with digits and symbols around it (`pass1234`, `admin123`, `test!`). Whole
+ * words only, so `latest2024` and `badminton42` are passwords.
+ */
+const BASIC_PLACEHOLDER_RE =
+  /^[^a-z]*(?:pass|password|passwd|pwd|secret|admin|administrator|letmein|qwerty|default|test|changeme|example|sample|dummy|fake|placeholder|guest|demo|here|your[a-z_]*)[^a-z]*$/;
+/** Template and filler text inside a password: never a real one. */
+const BASIC_TEMPLATE_MARKERS = ['${', '{{', '%{', '<your', 'xxxxxx', 'aaaaaa', 'bbbbbb', '000000'];
 
 /** `Basic <b64>`: a canonical base64 of UTF-8 `user:password`, the password generated. */
 function validateBasicCredential(raw: string, before = ''): boolean {
@@ -426,8 +433,8 @@ function headerPairIsCredential(text: string): boolean {
   const [, user, password] = pair;
   const lower = password.toLowerCase();
   if (lower === user.toLowerCase() || /^(.)\1*$/.test(password)) return false;
-  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
-  if (BASIC_PLACEHOLDERS.some((w) => lower.includes(w)) || hasSequentialRun(password)) return false;
+  if (BASIC_TEMPLATE_MARKERS.some((m) => lower.includes(m))) return false;
+  if (BASIC_PLACEHOLDER_RE.test(lower) || hasSequentialRun(password)) return false;
   return shannonEntropy(password) >= 2.5;
 }
 
