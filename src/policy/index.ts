@@ -112,8 +112,24 @@ export async function evaluatePolicy(
         : isTrustedHost,
       readAgentSettings,
       isConfiguredRegistry: (host: string, at?: string) => configuredRegistryHosts(at).has(host),
+      isGitWorkTreeTop,
     }
   );
+}
+
+/**
+ * `dir` under `cwd` holds a `.git` entry (a directory, or the file a worktree
+ * or a submodule has): it is the top of a work tree. Decides whether
+ * `git -C <dir> add .` stages the whole tree (node9Firewall#413). A cwd that
+ * is not absolute, or a lookup that fails, answers true: the finding stands.
+ */
+function isGitWorkTreeTop(dir: string, cwd: string): boolean {
+  if (!path.isAbsolute(cwd)) return true;
+  try {
+    return fs.existsSync(path.join(path.resolve(cwd, dir), '.git'));
+  } catch {
+    return true;
+  }
 }
 
 /** The most an agent settings file is read for the hooks comparison. */

@@ -284,6 +284,27 @@ describe('an opt-in check is silent until a person sets it (node9Firewall#413 pa
     const named = await bash(cfg({ 'commands.git-stage-all': 'review' }), 'git add src/x.ts');
     expect(named).toEqual({ decision: 'allow' });
   });
+  it('`git -C <dir> add .` asks the host whether <dir> is a work-tree top (node9Firewall#413)', async () => {
+    const config = cfg({ 'commands.git-stage-all': 'review' });
+    const run = (top?: (dir: string, cwd: string) => boolean) =>
+      evaluatePolicy(
+        config,
+        'bash',
+        { command: 'git -C myapp add .' },
+        { agent: 'Claude Code', cwd: '/work' },
+        top ? { isGitWorkTreeTop: top } : {}
+      );
+    const asked: string[][] = [];
+    const root = await run((dir, cwd) => {
+      asked.push([dir, cwd]);
+      return true;
+    });
+    expect(root).toMatchObject({ decision: 'review', checkId: 'commands.git-stage-all' });
+    expect(asked).toEqual([['myapp', '/work']]);
+    expect(await run(() => false)).toEqual({ decision: 'allow' });
+    // No host answer: the plain reading, as before.
+    expect((await run()).decision).toBe('review');
+  });
   it('set to log, an allow that names the check; block blocks', async () => {
     const log = await bash(cfg({ 'commands.git-stage-all': 'log' }), 'git commit -am wip');
     expect(log).toMatchObject({

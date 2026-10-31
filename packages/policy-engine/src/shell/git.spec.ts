@@ -342,6 +342,22 @@ describe('commands.git-hooks-bypass: the agent disarms the hooks', () => {
     'git config --unset core.hooksPath',
     'GIT_CONFIG_PARAMETERS="\'core.hooksPath=/dev/null\'" git commit -m x',
     'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x',
+    // outside the tree, empty or unreadable (node9Firewall#413 follow-up)
+    'git config core.hooksPath ../hooks',
+    'git config core.hooksPath hooks/../../elsewhere',
+    'git config core.hooksPath ""',
+    'git config core.hooksPath "$EMPTY"',
+    'git -c core.hooksPath= commit -m x',
+    'git -c core.hooksPath=~/x commit -m x',
+    'git config core.hooksPath C:\\nohooks',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=../x git commit -m x',
+    // the root of the tree or the git directory hold no hook files (code review)
+    'git -c core.hooksPath=. commit -m x',
+    'git config core.hooksPath ./',
+    'git config core.hooksPath sub/..',
+    'git config core.hooksPath .git',
+    'git config core.hooksPath ./.git/',
+    'git config --unset-all core.hooksPath',
     // the hook managers' kill switches, on the git call
     'HUSKY=0 git commit -m x',
     'HUSKY=0 git push',
@@ -390,6 +406,17 @@ describe('commands.git-hooks-bypass: ordinary work stays clean', () => {
     'git push origin main',
     'git config core.hooksPath',
     'git config --get core.hooksPath',
+    // the project's own versioned hooks, inside the tree (node9Firewall#413 follow-up)
+    'git config core.hooksPath .githooks',
+    'git config --local core.hooksPath .githooks',
+    'git config core.hooksPath .husky',
+    'git config core.hooksPath ./tools/git-hooks',
+    'git config core.hooksPath .git/hooks',
+    'git config set core.hooksPath .githooks',
+    'git -c core.hooksPath=.githooks commit -m x',
+    'git -c core.hooksPath=.githooks push origin main',
+    'git config core.hooksPath .githooks && git push origin main',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=.githooks git commit -m x',
     'git config --list',
     'git config user.name "x"',
     'git -c core.pager=cat log',
@@ -445,6 +472,19 @@ describe('commands.git-stage-all: everything staged at once', () => {
     'git commit . -m wip',
     'git commit -m wip -- :/',
     'git -C ../app add -A',
+    // -C that leaves the tree, is absolute or dynamic: read as today
+    'git -C ../app add .',
+    'git -C /srv/repo add .',
+    'git -C "$REPO" add .',
+    // -C into a subdirectory, then climbing back to the top
+    'git -C sub add ..',
+    'git -C packages/a add ../..',
+    // -A, -u, commit -a with no pathspec stage the whole tree from anywhere
+    'git -C sub add -A',
+    'git -C sub commit -am wip',
+    // a -C filled in at run time is dynamic (code review)
+    'ls -d */ | xargs -I{} git -C {} add .',
+    'find . -maxdepth 1 -type d -exec git -C {} add . \\;',
     "sh -c 'git add -A && git commit -m wip'",
     'f=-A; git add $f',
     "git config alias.ca 'commit -a' && git ca -m wip",
@@ -492,5 +532,46 @@ describe('commands.git-stage-all: named files stay clean', () => {
     'npm run add-all',
   ])('%s', (cmd) => {
     expect(stageAll(cmd), `${cmd} should be clean`).toBe(false);
+  });
+});
+
+// ── -C into a directory: whole tree only if that directory is a work-tree top ──
+// (node9Firewall#413 follow-up, code review). The command alone cannot tell
+// `git -C sub add .` (a subdirectory) from `git -C myapp add .` run from the
+// folder above the repository (the whole tree). The finding names the
+// directory; the gate, which knows the working directory, asks the disk.
+
+const stageAllFinding = (cmd: string) =>
+  analyzeGit(cmd).findings.find((f) => f.checkId === 'commands.git-stage-all');
+
+describe('commands.git-stage-all: -C into a directory is decided by the disk', () => {
+  it.each([
+    ['git -C sub add .', 'sub'],
+    ['git -C packages/web add .', 'packages/web'],
+    ['git -C ./docs add -- .', 'docs'],
+    ['f() { git -C "site" add .; }; f', 'site'],
+    ['git -C sub -C deeper add .', 'sub/deeper'],
+    ['git -C sub add -A .', 'sub'],
+    ['git -C myapp add .', 'myapp'],
+    ['git -C sub add "*"', 'sub'],
+    ['git -C sub commit -m wip .', 'sub'],
+    ['git config alias.aa add && git -C sub aa .', 'sub'],
+  ])('%s -> whole tree only if %s is a work-tree top', (cmd, dir) => {
+    expect(stageAllFinding(cmd)?.ifWorkTreeTop, cmd).toBe(dir);
+  });
+  it('a finding that does not depend on the directory carries no condition', () => {
+    for (const cmd of [
+      'git add .',
+      'git -C sub add -A',
+      'git -C sub add ..',
+      'git -C /srv/repo add .',
+    ]) {
+      const f = stageAllFinding(cmd);
+      expect(f, cmd).toBeDefined();
+      expect(f?.ifWorkTreeTop, cmd).toBeUndefined();
+    }
+  });
+  it('named files under -C are no finding at all', () => {
+    expect(stageAllFinding('git -C sub add src/x.ts')).toBeUndefined();
   });
 });
