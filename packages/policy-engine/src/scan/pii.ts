@@ -206,7 +206,7 @@ const NATIONAL_ID_LABEL_RE = new RegExp(
     ].join('|'),
     ')(?![A-Za-z])',
     // Hebrew: teudat zehut, t.z. (with or without the dots or the gershayim), mispar zehut.
-    '|(?<![\u05d0-\u05ea])(?:\u05ea\u05e2\u05d5\u05d3\u05ea[ _-]?\u05d6\u05d4\u05d5\u05ea|\u05ea[.\u05f4"]?\u05d6\.?|\u05de\u05e1\u05e4\u05e8[ _-]?\u05d6\u05d4\u05d5\u05ea)(?![\u05d0-\u05ea])',
+    '|(?<![\u05d0-\u05ea])(?:\u05ea\u05e2\u05d5\u05d3\u05ea[ _-]?\u05d6\u05d4\u05d5\u05ea|\u05ea[.\u05f4"]?\u05d6\\.?|\u05de\u05e1\u05e4\u05e8[ _-]?\u05d6\u05d4\u05d5\u05ea)(?![\u05d0-\u05ea])',
   ].join(''),
   'iu'
 );
