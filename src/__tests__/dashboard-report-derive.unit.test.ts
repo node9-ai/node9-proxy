@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { EMPTY_FILTERED_SCAN, filterScanByPeriod } from '../tui/dashboard/views/report/derive';
 import type { ScanResult } from '../cli/commands/scan';
-import type { ScanCache } from '../tui/dashboard/types';
+import type { ScanCache, ScanWalkAgent } from '../tui/dashboard/types';
 
 const NOW = new Date('2026-05-10T15:00:00Z');
 
@@ -32,7 +32,7 @@ function emptyResult(): ScanResult {
 }
 
 function readyCache(
-  overrides: Partial<{ claude: ScanResult; gemini: ScanResult; codex: ScanResult }> = {}
+  overrides: Partial<Record<ScanWalkAgent, ScanResult>> = {}
 ): Extract<ScanCache, { status: 'ready' }> {
   return {
     status: 'ready',
@@ -41,9 +41,20 @@ function readyCache(
       claude: overrides.claude ?? emptyResult(),
       gemini: overrides.gemini ?? emptyResult(),
       codex: overrides.codex ?? emptyResult(),
+      copilot: overrides.copilot ?? emptyResult(),
+      antigravity: overrides.antigravity ?? emptyResult(),
     },
   };
 }
+
+describe('the walk covers the five agents scan covers (fw#421 item 7)', () => {
+  it('counts Copilot and Antigravity calls in the period totals', () => {
+    const copilot = { ...emptyResult(), totalToolCalls: 4 };
+    const antigravity = { ...emptyResult(), totalToolCalls: 3 };
+    const out = filterScanByPeriod(readyCache({ copilot, antigravity }), '7d', NOW);
+    expect(out.totalToolCalls).toBe(7);
+  });
+});
 
 describe('EMPTY_FILTERED_SCAN', () => {
   it('exposes zero counters and empty arrays', () => {

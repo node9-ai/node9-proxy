@@ -17,6 +17,7 @@ import { Box, Text } from 'ink';
 import type { ScanSummary } from '../../../../scan-summary.js';
 import { originForRule, topRulesByVerdict } from '../../scan-derive.js';
 import { topOf } from './title-count.js';
+import { levelOf } from '@node9/policy-engine';
 
 interface Props {
   summary: ScanSummary;
@@ -49,7 +50,7 @@ export function BlockedPanel({
   // and the footer say so, in the words `node9 posture` uses.
   const recordOnly = summary.policy?.recordOnly === true;
   const footer = recordOnly
-    ? `→ ${summary.policy?.mode} mode: these were logged, not stopped · nothing here was enforced`
+    ? `→ ${levelOf(summary.policy?.mode)} mode: these were logged, not stopped · nothing here was enforced`
     : enabled.size === 0
       ? '→ install node9 + enable shields above'
       : anyNeeds

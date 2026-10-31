@@ -108,4 +108,14 @@ describe('posture advice follows the state', () => {
     // The fix string ships to the dashboard: never a path in it.
     expect(row?.fix).not.toContain('.ssh');
   });
+
+  it('a config that still says observe gets the same audit wording (fw#421)', async () => {
+    plant(['.ssh', 'id_rsa']);
+    writeConfig({ mode: 'observe' });
+    const findings = checkSecrets(ctx());
+    await annotateCoverage(findings, ctx());
+    const row = findings.find((f) => f.title.includes('credential file'));
+    expect(row?.fix).toContain('audit mode');
+    expect(row?.fix).not.toContain('observe');
+  });
 });

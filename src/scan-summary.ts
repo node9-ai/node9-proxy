@@ -223,7 +223,7 @@ export interface LoopRef {
 // them; a reachable constant is how six competing loop-waste formulas grew in
 // the first place — whoever needed a price multiplied by the nearest one.
 export { LOOP_THRESHOLD_FOR_WASTE } from '@node9/policy-engine';
-import { LOOP_THRESHOLD_FOR_WASTE } from '@node9/policy-engine';
+import { LOOP_THRESHOLD_FOR_WASTE, levelOf } from '@node9/policy-engine';
 
 // ---------------------------------------------------------------------------
 // Main entry point
@@ -425,7 +425,7 @@ export function buildScanSummary(agents: AgentScanInput[]): ScanSummary {
  */
 export function wouldHaveVerb(summary: ScanSummary, past = 'would have blocked'): string {
   return summary.policy?.recordOnly
-    ? `logged only (${summary.policy.mode} mode, nothing enforced)`
+    ? `logged only (${levelOf(summary.policy.mode)} mode, nothing enforced)`
     : past;
 }
 

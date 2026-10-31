@@ -23,7 +23,7 @@ export function renderBar(value: number, max: number, width: number): string {
 const BLOCK_REASON_LABELS: Record<string, string> = {
   timeout: 'Approval timeout',
   'smart-rule-block': 'Smart rule',
-  'observe-mode-dlp-would-block': 'DLP (observe)',
+  'observe-mode-dlp-would-block': 'DLP (audit)',
   'persistent-deny': 'Persistent deny',
   'local-decision': 'User denied',
   'dlp-block': 'DLP block',

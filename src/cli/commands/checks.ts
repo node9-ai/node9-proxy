@@ -14,6 +14,7 @@ import {
   resolveAllChecks,
   type CheckGroup,
   type ResolvedCheck,
+  levelOf,
 } from '@node9/policy-engine';
 import { getConfig, catalogSettingsFrom, type Config } from '../../config';
 import { configurableValues } from '../../config/v2';
@@ -73,14 +74,16 @@ const VALUE_COLOR: Record<string, (s: string) => string> = {
   block: chalk.red,
 };
 
-function renderChecks(report: ChecksReport): string {
+export function renderChecks(report: ChecksReport): string {
   const lines: string[] = [];
   const where =
     report.policySource === 'workspace'
       ? 'workspace (app.node9.ai)'
       : 'local (~/.node9/config.json)';
   lines.push('');
-  lines.push(`${chalk.cyan.bold('node9 checks')}   policy: ${where}   mode: ${report.mode}`);
+  lines.push(
+    `${chalk.cyan.bold('node9 checks')}   policy: ${where}   mode: ${levelOf(report.mode)}`
+  );
   lines.push('');
 
   const row = (c: ChecksReport['checks'][number]) => {

@@ -119,6 +119,12 @@ export function runBlast(): BlastResult {
   return { reachable, envFindings, score: Math.max(0, 100 - scoreDeduction) };
 }
 
+/** Width of the label column: 38 unless a label needs more (fw#421 item 2:
+ *  `~/.config/gcloud/application_default_credentials.json` glued to its text). */
+export function labelColumnWidth(labels: string[]): number {
+  return Math.max(38, ...labels.map((l) => l.length + 2));
+}
+
 // ---------------------------------------------------------------------------
 // Command
 // ---------------------------------------------------------------------------
@@ -131,6 +137,10 @@ export function registerBlastCommand(program: Command): void {
       const home = os.homedir();
       const cwd = process.cwd();
       const { reachable, envFindings, score } = runBlast();
+      const width = labelColumnWidth([
+        ...reachable.map((p) => p.label),
+        ...envFindings.map((f) => f.key),
+      ]);
 
       console.log('');
       console.log(
@@ -144,7 +154,10 @@ export function registerBlastCommand(program: Command): void {
         console.log('  ' + chalk.red.bold('Sensitive files reachable:'));
         for (const p of reachable) {
           console.log(
-            '    ' + chalk.red('✗  ') + chalk.yellow(p.label.padEnd(38)) + chalk.dim(p.description)
+            '    ' +
+              chalk.red('✗  ') +
+              chalk.yellow(p.label.padEnd(width)) +
+              chalk.dim(p.description)
           );
         }
         console.log('');
@@ -154,7 +167,7 @@ export function registerBlastCommand(program: Command): void {
         console.log('  ' + chalk.red.bold('Secrets in active environment:'));
         for (const f of envFindings) {
           console.log(
-            '    ' + chalk.red('✗  ') + chalk.yellow(f.key.padEnd(38)) + chalk.dim(f.patternName)
+            '    ' + chalk.red('✗  ') + chalk.yellow(f.key.padEnd(width)) + chalk.dim(f.patternName)
           );
         }
         console.log('');

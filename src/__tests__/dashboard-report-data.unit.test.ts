@@ -38,6 +38,8 @@ vi.mock('../cli/commands/scan', () => ({
   scanClaudeHistoryAsync: vi.fn(async () => emptyScan),
   scanGeminiHistory: vi.fn(() => emptyScan),
   scanCodexHistory: vi.fn(() => emptyScan),
+  scanCopilotHistory: vi.fn(async () => emptyScan),
+  scanAntigravityHistory: vi.fn(async () => emptyScan),
 }));
 
 import { loadReportAudit, startScanWalk } from '../tui/dashboard/data';
@@ -112,6 +114,9 @@ describe('startScanWalk', () => {
       expect(updates[1].results.claude).toBe(emptyScan);
       expect(updates[1].results.gemini).toBe(emptyScan);
       expect(updates[1].results.codex).toBe(emptyScan);
+      // fw#421 item 7: the walk reads the five agents `node9 scan` reads.
+      expect(updates[1].results.copilot).toBe(emptyScan);
+      expect(updates[1].results.antigravity).toBe(emptyScan);
       expect(typeof updates[1].readyAt).toBe('number');
     }
   });

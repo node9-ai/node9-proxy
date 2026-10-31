@@ -34,6 +34,8 @@ import {
   scanClaudeHistoryAsync,
   scanGeminiHistory,
   scanCodexHistory,
+  scanCopilotHistory,
+  scanAntigravityHistory,
 } from '../../cli/commands/scan.js';
 import {
   type ActivityEvent,
@@ -888,10 +890,20 @@ export function startScanWalk(onUpdate: (cache: ScanCache) => void): () => void 
 
       const codex = await scanCodexHistory(lookbackStart);
       if (cancelled) return;
+      await yieldToEventLoop();
+      if (cancelled) return;
+
+      const copilot = await scanCopilotHistory(lookbackStart);
+      if (cancelled) return;
+      await yieldToEventLoop();
+      if (cancelled) return;
+
+      const antigravity = await scanAntigravityHistory(lookbackStart);
+      if (cancelled) return;
 
       onUpdate({
         status: 'ready',
-        results: { claude, gemini, codex },
+        results: { claude, gemini, codex, copilot, antigravity },
         readyAt: Date.now(),
       });
     } catch (err) {

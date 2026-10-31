@@ -24,7 +24,7 @@ const MAX_STARTUP_LOG_BYTES = 256 * 1024;
 /** Keep the human log bounded. Called from BOTH writers: the spawner opens it as
  *  an fd, while a systemd-launched daemon never goes through the spawner at all, so
  *  neither one alone is enough. Never throws. */
-function capStartupLog(file: string): void {
+export function capStartupLog(file: string): void {
   try {
     if (fs.statSync(file).size > MAX_STARTUP_LOG_BYTES) fs.truncateSync(file);
   } catch {

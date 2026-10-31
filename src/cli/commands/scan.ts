@@ -60,6 +60,7 @@ import {
   computeLoopWaste,
   originForRule,
   relativeDate,
+  relativeAgo,
   rollupByShield,
   topDlpPatterns,
   topRulesByVerdict,
@@ -3245,25 +3246,25 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   const topLines: Line[] = [];
   if (scan.canaryFindings.length > 0) {
     const latest = scan.canaryFindings[0];
-    const rel = relativeDate(latest.timestamp, now);
+    const rel = relativeAgo(latest.timestamp, now);
     const n = scan.canaryFindings.length;
     topLines.push(
       mkLine(
         ['🪤 ', chalk.red],
         [`${n} decoy credential${n !== 1 ? 's' : ''} tripped  `, chalk.bold],
-        [`(latest: ${rel} ago, ${latest.kind} at ${displayHome(latest.path)})`, chalk.dim]
+        [`(latest: ${rel}, ${latest.kind} at ${displayHome(latest.path)})`, chalk.dim]
       )
     );
   }
   if (scan.dlpFindings.length > 0) {
     const latest = scan.dlpFindings[0];
-    const rel = relativeDate(latest.timestamp, now);
+    const rel = relativeAgo(latest.timestamp, now);
     const noun = `credential leak${scan.dlpFindings.length !== 1 ? 's' : ''}`;
     topLines.push(
       mkLine(
         ['🚨 ', chalk.red],
         [`${scan.dlpFindings.length} ${noun} in tool input  `, chalk.bold],
-        [`(latest: ${rel} ago, ${latest.patternName})`, chalk.dim]
+        [`(latest: ${rel}, ${latest.patternName})`, chalk.dim]
       )
     );
   }

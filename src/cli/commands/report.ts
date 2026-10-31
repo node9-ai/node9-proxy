@@ -30,7 +30,7 @@ import {
 const BLOCK_REASON_LABELS: Record<string, string> = {
   timeout: 'Approval timeout',
   'smart-rule-block': 'Smart rule',
-  'observe-mode-dlp-would-block': 'DLP (observe)',
+  'observe-mode-dlp-would-block': 'DLP (audit)',
   'persistent-deny': 'Persistent deny',
   'local-decision': 'User denied',
   'dlp-block': 'DLP block',
@@ -85,7 +85,7 @@ export function registerReportCommand(program: Command): void {
   program
     .command('report')
     .description('Activity and security report — what Claude did, what was blocked')
-    .option('--period <period>', 'today | 7d | 30d | month', '7d')
+    .option('--period <period>', 'today | 7d | 30d | 90d | month', '30d')
     .option('--no-tests', 'exclude test runner calls (npm test, vitest, pytest…) from stats')
     .option('--json', 'Emit machine-readable JSON to stdout (suppresses renderer)')
     .action((options: { period: string; tests: boolean; json?: boolean }) => {
@@ -93,7 +93,7 @@ export function registerReportCommand(program: Command): void {
         options.period as ReportPeriod
       )
         ? (options.period as ReportPeriod)
-        : '7d';
+        : '30d';
 
       const excludeTests = options.tests === false;
       const { data, hasAuditFile, responseDlpEntries } = aggregateReportFromAudit(period, {
@@ -353,7 +353,7 @@ function renderTerminalReport(
   );
   summaryRow(
     observeDlp > 0 ? chalk.blue('👁') : chalk.dim('👁'),
-    'DLP (observe)',
+    'DLP (audit)',
     observeDlp,
     observeDlp > 0 ? 'would-block in strict mode' : undefined,
     observeDlp > 0 ? (s) => chalk.blue(s) : (s) => chalk.dim(s)

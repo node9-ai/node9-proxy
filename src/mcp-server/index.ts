@@ -35,7 +35,9 @@ import {
   normalizeEgressHost,
   isValidEgressHost,
 } from '../auth/egress-config';
-import { DEFAULT_EGRESS_ALLOWLIST } from '@node9/policy-engine';
+import { DEFAULT_EGRESS_ALLOWLIST, levelOf } from '@node9/policy-engine';
+import { describeInternalState, readInternalState } from '../cli/commands/egress';
+import { getAgentWiring } from '../agent-wiring';
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
@@ -218,7 +220,8 @@ export const TOOLS = [
   {
     name: 'node9_scan',
     description:
-      'Scan all AI agent history (Claude + Gemini) and report what node9 would have blocked or ' +
+      'Scan the history of all supported coding agents (Claude Code, Gemini, Codex, Copilot, ' +
+      'Antigravity) and report what node9 would have blocked or ' +
       'flagged. Shows blocked operations, reviewed commands, credential leaks, and agent spend. ' +
       'Use this to audit past activity and find security gaps before they become incidents.',
     inputSchema: {
@@ -243,8 +246,8 @@ export const TOOLS = [
       properties: {
         period: {
           type: 'string',
-          enum: ['today', '7d', '30d', 'month'],
-          description: 'Time period for the report (default: 7d).',
+          enum: ['today', '7d', '30d', '90d', 'month'],
+          description: 'Time period for the report (default: 30d).',
         },
         no_tests: {
           type: 'boolean',
@@ -417,7 +420,7 @@ function handleStatus(): string {
 
   const lines: string[] = [];
 
-  lines.push(`Mode: ${settings.mode}`);
+  lines.push(`Mode: ${levelOf(settings.mode)}`);
   if (wsGoverned) {
     lines.push(
       'Policy source: workspace config (app.node9.ai) — local config files are ignored for policy'
@@ -437,6 +440,23 @@ function handleStatus(): string {
   lines.push(`Active shields: ${activeShields.length > 0 ? activeShields.join(', ') : 'none'}`);
   lines.push(`Smart rules: ${config.policy.smartRules.length} loaded`);
   lines.push(`DLP: ${config.policy.dlp?.enabled !== false ? 'enabled' : 'disabled'}`);
+
+  // The wiring this tool's description promises, from the same source
+  // `node9 status` reads (fw#421 item 5).
+  lines.push('Agent hooks:');
+  // `isProtected`, as posture reads it: any hook event wired, or node9 on the
+  // agent's MCP servers (Cursor has no hook file at all).
+  for (const a of getAgentWiring()) {
+    const hooked = a.hooks.some((h) => h.wired);
+    const state = !a.installed
+      ? 'not installed'
+      : hooked
+        ? 'wired'
+        : a.isProtected
+          ? 'protected through MCP'
+          : 'not wired';
+    lines.push(`  ${a.label}: ${state}`);
+  }
 
   const projectConfig = path.join(process.cwd(), 'node9.config.json');
   const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
@@ -556,6 +576,25 @@ function handleShieldDisable(args: Record<string, unknown>): string {
 // shared egress-config module, which writes the global ~/.node9/config.json —
 // the same file (and merge layer) the `node9 egress` CLI writes.
 
+/**
+ * The internal-address line of `node9_egress_status`: three states, one
+ * description each, the words `node9 egress status` uses (fw#421 item 4).
+ * The floor (`blocked`) applies whether egress is on or not; the allowlist
+ * does not, so with egress off a `listed` config reaches them freely.
+ */
+export function internalAddressLine(e: {
+  enabled: boolean;
+  ssrfStrict?: boolean;
+  allowPrivate?: boolean;
+}): string {
+  const configured = readInternalState(e);
+  const state = !e.enabled && configured === 'listed' ? 'allowed' : configured;
+  return (
+    `Internal addresses: ${state} — loopback and the private ranges are ` +
+    `${describeInternalState(state)}.`
+  );
+}
+
 function handleEgressStatus(): string {
   const cfgEgress = getConfig();
   const e = cfgEgress.policy.egress;
@@ -589,8 +628,7 @@ function handleEgressStatus(): string {
       'destination inside a program and does not reach this gate. CGNAT (100.64/10) is ' +
       'NOT in the always-blocked set — it is reachable until the strict tier is on, and ' +
       'an exemption can release it.',
-    `Internal addresses: ${e.ssrfStrict ? 'on' : 'off'} — loopback and the private ranges ` +
-      `are ${e.ssrfStrict ? 'blocked too' : 'reachable'}.`,
+    internalAddressLine(e),
     `Floor exemptions: ${e.ssrfAllow?.length ? e.ssrfAllow.join(', ') : '(none)'}`,
   ];
   return lines.join('\n');
