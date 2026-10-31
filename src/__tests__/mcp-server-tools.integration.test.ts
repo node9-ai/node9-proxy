@@ -337,7 +337,20 @@ describe('node9 MCP server — egress control tools', () => {
     expect(text).toMatch(/Claude Code: wired/);
     // Whether Gemini is installed depends on the runner; the row exists either way.
     expect(text).toMatch(/^  Gemini CLI: (wired|not wired|not installed)$/m);
+    // Cursor is protected through MCP, not a hook file (review finding 2).
+    expect(text).toMatch(/^  Cursor: (protected through MCP|not wired|not installed)$/m);
     fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('node9_report advertises the CLI default (30d) and accepts 90d', () => {
+    const res = driveMcp([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
+    const tools = (res[1]?.result?.tools ?? []) as {
+      name: string;
+      inputSchema?: { properties?: { period?: { enum?: string[]; description?: string } } };
+    }[];
+    const period = tools.find((t) => t.name === 'node9_report')?.inputSchema?.properties?.period;
+    expect(period?.enum).toContain('90d');
+    expect(period?.description).toMatch(/default: 30d/);
   });
 
   it('node9_scan describes all five agents, not "Claude + Gemini"', () => {

@@ -3,6 +3,11 @@
 // the three internal-address states over MCP, and node9's own key out of the
 // credential list. Each case pins one rendered string, not a gate decision.
 import { describe, it, expect, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+import { BlockedPanel } from '../cli/render/ink/panels/BlockedPanel';
+import { checkEgress } from '../posture/egress';
+import { internalAddressLine } from '../mcp-server/index';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -47,6 +52,57 @@ describe('item 1: the mode is named audit in every human text', () => {
     const f = findings.find((x) => x.category === 'Coverage');
     expect(f?.title).toContain('audit mode');
     expect(JSON.stringify(f)).not.toMatch(/observe mode/);
+  });
+});
+
+describe('item 1 (review): the default scan view and posture egress say audit too', () => {
+  beforeEach(() => {
+    writeJson('.node9/config.json', { settings: { mode: 'observe' } });
+    _resetConfigCache();
+  });
+
+  it('the Ink BLOCKED panel footer names audit mode', () => {
+    const summary = {
+      policy: { mode: 'observe', recordOnly: true },
+      sections: [
+        {
+          id: 'default',
+          label: 'Default Rules',
+          subtitle: '',
+          sourceType: 'default',
+          blockedCount: 1,
+          reviewCount: 0,
+          rules: [{ name: 'block-rm-rf', verdict: 'block', reason: '', findings: [{}] }],
+        },
+      ],
+    } as unknown as ScanSummary;
+    const frame = render(React.createElement(BlockedPanel, { summary, width: 120 })).lastFrame();
+    expect(frame).toContain('audit mode: these were logged');
+    expect(frame).not.toContain('observe');
+  });
+
+  it('posture egress findings do not say observe mode', () => {
+    writeJson('.node9/config.json', {
+      settings: { mode: 'observe' },
+      policy: { egress: { enabled: true, mode: 'block' } },
+    });
+    _resetConfigCache();
+    const text = JSON.stringify(checkEgress({ home: home(), cwd: home() }));
+    expect(text).not.toMatch(/observe mode/);
+  });
+});
+
+describe('item 4 (review): internal addresses when egress is off', () => {
+  it('egress off: the allowlist is not consulted, so listed reads as allowed', () => {
+    expect(internalAddressLine({ enabled: false, ssrfStrict: false, allowPrivate: false })).toMatch(
+      /^Internal addresses: allowed/
+    );
+    expect(internalAddressLine({ enabled: true, ssrfStrict: false, allowPrivate: false })).toMatch(
+      /^Internal addresses: listed/
+    );
+    expect(internalAddressLine({ enabled: false, ssrfStrict: true })).toMatch(
+      /^Internal addresses: blocked/
+    );
   });
 });
 

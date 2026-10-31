@@ -22,7 +22,13 @@ vi.mock('child_process', async (orig) => {
   };
 });
 
-import { restartDaemonService, scheduleAutostartSelfHeal } from '../daemon/service';
+import fs from 'fs';
+import {
+  restartDaemonService,
+  scheduleAutostartSelfHeal,
+  type HealResult,
+} from '../daemon/service';
+import { DAEMON_STARTUP_LOG } from '../daemon/startup-log';
 
 const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 const setPlatform = (p: NodeJS.Platform) =>
@@ -80,5 +86,46 @@ describe('scheduleAutostartSelfHeal', () => {
     expect(first).toBe(1);
     vi.advanceTimersByTime(24 * 60 * 60 * 1000);
     expect(calls.list.filter((c) => c.includes('is-enabled')).length).toBe(2);
+  });
+
+  // fw#421 item 10: one failed `enable` used to wait a day for its retry, and
+  // left no trace. Now: every 10 minutes until it heals, then daily, logged.
+  it('retries every 10 minutes after a failed repair, then once a day', () => {
+    vi.useFakeTimers();
+    vi.stubEnv('NODE9_TESTING', '');
+    const results: HealResult[] = ['failed', 'failed', 'repaired', 'ok', 'ok'];
+    const seen: number[] = [];
+    const heal = () => {
+      seen.push(Date.now());
+      return results.shift() ?? 'ok';
+    };
+    const t0 = Date.now();
+    scheduleAutostartSelfHeal(() => true, heal);
+    vi.advanceTimersByTime(60_000);
+    expect(seen).toEqual([t0 + 60_000]);
+    vi.advanceTimersByTime(10 * 60_000);
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(seen.length).toBe(3); // two retries, the second one repaired
+    vi.advanceTimersByTime(60 * 60_000);
+    expect(seen.length).toBe(3); // healthy: no more 10-minute probes
+    vi.advanceTimersByTime(24 * 60 * 60_000);
+    expect(seen.length).toBe(4);
+  });
+
+  it('writes repaired and failed outcomes to daemon-startup.log, ok writes nothing', () => {
+    vi.useFakeTimers();
+    vi.stubEnv('NODE9_TESTING', '');
+    fs.rmSync(DAEMON_STARTUP_LOG(), { force: true }); // the case above wrote its own lines
+    const results: HealResult[] = ['failed', 'repaired', 'ok'];
+    scheduleAutostartSelfHeal(
+      () => true,
+      () => results.shift() ?? 'ok'
+    );
+    vi.advanceTimersByTime(60_000 + 10 * 60_000 + 24 * 60 * 60_000);
+    const log = fs.readFileSync(DAEMON_STARTUP_LOG(), 'utf8');
+    const lines = log.split('\n').filter((l) => l.includes('[autostart-heal]'));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('failed');
+    expect(lines[1]).toContain('repaired');
   });
 });

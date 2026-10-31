@@ -246,8 +246,8 @@ export const TOOLS = [
       properties: {
         period: {
           type: 'string',
-          enum: ['today', '7d', '30d', 'month'],
-          description: 'Time period for the report (default: 7d).',
+          enum: ['today', '7d', '30d', '90d', 'month'],
+          description: 'Time period for the report (default: 30d).',
         },
         no_tests: {
           type: 'boolean',
@@ -444,8 +444,17 @@ function handleStatus(): string {
   // The wiring this tool's description promises, from the same source
   // `node9 status` reads (fw#421 item 5).
   lines.push('Agent hooks:');
+  // `isProtected`, as posture reads it: any hook event wired, or node9 on the
+  // agent's MCP servers (Cursor has no hook file at all).
   for (const a of getAgentWiring()) {
-    const state = !a.installed ? 'not installed' : a.wireState === 'wired' ? 'wired' : 'not wired';
+    const hooked = a.hooks.some((h) => h.wired);
+    const state = !a.installed
+      ? 'not installed'
+      : hooked
+        ? 'wired'
+        : a.isProtected
+          ? 'protected through MCP'
+          : 'not wired';
     lines.push(`  ${a.label}: ${state}`);
   }
 
@@ -567,6 +576,25 @@ function handleShieldDisable(args: Record<string, unknown>): string {
 // shared egress-config module, which writes the global ~/.node9/config.json —
 // the same file (and merge layer) the `node9 egress` CLI writes.
 
+/**
+ * The internal-address line of `node9_egress_status`: three states, one
+ * description each, the words `node9 egress status` uses (fw#421 item 4).
+ * The floor (`blocked`) applies whether egress is on or not; the allowlist
+ * does not, so with egress off a `listed` config reaches them freely.
+ */
+export function internalAddressLine(e: {
+  enabled: boolean;
+  ssrfStrict?: boolean;
+  allowPrivate?: boolean;
+}): string {
+  const configured = readInternalState(e);
+  const state = !e.enabled && configured === 'listed' ? 'allowed' : configured;
+  return (
+    `Internal addresses: ${state} — loopback and the private ranges are ` +
+    `${describeInternalState(state)}.`
+  );
+}
+
 function handleEgressStatus(): string {
   const cfgEgress = getConfig();
   const e = cfgEgress.policy.egress;
@@ -600,10 +628,7 @@ function handleEgressStatus(): string {
       'destination inside a program and does not reach this gate. CGNAT (100.64/10) is ' +
       'NOT in the always-blocked set — it is reachable until the strict tier is on, and ' +
       'an exemption can release it.',
-    // Three states, one description each, the same words `node9 egress status`
-    // prints (fw#421 item 4). "listed" is not "off": the ranges need an entry.
-    `Internal addresses: ${readInternalState(e)} — loopback and the private ranges ` +
-      `are ${describeInternalState(readInternalState(e))}.`,
+    internalAddressLine(e),
     `Floor exemptions: ${e.ssrfAllow?.length ? e.ssrfAllow.join(', ') : '(none)'}`,
   ];
   return lines.join('\n');

@@ -93,7 +93,7 @@ export function registerReportCommand(program: Command): void {
         options.period as ReportPeriod
       )
         ? (options.period as ReportPeriod)
-        : '7d';
+        : '30d';
 
       const excludeTests = options.tests === false;
       const { data, hasAuditFile, responseDlpEntries } = aggregateReportFromAudit(period, {
