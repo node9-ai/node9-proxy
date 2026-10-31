@@ -760,3 +760,15 @@ describe('extractCanonicalFindings — outbound actions and code bodies', () => 
     expect(out.some((x) => /reverse-shell|env-exfil/.test(x.ruleName))).toBe(false);
   });
 });
+
+// node9Firewall#385 (step 5 of #416): the scan reads the key of a lone value
+// as its label, as the realtime gate does, so the two agree on a labelled id.
+describe('extractCanonicalFindings — the argument key labels a lone value', () => {
+  it('a BSN under its key is a national-id finding; the same digits under another key are not', () => {
+    const bsn = ['111', '222', '333'].join('');
+    const labelled = extractCanonicalFindings(call({ args: { bsn } }), baseCtx());
+    expect(labelled.some((x) => x.ruleName === 'pii:national-id')).toBe(true);
+    const plain = extractCanonicalFindings(call({ args: { order_id: bsn } }), baseCtx());
+    expect(plain.some((x) => x.ruleName === 'pii:national-id')).toBe(false);
+  });
+});

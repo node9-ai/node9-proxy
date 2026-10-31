@@ -249,10 +249,11 @@ export async function explainPolicy(
   const panicMode = config.settings.panicMode === true;
   const gates = await runStatelessGates({
     settings: { panicMode, dlp: config.policy.dlp, toolIgnored: isIgnoredTool(toolName) },
-    file: () =>
-      manual
-        ? null
-        : evaluateProtectedFileAccess(
+    // Omitted for a manual call, as the hook skips the gate: no step is shown.
+    file: manual
+      ? undefined
+      : () =>
+          evaluateProtectedFileAccess(
             prepared.accesses,
             prepared,
             catalogSettingsFromConfig(config.settings, config.policy)

@@ -248,11 +248,12 @@ describe('explain shows the package check (fw#395)', () => {
     expect(stepOf(r)).toMatchObject({ outcome: 'skip' });
   });
 
-  it('a manual Terminal call skips the check, as the hook does', async () => {
+  it('a manual Terminal call skips the check and the file gate, as the hook does', async () => {
     runPackageCheck.mockResolvedValue(MALICIOUS);
     const r = await explainPolicy('bash', { command: 'pip install litellm==1.107.0' }, 'Terminal');
     expect(runPackageCheck).not.toHaveBeenCalled();
     expect(stepOf(r)).toBeUndefined();
+    expect(r.steps.find((s) => s.name === 'Protected file gate')).toBeUndefined();
   });
 
   it('the step sits right after the DLP step, in hook order', async () => {
