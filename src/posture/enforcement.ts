@@ -13,7 +13,7 @@ import { evaluatePolicy } from '../policy';
 import { getConfig } from '../config';
 import { getAgentWiring } from '../agent-wiring';
 import type { CheckContext, Coverage, Finding } from './types';
-import { isRecordOnly } from '@node9/policy-engine';
+import { isRecordOnly, levelOf } from '@node9/policy-engine';
 
 interface EnforceEnv {
   /** node9 is actually enforcing (not observe/audit) AND wired into an agent. */
@@ -127,7 +127,7 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
         if (isRecordOnly(mode) && f.fix?.includes('shield enable project-jail')) {
           f.fix =
             'node9 already recognises reads of these files, but it is in ' +
-            `${mode ?? 'audit'} mode, which logs them and lets them through. ` +
+            `${levelOf(mode)} mode, which logs them and lets them through. ` +
             'Fix it now: set mode to `standard` (or `strict`) to stop them.';
         }
       }

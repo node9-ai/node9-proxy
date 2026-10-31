@@ -30,7 +30,7 @@ import {
 const BLOCK_REASON_LABELS: Record<string, string> = {
   timeout: 'Approval timeout',
   'smart-rule-block': 'Smart rule',
-  'observe-mode-dlp-would-block': 'DLP (observe)',
+  'observe-mode-dlp-would-block': 'DLP (audit)',
   'persistent-deny': 'Persistent deny',
   'local-decision': 'User denied',
   'dlp-block': 'DLP block',
@@ -353,7 +353,7 @@ function renderTerminalReport(
   );
   summaryRow(
     observeDlp > 0 ? chalk.blue('👁') : chalk.dim('👁'),
-    'DLP (observe)',
+    'DLP (audit)',
     observeDlp,
     observeDlp > 0 ? 'would-block in strict mode' : undefined,
     observeDlp > 0 ? (s) => chalk.blue(s) : (s) => chalk.dim(s)
