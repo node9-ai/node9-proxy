@@ -12,6 +12,7 @@
 export const ENGINE_VERSION = '1.4.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
+export { derivedWrites, pipelineTexts, type DerivedWrite } from './shell/derived-writes';
 export {
   collectFileAccesses,
   evaluateProtectedFileAccess,

@@ -379,6 +379,8 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'actions.money',
   'actions.access',
   'actions.publish',
+  'actions.settings',
+  'actions.protected-branch',
 ]);
 
 /**

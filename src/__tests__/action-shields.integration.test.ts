@@ -177,3 +177,120 @@ describe.skipIf(process.platform === 'win32')('actions at the real gate', () => 
     expect(probe(h, 'mcp__acme_idp__reset_password', { user: 'u1' }).verdict).toBe('review');
   });
 });
+
+// node9Firewall#415 items 5 and 6 (step 6 of #416): settings and the main
+// branch through MCP tools, at the real gate. The Settings check and the Main
+// branch check are on by default (review) for every server.
+describe.skipIf(process.platform === 'win32')('settings and branches at the real gate', () => {
+  const FILES_OK = [{ path: 'README.md', content: 'x' }];
+  const WORKFLOW = [{ path: '.github/workflows/ci.yml', content: 'on: push' }];
+
+  it('a push straight to main is held by the Main branch check; to a feature branch it passes', () => {
+    const h = home();
+    const main = probe(h, 'mcp__github__push_files', {
+      owner: 'o',
+      repo: 'r',
+      branch: 'main',
+      files: FILES_OK,
+      message: 'm',
+    });
+    expect(main.error).toBeUndefined();
+    expect(main.verdict, main.stdout).toBe('review');
+    expect(main.stdout).toContain('Main branch check');
+    const feature = probe(h, 'mcp__github__push_files', {
+      owner: 'o',
+      repo: 'r',
+      branch: 'feature/x',
+      files: FILES_OK,
+      message: 'm',
+    });
+    expect(feature.verdict, feature.stdout).toBe('allow');
+  });
+
+  it('a workflow file on any branch is held, through `path` and through `files.*.path`', () => {
+    const h = home();
+    const single = probe(h, 'mcp__github__create_or_update_file', {
+      owner: 'o',
+      repo: 'r',
+      branch: 'feature/x',
+      path: '.github/workflows/deploy.yml',
+      content: 'x',
+      message: 'm',
+    });
+    expect(single.verdict, single.stdout).toBe('review');
+    const many = probe(h, 'mcp__github__push_files', {
+      owner: 'o',
+      repo: 'r',
+      branch: 'feature/x',
+      files: WORKFLOW,
+      message: 'm',
+    });
+    expect(many.verdict, many.stdout).toBe('review');
+    expect(many.stdout).toContain('CI configuration');
+  });
+
+  it('a merge is held; a read of a file passes', () => {
+    const h = home();
+    const merge = probe(h, 'mcp__github__merge_pull_request', {
+      owner: 'o',
+      repo: 'r',
+      pull_number: 7,
+    });
+    expect(merge.verdict, merge.stdout).toBe('review');
+    expect(
+      probe(h, 'mcp__github__get_file_contents', { owner: 'o', repo: 'r', path: 'x' }).verdict
+    ).toBe('allow');
+  });
+
+  it('settings: a deploy key, a repository made public, a mail filter that forwards', () => {
+    const h = home();
+    const key = probe(h, 'mcp__github__add_deploy_key', {
+      owner: 'o',
+      repo: 'r',
+      key: 'ssh-ed25519 AAAA',
+    });
+    expect(key.verdict, key.stdout).toBe('review');
+    expect(key.stdout).toContain('Settings check');
+    expect(
+      probe(h, 'mcp__github__update_repository', { owner: 'o', repo: 'r', private: false }).verdict
+    ).toBe('review');
+    expect(
+      probe(h, 'mcp__github__update_repository', { owner: 'o', repo: 'r', description: 'd' })
+        .verdict
+    ).toBe('allow');
+    const forward = probe(h, 'mcp__gmail__create_filter', {
+      criteria: { from: 'boss@corp.example' },
+      action: { forward: 'outside@evil.example' },
+    });
+    expect(forward.verdict, forward.stdout).toBe('review');
+    const label = probe(h, 'mcp__gmail__create_filter', {
+      criteria: { from: 'boss@corp.example' },
+      action: { addLabelIds: ['Label_1'] },
+    });
+    expect(label.verdict, label.stdout).toBe('allow');
+  });
+
+  it('an outside invite is held by the Accounts and access check', () => {
+    const h = home();
+    const guest = probe(h, 'mcp__slack__invite_guest', {
+      channel: 'C1',
+      email: 'x@outside.example',
+    });
+    expect(guest.verdict, guest.stdout).toBe('review');
+  });
+
+  it('the checks can be turned off', () => {
+    const h = home({ checks: { 'actions.protected-branch': 'off', 'actions.settings': 'off' } });
+    expect(
+      probe(h, 'mcp__github__push_files', {
+        owner: 'o',
+        repo: 'r',
+        branch: 'main',
+        files: FILES_OK,
+      }).verdict
+    ).toBe('allow');
+    expect(
+      probe(h, 'mcp__github__add_deploy_key', { owner: 'o', repo: 'r', key: 'k' }).verdict
+    ).toBe('allow');
+  });
+});

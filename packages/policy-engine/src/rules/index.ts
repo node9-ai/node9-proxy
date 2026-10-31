@@ -78,7 +78,32 @@ export function getNestedValue(obj: unknown, path: string): unknown {
   for (const seg of segments) {
     if (FORBIDDEN_PATH_SEGMENTS.has(seg)) return null;
   }
-  return segments.reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
+  return walkPath(obj, segments);
+}
+
+/**
+ * A `*` segment over an array reads the rest of the path from each element
+ * and joins the string and number results with newlines, so a `matches`
+ * condition with the `m` flag tests each one (`files.*.path`, the files of a
+ * push through an MCP tool; node9Firewall#415). Elsewhere `*` is a plain key.
+ */
+function walkPath(obj: unknown, segments: string[]): unknown {
+  let cur: unknown = obj;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg === '*' && Array.isArray(cur)) {
+      const rest = segments.slice(i + 1);
+      const parts: string[] = [];
+      for (const el of cur.slice(0, 256)) {
+        const v = rest.length === 0 ? el : walkPath(el, rest);
+        if (typeof v === 'string' || typeof v === 'number') parts.push(String(v));
+      }
+      return parts.length === 0 ? undefined : parts.join('\n');
+    }
+    if (cur === null || cur === undefined) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
 }
 
 /**

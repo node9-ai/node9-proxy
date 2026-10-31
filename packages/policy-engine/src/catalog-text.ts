@@ -109,6 +109,22 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     advice:
       'Keep Review. Set Log on a release machine whose pipeline publishes on purpose, never on a developer laptop.',
   },
+  'actions.settings': {
+    plain:
+      'The agent changes a setting that opens a door: a repository made public, a deploy key or webhook added, a CI secret written, branch protection changed, mail forwarded to another address, a public share link.',
+    example:
+      'add_deploy_key on the GitHub server, or create_filter with a forward address on the Gmail server',
+    advice:
+      'Keep Review. These changes are rare in ordinary work and hard to notice afterwards. Set Log only on a throwaway account.',
+  },
+  'actions.protected-branch': {
+    plain:
+      'The agent merges, commits straight to the main branch, or writes a CI workflow file through an app, without a pull request a person reviews.',
+    example:
+      'push_files to main, merge_pull_request, or create_or_update_file under .github/workflows',
+    advice:
+      'Keep Review. Work on a feature branch is never asked about. Set Log on a bot account whose job is to merge.',
+  },
   'commands.sudo': {
     plain: 'The agent runs a command as the administrator (root).',
     example: 'sudo apt-get install -y nginx',

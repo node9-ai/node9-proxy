@@ -16,10 +16,12 @@ import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
 import {
   notifyTaintPropagate,
+  notifyTaint,
   isDaemonRunning,
   notifyActivitySocket,
   notifySessionTaint,
   approveSessionExposure,
+  checkTaint,
 } from '../../auth/daemon';
 import { extractContentDestinations, classifyShellExposure } from '@node9/policy-engine';
 import { recordExposureSource } from '../../exposure/source';
@@ -54,7 +56,8 @@ import {
   frameToolOutputLeaves,
 } from '../../tool-output';
 import { hashArgs } from '../../audit/hasher';
-import { parseCpMvOp } from '../../utils/cp-mv-parser';
+import { derivedWrites } from '@node9/policy-engine';
+import { scanFilePath } from '../../dlp';
 import {
   extractToolName,
   extractToolInput,
@@ -337,10 +340,28 @@ export function registerLogCommand(program: Command): void {
             fs.mkdirSync(path.dirname(logPath), { recursive: true });
           fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
-          // Taint propagation: if the completed bash command was a cp or mv,
-          // forward taint from source to destination so a later network upload
-          // of the copy is still caught. Must be awaited before process.exit(0)
-          // — fire-and-forget would lose the propagation when the process exits.
+          // Validate cwd is absolute before passing to getConfig() — prevents path
+          // traversal via a crafted hook payload (e.g. cwd: "../../../../etc").
+          // A relative or empty cwd falls back to ambient process.cwd().
+          // Antigravity has no top-level cwd; workspacePaths[0] is the
+          // workspace root (mirrors check.ts).
+          const payloadCwd =
+            typeof payload.cwd === 'string'
+              ? payload.cwd
+              : Array.isArray(payload.workspacePaths) &&
+                  typeof payload.workspacePaths[0] === 'string'
+                ? payload.workspacePaths[0]
+                : undefined;
+          const safeCwd =
+            typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
+
+          // Taint across a copy (node9Firewall#415 item 2): a file the completed
+          // command wrote from a tainted file, or from a credential or protected
+          // file, carries that label until it leaves. Pairs come from the
+          // engine's own file-access listing, pipeline by pipeline (cp, mv,
+          // install, a redirect, a pipe, dd, tee), so a later upload of the copy
+          // is still caught. Must be awaited before process.exit(0): fire-and-
+          // forget would lose the record when the process exits.
           if ((tool === 'Bash' || tool === 'bash') && isDaemonRunning()) {
             const command =
               typeof rawInput === 'object' &&
@@ -350,20 +371,7 @@ export function registerLogCommand(program: Command): void {
                 ? ((rawInput as Record<string, unknown>).command as string)
                 : null;
             if (command) {
-              const op = parseCpMvOp(command);
-              // parseCpMvOp returns null for two distinct reasons:
-              //   1. Not a cp/mv command — no taint propagation needed (correct).
-              //   2. cp/mv that couldn't be safely parsed — e.g. env-prefixed
-              //      commands like `IFS=/ cp src dest`, glob patterns, shell
-              //      metacharacters, or multi-source invocations. In these cases
-              //      null is the safe/conservative choice: taint stays on the
-              //      source rather than propagating to a potentially wrong dest.
-              // Callers that need to distinguish the two cases should extend
-              // parseCpMvOp to return a reason code. For audit purposes here,
-              // both cases are equivalent: no propagation occurs.
-              if (op) {
-                await notifyTaintPropagate(op.src, op.dest, op.clearSource);
-              }
+              await carryTaintAcrossWrites(command, safeCwd);
             }
           }
 
@@ -400,21 +408,6 @@ export function registerLogCommand(program: Command): void {
               }
             }
           }
-
-          // Validate cwd is absolute before passing to getConfig() — prevents path
-          // traversal via a crafted hook payload (e.g. cwd: "../../../../etc").
-          // A relative or empty cwd falls back to ambient process.cwd().
-          // Antigravity has no top-level cwd; workspacePaths[0] is the
-          // workspace root (mirrors check.ts).
-          const payloadCwd =
-            typeof payload.cwd === 'string'
-              ? payload.cwd
-              : Array.isArray(payload.workspacePaths) &&
-                  typeof payload.workspacePaths[0] === 'string'
-                ? payload.workspacePaths[0]
-                : undefined;
-          const safeCwd =
-            typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
 
           // Config load runs AFTER the audit write — a config failure here is
           // non-fatal and must not retroactively gap the audit trail above. It is
@@ -775,4 +768,44 @@ export function registerLogCommand(program: Command): void {
         }, 500);
       }
     });
+}
+
+/** `~/x` and a relative path, as an absolute path the daemon can key on. */
+function absolutePathFor(spelled: string, cwd: string | undefined): string {
+  const expanded =
+    spelled === '~' || spelled.startsWith('~/')
+      ? path.join(os.homedir(), spelled.slice(1))
+      : spelled;
+  if (path.isAbsolute(expanded)) return expanded;
+  return cwd ? path.resolve(cwd, expanded) : path.resolve(expanded);
+}
+
+/**
+ * For every file the command wrote from another file: a tainted source hands
+ * its record to the target (a move clears the source); a credential or
+ * protected source (the DLP path scanner's judgement, the same the gate uses)
+ * starts a record of its own. Best effort: the daemon may be gone.
+ */
+export async function carryTaintAcrossWrites(
+  command: string,
+  cwd: string | undefined
+): Promise<void> {
+  let pairs;
+  try {
+    pairs = derivedWrites(command, { cwd });
+  } catch {
+    return;
+  }
+  for (const { source, target, move } of pairs.slice(0, 64)) {
+    const src = absolutePathFor(source, cwd);
+    const dst = absolutePathFor(target, cwd);
+    if (src === dst) continue;
+    const tainted = await checkTaint([src]);
+    if (tainted.tainted && tainted.record) {
+      await notifyTaintPropagate(src, dst, move);
+      continue;
+    }
+    const sensitive = scanFilePath(src, cwd);
+    if (sensitive) await notifyTaint(dst, `copy:${sensitive.patternName}:${path.basename(src)}`);
+  }
 }

@@ -3,6 +3,7 @@
 import { randomUUID } from 'crypto';
 import { resolveLinkedServer } from '../apps/state';
 import os from 'os';
+import path from 'path';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import {
@@ -263,6 +264,16 @@ function isWriteTool(toolName: string): boolean {
  *  Same shape the hook and the gateway use to extract the server name. */
 function isMcpToolName(toolName: string): boolean {
   return /^mcp__[^_](?:[^_]|_(?!_))*?__/i.test(toolName);
+}
+
+/** `~/x` and a relative path as an absolute path (the daemon keys taint by real path). */
+function absoluteUploadPath(spelled: string, cwd: string | undefined): string {
+  const expanded =
+    spelled === '~' || spelled.startsWith('~/')
+      ? path.join(os.homedir(), spelled.slice(1))
+      : spelled;
+  if (path.isAbsolute(expanded)) return expanded;
+  return cwd && path.isAbsolute(cwd) ? path.resolve(cwd, expanded) : expanded;
 }
 
 /**
@@ -791,10 +802,23 @@ export async function _authorizeHeadlessCore(
   // Taint is heuristic (a file *may* still be sensitive); hard blocks are
   // reserved for team policy shields.
   let taintWarning: string | null = null;
-  if (shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command)) {
-    const filePaths = extractFilePaths(toolName, args, shellInput.command);
+  const uploadsAFile = fileAccess.accesses.some((a) => a.upload);
+  if (
+    shellInput.kind === 'shell' &&
+    (NETWORK_COMMAND_RE.test(shellInput.command) || uploadsAFile)
+  ) {
+    // The regex readings plus the engine's own upload listing (`curl -F
+    // name=@F`, `-d @F`, `--json @F`, HTTPie, scp, rsync, `nc < F`), each as
+    // an absolute path: the daemon keys its records by real path, and a
+    // relative spelling would otherwise resolve against the daemon's cwd
+    // (node9Firewall#415 item 2).
+    const uploaded = fileAccess.accesses.filter((a) => a.upload).map((a) => a.path);
+    const spelledPaths = extractFilePaths(toolName, args, shellInput.command);
+    const filePaths = [...new Set([...spelledPaths, ...uploaded])];
     if (filePaths.length > 0) {
-      const taintResult = await checkTaint(filePaths);
+      const taintResult = await checkTaint(
+        filePaths.map((p) => absoluteUploadPath(p, options?.cwd))
+      );
       if (taintResult.tainted && taintResult.record) {
         const {
           path: taintedPath,
@@ -842,12 +866,15 @@ export async function _authorizeHeadlessCore(
             };
           }
         }
-      } else if (taintResult.daemonUnavailable) {
+      } else if (taintResult.daemonUnavailable && spelledPaths.length > 0) {
         // Taint service is down — cannot confirm files are clean.
         // Treat as a soft taint: the user sees a warning and must explicitly
         // approve. This prevents a daemon crash from silently unblocking
-        // exfiltration checks.
-        taintWarning = `⚠️ Taint service unavailable — cannot verify if ${filePaths.join(', ')} is clean`;
+        // exfiltration checks. Only for the upload spellings this guard has
+        // always read: the engine's wider listing (a form upload, scp) joins
+        // the check when the daemon answers, and does not turn every upload
+        // into a hold while it is down.
+        taintWarning = `⚠️ Taint service unavailable — cannot verify if ${spelledPaths.join(', ')} is clean`;
       }
     }
   }

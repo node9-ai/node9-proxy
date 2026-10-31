@@ -55,7 +55,7 @@ describe('action templates: every tool rule meets both spellings and no read', (
   for (const name of TEMPLATES) {
     const rules = ACTION_TEMPLATES[name];
     it(`${name} has the template shape`, () => {
-      expect(rules.length).toBeGreaterThan(4);
+      expect(rules.length).toBeGreaterThanOrEqual(3);
       for (const r of rules) {
         expect(r.name, name).toMatch(new RegExp(`^shield:${name}:review-`));
         expect(r.verdict, r.name).toBe('review');
@@ -65,7 +65,9 @@ describe('action templates: every tool rule meets both spellings and no read', (
     const toolRules = rules.filter((r) => typeof r.tool === 'string' && r.tool !== 'bash');
     for (const r of toolRules) {
       it(`${r.name} matches its tools bare and namespaced`, () => {
-        expect(r.conditions).toEqual([]);
+        // A template rule asks on the whole tool, or narrows by an argument
+        // field (a push to main, a filter that forwards); never by `command`.
+        for (const c of r.conditions) expect(c.field, r.name).not.toBe('command');
         for (const tool of toolsOf(r.tool as string)) {
           expect(toolMatchesRule(tool, r.tool), tool).toBe(true);
           expect(toolMatchesRule(`mcp__stripe__${tool}`, r.tool), tool).toBe(true);

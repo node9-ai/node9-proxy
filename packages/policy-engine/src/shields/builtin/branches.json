@@ -1,0 +1,75 @@
+{
+  "name": "branches",
+  "description": "Asks before a merge, a commit straight to the main branch, or a CI configuration file written through an app. Branch work on a feature branch is never asked about.",
+  "aliases": ["protected-branch"],
+  "smartRules": [
+    {
+      "name": "shield:branches:review-merge",
+      "tool": "{,mcp__*__}{merge_pull_request,merge_pr,merge_merge_request,accept_merge_request,squash_merge_pull_request,rebase_merge_pull_request,enable_auto_merge,enable_pull_request_auto_merge,merge_branch}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This merges into a shared branch. node9 asks before a merge, whatever the request said (Branches shield)."
+    },
+    {
+      "name": "shield:branches:review-push-main",
+      "tool": "{,mcp__*__}{push_files,create_or_update_file,delete_file,commit_files,create_commit,update_file_contents,push_commit}",
+      "conditions": [
+        {
+          "field": "branch",
+          "op": "matches",
+          "value": "^(?:refs/heads/)?(?:main|master|trunk|production|prod|release|stable)$",
+          "flags": "i"
+        },
+        {
+          "field": "ref",
+          "op": "matches",
+          "value": "^(?:refs/heads/)?(?:main|master|trunk|production|prod|release|stable)$",
+          "flags": "i"
+        },
+        {
+          "field": "target_branch",
+          "op": "matches",
+          "value": "^(?:refs/heads/)?(?:main|master|trunk|production|prod|release|stable)$",
+          "flags": "i"
+        },
+        {
+          "field": "base",
+          "op": "matches",
+          "value": "^(?:refs/heads/)?(?:main|master|trunk|production|prod|release|stable)$",
+          "flags": "i"
+        }
+      ],
+      "conditionMode": "any",
+      "verdict": "review",
+      "reason": "This commits straight to the main branch. node9 asks before the main branch changes without a pull request (Branches shield)."
+    },
+    {
+      "name": "shield:branches:review-ci-file",
+      "tool": "{,mcp__*__}{push_files,create_or_update_file,delete_file,commit_files,create_commit,update_file_contents,push_commit}",
+      "conditions": [
+        {
+          "field": "path",
+          "op": "matches",
+          "value": "(?:^|/)(?:\\.github/(?:workflows|actions)/|\\.gitlab-ci\\.ya?ml$|\\.circleci/|Jenkinsfile$|azure-pipelines\\.ya?ml$|bitbucket-pipelines\\.ya?ml$|\\.travis\\.ya?ml$)",
+          "flags": "im"
+        },
+        {
+          "field": "file_path",
+          "op": "matches",
+          "value": "(?:^|/)(?:\\.github/(?:workflows|actions)/|\\.gitlab-ci\\.ya?ml$|\\.circleci/|Jenkinsfile$|azure-pipelines\\.ya?ml$|bitbucket-pipelines\\.ya?ml$|\\.travis\\.ya?ml$)",
+          "flags": "im"
+        },
+        {
+          "field": "files.*.path",
+          "op": "matches",
+          "value": "(?:^|/)(?:\\.github/(?:workflows|actions)/|\\.gitlab-ci\\.ya?ml$|\\.circleci/|Jenkinsfile$|azure-pipelines\\.ya?ml$|bitbucket-pipelines\\.ya?ml$|\\.travis\\.ya?ml$)",
+          "flags": "im"
+        }
+      ],
+      "conditionMode": "any",
+      "verdict": "review",
+      "reason": "This writes a CI configuration file (a workflow) through an app; a workflow runs with the repository's secrets. node9 asks before CI configuration changes (Branches shield)."
+    }
+  ],
+  "dangerousWords": []
+}
