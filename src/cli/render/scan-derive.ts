@@ -272,3 +272,12 @@ export function relativeDate(timestamp: string, now: Date = new Date()): string 
   if (days > 90) return '90d+';
   return `${days}d`;
 }
+
+/** The same distance as a phrase that already carries "ago", so a caller
+ *  never prints "today ago" (fw#421 item 3). */
+export function relativeAgo(timestamp: string, now: Date = new Date()): string {
+  const rel = relativeDate(timestamp, now);
+  if (rel === '?' || rel === 'today') return rel;
+  if (rel === '1d') return 'yesterday';
+  return `${rel} ago`;
+}
