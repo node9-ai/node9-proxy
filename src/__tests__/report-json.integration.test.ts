@@ -80,7 +80,7 @@ describe('node9 report --json', () => {
     const env = parsed as Record<string, unknown>;
     expect(env.schemaVersion).toBe(1);
     expect(typeof env.generatedAt).toBe('string');
-    expect(env.period).toBe('7d');
+    expect(env.period).toBe('30d'); // fw#421 decision 4: the default window is 30 days
     expect(env.range).toMatchObject({
       start: expect.any(String),
       end: expect.any(String),

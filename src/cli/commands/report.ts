@@ -85,7 +85,7 @@ export function registerReportCommand(program: Command): void {
   program
     .command('report')
     .description('Activity and security report — what Claude did, what was blocked')
-    .option('--period <period>', 'today | 7d | 30d | month', '7d')
+    .option('--period <period>', 'today | 7d | 30d | 90d | month', '30d')
     .option('--no-tests', 'exclude test runner calls (npm test, vitest, pytest…) from stats')
     .option('--json', 'Emit machine-readable JSON to stdout (suppresses renderer)')
     .action((options: { period: string; tests: boolean; json?: boolean }) => {
