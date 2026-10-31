@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -181,5 +182,105 @@ describe('node9 explain --json', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain(SECRET_PART);
     expect(JSON.parse(r.stdout).input).toContain('[node9-redacted:');
+  });
+});
+
+// node9Firewall#405: explain runs the hook's stateless gates in the hook's
+// order. Each row below proves the built CLI runs the gate (not a skip step
+// that would print the same whether or not the check ran): a malicious
+// package from a seeded local OSV index, with no network; the PII gate; the
+// inline-code check honouring its value at Soft.
+
+function makeHome(config: Record<string, unknown>): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-explain-gates-'));
+  fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.node9', 'config.json'), JSON.stringify(config));
+  return home;
+}
+
+/** A local OSV index with one MAL record covering every version of `name`. */
+function seedOsvIndex(home: string, name: string): void {
+  const dir = path.join(home, '.node9', 'osv', 'npm');
+  fs.mkdirSync(path.join(dir, 'shards'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'meta.json'),
+    JSON.stringify({
+      syncedAt: new Date().toISOString(),
+      lastModifiedMs: Date.now(),
+      records: 1,
+      mode: 'full',
+    })
+  );
+  const key = name.toLowerCase();
+  const shard = createHash('sha1').update(key).digest('hex').slice(0, 2);
+  fs.writeFileSync(
+    path.join(dir, 'shards', `${shard}.json`),
+    JSON.stringify({ [key]: [{ id: 'MAL-0000-node9-test', all: true }] })
+  );
+}
+
+const homeEnv = (home: string) => ({ HOME: home, USERPROFILE: home });
+
+describe('node9 explain runs the gates the hook runs (node9Firewall#405)', () => {
+  it('a malicious package in the local index is BLOCK before the engine, offline', () => {
+    const home = makeHome({
+      policy: { packageCheck: { newPackage: 'off', installScript: 'off', onlineFallback: false } },
+    });
+    seedOsvIndex(home, 'node9-test-only-malicious-pkg');
+    const r = run(['bash', 'npm install node9-test-only-malicious-pkg@1.0.0', '--json'], {
+      env: homeEnv(home),
+    });
+    expect(r.status).toBe(0);
+    const doc = JSON.parse(r.stdout);
+    expect(doc.decision).toBe('block');
+    expect(doc.reason).toContain('Package Check');
+    expect(doc.steps).toContainEqual(
+      expect.objectContaining({ name: 'Package check', outcome: 'block', final: true })
+    );
+    expect(doc.steps).toContainEqual(
+      expect.objectContaining({ name: 'Engine verdict (authoritative)', outcome: 'skip' })
+    );
+    expect(JSON.stringify(doc.steps)).toContain('MAL-0000-node9-test');
+  });
+
+  it('the PII gate is shown and stops the call; off, the same call is allowed', () => {
+    // A Luhn-valid test card number, built from parts.
+    const card = ['4111', '1111', '1111', '1111'].join(' ');
+    const on = run(['bash', `echo ${card} > out.txt`, '--json'], { env: homeEnv(makeHome({})) });
+    expect(on.status).toBe(0);
+    const onDoc = JSON.parse(on.stdout);
+    expect(onDoc.decision).toBe('block');
+    expect(onDoc.reason).toContain('PII');
+    expect(onDoc.steps).toContainEqual(
+      expect.objectContaining({ name: 'PII gate', outcome: 'block', final: true })
+    );
+    expect(onDoc.steps).toContainEqual(
+      expect.objectContaining({ name: 'Package check', outcome: 'skip' })
+    );
+
+    const off = run(['bash', `echo ${card} > out.txt`, '--json'], {
+      env: homeEnv(makeHome({ policy: { dlp: { pii: 'off' } } })),
+    });
+    const offDoc = JSON.parse(off.stdout);
+    expect(offDoc.decision).toBe('allow');
+    expect(offDoc.steps).toContainEqual(
+      expect.objectContaining({ name: 'PII gate', outcome: 'skip' })
+    );
+  });
+
+  it('at Soft, dangerous inline code is logged, not shown as a stop above an allow', () => {
+    const script = 'python3 -c \'import os; os.remove("/var/tmp/x")\'';
+    const soft = run(['bash', script, '--json'], {
+      env: homeEnv(makeHome({ settings: { mode: 'soft' } })),
+    });
+    const doc = JSON.parse(soft.stdout);
+    expect(doc.decision).toBe('allow');
+    const inline = doc.steps.find((s: { name: string }) => s.name === 'Inline execution');
+    expect(inline).toMatchObject({ outcome: 'allow' });
+    expect(inline.final).not.toBe(true);
+    expect(doc.steps.filter((s: { final?: boolean }) => s.final).length).toBeLessThanOrEqual(1);
+
+    const standard = run(['bash', script, '--json'], { env: homeEnv(makeHome({})) });
+    expect(JSON.parse(standard.stdout).decision).toBe('review');
   });
 });

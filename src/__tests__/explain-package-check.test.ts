@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PackageCheckResult } from '../supply-chain/check';
-import type { PolicyVerdict } from '@node9/policy-engine';
+import type { PolicyVerdict, DlpMatch } from '@node9/policy-engine';
 
 let engineOverride: PolicyVerdict | null = null;
 vi.mock('@node9/policy-engine', async () => {
@@ -31,6 +31,16 @@ vi.mock('../supply-chain/check', async () => {
   const actual =
     await vi.importActual<typeof import('../supply-chain/check')>('../supply-chain/check');
   return { ...actual, runPackageCheck: (...a: unknown[]) => runPackageCheck(...a) };
+});
+
+let dlpOverride: DlpMatch | null = null;
+vi.mock('../dlp', async () => {
+  const actual = await vi.importActual<typeof import('../dlp')>('../dlp');
+  return {
+    ...actual,
+    scanArgumentSecrets: (...a: Parameters<typeof actual.scanArgumentSecrets>) =>
+      dlpOverride ?? actual.scanArgumentSecrets(...a),
+  };
 });
 
 const packageCheckOverride: { enabled?: boolean } = {};
@@ -78,6 +88,7 @@ beforeEach(() => {
   runPackageCheck.mockReset();
   delete packageCheckOverride.enabled;
   engineOverride = null;
+  dlpOverride = null;
 });
 
 describe('explain shows the package check (fw#395)', () => {
@@ -164,18 +175,39 @@ describe('explain shows the package check (fw#395)', () => {
     }
   );
 
-  it('a DLP block the engine reports returns before the package check', async () => {
+  it('a DLP block returns before the package check, as in the hook', async () => {
     runPackageCheck.mockResolvedValue(MALICIOUS);
-    engineOverride = {
-      decision: 'block',
-      blockedByLabel: 'DLP: test-only secret',
-      checkId: 'data.secrets',
-      reason: 'test-only secret',
-    } as PolicyVerdict;
+    dlpOverride = {
+      patternName: 'Test-only secret',
+      fieldPath: 'command',
+      redactedSample: 'test-***',
+      severity: 'block',
+    };
     const r = await explainPolicy('bash', { command: 'pip install litellm==1.107.0' });
     expect(runPackageCheck).not.toHaveBeenCalled();
-    expect(r.blockedByLabel).toBe('DLP: test-only secret');
+    expect(r.decision).toBe('block');
+    expect(r.blockedByLabel).toBe('🚨 Node9 DLP (Secret Detected)');
     expect(stepOf(r)?.detail).toContain('DLP');
+    expect(r.steps.find((s) => s.name === 'DLP Content Scanner')).toMatchObject({
+      outcome: 'block',
+      isFinal: true,
+    });
+  });
+
+  it('the PII gate returns before the package check, and the step says so (node9Firewall#405)', async () => {
+    runPackageCheck.mockResolvedValue(MALICIOUS);
+    // A Luhn-valid test card number, built from parts.
+    const card = ['4111', '1111', '1111', '1111'].join(' ');
+    const r = await explainPolicy('bash', { command: `pip install litellm==1.107.0 # ${card}` });
+    expect(runPackageCheck).not.toHaveBeenCalled();
+    expect(r.decision).toBe('block');
+    expect(r.blockedByLabel).toBe('🔒 Node9 PII (Detected)');
+    expect(r.steps.find((s) => s.name === 'PII gate')).toMatchObject({
+      outcome: 'block',
+      isFinal: true,
+    });
+    expect(stepOf(r)).toMatchObject({ outcome: 'skip' });
+    expect(stepOf(r)?.detail).toContain('PII');
   });
 
   it('lookup misses are shown, and the decision follows the verdict (fail open)', async () => {
@@ -228,6 +260,8 @@ describe('explain shows the package check (fw#395)', () => {
     const r = await explainPolicy('bash', { command: 'pip install requests' });
     const names = r.steps.map((s) => s.name);
     const dlp = names.indexOf('DLP Content Scanner');
-    expect(names.indexOf('Package check')).toBe(dlp + 1);
+    // The PII gate sits between them, as in the hook (node9Firewall#405).
+    expect(names.indexOf('PII gate')).toBe(dlp + 1);
+    expect(names.indexOf('Package check')).toBe(dlp + 2);
   });
 });
