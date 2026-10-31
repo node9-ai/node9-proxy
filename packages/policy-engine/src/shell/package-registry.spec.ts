@@ -25,6 +25,9 @@ describe('extractRegistryOverrides', () => {
     ['uv add with a named index', 'uv add --index mine=https://r.example.test/simple x'],
     ['uv tool install', 'uv tool install --index-url https://r.example.test/simple x'],
     ['pipenv', 'pipenv install -i https://r.example.test/simple x'],
+    // Release review: pip's short flags with the URL attached.
+    ['pip -i attached', 'pip install -ihttps://r.example.test/simple requests'],
+    ['pip -f attached', 'pip install -fhttps://r.example.test/wheels x'],
     ['inside sh -c', 'sh -c "npm i --registry https://r.example.test x"'],
     ['behind sudo', 'sudo npm i -g --registry https://r.example.test x'],
     [

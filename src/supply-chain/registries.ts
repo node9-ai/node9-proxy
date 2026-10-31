@@ -5,10 +5,14 @@
 // user already set up is not unknown. "Set up" means what the package
 // managers themselves read: the npm, yarn and bun config files, pip's and
 // uv's config files, the project's pyproject.toml / Pipfile sources, and the
-// variables those tools read from the environment the agent runs in. Every
-// http(s) URL on a registry, index, source or mirror line counts; the file
-// formats are not parsed beyond that, since a URL on such a line is a
-// registry the user wrote down.
+// variables those tools read from the environment the agent runs in. A URL
+// counts when its key names a registry or an index (`registry=`,
+// `index-url =`, `npmRegistryServer:`), when it is a `url` inside a section
+// that declares one (`[[tool.uv.index]]`, `[[tool.poetry.source]]`, Pipfile's
+// `[[source]]`, bunfig's `[install.scopes]`), or when it continues such a key
+// on an indented line (pip's multi-line `extra-index-url`). A project's own
+// links (`[project.urls] Source = "https://gitlab.com/…"`) are not
+// registries: counting them let any package on that host in.
 //
 // Known limit: a registry the agent writes into one of these files in an
 // earlier call is "configured" by then. The package manager reads the file
@@ -59,7 +63,10 @@ const PATH_VARS = [
   'VIRTUAL_ENV',
   'UV_CONFIG_FILE',
 ];
-const REGISTRY_LINE_RE = /registry|index|url|source|mirror|find-links/i;
+/** Keys that name a registry or an index. */
+const REGISTRY_KEY_RE = /registry|index|find-links|mirror/i;
+/** Sections whose keys (`url = …`, `myorg = { url = … }`) declare a registry. */
+const REGISTRY_SECTION_RE = /index|source|registr|scopes|mirror/i;
 const URL_RE = /https?:\/\/[^\s"'<>,;]+/gi;
 
 function userFiles(home: string, env: NodeJS.ProcessEnv): string[] {
@@ -93,10 +100,39 @@ function projectFiles(cwd: string | undefined): string[] {
   return out;
 }
 
+/** The key of a config line: before `=` (ini, toml, .npmrc, where `@scope:
+ *  registry=` keeps its colon), else before `:` (yaml). */
+function keyOf(line: string): string | null {
+  const eq = line.indexOf('=');
+  if (eq > 0) return line.slice(0, eq).trim();
+  const colon = line.search(/:\s/);
+  return colon > 0 ? line.slice(0, colon).trim() : null;
+}
+
 function hostsInText(text: string, out: Set<string>): void {
+  let section = '';
+  let continues = false;
   for (const line of text.split(/\r?\n/)) {
     const t = line.trim();
-    if (t.startsWith('#') || t.startsWith(';') || !REGISTRY_LINE_RE.test(t)) continue;
+    if (!t || t.startsWith('#') || t.startsWith(';')) continue;
+    if (t.startsWith('[')) {
+      section = t.replace(/^\[+|\]+$/g, '').trim();
+      continues = false;
+      continue;
+    }
+    let counts: boolean;
+    if (/^\s/.test(line) && continues && /^["']?https?:/i.test(t)) {
+      counts = true;
+    } else {
+      const key = keyOf(t);
+      const projectLinks = /(?:^|\.)urls$/i.test(section);
+      counts =
+        key !== null &&
+        !projectLinks &&
+        (REGISTRY_KEY_RE.test(key) || REGISTRY_SECTION_RE.test(section));
+      continues = counts;
+    }
+    if (!counts) continue;
     for (const m of t.matchAll(URL_RE)) {
       const host = registryHost(m[0]);
       if (host) out.add(host);

@@ -98,9 +98,12 @@ const NPM_VARS =
   /^(?:npm_config_registry|NPM_CONFIG_REGISTRY|YARN_REGISTRY|YARN_NPM_REGISTRY_SERVER|BUN_CONFIG_REGISTRY)$/;
 const PIP_VARS =
   /^(?:PIP_INDEX_URL|PIP_EXTRA_INDEX_URL|PIP_FIND_LINKS|UV_INDEX_URL|UV_EXTRA_INDEX_URL|UV_INDEX|UV_DEFAULT_INDEX|PIPENV_PYPI_MIRROR)$/;
-// Narrow on purpose: `rm -f` and `index.js` must not wake the walk.
+// Narrow on purpose: `rm -f` and `index.js` must not wake the walk. pip's
+// short flags take the value attached too (`-ihttps://…`).
 const PRESCREEN_RE =
-  /--registry|index-url|--index\b|--default-index|find-links|\s-[if]\s|npm_config_registry|_REGISTRY|PIP_|UV_(?:INDEX|DEFAULT)|PIPENV_PYPI/i;
+  /--registry|index-url|--index\b|--default-index|find-links|\s-[if](?:\s|https?:)|npm_config_registry|_REGISTRY|PIP_|UV_(?:INDEX|DEFAULT)|PIPENV_PYPI/i;
+/** pip's `-i` / `-f` with the URL attached: `-ihttps://host/simple`. */
+const PIP_ATTACHED_RE = /^-([if])(https?:\/\/.+)$/i;
 const MAX_PAYLOAD_DEPTH = 4;
 
 /**
@@ -226,6 +229,11 @@ function fromCall(
   for (let i = 0; i < runnerEnd(manager, rest, valued); i++) {
     const w = rest[i];
     if (w === null) continue;
+    const attached = npm ? null : PIP_ATTACHED_RE.exec(w);
+    if (attached) {
+      push(out, manager, `-${attached[1]}`, attached[2]);
+      continue;
+    }
     const eq = w.indexOf('=');
     const flag = eq > 0 && w.startsWith('--') ? w.slice(0, eq) : w;
     if (!flags.has(flag)) continue;

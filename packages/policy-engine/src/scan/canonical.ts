@@ -771,6 +771,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // `python3 - <<'PY'` is a finding again. And two new findings
 // (node9Firewall#415): block-reverse-shell and review-env-exfil, from
 // shell/outbound.ts as the gate reads them. Histories scanned under v32 re-read.
+// Folded into v33 before it shipped (release review): the attached `nc
+// -e/bin/sh` and `/proc/$$/environ` (its pid a variable) are found, and
+// `declare -f` is no longer read as the environment.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
@@ -831,7 +834,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '70cbfceb6c872d02';
+export const CANONICAL_EXTRACTOR_HASH = '7ee8bbd5101ddc6c';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
