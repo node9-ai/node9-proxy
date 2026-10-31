@@ -247,16 +247,19 @@ import type { ScanResult } from '../../cli/commands/scan.js';
  *             scan-derived panels render a loading placeholder while
  *             non-scan panels render normally
  *   ready   — walk finished. results.{claude,gemini,codex} hold full
- *             ScanResult triples; period filtering is in-memory after this
+ *             one ScanResult per agent; period filtering is in-memory after this
  *   error   — walk threw; scan-derived panels render an error state with
  *             [r] retry hint
  */
+/** The agents the dashboard's history walk reads: the same five `node9 scan` reads. */
+export type ScanWalkAgent = 'claude' | 'gemini' | 'codex' | 'copilot' | 'antigravity';
+
 export type ScanCache =
   | { status: 'idle' }
   | { status: 'loading' }
   | {
       status: 'ready';
-      results: { claude: ScanResult; gemini: ScanResult; codex: ScanResult };
+      results: Record<ScanWalkAgent, ScanResult>;
       /** ms epoch when the walk finished — used to invalidate on [r] refresh. */
       readyAt: number;
     }

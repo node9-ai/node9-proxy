@@ -83,35 +83,24 @@ export function filterScanByPeriod(
     return t >= startMs && t <= endMs;
   };
 
-  // Combine the three agent slots into single arrays. ScanResult shapes are
-  // identical across agents, so concat is safe.
-  const allLeaks: DlpFinding[] = [
-    ...ready.results.claude.dlpFindings,
-    ...ready.results.gemini.dlpFindings,
-    ...ready.results.codex.dlpFindings,
-  ].filter((f) => inPeriod(f.timestamp));
+  // Combine the agent slots into single arrays. ScanResult shapes are
+  // identical across agents, so concat is safe; every slot counts (fw#421).
+  const slots = Object.values(ready.results);
+  const allLeaks: DlpFinding[] = slots
+    .flatMap((r) => r.dlpFindings)
+    .filter((f) => inPeriod(f.timestamp));
 
-  const allLoops: LoopFinding[] = [
-    ...ready.results.claude.loopFindings,
-    ...ready.results.gemini.loopFindings,
-    ...ready.results.codex.loopFindings,
-  ].filter((f) => inPeriod(f.timestamp));
+  const allLoops: LoopFinding[] = slots
+    .flatMap((r) => r.loopFindings)
+    .filter((f) => inPeriod(f.timestamp));
 
-  const allFindings: Finding[] = [
-    ...ready.results.claude.findings,
-    ...ready.results.gemini.findings,
-    ...ready.results.codex.findings,
-  ].filter((f) => inPeriod(f.timestamp));
+  const allFindings: Finding[] = slots
+    .flatMap((r) => r.findings)
+    .filter((f) => inPeriod(f.timestamp));
 
-  const totalToolCalls =
-    ready.results.claude.totalToolCalls +
-    ready.results.gemini.totalToolCalls +
-    ready.results.codex.totalToolCalls;
+  const totalToolCalls = slots.reduce((n, r) => n + r.totalToolCalls, 0);
 
-  const sessionsWithEarlySecrets =
-    ready.results.claude.sessionsWithEarlySecrets +
-    ready.results.gemini.sessionsWithEarlySecrets +
-    ready.results.codex.sessionsWithEarlySecrets;
+  const sessionsWithEarlySecrets = slots.reduce((n, r) => n + r.sessionsWithEarlySecrets, 0);
 
   return {
     leaks: allLeaks,
