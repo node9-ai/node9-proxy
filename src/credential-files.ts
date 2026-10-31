@@ -48,6 +48,5 @@ export function homeCredentialFiles(home: string): CredentialFile[] {
     f(['.docker', 'config.json'], 'Docker registry auth tokens', 10),
     f(['.netrc'], 'FTP/HTTP credentials in plain text', 15),
     f(['.npmrc'], 'npm auth token: can publish packages as you', 10),
-    f(['.node9', 'credentials.json'], 'Node9 cloud API key', 10),
   ];
 }
