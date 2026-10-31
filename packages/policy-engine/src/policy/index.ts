@@ -169,6 +169,10 @@ export interface PolicyHostHooks {
    *  this registry host (node9Firewall#415 item 4). Absent: only the public
    *  registries and the machine itself count as configured. */
   isConfiguredRegistry?: (host: string, cwd?: string) => boolean;
+  /** True when `dir` (relative to `cwd`) is the top of a git work tree: it
+   *  holds a `.git` entry. Decides `git -C <dir> add .` (node9Firewall#413).
+   *  Absent, or no cwd: the stage-all finding stands. */
+  isGitWorkTreeTop?: (dir: string, cwd: string) => boolean;
 }
 
 export interface PolicyVerdict {
@@ -513,7 +517,7 @@ async function evaluatePolicyCore(
   hooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
   const { agent, cwd, activeEnvironment } = context;
-  const { checkProvenance, isTrustedHost, isConfiguredRegistry } = hooks;
+  const { checkProvenance, isTrustedHost, isConfiguredRegistry, isGitWorkTreeTop } = hooks;
   const settingsView = catalogSettings(config);
   const layers = inspectionLayers(config.policy);
   // ONE reader for every built-in site: the check's value in force.
@@ -790,6 +794,14 @@ async function evaluatePolicyCore(
         const action = cv(id);
         const finding = action === 'off' ? undefined : git.findings.find((f) => f.checkId === id);
         if (!finding) continue;
+        // `git -C <dir> add .` stages the whole tree only if <dir> is its top.
+        if (
+          finding.ifWorkTreeTop !== undefined &&
+          isGitWorkTreeTop &&
+          cwd &&
+          !isGitWorkTreeTop(finding.ifWorkTreeTop, cwd)
+        )
+          continue;
         const v = applyCheckValue(action, {
           decision: 'review',
           blockedByLabel: `Node9 (AST): ${finding.ruleName}`,

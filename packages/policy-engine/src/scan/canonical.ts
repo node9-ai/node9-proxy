@@ -783,6 +783,10 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // no longer fires on core.hooksPath set to a directory inside the tree
 // (`.githooks`), and review-git-stage-all reads `git -C sub add .` as `sub`
 // only. Histories scanned under v34 re-read.
+// Folded into v35 before it shipped (code review): core.hooksPath set to the
+// root of the tree (`.`) or to `.git` is a bypass again; a `-C {}` filled in
+// at run time is dynamic; `git -C <dir> add .` is a finding that holds unless
+// the host finds <dir> is not a work-tree top (the scan keeps it).
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v35';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
@@ -843,7 +847,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v35';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '756be23235a1fbf3';
+export const CANONICAL_EXTRACTOR_HASH = '3b56e19906016767';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

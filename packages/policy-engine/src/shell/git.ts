@@ -52,6 +52,15 @@ export interface GitFinding {
   description: string;
   /** The invocation as resolved, for the reason and the explain trace. */
   shown: string;
+  /**
+   * A stage-all finding that holds only if this directory (as written after
+   * `-C`, relative to where the command runs) is the top of a work tree:
+   * `git -C sub add .` stages `sub` alone, `git -C myapp add .` run from the
+   * folder above the repository stages all of it. The command cannot tell
+   * them apart; a host that knows the working directory asks the disk, and
+   * without an answer the finding stands (node9Firewall#413).
+   */
+  ifWorkTreeTop?: string;
 }
 
 export interface GitAnalysis {
@@ -362,7 +371,9 @@ class GitWalk {
           i++;
           value = i < rest.length ? rest[i] : null;
         }
-        if (name === '-C') chdir.push(value);
+        // `xargs -I{} git -C {} …`, `find -exec git -C {} …`: the directory
+        // is filled in at run time, so it is dynamic.
+        if (name === '-C') chdir.push(viaXargs || (value ?? '').includes('{}') ? null : value);
         if (name === '-c' && value !== null) {
           const ceq = value.indexOf('=');
           const key = (ceq > 0 ? value.slice(0, ceq) : value).toLowerCase();
@@ -401,7 +412,7 @@ class GitWalk {
     const fromConfig = config.get(`alias.${subWord.toLowerCase()}`);
     const alias = fromConfig !== undefined ? fromConfig : this.aliases.get(subWord);
     if (alias !== undefined && !fromAlias) {
-      this.expandAlias(subWord, alias, args, env, depth, 0, shown);
+      this.expandAlias(subWord, alias, args, env, depth, 0, shown, chdir);
       return;
     }
     inv.sub = subWord;
@@ -416,10 +427,18 @@ class GitWalk {
     env: Map<string, string | null>,
     depth: number,
     level: number,
-    shown: string
+    shown: string,
+    chdir: (string | null)[]
   ): void {
     if (value === null) {
-      this.emit({ sub: null, args, config: new Map(), env, shown: `${shown} (alias ${name})` });
+      this.emit({
+        sub: null,
+        args,
+        config: new Map(),
+        env,
+        shown: `${shown} (alias ${name})`,
+        chdir,
+      });
       return;
     }
     if (value.startsWith('!')) {
@@ -434,7 +453,16 @@ class GitWalk {
     const nested = this.aliases.get(sub);
     const expandedShown = `${shown} (alias ${name} = ${value})`;
     if (nested !== undefined && level < MAX_ALIAS_DEPTH) {
-      this.expandAlias(sub, nested, [...words.slice(1), ...args], env, depth, level + 1, shown);
+      this.expandAlias(
+        sub,
+        nested,
+        [...words.slice(1), ...args],
+        env,
+        depth,
+        level + 1,
+        shown,
+        chdir
+      );
       return;
     }
     this.emit({
@@ -443,6 +471,7 @@ class GitWalk {
       config: new Map(),
       env,
       shown: expandedShown,
+      chdir,
     });
   }
 
@@ -484,7 +513,7 @@ class GitWalk {
     const value = args[i + 1];
     this.aliases.set(m[1], value);
     // Judge the definition itself.
-    this.expandAlias(m[1], value, [], env, depth, 0, `${inv.shown}`);
+    this.expandAlias(m[1], value, [], env, depth, 0, `${inv.shown}`, []);
   }
 }
 
@@ -755,7 +784,10 @@ function classify(inv: GitInvocation): GitFinding[] {
     out.push({ ...f, shown: inv.shown, reason: `${f.reason}: ${inv.shown}` });
   };
   if (hooksBypass(inv)) found(HOOKS_BYPASS);
-  if (stagesEverything(inv)) found(STAGE_ALL);
+  const staged = stagesEverything(inv);
+  if (staged) {
+    found(staged.ifWorkTreeTop === undefined ? STAGE_ALL : { ...STAGE_ALL, ...staged });
+  }
   if (inv.sub === null) {
     found(UNREADABLE);
     return out;
@@ -864,26 +896,42 @@ function appliedValue(env: Map<string, string | null>, name: string): string | n
 }
 
 /**
+ * A path as written, read lexically: its parts with `.` dropped and `..`
+ * applied, and whether a `..` climbed above the start. Null for a path that
+ * is not relative to where the command runs: absolute, a drive (`C:`), the
+ * home directory (`~`), a variable. One reading for every git path rule here.
+ */
+function lexicalPath(p: string): { parts: string[]; climbed: boolean } | null {
+  if (/^[\\/~$]/.test(p) || /^[A-Za-z]:/.test(p)) return null;
+  const parts: string[] = [];
+  let climbed = false;
+  for (const part of p.split(/[\\/]+/)) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (parts.length === 0) climbed = true;
+      else parts.pop();
+    } else parts.push(part);
+  }
+  return { parts, climbed };
+}
+
+/**
  * Does pointing `core.hooksPath` at this value take the hooks away? git
  * reads a relative value from the root of the working tree, so a relative
- * path that does not climb out of it is a hooks directory inside the
- * repository (`.githooks`, `.husky`): the project's own hooks keep running
- * (node9Firewall#413 follow-up). Everything else is a bypass: an absolute
- * path (`/dev/null`, `/tmp/empty`, `C:\\x`), the home directory, a value
- * that climbs (`../hooks`), an empty value, a dynamic one.
+ * path to a directory inside the tree (`.githooks`, `.husky`, `.git/hooks`)
+ * is the project's own hooks, which keep running (node9Firewall#413
+ * follow-up). Everything else is a bypass: an absolute path (`/dev/null`,
+ * `/tmp/empty`, `C:\\x`), the home directory, a value that climbs
+ * (`../hooks`), the root of the tree itself (`.`) or the git directory
+ * (`.git`), where no hook files live, an empty value, a dynamic one.
  */
 export function hooksPathBypasses(value: string | null | undefined): boolean {
   if (value === null || value === undefined) return true;
   const v = value.trim();
   if (v === '' || v === 'true') return true; // `-c core.hooksPath` with no value reads as true
-  if (/^[\\/~$]/.test(v) || /^[A-Za-z]:/.test(v)) return true;
-  let level = 0;
-  for (const part of v.split(/[\\/]+/)) {
-    if (part === '' || part === '.') continue;
-    level += part === '..' ? -1 : 1;
-    if (level < 0) return true;
-  }
-  return false;
+  const lp = lexicalPath(v);
+  if (lp === null || lp.climbed || lp.parts.length === 0) return true;
+  return lp.parts[0] === '.git' && lp.parts[1] !== 'hooks';
 }
 
 function hooksBypass(inv: GitInvocation): boolean {
@@ -1029,13 +1077,8 @@ function wholeTree(operand: string): boolean {
   if (/^:\(top\)\.?$/.test(operand) || operand === ':/' || operand === '*') return true;
   if (operand.startsWith(':')) return false;
   // `.`, `./`, `src/..`: lexically the current directory.
-  const parts: string[] = [];
-  for (const part of operand.split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') parts.pop();
-    else parts.push(part);
-  }
-  return parts.length === 0 && !operand.startsWith('/');
+  const lp = lexicalPath(operand);
+  return lp !== null && lp.parts.length === 0;
 }
 
 /**
@@ -1049,26 +1092,36 @@ function chdirPrefix(inv: GitInvocation): string | null {
   if (dirs.length === 0) return null;
   const parts: string[] = [];
   for (const d of dirs) {
-    if (d === null || d === '' || /^[\\/~$]/.test(d) || /^[A-Za-z]:/.test(d)) return null;
-    for (const part of d.split(/[\\/]+/)) {
-      if (part === '' || part === '.') continue;
-      if (part === '..') return null;
-      parts.push(part);
-    }
+    if (d === null || d === '') return null;
+    const lp = lexicalPath(d);
+    if (lp === null || lp.climbed) return null;
+    parts.push(...lp.parts);
   }
-  return parts.join('/');
+  return parts.length === 0 ? null : parts.join('/');
 }
 
-function stagesEverything(inv: GitInvocation): boolean {
+/**
+ * Does the call stage the whole tree? `{}` when it does wherever it runs;
+ * `{ ifWorkTreeTop: dir }` when a pathspec selects the whole of a `-C`
+ * directory, which is the whole tree only if that directory is the top of
+ * one (`git -C sub add .` stages `sub`; `git -C myapp add .` from the folder
+ * above the repository stages all of it); null when it does not.
+ */
+function stagesEverything(inv: GitInvocation): { ifWorkTreeTop?: string } | null {
   const sub = inv.sub?.toLowerCase();
-  // A pathspec under `-C sub` names a path inside `sub` (node9Firewall#413
-  // follow-up): `git -C sub add .` stages `sub` only; `git -C sub add ..`
-  // is the whole tree again.
   const prefix = chdirPrefix(inv);
-  const wholeTreeHere = (operand: string): boolean =>
-    prefix && !operand.startsWith(':') && !operand.startsWith('/') && operand !== '*'
-      ? wholeTree(`${prefix}/${operand}`)
-      : wholeTree(operand);
+  const judge = (operands: string[]): { ifWorkTreeTop?: string } | null => {
+    let conditional = false;
+    for (const operand of operands) {
+      if (!wholeTree(operand)) continue;
+      // Pathspec magic (`:/`, `:(top)`) and an absolute path name the top
+      // whatever the directory.
+      if (prefix === null || operand.startsWith(':') || operand.startsWith('/')) return {};
+      if (wholeTree(`${prefix}/${operand === '*' ? '.' : operand}`)) return {};
+      conditional = true;
+    }
+    return conditional && prefix !== null ? { ifWorkTreeTop: prefix } : null;
+  };
   if (sub === 'add') {
     const o = parseOptions(inv.args, '', ADD_LONG_VALUE);
     if (
@@ -1081,21 +1134,21 @@ function stagesEverything(inv: GitInvocation): boolean {
       o.flags.has('-e') ||
       o.flags.has('--edit')
     )
-      return false;
+      return null;
     const all =
       o.flags.has('-A') ||
       o.flags.has('--all') ||
       o.flags.has('--no-ignore-removal') ||
       o.flags.has('-u') ||
       o.flags.has('--update');
-    if (all && o.operands.length === 0) return true;
-    return o.operands.some(wholeTreeHere);
+    if (all && o.operands.length === 0) return {};
+    return judge(o.operands);
   }
   if (sub === 'commit') {
     const o = parseOptions(inv.args, 'mFCcut', COMMIT_LONG_VALUE);
-    if (o.flags.has('--dry-run')) return false;
-    if (o.flags.has('-a') || o.flags.has('--all')) return true;
-    return o.operands.some(wholeTreeHere);
+    if (o.flags.has('--dry-run')) return null;
+    if (o.flags.has('-a') || o.flags.has('--all')) return {};
+    return judge(o.operands);
   }
-  return false;
+  return null;
 }
