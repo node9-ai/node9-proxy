@@ -7,6 +7,7 @@
 
 import os from 'os';
 import { getConfig } from '../config';
+import { isRecordOnly, levelOf } from '@node9/policy-engine';
 import { getAgentWiring } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
 
@@ -33,13 +34,16 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
 
   // Wired — but enforcing, or only observing?
   const mode = getConfig(ctx.cwd).settings.mode;
-  if (mode === 'observe' || mode === 'audit') {
+  if (isRecordOnly(mode)) {
+    // One name for the level in every report (fw#421): the config may still
+    // say `observe`, the user reads `audit`, as `status` prints it.
+    const level = levelOf(mode);
     findings.push({
       category: 'Coverage',
       severity: 'high',
-      title: `node9 is in ${mode} mode — watching, not blocking`,
+      title: `node9 is in ${level} mode — watching, not blocking`,
       what: 'node9 is watching but not actually blocking anything.',
-      why: `It's in ${mode} mode, which logs risky actions but lets them through.`,
+      why: `It's in ${level} mode, which logs risky actions but lets them through.`,
       who: 'The guardrails above are observed, not enforced.',
       detail: [],
       owner: 'node9',
