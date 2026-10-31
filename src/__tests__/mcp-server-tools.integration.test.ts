@@ -279,9 +279,73 @@ describe('node9 MCP server — egress control tools', () => {
       /100\.64|CGNAT/i
     );
     expect(text, 'pause suspends it').toMatch(/pause/i);
-    expect(text, 'the strict tier and its state').toMatch(/internal addresses:\s*on/i);
+    expect(text, 'the strict tier and its state').toMatch(/internal addresses:\s*blocked/i);
     expect(text, 'the exemptions in force').toContain('100.64.0.1');
     fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('node9_egress_status names the listed state when private ranges need an allowlist entry', () => {
+    // fw#421 item 4: ssrfStrict=false has two states (allowed / listed); the
+    // handler used to print "off, reachable" for both.
+    const h = makeHome({
+      settings: { mode: 'standard' },
+      policy: { egress: { enabled: true, mode: 'review', ssrfStrict: false, allowPrivate: false } },
+    });
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_egress_status', arguments: {} },
+        },
+      ],
+      h,
+      h
+    );
+    const text = res[1]?.result?.content?.[0]?.text ?? '';
+    expect(text).toMatch(/internal addresses:\s*listed/i);
+    expect(text).toMatch(/allowlist/i);
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('node9_status says audit (not observe) and lists the agent wiring it promises', () => {
+    // fw#421 items 1 and 5.
+    const h = makeHome({ settings: { mode: 'observe' } });
+    fs.mkdirSync(path.join(h, '.claude'), { recursive: true });
+    fs.writeFileSync(
+      path.join(h, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: '*', hooks: [{ command: 'node9 check' }] }] },
+      })
+    );
+    const res = driveMcp(
+      [
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'node9_status', arguments: {} },
+        },
+      ],
+      h,
+      h
+    );
+    const text = res[1]?.result?.content?.[0]?.text ?? '';
+    expect(text).toMatch(/^Mode: audit/m);
+    expect(text).not.toMatch(/observe/i);
+    expect(text).toMatch(/Claude Code: wired/);
+    // Whether Gemini is installed depends on the runner; the row exists either way.
+    expect(text).toMatch(/^  Gemini CLI: (wired|not wired|not installed)$/m);
+    fs.rmSync(h, { recursive: true, force: true });
+  });
+
+  it('node9_scan describes all five agents, not "Claude + Gemini"', () => {
+    const res = driveMcp([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
+    const tools = (res[1]?.result?.tools ?? []) as { name: string; description?: string }[];
+    const scan = tools.find((t) => t.name === 'node9_scan');
+    expect(scan?.description).toMatch(/Claude Code, Gemini, Codex, Copilot, Antigravity/);
+    expect(scan?.description).not.toMatch(/Claude \+ Gemini/);
   });
 
   it('node9_egress_status reports the strict tier OFF as off', () => {
@@ -305,7 +369,7 @@ describe('node9 MCP server — egress control tools', () => {
       h
     );
     const text = res[1]?.result?.content?.[0]?.text ?? '';
-    expect(text).toMatch(/internal addresses:\s*off/i);
+    expect(text).toMatch(/internal addresses:\s*allowed/i);
     expect(text).toMatch(/reachable/i);
     fs.rmSync(h, { recursive: true, force: true });
   });

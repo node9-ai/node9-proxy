@@ -35,7 +35,9 @@ import {
   normalizeEgressHost,
   isValidEgressHost,
 } from '../auth/egress-config';
-import { DEFAULT_EGRESS_ALLOWLIST } from '@node9/policy-engine';
+import { DEFAULT_EGRESS_ALLOWLIST, levelOf } from '@node9/policy-engine';
+import { describeInternalState, readInternalState } from '../cli/commands/egress';
+import { getAgentWiring } from '../agent-wiring';
 
 // ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
@@ -218,7 +220,8 @@ export const TOOLS = [
   {
     name: 'node9_scan',
     description:
-      'Scan all AI agent history (Claude + Gemini) and report what node9 would have blocked or ' +
+      'Scan the history of all supported coding agents (Claude Code, Gemini, Codex, Copilot, ' +
+      'Antigravity) and report what node9 would have blocked or ' +
       'flagged. Shows blocked operations, reviewed commands, credential leaks, and agent spend. ' +
       'Use this to audit past activity and find security gaps before they become incidents.',
     inputSchema: {
@@ -417,7 +420,7 @@ function handleStatus(): string {
 
   const lines: string[] = [];
 
-  lines.push(`Mode: ${settings.mode}`);
+  lines.push(`Mode: ${levelOf(settings.mode)}`);
   if (wsGoverned) {
     lines.push(
       'Policy source: workspace config (app.node9.ai) — local config files are ignored for policy'
@@ -437,6 +440,14 @@ function handleStatus(): string {
   lines.push(`Active shields: ${activeShields.length > 0 ? activeShields.join(', ') : 'none'}`);
   lines.push(`Smart rules: ${config.policy.smartRules.length} loaded`);
   lines.push(`DLP: ${config.policy.dlp?.enabled !== false ? 'enabled' : 'disabled'}`);
+
+  // The wiring this tool's description promises, from the same source
+  // `node9 status` reads (fw#421 item 5).
+  lines.push('Agent hooks:');
+  for (const a of getAgentWiring()) {
+    const state = !a.installed ? 'not installed' : a.wireState === 'wired' ? 'wired' : 'not wired';
+    lines.push(`  ${a.label}: ${state}`);
+  }
 
   const projectConfig = path.join(process.cwd(), 'node9.config.json');
   const globalConfig = path.join(os.homedir(), '.node9', 'config.json');
@@ -589,8 +600,10 @@ function handleEgressStatus(): string {
       'destination inside a program and does not reach this gate. CGNAT (100.64/10) is ' +
       'NOT in the always-blocked set — it is reachable until the strict tier is on, and ' +
       'an exemption can release it.',
-    `Internal addresses: ${e.ssrfStrict ? 'on' : 'off'} — loopback and the private ranges ` +
-      `are ${e.ssrfStrict ? 'blocked too' : 'reachable'}.`,
+    // Three states, one description each, the same words `node9 egress status`
+    // prints (fw#421 item 4). "listed" is not "off": the ranges need an entry.
+    `Internal addresses: ${readInternalState(e)} — loopback and the private ranges ` +
+      `are ${describeInternalState(readInternalState(e))}.`,
     `Floor exemptions: ${e.ssrfAllow?.length ? e.ssrfAllow.join(', ') : '(none)'}`,
   ];
   return lines.join('\n');

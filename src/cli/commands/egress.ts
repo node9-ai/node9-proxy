@@ -78,6 +78,11 @@ const INTERNAL_SAID: Record<InternalState, string> = {
   blocked: 'blocked',
 };
 
+/** The one description per state, shared with the MCP status tool (fw#421 item 4). */
+export function describeInternalState(state: InternalState): string {
+  return INTERNAL_SAID[state];
+}
+
 /** The state a config is in. ssrfStrict wins: the floor answers before the policy. */
 export function readInternalState(e: {
   ssrfStrict?: boolean;
