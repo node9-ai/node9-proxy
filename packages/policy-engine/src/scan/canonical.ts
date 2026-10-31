@@ -40,6 +40,7 @@ import {
   normalizeCommandForPolicy,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
+import { analyzeOutbound } from '../shell/outbound';
 import { collectFileAccesses, incompleteFileVerdict } from '../files/protected-access';
 import { evaluateFileChecks, type FileCheckVerdict } from '../files/file-checks';
 import type { CatalogSettings } from '../catalog';
@@ -763,7 +764,27 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // every node9 user's settings file has hooks and the gate's fallback would
 // report each rewrite of it.
 // Shell writes to the same files (`: > .husky/pre-commit`) are not covered yet.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v32';
+// canonical-v33 (2026-10-30, node9Firewall#414): a file-access rule (a jail
+// path rule, the project-jail shield's bash rules) reads the code body of a
+// stdin interpreter again, which v31 had stripped for every rule; the
+// project-jail bash rules read the access view. A jailed path in
+// `python3 - <<'PY'` is a finding again. And two new findings
+// (node9Firewall#415): block-reverse-shell and review-env-exfil, from
+// shell/outbound.ts as the gate reads them. Histories scanned under v32 re-read.
+// Folded into v33 before it shipped (release review): the attached `nc
+// -e/bin/sh` and `/proc/$$/environ` (its pid a variable) are found, and
+// `declare -f` is no longer read as the environment.
+// canonical-v34 (2026-10-31, node9Firewall#385 step 5 of #416): the PII
+// detectors read a routing label glued to other characters or further away
+// (48 characters), the leaf's key as the label of a lone value, and twelve
+// more national and tax ids with a check digit (IL, NL, DE, BR, IN, CA, AU,
+// CN, PT, BE, AR, TR). Histories scanned under v33 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v34';
+
+// 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
+// gained the Dropbox App Secret pattern and an Authorization-header reading of
+// HTTP Basic. Both are argumentsOnly, which scanArgs (the extractor's DLP pass)
+// skips, so detector output is identical.
 
 // 2026-10-24, hash bumped with NO version bump (node9Firewall#390):
 // rules/index.ts gained mcpServerFromToolName and ruleServerMatches for the
@@ -818,7 +839,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v32';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'bf14326b92bf1718';
+export const CANONICAL_EXTRACTOR_HASH = '45158fa38836036f';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -910,8 +931,8 @@ export function extractCanonicalFindings(
   }
 
   // ── PII (over string-shaped args) ────────────────────────────────────────
-  for (const value of stringValues(call.args)) {
-    const piiHits = detectPii(value);
+  for (const [value, key] of stringLeavesWithKeys(call.args)) {
+    const piiHits = detectPii(value, key);
     for (const pattern of piiHits) {
       out.push(
         makeFinding({
@@ -1102,6 +1123,28 @@ export function extractCanonicalFindings(
         })
       );
     }
+  }
+
+  // A reverse shell and the environment sent out (node9Firewall#415), named
+  // as the gate names them. The unknown-registry check needs the user's
+  // package manager configuration, which a history scan does not read.
+  for (const f of analyzeOutbound(command).findings) {
+    const verdict = f.checkId === 'commands.reverse-shell' ? 'block' : 'review';
+    out.push(
+      makeFinding({
+        type: 'smart-rule',
+        ruleName: f.ruleName,
+        verdict,
+        severity: classifyRuleSeverity(f.ruleName, verdict),
+        reason: f.reason,
+        toolName: call.toolName,
+        ctx,
+        ts,
+        sourceType: 'engine',
+        shieldLabel: 'Node9 (AST)',
+        input: call.args,
+      })
+    );
   }
 
   // ── Eval-of-remote (curl | bash, bash -c "$(curl …)" etc.) ───────────────
@@ -1427,16 +1470,23 @@ function makeFinding(args: {
  * which only operates on text. Caps recursion + total size so a pathological
  * deeply-nested arg can't burn unbounded CPU.
  */
-function* stringValues(obj: unknown, depth = 0): Generator<string> {
+/** Every string leaf with the key it sits under, so a labelled detector can
+ *  read the key as the label of a lone value, as the realtime gate does
+ *  (node9Firewall#385). */
+function* stringLeavesWithKeys(
+  obj: unknown,
+  depth = 0,
+  key?: string
+): Generator<[string, string | undefined]> {
   if (depth > 6) return;
   if (typeof obj === 'string') {
-    if (obj.length > 0) yield obj;
+    if (obj.length > 0) yield [obj, key];
     return;
   }
   if (!obj || typeof obj !== 'object') return;
   if (Array.isArray(obj)) {
-    for (const v of obj) yield* stringValues(v, depth + 1);
+    for (const v of obj) yield* stringLeavesWithKeys(v, depth + 1, key);
     return;
   }
-  for (const v of Object.values(obj)) yield* stringValues(v, depth + 1);
+  for (const [k, v] of Object.entries(obj)) yield* stringLeavesWithKeys(v, depth + 1, k);
 }

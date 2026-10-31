@@ -262,3 +262,101 @@ describe('validateCask', () => {
     expect(validateCask(filler(40) + 'QJJQ' + filler(40))).toBe(false);
   });
 });
+
+// ── National and tax ids, second round (node9Firewall#385, step 5 of #416) ──
+// Ground truth: published test values and documentation examples, checked by
+// hand against each authority's algorithm in Python at authoring time, never
+// by the validators under test. Values are split so no identifier is whole in
+// source (the golden-corpus rule); mutations change one digit.
+import {
+  validateIsraeliId,
+  validateBsn,
+  validateSteuerId,
+  validateCpf,
+  validateAadhaar,
+  validateVerhoeff,
+  validateSin,
+  validateTfn,
+  validateChineseId,
+  validatePortugueseNif,
+  validateBelgianNationalNumber,
+  validateCuit,
+  validateTckn,
+} from './checksums';
+
+describe('national ids, second round', () => {
+  const rows: Array<[string, (s: string) => boolean, string[], string[]]> = [
+    // [name, validator, valid parts, invalid parts (one digit changed, or a range rule broken)]
+    ['Israeli id', validateIsraeliId, ['123', '456', '782'], ['123', '456', '783']],
+    ['BSN', validateBsn, ['111', '222', '333'], ['111', '222', '334']],
+    ['Steuer-ID', validateSteuerId, ['86095', '742', '719'], ['86095', '742', '718']],
+    [
+      'Steuer-ID, two repeated digits',
+      validateSteuerId,
+      ['65929', '970', '489'],
+      ['11223', '344', '550'],
+    ],
+    ['CPF formatted', validateCpf, ['529.', '982.', '247-25'], ['529.', '982.', '247-26']],
+    ['CPF bare', validateCpf, ['111', '444', '77735'], ['111', '111', '11111']],
+    ['Aadhaar', validateAadhaar, ['2345', '6789', '0124'], ['1345', '6789', '0124']],
+    ['SIN', validateSin, ['046', '454', '286'], ['046', '454', '287']],
+    ['SIN spaced', validateSin, ['130 ', '692 ', '544'], ['830 ', '692 ', '544']],
+    ['TFN', validateTfn, ['123', '456', '782'], ['123', '456', '783']],
+    [
+      'Chinese id',
+      validateChineseId,
+      ['110105', '19491231', '002X'],
+      ['110105', '19491231', '0021'],
+    ],
+    [
+      'Chinese id, impossible date',
+      validateChineseId,
+      ['110105', '19491231', '002X'],
+      ['110105', '19491331', '002X'],
+    ],
+    ['Portuguese NIF', validatePortugueseNif, ['501', '964', '843'], ['501', '964', '844']],
+    [
+      'Belgian number formatted',
+      validateBelgianNationalNumber,
+      ['85.07.', '30-033', '.28'],
+      ['85.07.', '30-033', '.29'],
+    ],
+    [
+      'Belgian number bare',
+      validateBelgianNationalNumber,
+      ['850730', '033', '28'],
+      ['851330', '033', '28'],
+    ],
+    ['CUIT formatted', validateCuit, ['20-', '12345678', '-6'], ['20-', '12345678', '-7']],
+    ['CUIL bare', validateCuit, ['27', '23456789', '1'], ['27', '23456789', '2']],
+    ['TCKN', validateTckn, ['10000', '000', '146'], ['10000', '000', '147']],
+  ];
+  it.each(rows)('%s: the published value passes, a mutation fails', (_n, v, ok, bad) => {
+    expect(v(ok.join(''))).toBe(true);
+    expect(v(bad.join(''))).toBe(false);
+  });
+  it('rejects empty, short and non-digit input', () => {
+    for (const v of [
+      validateIsraeliId,
+      validateBsn,
+      validateSteuerId,
+      validateCpf,
+      validateAadhaar,
+      validateSin,
+      validateTfn,
+      validateChineseId,
+      validatePortugueseNif,
+      validateBelgianNationalNumber,
+      validateCuit,
+      validateTckn,
+    ]) {
+      expect(v('')).toBe(false);
+      expect(v('1234')).toBe(false);
+      expect(v('abcdefghijk')).toBe(false);
+    }
+  });
+  it('Verhoeff: the published example and its mutation', () => {
+    expect(validateVerhoeff(['2363', ''].join(''))).toBe(true);
+    expect(validateVerhoeff('2364')).toBe(false);
+  });
+});

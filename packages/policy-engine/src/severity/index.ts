@@ -57,6 +57,8 @@ export function classifyRuleSeverity(
     'flushall',
     'flushdb',
     'pipe-shell',
+    'reverse-shell',
+    'env-exfil',
   ];
   if (criticalPatterns.some((p) => n.includes(p))) return 'critical';
 
@@ -72,6 +74,7 @@ export function classifyRuleSeverity(
     'rebase',
     'delete-branch',
     'delete-remote',
+    'unknown-registry',
   ];
   if (highPatterns.some((p) => n.includes(p))) return 'high';
 
@@ -120,6 +123,9 @@ export function narrativeRuleLabel(name: string): string {
     'git-destructive': 'destructive git operations',
     'git-hooks-bypass': 'git hooks bypassed',
     'git-stage-all': 'staging everything at once',
+    'reverse-shell': 'reverse shell',
+    'env-exfil': 'environment sent out',
+    'unknown-registry': 'install from an unknown registry',
     'agent-file-write': 'agent instruction file written',
     'agent-file-content': 'instruction written into an agent file',
     'agent-hooks-change': 'agent hooks changed',

@@ -12,6 +12,7 @@
 export const ENGINE_VERSION = '1.4.0';
 
 export type { SmartCondition, SmartRule, DlpMatch, RiskMetadata } from './types';
+export { derivedWrites, pipelineTexts, type DerivedWrite } from './shell/derived-writes';
 export {
   collectFileAccesses,
   evaluateProtectedFileAccess,
@@ -112,6 +113,22 @@ export {
   type GitFinding,
   type GitInvocation,
 } from './shell/git';
+
+// Outbound actions read from the parsed command (node9Firewall#415 items 1, 3).
+export {
+  analyzeOutbound,
+  type OutboundAnalysis,
+  type OutboundFinding,
+  type OutboundCheckId,
+} from './shell/outbound';
+
+// Registries an install names on its command line (node9Firewall#415 item 4).
+export {
+  extractRegistryOverrides,
+  registryHost,
+  isPublicRegistryHost,
+  type RegistryOverride,
+} from './shell/package-registry';
 
 // Package-install extraction (supply-chain check; the host does the lookups).
 export {

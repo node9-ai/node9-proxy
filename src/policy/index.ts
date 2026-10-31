@@ -1,5 +1,5 @@
 import type { InspectionInput, InspectionLayers, DlpMatch } from '@node9/policy-engine';
-import { reviewsEveryInline, isBlockAll } from '@node9/policy-engine';
+import { reviewsEveryInline, isBlockAll, checkValue } from '@node9/policy-engine';
 // src/policy/index.ts
 // Host wrapper around @node9/policy-engine.
 //
@@ -14,9 +14,18 @@ import fs from 'fs';
 import { readCappedText } from '../utils/read-capped';
 import path from 'path';
 import os from 'os';
-import { scanArgumentSecrets, scanFilePath } from '../dlp';
+import { scanArgumentSecrets, scanFilePath, detectArgsPii } from '../dlp';
+import {
+  runStatelessGates,
+  combineWithEngine,
+  GATE_LABELS,
+  PRE_ENGINE_GATES,
+  type PreEngineGate,
+  type StatelessGates,
+} from './gate-order';
 import { prepareFileAccesses, type PreparedFileAccess } from './file-access';
-import { runPackageCheck, type PackageCheckConfig } from '../supply-chain/check';
+import { runPackageCheck } from '../supply-chain/check';
+import { configuredRegistryHosts } from '../supply-chain/registries';
 import { getConfig, getActiveEnvironment } from '../config';
 import { checkProvenance } from '../utils/provenance.js';
 import { matchesTrustedHost, isTrustedHost } from '../auth/trusted-hosts.js';
@@ -102,6 +111,7 @@ export async function evaluatePolicy(
         ? (host: string) => matchesTrustedHost(host, config.policy.trustedHosts)
         : isTrustedHost,
       readAgentSettings,
+      isConfiguredRegistry: (host: string, at?: string) => configuredRegistryHosts(at).has(host),
     }
   );
 }
@@ -207,12 +217,19 @@ const EXPLAIN_AGENT = 'agent';
 /**
  * Diagnostic preview of how node9 would treat a tool call.
  *
- * The DECISION is taken from the real engine (`evaluatePolicy`) so explain can
- * never under-report what the live hook enforces. The step-by-step trace is the
- * human-readable re-derivation in `deriveExplainTrace`. When the two disagree —
- * because the trace omits an engine gate (AST file-op / pipe-chain / SQL /
- * chmod) or applies one the engine suppresses — the engine wins and we append an
- * authoritative step stating the real verdict, plus a NODE9_DEBUG drift canary.
+ * The hook's stateless gates (protected file, DLP, PII, package check) run
+ * first, through the same module the hook uses (`policy/gate-order.ts`,
+ * node9Firewall#405): same order, same stop and review rules. A gate that
+ * stops the call ends the preview there, as the hook returns there. Then the
+ * DECISION is taken from the real engine (`evaluatePolicy`) so explain can
+ * never under-report what the live hook enforces. The step-by-step trace is
+ * the human-readable re-derivation in `deriveExplainTrace`. When the two
+ * disagree the engine wins and an authoritative step states the real verdict,
+ * plus a NODE9_DEBUG drift canary. Last, the gates' reviews meet the engine's
+ * verdict through the hook's combination rules.
+ *
+ * Not modelled: the gates that depend on the running session (file taint,
+ * session taint, outside content, canaries, app permissions, approvals).
  */
 export async function explainPolicy(
   toolName: string,
@@ -226,164 +243,193 @@ export async function explainPolicy(
     process.cwd(),
     inspectionLayers(config.policy)
   );
-  const { result, engine } = await explainEngineVerdict(toolName, args, agent, config, prepared);
-  // The hook skips the package check for a manual (Terminal) call.
-  if (agent === 'Terminal') return result;
-  return withPackageCheck(
-    result,
-    toolName,
-    args,
-    config.policy.packageCheck,
-    prepared.cwd,
-    gateBeforePackageCheck(result, engine, config, prepared)
+  // The hook skips the file gate and the package check for a manual (Terminal) call.
+  const manual = agent === 'Terminal';
+  const cfg = config.policy.packageCheck;
+  const panicMode = config.settings.panicMode === true;
+  const gates = await runStatelessGates({
+    settings: { panicMode, dlp: config.policy.dlp, toolIgnored: isIgnoredTool(toolName) },
+    // Omitted for a manual call, as the hook skips the gate: no step is shown.
+    file: manual
+      ? undefined
+      : () =>
+          evaluateProtectedFileAccess(
+            prepared.accesses,
+            prepared,
+            catalogSettingsFromConfig(config.settings, config.policy)
+          ),
+    dlp: () => explainDlpMatch(args, prepared),
+    pii: () => detectArgsPii(args),
+    packageCheck: () =>
+      manual || !cfg?.enabled
+        ? Promise.resolve(null)
+        : runPackageCheck(toolName, args, cfg, prepared.cwd),
+  });
+  const gateSteps = explainGateSteps(gates, { manual, packageOn: cfg?.enabled === true });
+  const waterfall = explainWaterfall(config);
+
+  if (gates.stop) {
+    // The hook returns here, so the engine never runs.
+    const { stop } = gates;
+    return {
+      tool: toolName,
+      args,
+      waterfall,
+      steps: [
+        ...gateSteps,
+        {
+          name: ENGINE_STEP,
+          outcome: 'skip',
+          detail: `Not reached: ${GATE_PLAIN[stop.gate]} blocks before the policy engine runs`,
+          isFinal: false,
+        },
+      ],
+      decision: 'block',
+      blockedByLabel: stop.label,
+      ruleDescription: stop.ruleDescription ?? stop.reason,
+    };
+  }
+
+  const { result } = await explainEngineVerdict(toolName, args, agent, config, prepared);
+  const combined = combineWithEngine(
+    gates,
+    {
+      decision: result.decision,
+      blockedByLabel: result.blockedByLabel,
+      ruleDescription: result.ruleDescription,
+    },
+    { panicMode }
   );
+  let steps: ExplainStep[] = [...gateSteps, ...result.steps];
+  if (combined.panicked) {
+    steps = [
+      ...steps.map((s) => (s.isFinal ? { ...s, isFinal: false } : s)),
+      {
+        name: 'Panic mode',
+        outcome: 'block',
+        detail: 'Workspace is in panic mode: every review is a block',
+        isFinal: true,
+      },
+    ];
+  } else if (combined.decision !== result.decision) {
+    // A gate's review holds a call the engine allowed: the gate step is the stop.
+    const stopName = explainReviewStopName(gates);
+    steps = steps.map((s) =>
+      s.name === stopName ? { ...s, isFinal: true } : s.isFinal ? { ...s, isFinal: false } : s
+    );
+  }
+  return {
+    ...result,
+    waterfall,
+    steps,
+    decision: combined.decision,
+    blockedByLabel: combined.blockedByLabel ?? result.blockedByLabel,
+    ruleDescription: combined.ruleDescription ?? result.ruleDescription,
+  };
 }
 
 const PACKAGE_STEP = 'Package check';
-const PACKAGE_BLOCK_LABEL = '📦 Node9 Package Check (Malicious)';
-const PACKAGE_REVIEW_LABEL = '📦 Node9 Package Check (Review)';
 const ENGINE_STEP = 'Engine verdict (authoritative)';
 
-/**
- * The hook gate that returns before the package check runs, if any. In the
- * hook (auth/orchestrator.ts) the protected-file gate returns first (a block,
- * or a review under panic mode), then the DLP scanner on a block. The file
- * verdict is computed here with the same function and inputs the hook uses,
- * so explain does not infer it from the engine's labels.
- */
-function gateBeforePackageCheck(
-  result: ExplainResult,
-  engine: PolicyVerdict | null,
-  config: ReturnType<typeof getConfig>,
-  prepared: PreparedFileAccess
-): string | null {
-  try {
-    const file = evaluateProtectedFileAccess(
-      prepared.accesses,
-      prepared,
-      catalogSettingsFromConfig(config.settings, config.policy)
-    );
-    if (
-      file &&
-      (file.decision === 'block' || (file.decision === 'review' && config.settings.panicMode))
-    ) {
-      return 'the protected-file check';
-    }
-  } catch {
-    // The hook holds such a call for approval; explain reports what it can.
-  }
-  const traceDlpBlock = result.steps.some(
-    (s) => s.name === 'DLP Content Scanner' && s.outcome === 'block'
+/** The step name of each gate, as the preview prints it. */
+const GATE_STEP: Record<PreEngineGate, string> = {
+  file: 'Protected file gate',
+  dlp: 'DLP Content Scanner',
+  pii: 'PII gate',
+  package: PACKAGE_STEP,
+};
+const GATE_PLAIN: Record<PreEngineGate, string> = {
+  file: 'the protected-file check',
+  dlp: 'the DLP scanner',
+  pii: 'the PII gate',
+  package: 'the package check',
+};
+
+/** The same DLP inputs the hook scans: the file path first, then the arguments. */
+function explainDlpMatch(args: unknown, prepared: PreparedFileAccess): DlpMatch | null {
+  const argsObj =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+  const filePath = String(argsObj.file_path ?? argsObj.path ?? argsObj.filename ?? '');
+  return (
+    (filePath
+      ? scanFilePath(filePath, prepared.cwd, {
+          systemAccessHandled: prepared.handledPaths.has(filePath),
+        })
+      : null) ?? (args !== undefined ? scanArgumentSecrets(args) : null)
   );
-  const engineDlpBlock =
-    engine?.decision === 'block' && (engine.checkId?.startsWith('data.secrets') ?? false);
-  return traceDlpBlock || engineDlpBlock ? 'the DLP scanner' : null;
 }
 
-/**
- * The package check runs in the hook (auth/orchestrator.ts), not in the
- * engine, so the engine verdict above cannot include it (fw#395). Mirror the
- * hook's order: the file gate and a DLP block return first; a package block
- * returns before the engine runs; a package review turns an engine allow into
- * a review, and an engine block wins over it. Lookups fail open in both places.
- */
-async function withPackageCheck(
-  result: ExplainResult,
-  toolName: string,
-  args: unknown,
-  cfg: PackageCheckConfig | undefined,
-  cwd: string | undefined,
-  preemptedBy: string | null
-): Promise<ExplainResult> {
-  const place = (step: ExplainStep, patch: Partial<ExplainResult> = {}): ExplainResult => {
-    const earlier = step.isFinal
-      ? result.steps.map((s) => (s.isFinal ? { ...s, isFinal: false } : s))
-      : [...result.steps];
-    const dlp = earlier.findIndex((s) => s.name === 'DLP Content Scanner');
-    earlier.splice(dlp + 1, 0, step);
-    return { ...result, ...patch, steps: earlier };
-  };
-
-  if (preemptedBy) {
-    return place({
-      name: PACKAGE_STEP,
-      outcome: 'skip',
-      detail: `Not reached: ${preemptedBy} blocks first`,
-    });
-  }
-  if (!cfg?.enabled) {
-    return place({
-      name: PACKAGE_STEP,
-      outcome: 'skip',
-      detail: 'Package check is off (policy.packageCheck.enabled is false)',
-    });
-  }
-
-  const pkg = await runPackageCheck(toolName, args, cfg, cwd);
-  const failed = pkg.misses.join('; ');
+/** The gates as steps, in gate order; the gates after a stop are "not reached". */
+function explainGateSteps(
+  gates: StatelessGates,
+  opts: { manual: boolean; packageOn: boolean }
+): ExplainStep[] {
+  const steps: ExplainStep[] = [];
+  const pkg = gates.packageResult;
+  const failed = pkg?.misses.join('; ') ?? '';
   const misses =
-    pkg.misses.length === 0
+    !pkg || pkg.misses.length === 0
       ? ''
       : pkg.verdict === 'block'
         ? ` Some lookups failed: ${failed}`
         : ` Some lookups failed, and a failed lookup does not stop the call: ${failed}`;
-
-  if (pkg.verdict === 'block' && pkg.reason) {
-    // The hook returns here, so the engine never runs: its step, if shown,
-    // must not still claim to be the enforced verdict.
-    const blocked = place(
-      { name: PACKAGE_STEP, outcome: 'block', detail: pkg.reason + misses, isFinal: true },
-      {
-        decision: 'block',
-        blockedByLabel: PACKAGE_BLOCK_LABEL,
-        ruleDescription: pkg.reason,
-        matchedToken: undefined,
+  for (const run of gates.ran) {
+    const name = GATE_STEP[run.gate];
+    if (run.gate === 'package') {
+      if (opts.manual) continue;
+      if (!opts.packageOn) {
+        steps.push({
+          name,
+          outcome: 'skip',
+          detail: 'Package check is off (policy.packageCheck.enabled is false)',
+        });
+        continue;
       }
-    );
-    return {
-      ...blocked,
-      steps: blocked.steps.map((s) =>
-        s.name === ENGINE_STEP
-          ? {
-              ...s,
-              outcome: 'skip',
-              detail: 'Not reached: the package check blocks before the policy engine runs',
-            }
-          : s
-      ),
-    };
+      const outcome: ExplainStep['outcome'] =
+        run.outcome === 'stop'
+          ? 'block'
+          : run.outcome === 'review'
+            ? 'review'
+            : pkg && pkg.checked > 0
+              ? 'checked'
+              : 'skip';
+      steps.push({ name, outcome, detail: run.detail + misses, isFinal: run.outcome === 'stop' });
+      continue;
+    }
+    if (run.gate === 'file' && run.outcome === 'skip') continue;
+    const outcome: ExplainStep['outcome'] =
+      run.outcome === 'stop'
+        ? 'block'
+        : run.outcome === 'review'
+          ? 'review'
+          : run.outcome === 'skip'
+            ? 'skip'
+            : 'checked';
+    steps.push({ name, outcome, detail: run.detail, isFinal: run.outcome === 'stop' });
   }
-  if (pkg.verdict === 'review' && pkg.reason) {
-    const step: ExplainStep = {
-      name: PACKAGE_STEP,
-      outcome: 'review',
-      detail: pkg.reason + misses,
-    };
-    if (result.decision === 'block') return place(step);
-    if (result.decision === 'review') {
-      return place(step, {
-        ruleDescription: result.ruleDescription
-          ? `${result.ruleDescription}\n${pkg.reason}`
-          : pkg.reason,
+  if (gates.stop) {
+    const after = PRE_ENGINE_GATES.slice(PRE_ENGINE_GATES.indexOf(gates.stop.gate) + 1);
+    for (const gate of after) {
+      if (gate === 'package' && opts.manual) continue;
+      steps.push({
+        name: GATE_STEP[gate],
+        outcome: 'skip',
+        detail: `Not reached: ${GATE_PLAIN[gates.stop.gate]} blocks first`,
       });
     }
-    return place(
-      { ...step, isFinal: true },
-      { decision: 'review', blockedByLabel: PACKAGE_REVIEW_LABEL, ruleDescription: pkg.reason }
-    );
   }
-  if (pkg.checked === 0) {
-    return place({
-      name: PACKAGE_STEP,
-      outcome: 'skip',
-      detail: `No package install or run in this command.${misses}`,
-    });
-  }
-  return place({
-    name: PACKAGE_STEP,
-    outcome: 'checked',
-    detail: `${pkg.checked} package${pkg.checked === 1 ? '' : 's'} checked, no findings.${misses}`,
-  });
+  return steps;
+}
+
+/** The gate whose review holds the call, by the label the hook carries. */
+function explainReviewStopName(gates: StatelessGates): string {
+  if (gates.label === GATE_LABELS.dlpReview) return GATE_STEP.dlp;
+  if (gates.label === GATE_LABELS.packageReview) return GATE_STEP.package;
+  if (gates.reviews.file || gates.reviews.fileIncomplete) return GATE_STEP.file;
+  if (gates.reviews.dlp) return GATE_STEP.dlp;
+  return GATE_STEP.package;
 }
 
 /** The engine verdict, reconciled with the human-readable trace. */
@@ -394,7 +440,7 @@ async function explainEngineVerdict(
   config: ReturnType<typeof getConfig>,
   prepared: PreparedFileAccess
 ): Promise<{ result: ExplainResult; engine: PolicyVerdict }> {
-  const derived = await deriveExplainTrace(toolName, args, prepared);
+  const derived = await deriveExplainTrace(toolName, args);
   const engine = await evaluatePolicy(toolName, args, agent, prepared.cwd, {
     fileAccess: prepared,
     config,
@@ -428,7 +474,8 @@ async function explainEngineVerdict(
     engine,
     result: {
       ...derived,
-      steps: [...derived.steps, engineStep],
+      // One stop per preview: the trace's own final step yields to the engine's.
+      steps: [...derived.steps.map((s) => (s.isFinal ? { ...s, isFinal: false } : s)), engineStep],
       decision: engine.decision,
       blockedByLabel: engine.blockedByLabel ?? derived.blockedByLabel,
       ruleDescription: engine.ruleDescription ?? derived.ruleDescription,
@@ -436,19 +483,12 @@ async function explainEngineVerdict(
   };
 }
 
-async function deriveExplainTrace(
-  toolName: string,
-  args: unknown,
-  prepared: PreparedFileAccess
-): Promise<ExplainResult> {
-  const steps: ExplainStep[] = [];
-
+/** The config sources, as the preview lists them. */
+function explainWaterfall(config: ReturnType<typeof getConfig>): WaterfallTier[] {
   const globalPath = path.join(os.homedir(), '.node9', 'config.json');
   const projectPath = path.join(process.cwd(), 'node9.config.json');
   const credsPath = path.join(os.homedir(), '.node9', 'credentials.json');
 
-  const config = getConfig();
-  const layers = inspectionLayers(config.policy);
   // I4: the waterfall must tell the PR-2 truth. On a workspace-governed
   // machine the local tiers exist on disk but are inert for policy, and the
   // env-var mode override is ignored too — labeling them 'active' would
@@ -503,42 +543,16 @@ async function deriveExplainTrace(
     },
   ];
 
-  // ── 0. DLP Content Scanner ────────────────────────────────────────────────
+  return waterfall;
+}
+
+async function deriveExplainTrace(toolName: string, args: unknown): Promise<ExplainResult> {
+  const steps: ExplainStep[] = [];
+
+  const config = getConfig();
+  const layers = inspectionLayers(config.policy);
+  const waterfall = explainWaterfall(config);
   const wouldBeIgnored = matchesPattern(toolName, config.policy.ignoredTools);
-  if (config.policy.dlp.enabled && (!wouldBeIgnored || config.policy.dlp.scanIgnoredTools)) {
-    const argsObjE =
-      args && typeof args === 'object' && !Array.isArray(args)
-        ? (args as Record<string, unknown>)
-        : {};
-    const filePathE = String(argsObjE.file_path ?? argsObjE.path ?? argsObjE.filename ?? '');
-    const dlpMatch =
-      (filePathE
-        ? scanFilePath(filePathE, prepared.cwd, {
-            systemAccessHandled: prepared.handledPaths.has(filePathE),
-          })
-        : null) ?? (args !== undefined ? scanArgumentSecrets(args) : null);
-    if (dlpMatch) {
-      // Mirror the real gate (orchestrator DLP section): reviewAction:'block'
-      // upgrades review-severity matches — explain must not say 'review'
-      // where the gate would block.
-      const dlpBlocks = dlpMatch.severity === 'block' || config.policy.dlp.reviewAction === 'block';
-      steps.push({
-        name: 'DLP Content Scanner',
-        outcome: dlpBlocks ? 'block' : 'review',
-        detail: `🚨 ${dlpMatch.patternName} detected in ${dlpMatch.fieldPath} — sample: ${dlpMatch.redactedSample}`,
-        isFinal: dlpBlocks,
-      });
-      if (dlpBlocks) {
-        return { tool: toolName, args, waterfall, steps, decision: 'block' };
-      }
-    } else {
-      steps.push({
-        name: 'DLP Content Scanner',
-        outcome: 'checked',
-        detail: 'No sensitive credentials detected in args',
-      });
-    }
-  }
 
   // ── 1. Ignored tools ──────────────────────────────────────────────────────
   if (wouldBeIgnored) {
@@ -635,11 +649,30 @@ async function deriveExplainTrace(
     const everyInline = reviewsEveryInline(config.settings.mode);
     const strictInline = everyInline && detectInlineExec(shellCommand);
     const inline = everyInline ? null : inlineExecReview(shellCommand);
-    if (strictInline || inline) {
-      const reason = inline ? inlineExecReason(inline) : undefined;
+    // The check's value in force, as the engine reads it: `off` skips the
+    // check, `log` records the finding and lets the call through (Soft).
+    const inlineValue = checkValue(
+      catalogSettingsFromConfig(config.settings, config.policy),
+      'commands.inline-exec'
+    );
+    if ((strictInline || inline) && inlineValue === 'off') {
       steps.push({
         name: 'Inline execution',
-        outcome: 'review',
+        outcome: 'skip',
+        detail: 'Inline code detected; the check is off (commands.inline-exec: off)',
+      });
+    } else if ((strictInline || inline) && inlineValue === 'log') {
+      steps.push({
+        name: 'Inline execution',
+        outcome: 'allow',
+        detail: `${inline ? inlineExecReason(inline) : 'Inline code execution detected'} — logged, not held at this level (commands.inline-exec: log)`,
+      });
+    } else if (strictInline || inline) {
+      const reason = inline ? inlineExecReason(inline) : undefined;
+      const outcome = inlineValue === 'block' ? 'block' : 'review';
+      steps.push({
+        name: 'Inline execution',
+        outcome,
         detail: reason ?? 'Inline code execution detected — this level reviews every inline call',
         isFinal: true,
       });
@@ -648,19 +681,20 @@ async function deriveExplainTrace(
         args,
         waterfall,
         steps,
-        decision: 'review',
+        decision: outcome,
         blockedByLabel: 'Node9 Standard (Inline Execution)',
         ...(reason ? { reason } : {}),
         ruleDescription: inlineExecDescription(inline),
       };
+    } else {
+      steps.push({
+        name: 'Inline execution',
+        outcome: 'checked',
+        detail: detectInlineExec(shellCommand)
+          ? 'Inline code that does nothing dangerous'
+          : 'No inline execution pattern detected',
+      });
     }
-    steps.push({
-      name: 'Inline execution',
-      outcome: 'checked',
-      detail: detectInlineExec(shellCommand)
-        ? 'Inline code that does nothing dangerous'
-        : 'No inline execution pattern detected',
-    });
 
     // ── 3b. AST eval detection ────────────────────────────────────────────
     const evalVerdict = detectDangerousShellExec(shellCommand);

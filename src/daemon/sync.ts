@@ -1325,8 +1325,9 @@ export async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }
 }
 
 /**
- * Run a single cloud policy sync and return a result summary.
- * Exported for use by `node9 sync` CLI command.
+ * Run a single cloud policy sync and return a result summary. Fetches the
+ * rules and writes the cache, nothing else. Exported for `node9 policy sync`
+ * and onboarding.
  */
 export async function runCloudSync(): Promise<
   | { ok: true; rules: number; fetchedAt: string; unchanged?: boolean }
@@ -1336,25 +1337,9 @@ export async function runCloudSync(): Promise<
   if (!creds) {
     return { ok: false, reason: 'No API key configured. Add credentials with: node9 login' };
   }
-  // Whether the policy fetch succeeded or failed, kick off the blast
-  // push fire-and-forget so the manual `node9 policy sync` command also
-  // refreshes the SaaS-side disk exposure aggregate. Same opt-out env
-  // var as the daemon path. Scan piggybacks the same way.
-  const maybePushBlast = () => {
-    if (process.env.NODE9_BLAST_DISABLE !== '1') {
-      void pushBlastSnapshot(creds);
-    }
-    if (process.env.NODE9_SCAN_DISABLE !== '1') {
-      void pushScanSnapshot(creds);
-    }
-    if (process.env.NODE9_POSTURE_DISABLE !== '1') {
-      void pushPostureSnapshot(creds);
-    }
-    if (process.env.NODE9_POLICY_MIRROR_DISABLE !== '1') {
-      void pushPolicySnapshot(creds);
-    }
-  };
-
+  // Rules only. The blast, scan, posture and policy-mirror pushes belong to
+  // the daemon loop (syncOnce): a manual sync that also walked the agent
+  // history could stall for minutes after a detector upgrade.
   try {
     const result = await fetchCloudPolicy(creds.apiKey, creds.apiUrl, readCachedEtag());
     if (result.kind === 'unchanged') {
@@ -1362,7 +1347,6 @@ export async function runCloudSync(): Promise<
       // counts so the CLI still tells the user how many rules are active.
       const status = getCloudSyncStatus();
       recordSyncHealth({ ok: true });
-      maybePushBlast();
       return status.cached
         ? { ok: true, rules: status.rules, fetchedAt: status.fetchedAt, unchanged: true }
         : { ok: true, rules: 0, fetchedAt: new Date().toISOString(), unchanged: true };
@@ -1381,7 +1365,6 @@ export async function runCloudSync(): Promise<
     };
     writeCache(cache);
     recordSyncHealth({ ok: true, changed: true });
-    maybePushBlast();
     return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt };
   } catch (err) {
     // Record the failure so a manual sync that can't reach the server counts
@@ -1389,7 +1372,6 @@ export async function runCloudSync(): Promise<
     // so no extra hook-debug log here). Never fail open — cache is untouched.
     const msg = err instanceof Error ? err.message : String(err);
     recordSyncHealth({ ok: false, error: msg });
-    maybePushBlast();
     return { ok: false, reason: msg };
   }
 }

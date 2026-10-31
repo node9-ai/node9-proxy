@@ -371,11 +371,16 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'commands.disk-destroy',
   'commands.dangerous-word',
   'commands.node9-disarm',
+  'commands.reverse-shell',
   'data.pipe-chain',
+  'data.env-exfil',
+  'loading.unknown-registry',
   // The general action checks (node9Firewall#390): smart rules the map governs.
   'actions.money',
   'actions.access',
   'actions.publish',
+  'actions.settings',
+  'actions.protected-branch',
 ]);
 
 /**

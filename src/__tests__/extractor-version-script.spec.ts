@@ -50,6 +50,7 @@ const SOURCE_FILES = [
   'packages/policy-engine/src/catalog.ts',
   'packages/policy-engine/src/levels.ts',
   'packages/policy-engine/src/severity/index.ts',
+  'packages/policy-engine/src/shell/outbound.ts',
 ];
 
 describe('check-extractor-version.mjs', () => {

@@ -243,6 +243,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     legacy: ['review-git-stage-all'],
   },
   {
+    id: 'commands.reverse-shell',
+    group: 'commands',
+    title: 'Reverse shell',
+    catches:
+      'a shell wired to a network socket: bash -i >& /dev/tcp/…, nc -e, socat exec:, a socket fd read by a shell, a shell piped to and from nc or telnet',
+    values: ALL,
+    defaultValue: 'block',
+    legacy: ['block-reverse-shell'],
+  },
+  {
     id: 'commands.node9-disarm',
     group: 'commands',
     title: 'node9 disarmed from the shell',
@@ -384,6 +394,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
       'Node9: Pipe-Chain Exfiltration (critical)',
       'Node9: Pipe-Chain to Trusted Host (obfuscated)',
     ],
+  },
+  {
+    id: 'data.env-exfil',
+    group: 'data',
+    title: 'Environment sent out',
+    catches:
+      'the whole environment (env, printenv, set, export -p, /proc/*/environ) handed to curl, nc or another sender, through $(…), a pipe or a variable',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-env-exfil'],
   },
   {
     id: 'data.output-secrets',
@@ -529,6 +549,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'block',
     legacy: ['📦 Node9 Package Check (Malicious)', '📦 Node9 Package Check (Review)'],
   },
+  {
+    id: 'loading.unknown-registry',
+    group: 'loading',
+    title: 'Package from an unknown registry',
+    catches:
+      'an install that names a registry on the command line (--registry, --index-url, -i, npm_config_registry=…) that is not the public one, not in your npm, yarn, bun, pip or uv config and not on the allowlist',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['review-unknown-registry'],
+  },
   // ── Actions in apps (node9Firewall#390) ──────────────────────────────────
   // The safety net under the app shields: an action that moves money, changes
   // access or publishes, on an MCP server no app shield claims (an internal
@@ -566,6 +596,29 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     values: ALL,
     defaultValue: 'review',
     legacy: generalActionRuleNames('publishing'),
+  },
+  // node9Firewall#415 items 5 and 6 (step 6 of #416): settings and the main
+  // branch through MCP tools. Review at every level (the founder's rule for
+  // dangerous actions: ask, never block at a level).
+  {
+    id: 'actions.settings',
+    group: 'actions',
+    title: 'Repository, account and mailbox settings change',
+    catches:
+      'a repository made public, a deploy key, webhook or CI secret added, branch protection changed, mail forwarded outside or a public share link, through an app',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: generalActionRuleNames('settings'),
+  },
+  {
+    id: 'actions.protected-branch',
+    group: 'actions',
+    title: 'The main branch changes through an app',
+    catches:
+      'a merge, a commit straight to main or master, or a CI workflow file written through an app',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: generalActionRuleNames('branches'),
   },
 ];
 

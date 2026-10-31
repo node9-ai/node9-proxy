@@ -544,3 +544,193 @@ export function validateFinnishHetu(raw: string): boolean {
   const n = Number(m[1] + m[2] + m[3] + m[4]);
   return HETU_CHARS[n % 31] === m[5];
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// National and tax identifiers, second round (node9Firewall#385, step 5 of
+// #416). Same contract as above: the identifier as written, the issuing
+// authority's own check digit and range rules, nothing guessed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Israeli identity number: 9 digits, weights 1,2 alternating, digit sums, mod 10. */
+export function validateIsraeliId(raw: string): boolean {
+  if (!/^\d{9}$/.test(raw)) return false;
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    let n = (raw.charCodeAt(i) - 48) * (i % 2 === 0 ? 1 : 2);
+    if (n > 9) n -= 9;
+    sum += n;
+  }
+  return sum % 10 === 0;
+}
+
+/** Dutch BSN: 9 digits, the 11-proof (weights 9..2, the last digit counted negative). */
+export function validateBsn(raw: string): boolean {
+  if (!/^\d{9}$/.test(raw)) return false;
+  let sum = 0;
+  for (let i = 0; i < 8; i++) sum += (raw.charCodeAt(i) - 48) * (9 - i);
+  sum -= raw.charCodeAt(8) - 48;
+  return sum % 11 === 0;
+}
+
+/**
+ * German Steuer-ID (IdNr): 11 digits, first not 0; among the first ten,
+ * exactly one digit appears two or three times and the others at most once;
+ * the eleventh is the ISO 7064 mod 11,10 check digit.
+ */
+export function validateSteuerId(raw: string): boolean {
+  if (!/^[1-9]\d{10}$/.test(raw)) return false;
+  const counts = new Array<number>(10).fill(0);
+  for (let i = 0; i < 10; i++) counts[raw.charCodeAt(i) - 48]++;
+  const repeated = counts.filter((c) => c > 1);
+  if (repeated.length !== 1 || repeated[0] > 3) return false;
+  let product = 10;
+  for (let i = 0; i < 10; i++) {
+    let sum = (raw.charCodeAt(i) - 48 + product) % 10;
+    if (sum === 0) sum = 10;
+    product = (2 * sum) % 11;
+  }
+  let check = 11 - product;
+  if (check === 10) check = 0;
+  return check === raw.charCodeAt(10) - 48;
+}
+
+/** Brazilian CPF: 11 digits (###.###.###-## or bare), two mod-11 check digits; not all one digit. */
+export function validateCpf(raw: string): boolean {
+  const d = raw.replace(/[.-]/g, '');
+  if (!/^\d{11}$/.test(d) || /^(\d)\1{10}$/.test(d)) return false;
+  for (const n of [9, 10]) {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += (d.charCodeAt(i) - 48) * (n + 1 - i);
+    let r = (sum * 10) % 11;
+    if (r === 10) r = 0;
+    if (r !== d.charCodeAt(n) - 48) return false;
+  }
+  return true;
+}
+
+const VERHOEFF_D = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+  [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
+  [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+  [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
+  [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+  [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
+  [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+  [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
+  [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+];
+const VERHOEFF_P = [
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
+  [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
+  [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+  [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
+  [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
+  [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
+  [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
+];
+
+/** The Verhoeff check over a digit string (the last digit is the check digit). */
+export function validateVerhoeff(digits: string): boolean {
+  if (!/^\d+$/.test(digits)) return false;
+  let c = 0;
+  const n = digits.length;
+  for (let i = 0; i < n; i++) {
+    const d = digits.charCodeAt(n - 1 - i) - 48;
+    c = VERHOEFF_D[c][VERHOEFF_P[i % 8][d]];
+  }
+  return c === 0;
+}
+
+/** Indian Aadhaar: 12 digits (#### #### #### or bare), first digit 2-9, Verhoeff. */
+export function validateAadhaar(raw: string): boolean {
+  const d = raw.replace(/ /g, '');
+  if (!/^[2-9]\d{11}$/.test(d)) return false;
+  return validateVerhoeff(d);
+}
+
+/** Canadian SIN: 9 digits (### ### ### or bare), Luhn (its own sum: validateLuhn is card-length only), first digit not 8. */
+export function validateSin(raw: string): boolean {
+  const d = raw.replace(/[ -]/g, '');
+  if (!/^[0-79]\d{8}$/.test(d)) return false;
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    let n = (d.charCodeAt(i) - 48) * (i % 2 === 1 ? 2 : 1);
+    if (n > 9) n -= 9;
+    sum += n;
+  }
+  return sum % 10 === 0;
+}
+
+/** Australian TFN: 9 digits (### ### ### or bare) with weights 1,4,3,7,5,8,6,9,10, mod 11. */
+export function validateTfn(raw: string): boolean {
+  const d = raw.replace(/ /g, '');
+  if (!/^\d{9}$/.test(d)) return false;
+  const weights = [1, 4, 3, 7, 5, 8, 6, 9, 10];
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += (d.charCodeAt(i) - 48) * weights[i];
+  return sum % 11 === 0;
+}
+
+/** Chinese resident identity number: 17 digits with a YYYYMMDD birth date, then an ISO 7064 mod 11-2 check character. */
+export function validateChineseId(raw: string): boolean {
+  const s = raw.toUpperCase();
+  const m = /^\d{6}(\d{4})(\d{2})(\d{2})\d{3}([0-9X])$/.exec(s);
+  if (!m) return false;
+  const year = Number(m[1]);
+  if (year < 1900 || year > 2100 || !plausibleDate(m[2], m[3])) return false;
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+  let sum = 0;
+  for (let i = 0; i < 17; i++) sum += (s.charCodeAt(i) - 48) * weights[i];
+  return '10X98765432'[sum % 11] === m[4];
+}
+
+/** Portuguese NIF: 9 digits, weights 9..2, mod 11 (10 and 11 read as 0). */
+export function validatePortugueseNif(raw: string): boolean {
+  if (!/^[1-9]\d{8}$/.test(raw)) return false;
+  let sum = 0;
+  for (let i = 0; i < 8; i++) sum += (raw.charCodeAt(i) - 48) * (9 - i);
+  let check = 11 - (sum % 11);
+  if (check >= 10) check = 0;
+  return check === raw.charCodeAt(8) - 48;
+}
+
+/** Belgian national number: YY.MM.DD-XXX.YY or 11 digits; 97 minus (the first nine mod 97), with a 2 prefix for births from 2000. */
+export function validateBelgianNationalNumber(raw: string): boolean {
+  const d = raw.replace(/[.-]/g, '');
+  if (!/^\d{11}$/.test(d)) return false;
+  // A date is encoded unless the month is unknown (00) or shifted (+20/+40 for bis numbers).
+  const month = Number(d.slice(2, 4)) % 20;
+  if (month !== 0 && !plausibleDate(String(month).padStart(2, '0'), d.slice(4, 6))) return false;
+  const base = Number(d.slice(0, 9));
+  const check = Number(d.slice(9, 11));
+  return 97 - (base % 97) === check || 97 - ((2_000_000_000 + base) % 97) === check;
+}
+
+/** Argentine CUIT / CUIL: ##-########-# or 11 digits, weights 5,4,3,2,7,6,5,4,3,2, mod 11. */
+export function validateCuit(raw: string): boolean {
+  const d = raw.replace(/-/g, '');
+  if (!/^\d{11}$/.test(d)) return false;
+  // Type prefixes in use: 20, 23, 24, 27 (persons), 30, 33, 34 (companies).
+  if (!/^(?:2[0347]|3[034])/.test(d)) return false;
+  const weights = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
+  let sum = 0;
+  for (let i = 0; i < 10; i++) sum += (d.charCodeAt(i) - 48) * weights[i];
+  let check = 11 - (sum % 11);
+  if (check === 11) check = 0;
+  if (check === 10) check = 9;
+  return check === d.charCodeAt(10) - 48;
+}
+
+/** Turkish TCKN: 11 digits, first not 0; two check digits over the first nine and ten. */
+export function validateTckn(raw: string): boolean {
+  if (!/^[1-9]\d{10}$/.test(raw)) return false;
+  const a = Array.from(raw, (c) => c.charCodeAt(0) - 48);
+  const odd = a[0] + a[2] + a[4] + a[6] + a[8];
+  const even = a[1] + a[3] + a[5] + a[7];
+  const tenth = (odd * 7 - even) % 10;
+  if ((tenth + 10) % 10 !== a[9]) return false;
+  const eleventh = a.slice(0, 10).reduce((s, n) => s + n, 0) % 10;
+  return eleventh === a[10];
+}

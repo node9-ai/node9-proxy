@@ -99,11 +99,11 @@ export async function onboardMachine(
         : { name: 'policy-sync', ok: false, detail: sync.reason }
     );
 
-    // runCloudSync already fires background pushes (blast/scan/posture and a
-    // SILENT policy mirror). runPolicyPush repeats the mirror loudly because
-    // its 2xx is the registration ack: the dashboard machines list is keyed
-    // off this snapshot row. One redundant idempotent POST beats claiming
-    // "Connected" blind — ignoring this exact failure was the old connect bug.
+    // runCloudSync fetches rules only; the blast/scan/posture pushes come from
+    // the daemon's first sync tick (step 5 starts it). runPolicyPush ships the
+    // mirror here because its 2xx is the registration ack: the dashboard
+    // machines list is keyed off this snapshot row. Claiming "Connected"
+    // blind — ignoring this exact failure — was the old connect bug.
     const push = await runPolicyPush();
     steps.push(
       push.ok

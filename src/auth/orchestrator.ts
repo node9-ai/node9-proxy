@@ -3,6 +3,7 @@
 import { randomUUID } from 'crypto';
 import { resolveLinkedServer } from '../apps/state';
 import os from 'os';
+import path from 'path';
 import { askNativePopup } from '../ui/native';
 import { computeRiskMetadata, type RiskMetadata } from '../context-sniper';
 import {
@@ -57,6 +58,12 @@ import { isTrustedHost, matchesTrustedHost } from './trusted-hosts';
 import { getConfig, getCredentials } from '../config';
 import { forecastRun, noteForecastUnknown } from './forecast-context';
 import { isIgnoredTool, evaluatePolicy } from '../policy';
+import {
+  runStatelessGates,
+  combineWithEngine,
+  joinPackageReview,
+  GATE_LABELS,
+} from '../policy/gate-order';
 import {
   checkPause,
   getActiveTrustSession,
@@ -259,6 +266,16 @@ function isMcpToolName(toolName: string): boolean {
   return /^mcp__[^_](?:[^_]|_(?!_))*?__/i.test(toolName);
 }
 
+/** `~/x` and a relative path as an absolute path (the daemon keys taint by real path). */
+function absoluteUploadPath(spelled: string, cwd: string | undefined): string {
+  const expanded =
+    spelled === '~' || spelled.startsWith('~/')
+      ? path.join(os.homedir(), spelled.slice(1))
+      : spelled;
+  if (path.isAbsolute(expanded)) return expanded;
+  return cwd && path.isAbsolute(cwd) ? path.resolve(cwd, expanded) : expanded;
+}
+
 /**
  * Extract file paths that a tool might be reading from or uploading.
  * Used to check taint before approving network/shell operations.
@@ -286,8 +303,10 @@ function extractFilePaths(toolName: string, args: unknown, shellCommand?: string
     for (const m of cmd.matchAll(/\b(?:scp|rsync)\s+(?:-\S+\s+)*(\S+)\s+\S+@/g)) {
       paths.push(m[1]);
     }
-    // nc / ncat with input redirect: nc host port < file
-    for (const m of cmd.matchAll(/<\s*(\S+)/g)) {
+    // nc / ncat with input redirect: nc host port < file. Only a single `<`:
+    // `<<'EOF'` is a heredoc (its label is no file), `<<<` a here-string,
+    // `<&3` an fd and `<(cmd)` a process substitution. `<>file` reads it too.
+    for (const m of cmd.matchAll(/(?<!<)<>?(?![<&(])\s*(\S+)/g)) {
       paths.push(m[1]);
     }
   }
@@ -311,7 +330,14 @@ function extractFilePaths(toolName: string, args: unknown, shellCommand?: string
 // silently leave the taint tier. The discriminator between the two is a DOT:
 // `.ssh` is a dotfile, while a slash or a quote before the name is just a path
 // or a payload. Measured over 13 shapes, 2026-09-11.
-const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b`);
+//
+// The lookahead is the same reasoning on the other side: a name followed by a
+// slash is a DIRECTORY on a path, not a program (`/etc/ssh/ssh_config`). That
+// was the same false entry into the taint tier, through a Python heredoc
+// copying `/etc/ssh/ssh_config` with /etc jailed: the daemon-down review came
+// back instead of the jail's block. `/usr/bin/curl`, `sh -c "curl …"` and
+// `{curl …;}` are not followed by a slash and still match.
+const NETWORK_COMMAND_RE = new RegExp(`(?<![.\\w-])(${[...NET_BINARIES].join('|')})\\b(?![/\\\\])`);
 
 // ── Flight Recorder — fire-and-forget socket notify ──────────────────────────
 // Returns a Promise so callers can await socket flush before process.exit().
@@ -776,10 +802,23 @@ export async function _authorizeHeadlessCore(
   // Taint is heuristic (a file *may* still be sensitive); hard blocks are
   // reserved for team policy shields.
   let taintWarning: string | null = null;
-  if (shellInput.kind === 'shell' && NETWORK_COMMAND_RE.test(shellInput.command)) {
-    const filePaths = extractFilePaths(toolName, args, shellInput.command);
+  const uploadsAFile = fileAccess.accesses.some((a) => a.upload);
+  if (
+    shellInput.kind === 'shell' &&
+    (NETWORK_COMMAND_RE.test(shellInput.command) || uploadsAFile)
+  ) {
+    // The regex readings plus the engine's own upload listing (`curl -F
+    // name=@F`, `-d @F`, `--json @F`, HTTPie, scp, rsync, `nc < F`), each as
+    // an absolute path: the daemon keys its records by real path, and a
+    // relative spelling would otherwise resolve against the daemon's cwd
+    // (node9Firewall#415 item 2).
+    const uploaded = fileAccess.accesses.filter((a) => a.upload).map((a) => a.path);
+    const spelledPaths = extractFilePaths(toolName, args, shellInput.command);
+    const filePaths = [...new Set([...spelledPaths, ...uploaded])];
     if (filePaths.length > 0) {
-      const taintResult = await checkTaint(filePaths);
+      const taintResult = await checkTaint(
+        filePaths.map((p) => absoluteUploadPath(p, options?.cwd))
+      );
       if (taintResult.tainted && taintResult.record) {
         const {
           path: taintedPath,
@@ -827,12 +866,15 @@ export async function _authorizeHeadlessCore(
             };
           }
         }
-      } else if (taintResult.daemonUnavailable) {
+      } else if (taintResult.daemonUnavailable && spelledPaths.length > 0) {
         // Taint service is down — cannot confirm files are clean.
         // Treat as a soft taint: the user sees a warning and must explicitly
         // approve. This prevents a daemon crash from silently unblocking
-        // exfiltration checks.
-        taintWarning = `⚠️ Taint service unavailable — cannot verify if ${filePaths.join(', ')} is clean`;
+        // exfiltration checks. Only for the upload spellings this guard has
+        // always read: the engine's wider listing (a form upload, scp) joins
+        // the check when the daemon answers, and does not turn every upload
+        // into a hold while it is down.
+        taintWarning = `⚠️ Taint service unavailable — cannot verify if ${spelledPaths.join(', ')} is clean`;
       }
     }
   }
@@ -1303,210 +1345,192 @@ export async function _authorizeHeadlessCore(
     }
   }
 
-  // ── DLP CONTENT SCANNER ───────────────────────────────────────────────────
-  // Runs before ignored-tool fast path and audit mode so that a leaked
-  // credential is always caught — even for "safe" tools like web_search.
-  if (
-    config.policy.dlp.enabled &&
-    (!isIgnoredTool(toolName) || config.policy.dlp.scanIgnoredTools)
-  ) {
-    // P1-1/P1-2: Check file path first (blocks read attempts before content is returned,
-    // and resolves symlinks to prevent escape attacks).
-    const argsObj =
-      args && typeof args === 'object' && !Array.isArray(args)
-        ? (args as Record<string, unknown>)
-        : {};
-    const filePath = String(argsObj.file_path ?? argsObj.path ?? argsObj.filename ?? '');
-    const dlpMatch: DlpMatch | null =
+  // ── DLP, PII AND PACKAGE CHECK (the stateless gates) ─────────────────────
+  // Their order and their stop/review rules live in policy/gate-order.ts,
+  // which `node9 explain` runs too (node9Firewall#405), so the two cannot
+  // drift. The scanning, every audit row and every side effect stay here.
+  // DLP runs before the ignored-tool fast path and audit mode so that a
+  // leaked credential is always caught, even for "safe" tools like
+  // web_search. The PII gate is its own control (default 'block'), independent
+  // of dlp.enabled. The package check: a known malicious package (OSV MAL-
+  // record) blocks with the advisory id; a malicious record with an unknown
+  // version, a package published inside policy.packageCheck.maxAgeHours, or
+  // an npm install script routes to review. Lookups fail OPEN, and every miss
+  // is written to hook-debug.log. Not for manual (Terminal) calls: a human
+  // typing an install is the decision this check would otherwise ask them
+  // for. `?.`: a config without the key must skip the check, never throw.
+  const argsObj =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+  const filePath = String(argsObj.file_path ?? argsObj.path ?? argsObj.filename ?? '');
+  const packageCheck = config.policy.packageCheck;
+  const gates = await runStatelessGates({
+    settings: {
+      panicMode: config.settings.panicMode === true,
+      dlp: config.policy.dlp,
+      toolIgnored: isIgnoredTool(toolName),
+    },
+    // The file gate was decided above, before the stateful gates.
+    // P1-1/P1-2: the file path first (blocks a read before its content comes
+    // back, and resolves symlinks), then the arguments.
+    dlp: () =>
       (filePath
         ? scanFilePath(filePath, options?.cwd, {
             systemAccessHandled: !isManual && fileAccess.handledPaths.has(filePath),
           })
-        : null) ?? argumentScan();
-    if (dlpMatch) {
-      // Attribution and hashing, ONCE, for both paths below: every row written
-      // for this call -- the block row, the flagged row, and every outcome row
-      // after it -- names the pattern and carries no credential in its args.
-      // (A review row passing the config's value would have stored args in
-      // clear with hashing off; redactSecrets needs a label to key on.)
-      meta = { ...meta, dlpPattern: dlpMatch.patternName, dlpSample: dlpMatch.redactedSample };
-      hashAuditArgs = true;
-      const dlpReason =
-        `🚨 DATA LOSS PREVENTION: ${dlpMatch.patternName} detected in ` +
-        `field "${dlpMatch.fieldPath}" (${dlpMatch.redactedSample})`;
-      // reviewAction:'block' (review-ask-inline-v2-spec.md): the admin's "if
-      // DLP matters, set it to block" lever — review-severity matches take the
-      // same hard-block path as block-severity ones. Default 'review' keeps
-      // today's behavior (fall through to the review path below).
-      if (dlpMatch.severity === 'block' || config.policy.dlp.reviewAction === 'block') {
-        // Always hash args on DLP blocks — the secret must never appear in
-        // the audit log. The pattern + redacted sample ride on the local row;
-        // the outbox shipper carries them to the SaaS (no decision-time
-        // network call — that path used to lose events when the hook process
-        // exited before the fire-and-forget POST completed).
-        // Phase D2 — capture this row's eid so the taint it creates can point
-        // back to it (the causal edge source). Undefined under --manual (no row).
-        let dlpEid: string | undefined;
-        if (!isManual)
-          dlpEid = appendLocalAudit(
-            toolName,
-            args,
-            'deny',
-            isObserveMode ? 'observe-mode-dlp-would-block' : 'dlp-block',
-            meta,
-            hashAuditArgs
-          );
-        // Taint the destination file so future uploads of it are also blocked.
-        if (isWriteTool(toolName) && filePath) {
-          await notifyTaint(filePath, `DLP:${dlpMatch.patternName}`, dlpEid);
-        }
-        if (isObserveMode) {
-          return {
-            approved: true,
-            checkedBy: 'audit',
-            observeWouldBlock: true,
-            blockedByLabel: '🚨 Node9 DLP (Secret Detected)',
-          };
-        }
-        return {
-          approved: false,
-          reason: dlpReason,
-          blockedBy: 'local-config',
-          blockedByLabel: '🚨 Node9 DLP (Secret Detected)',
-          // A PATH hit is a protected file, not a secret in the arguments: the
-          // agent must not be told to rotate a credential it never saw (MSG-1).
-          // Only when the arguments carry no credential: a path match
-          // short-circuits the argument scan above (`scanFilePath ?? scanArgs`),
-          // so a Write of a real key into .env would otherwise be told "nothing
-          // was exposed" (/code-review).
-          ...(dlpMatch.patternName === SENSITIVE_PATH_PATTERN &&
-            !argumentScan() && {
-              blockKind: 'protected-path' as const,
-              blockedPath: safePathForDisplay(dlpMatch.redactedSample),
-            }),
-        };
-      }
-      // severity === 'review': fall through to the race engine with a DLP label.
-      // Write an audit entry now so the DLP flag is traceable even if the race
-      // engine later approves the call without recording why it was intercepted.
-      // meta and hashing were set above, so the flagged row -- the one the
-      // dashboard renders as "Flagged" -- names the pattern (/code-review, DLP-3).
-      if (!isManual)
-        appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
-      explainableLabel = '🚨 Node9 DLP (Credential Review)';
-      dlpReviewFlagged = true;
-    }
+        : null) ?? argumentScan(),
+    pii: () => detectArgsPii(args),
+    packageCheck: () =>
+      packageCheck?.enabled && !isManual
+        ? runPackageCheck(toolName, args, packageCheck, options?.cwd, { offline: !!forecast })
+        : Promise.resolve(null),
+  });
+
+  const dlpMatch: DlpMatch | null = gates.stop?.dlpMatch ?? gates.reviews.dlp ?? null;
+  if (dlpMatch) {
+    // Attribution and hashing, ONCE, for both paths below: every row written
+    // for this call -- the block row, the flagged row, and every outcome row
+    // after it -- names the pattern and carries no credential in its args.
+    meta = { ...meta, dlpPattern: dlpMatch.patternName, dlpSample: dlpMatch.redactedSample };
+    hashAuditArgs = true;
+  }
+  if (gates.reviews.dlp) {
+    // severity === 'review': fall through to the race engine with a DLP label.
+    // Write an audit entry now so the DLP flag is traceable even if the race
+    // engine later approves the call without recording why it was intercepted.
+    if (!isManual)
+      appendLocalAudit(toolName, args, 'allow', 'dlp-review-flagged', meta, hashAuditArgs);
+    explainableLabel = GATE_LABELS.dlpReview;
+    dlpReviewFlagged = true;
+  }
+  const pkgResult = gates.packageResult;
+  if (pkgResult && pkgResult.misses.length > 0) {
+    noteForecastUnknown('package-registry');
+    appendToLog(HOOK_DEBUG_LOG, {
+      ts: new Date().toISOString(),
+      event: 'package-check-miss',
+      tool: toolName,
+      misses: pkgResult.misses,
+    });
   }
 
-  // ── PII GATE (GAP-7) ──────────────────────────────────────────────────────
-  // Opt-in realtime block for high-signal PII (SSN, Credit Card) in tool args.
-  // Reliable on/off only — no fragile "review" routing. Default 'off' so
-  // existing behaviour is unchanged. Independent of dlp.enabled: PII gating is
-  // its own control, so disabling secret-DLP does NOT silently disable PII
-  // blocking. Honours scanIgnoredTools: ignored tools (read/grep/ls) are
-  // scanned only when that flag is on — which it is by default. Args are always
-  // hashed in the audit row (last arg true) so the PII value never lands in
-  // audit.log in clear.
-  if (
-    config.policy.dlp.pii === 'block' &&
-    (!isIgnoredTool(toolName) || config.policy.dlp.scanIgnoredTools)
-  ) {
-    const piiFound = detectArgsPii(args);
-    if (piiFound.length > 0) {
-      const piiReason =
-        `🔒 PII DETECTED: ${piiFound.join(', ')} found in tool arguments. ` +
-        `Remove or tokenize personal data before passing it to a tool.`;
-      if (!isManual)
-        appendLocalAudit(
-          toolName,
-          args,
-          'deny',
-          isObserveMode ? 'observe-mode-pii-would-block' : 'pii-block',
-          { ...meta, piiPatterns: piiFound.join(',') },
-          true
-        );
-      if (isObserveMode) {
-        return {
-          approved: true,
-          checkedBy: 'audit',
-          observeWouldBlock: true,
-          blockedByLabel: '🔒 Node9 PII (Detected)',
-        };
-      }
+  if (gates.stop?.gate === 'dlp' && dlpMatch) {
+    // Always hash args on DLP blocks — the secret must never appear in
+    // the audit log. The pattern + redacted sample ride on the local row;
+    // the outbox shipper carries them to the SaaS (no decision-time
+    // network call — that path used to lose events when the hook process
+    // exited before the fire-and-forget POST completed).
+    // Phase D2 — capture this row's eid so the taint it creates can point
+    // back to it (the causal edge source). Undefined under --manual (no row).
+    let dlpEid: string | undefined;
+    if (!isManual)
+      dlpEid = appendLocalAudit(
+        toolName,
+        args,
+        'deny',
+        isObserveMode ? 'observe-mode-dlp-would-block' : 'dlp-block',
+        meta,
+        hashAuditArgs
+      );
+    // Taint the destination file so future uploads of it are also blocked.
+    if (isWriteTool(toolName) && filePath) {
+      await notifyTaint(filePath, `DLP:${dlpMatch.patternName}`, dlpEid);
+    }
+    if (isObserveMode) {
       return {
-        approved: false,
-        reason: piiReason,
-        blockedBy: 'local-config',
-        blockedByLabel: '🔒 Node9 PII (Detected)',
+        approved: true,
+        checkedBy: 'audit',
+        observeWouldBlock: true,
+        blockedByLabel: gates.stop.label,
       };
     }
+    return {
+      approved: false,
+      reason: gates.stop.reason,
+      blockedBy: 'local-config',
+      blockedByLabel: gates.stop.label,
+      // A PATH hit is a protected file, not a secret in the arguments: the
+      // agent must not be told to rotate a credential it never saw (MSG-1).
+      // Only when the arguments carry no credential: a path match
+      // short-circuits the argument scan above (`scanFilePath ?? scanArgs`),
+      // so a Write of a real key into .env would otherwise be told "nothing
+      // was exposed" (/code-review).
+      ...(dlpMatch.patternName === SENSITIVE_PATH_PATTERN &&
+        !argumentScan() && {
+          blockKind: 'protected-path' as const,
+          blockedPath: safePathForDisplay(dlpMatch.redactedSample),
+        }),
+    };
   }
 
-  // ── PACKAGE CHECK (supply chain) ──────────────────────────────────────────
-  // A shell command that installs or runs registry packages is checked before
-  // it runs: a known malicious package (OSV MAL- record) blocks with the
-  // advisory id; a malicious record with an unknown version, a package
-  // published inside policy.packageCheck.maxAgeHours, or an npm install script
-  // routes to review. Lookups fail OPEN — node9 never stops the agent because
-  // a check failed — and every miss is written to hook-debug.log.
-  // Not for manual (Terminal) calls: a human typing an install is the
-  // decision this check would otherwise ask them for.
-  // `?.`: a config without the key (an older managed shape, a partial test
-  // config) must skip the check, never throw — an exception here would turn
-  // into a fail-CLOSED engine error in the gateway.
-  const packageCheck = config.policy.packageCheck;
-  if (packageCheck?.enabled && !isManual) {
-    const pkg = await runPackageCheck(toolName, args, packageCheck, options?.cwd, {
-      offline: !!forecast,
-    });
-    if (pkg.misses.length > 0) {
-      noteForecastUnknown('package-registry');
-      appendToLog(HOOK_DEBUG_LOG, {
-        ts: new Date().toISOString(),
-        event: 'package-check-miss',
-        tool: toolName,
-        misses: pkg.misses,
-      });
-    }
-    if (pkg.verdict === 'block' && pkg.reason) {
-      const advisories = pkg.findings.flatMap((f) => f.advisories ?? []);
+  if (gates.stop?.gate === 'pii' && gates.stop.pii) {
+    // Args are always hashed in the audit row (last arg true) so the PII
+    // value never lands in audit.log in clear.
+    if (!isManual)
       appendLocalAudit(
         toolName,
         args,
         'deny',
-        isObserveMode ? 'observe-mode-package-would-block' : 'package-malicious',
-        { ...meta, ruleName: `package-check:${advisories.join(',')}` },
-        hashAuditArgs
+        isObserveMode ? 'observe-mode-pii-would-block' : 'pii-block',
+        { ...meta, piiPatterns: gates.stop.pii.join(',') },
+        true
       );
-      if (isObserveMode) {
-        return {
-          approved: true,
-          checkedBy: 'audit',
-          observeWouldBlock: true,
-          blockedByLabel: '📦 Node9 Package Check (Malicious)',
-        };
-      }
+    if (isObserveMode) {
       return {
-        approved: false,
-        reason: pkg.reason,
-        blockedBy: 'local-config',
-        blockedByLabel: '📦 Node9 Package Check (Malicious)',
-        ruleHit: `package-check:${advisories.join(',')}`,
-        ruleDescription: pkg.reason,
+        approved: true,
+        checkedBy: 'audit',
+        observeWouldBlock: true,
+        blockedByLabel: gates.stop.label,
       };
     }
-    if (pkg.verdict === 'review' && pkg.reason) {
-      appendLocalAudit(
-        toolName,
-        args,
-        'allow',
-        'package-review-flagged',
-        { ...meta, ruleName: 'package-check:review' },
-        hashAuditArgs
-      );
-      packageReview = pkg.reason;
-      if (!dlpReviewFlagged) explainableLabel = '📦 Node9 Package Check (Review)';
+    return {
+      approved: false,
+      reason: gates.stop.reason,
+      blockedBy: 'local-config',
+      blockedByLabel: gates.stop.label,
+    };
+  }
+
+  if (gates.stop?.gate === 'package' && gates.stop.pkg) {
+    const advisories = gates.stop.pkg.findings.flatMap((f) => f.advisories ?? []);
+    appendLocalAudit(
+      toolName,
+      args,
+      'deny',
+      isObserveMode ? 'observe-mode-package-would-block' : 'package-malicious',
+      { ...meta, ruleName: `package-check:${advisories.join(',')}` },
+      hashAuditArgs
+    );
+    if (isObserveMode) {
+      return {
+        approved: true,
+        checkedBy: 'audit',
+        observeWouldBlock: true,
+        blockedByLabel: gates.stop.label,
+      };
     }
+    return {
+      approved: false,
+      reason: gates.stop.reason,
+      blockedBy: 'local-config',
+      blockedByLabel: gates.stop.label,
+      ruleHit: `package-check:${advisories.join(',')}`,
+      ruleDescription: gates.stop.ruleDescription,
+    };
+  }
+
+  if (gates.reviews.package?.reason) {
+    appendLocalAudit(
+      toolName,
+      args,
+      'allow',
+      'package-review-flagged',
+      { ...meta, ruleName: 'package-check:review' },
+      hashAuditArgs
+    );
+    packageReview = gates.reviews.package.reason;
+    if (!dlpReviewFlagged) explainableLabel = GATE_LABELS.packageReview;
   }
 
   // ── G10: a tool on the ignored list that DECLARES a destination ──────────
@@ -1658,12 +1682,15 @@ export async function _authorizeHeadlessCore(
   }
 
   // Fast Paths (Ignore, Trust, Policy Allow)
-  // Bypassed entirely when a taint warning is active — taint overrides trust
-  // sessions and policy allows so the user always gets a chance to review.
-  // NOTE: appPermReview does NOT skip this block (fix #3) — the policy must run so
-  // a hard-block verdict still wins. The ALLOW-returns inside are individually
-  // guarded with `!appPermReview` so a review-marked tool can't auto-allow.
-  if (!taintWarning && judge) {
+  // A taint warning overrides trust sessions and policy allows, so the user
+  // always gets a chance to review. Neither it nor appPermReview skips this
+  // block (fix #3; for taint, the taint-order fix): the policy must run so a
+  // hard-block verdict still wins. Before, a taint warning skipped the policy
+  // entirely, and with the daemon down ("Taint service unavailable") a jail
+  // block, a reverse shell or `curl | sh` on the same call became an
+  // approvable question. The ALLOW-returns inside are each guarded by
+  // `!callSpecificReview()`, which includes the taint warning.
+  if (judge) {
     // ── LOOP DETECTION ────────────────────────────────────────────────────
     // Skipped for an org-set review (re-review regression fix): reopening this
     // block for fix #3 re-enabled loop detection, which would hard-deny a
@@ -1677,7 +1704,7 @@ export async function _authorizeHeadlessCore(
     // allow, allow, allow, allow, deny, deny). Egress judges the destination,
     // not the repetition.
     const ld = config.policy.loopDetection;
-    if (ld.enabled && !appPermReview && !isIgnoredTool(toolName)) {
+    if (ld.enabled && !appPermReview && !taintWarning && !isIgnoredTool(toolName)) {
       const loopResult = recordAndCheck(toolName, args, ld.threshold, ld.windowSeconds * 1000);
       if (loopResult.looping) {
         const reason =
@@ -1720,28 +1747,29 @@ export async function _authorizeHeadlessCore(
     // path or user trust decisions, and breaking them would block reads
     // alongside writes). Block-verdicts also pass through (they're
     // already strictest possible).
-    if (config.settings.panicMode && policyResult.decision === 'review') {
+    // The engine verdict against the gates' reviews: the shared rules
+    // (policy/gate-order.ts). Panic mode upgrades a review to a block; an
+    // allow stands only when no gate, stateless or stateful, asked for a
+    // review. (`callSpecificReview()`: load-bearing. The engine runs the same
+    // scanner and usually reviews whatever the gate flags; the gate's own
+    // flags (taint, package, app permission, protected file, uninspectable
+    // shell) are not all known to the engine, so the gate keeps the last word.)
+    const combined = combineWithEngine(gates, policyResult, {
+      panicMode: config.settings.panicMode === true,
+      otherReviews: callSpecificReview(),
+    });
+    if (combined.panicked) {
       policyResult = {
         ...policyResult,
         decision: 'block',
-        blockedByLabel: '🚨 Panic mode (org policy)',
+        blockedByLabel: combined.blockedByLabel,
         reason:
           'Workspace is in panic mode — all review-verdict actions are blocked. ' +
           'Contact your admin to disable panic mode in the Node9 dashboard.',
       };
     }
 
-    // `!appPermReview`: a policy ALLOW must not short-circuit an org-set review
-    // (fix #3) — fall through to the race. A policy BLOCK below still wins.
-    // (No `!taintWarning` term needed: this whole policy block is already inside
-    // `if (!taintWarning && !isIgnoredTool(...))` above, so a tainted call never
-    // reaches here — verified by revert experiment, task #16 vector C.)
-    // (`!callSpecificReview()`: load-bearing. The engine runs the same scanner
-    // (policy/index.ts) and usually reviews whatever the gate flags; the gate's
-    // own flags (taint, package, app permission, protected file, uninspectable
-    // shell) are not all known to the engine, so the gate keeps the last word.
-    // Found by /code-review when the two read different configs.)
-    if (policyResult.decision === 'allow' && !callSpecificReview()) {
+    if (combined.decision === 'allow') {
       // Local row only — the outbox shipper delivers it. Removing the old
       // awaited POST also removes a cloud round-trip from EVERY allowed
       // call (the hot path). Rule attribution rides on the row so the SaaS
@@ -2128,7 +2156,16 @@ export async function _authorizeHeadlessCore(
 
   // Taint warning active — set a high-risk label and fall through to the race engine.
   // The user sees the taint context in the browser dashboard / native popup / Slack.
-  if (taintWarning) {
+  if (taintWarning && hardBlockDowngraded && riskMetadata) {
+    // A policy block softened to a review (a human approver is reachable)
+    // keeps its own rule and label, so the audit row and the report attribute
+    // it to the rule that blocked; the taint warning is added to what the
+    // approver reads, not put in its place.
+    riskMetadata.ruleDescription = [taintWarning, riskMetadata.ruleDescription, appPermReview]
+      .filter((c): c is string => !!c)
+      .join('\n')
+      .slice(0, 1024);
+  } else if (taintWarning) {
     explainableLabel = '🔴 Node9 Taint (Exfiltration Prevention)';
     // tier 7 = highest valid tier; pass taintWarning as ruleName so all
     // approval channels (terminal card, browser dashboard, Slack) can render it.
@@ -2142,6 +2179,17 @@ export async function _authorizeHeadlessCore(
       undefined,
       appPermReview ? `${taintWarning}\n${appPermReview}` : taintWarning
     );
+    // The policy runs under a taint warning now: when it also reviewed the
+    // call, its rule and check stay on the result (the report counts the
+    // check that matched) and its description joins the taint warning, so the
+    // reason, the rule and the description describe the same review.
+    if (policyReviewRule || policyReviewCheckId) {
+      policyRuleDescription = [taintWarning, policyRuleDescription]
+        .filter((c): c is string => !!c)
+        .join('\n')
+        .slice(0, 1024);
+      riskMetadata.ruleDescription = policyRuleDescription;
+    }
   } else if (exposureReview) {
     // fw#318: a send after the session read outside content. Same
     // fall-through-to-race shape as taint. The rule name is the stable
@@ -2187,10 +2235,11 @@ export async function _authorizeHeadlessCore(
     // The package check's findings ride as the rule text so every approval
     // surface says WHICH package and why. A policy label set above (a smart
     // rule that also reviewed) is kept; the findings still reach the card.
-    policyRuleDescription =
-      explainableLabel === '📦 Node9 Package Check (Review)' || !policyRuleDescription
-        ? packageReview
-        : `${policyRuleDescription}\n${packageReview}`;
+    policyRuleDescription = joinPackageReview(
+      policyRuleDescription,
+      explainableLabel,
+      packageReview
+    );
     riskMetadata = computeRiskMetadata(
       args,
       5,

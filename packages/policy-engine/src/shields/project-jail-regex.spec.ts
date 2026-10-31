@@ -106,3 +106,27 @@ describe('every shipped shield regex is one the runtime runs', () => {
             expect(validateRegex(c.value), `${shield.name} ${r.name}`).toBeNull();
   });
 });
+
+// node9Firewall#414: the bash rules read the command as a file access, so a
+// read written inside a stdin code body still meets them (fw#407 strips that
+// body for the shell-syntax rules only).
+describe('project-jail bash rules read a stdin code body', () => {
+  it.each([
+    ['block-read-ssh', `python3 - <<'PY'\nimport os\nos.system("cat ~/.ssh/id_rsa")\nPY`],
+    ['block-read-aws', `python3 - <<'PY'\nimport os\nos.system("cat ~/.aws/credentials")\nPY`],
+    ['block-read-env', `node - <<'JS'\nrequire('child_process').execSync('cat .env | head')\nJS`],
+  ])('%s meets %s', (name, command) => {
+    expect(meets(`shield:project-jail:${name}`, command)).toBe(true);
+  });
+
+  it('a script that names no credential file does not', () => {
+    expect(meets('shield:project-jail:block-read-ssh', `python3 - <<'PY'\nprint("hi")\nPY`)).toBe(
+      false
+    );
+  });
+
+  it('a program run by its path is not a read of it', () => {
+    expect(meets('shield:project-jail:block-read-ssh', 'cat ~/.ssh/config')).toBe(true);
+    expect(meets('shield:project-jail:block-read-ssh', '/usr/bin/cat ~/.ssh/config')).toBe(true);
+  });
+});

@@ -6,7 +6,7 @@
  *  - getCloudSyncStatus() / getCloudRules(): reads cache file
  *  - runCloudSync(): returns error when no credentials
  *  - getConfig() cloud cache layer: merges rules-cache.json into policy
- *  - blast piggyback: runBlast is invoked from the policy sync timer
+ *  - blast/scan/posture piggyback: invoked from the daemon sync tick only
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
@@ -92,6 +92,7 @@ import {
   extractRules,
   pushScanSnapshot,
   personalTrustedRecipients,
+  triggerSyncNow,
 } from '../daemon/sync.js';
 import { CANONICAL_EXTRACTOR_VERSION, trustedEntryOf } from '@node9/policy-engine';
 import { getConfig, _resetConfigCache, __resetRulesCacheStateForTest } from '../core.js';
@@ -293,11 +294,12 @@ describe('runCloudSync — credentials resolution', () => {
 
 // ── B1.3: blast piggyback ────────────────────────────────────────────────
 //
-// The policy-sync timer also triggers a blast snapshot push. These tests
-// pin the contract: blast runs by default, can be opted out via env var,
-// and never blocks the policy sync (errors / network failures stay silent).
+// The daemon's policy-sync tick also triggers a blast snapshot push. These
+// tests pin the contract: blast runs by default, can be opted out via env
+// var, and never blocks the policy sync (errors / network failures stay
+// silent). The manual sync (runCloudSync) does none of this; see below.
 
-describe('blast piggyback on cloud sync', () => {
+describe('blast piggyback on the daemon sync tick', () => {
   beforeEach(() => {
     mockRunBlast.mockClear();
     delete process.env.NODE9_BLAST_DISABLE;
@@ -312,7 +314,7 @@ describe('blast piggyback on cloud sync', () => {
         },
       }),
     });
-    await runCloudSync();
+    await triggerSyncNow(false);
     // The push happens fire-and-forget after fetchCloudPolicy. Even though
     // both calls fail (closed port), runBlast still fires.
     // Allow microtasks to flush so the void pushBlastSnapshot starts.
@@ -330,7 +332,7 @@ describe('blast piggyback on cloud sync', () => {
         },
       }),
     });
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunBlast).not.toHaveBeenCalled();
   });
@@ -338,15 +340,15 @@ describe('blast piggyback on cloud sync', () => {
   it('skips runBlast when there are no credentials', async () => {
     // No credentials → readCredentials returns null → no sync, no push.
     mockFiles({});
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunBlast).not.toHaveBeenCalled();
   });
 });
 
-// ── P1: posture piggyback on cloud sync ────────────────────────────────
+// ── P1: posture piggyback on the daemon sync tick ────────────────────────────────
 
-describe('posture piggyback on cloud sync', () => {
+describe('posture piggyback on the daemon sync tick', () => {
   const CREDS = {
     [CRED_PATH]: JSON.stringify({
       default: {
@@ -364,7 +366,7 @@ describe('posture piggyback on cloud sync', () => {
 
   it('invokes runPosture + shipPosture when sync runs and NODE9_POSTURE_DISABLE is unset', async () => {
     mockFiles(CREDS);
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunPosture).toHaveBeenCalled();
     expect(mockShipPosture).toHaveBeenCalled();
@@ -373,14 +375,14 @@ describe('posture piggyback on cloud sync', () => {
   it('skips posture when NODE9_POSTURE_DISABLE=1 (opt-out)', async () => {
     process.env.NODE9_POSTURE_DISABLE = '1';
     mockFiles(CREDS);
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunPosture).not.toHaveBeenCalled();
   });
 
   it('skips posture when there are no credentials', async () => {
     mockFiles({});
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunPosture).not.toHaveBeenCalled();
   });
@@ -389,7 +391,7 @@ describe('posture piggyback on cloud sync', () => {
     mockRunPosture.mockRejectedValueOnce(new Error('boom'));
     mockFiles(CREDS);
     // Must resolve normally despite the rejection inside the fire-and-forget push.
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockRunPosture).toHaveBeenCalled();
   });
@@ -397,7 +399,7 @@ describe('posture piggyback on cloud sync', () => {
 
 // ── B1.3 sibling: forward-only scan piggyback ──────────────────────────
 
-describe('scan piggyback on cloud sync', () => {
+describe('scan piggyback on the daemon sync tick', () => {
   beforeEach(() => {
     mockTickScanWatcher.mockClear();
     delete process.env.NODE9_SCAN_DISABLE;
@@ -412,7 +414,7 @@ describe('scan piggyback on cloud sync', () => {
         },
       }),
     });
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockTickScanWatcher).toHaveBeenCalled();
   });
@@ -427,16 +429,51 @@ describe('scan piggyback on cloud sync', () => {
         },
       }),
     });
-    await runCloudSync();
+    await triggerSyncNow(false);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockTickScanWatcher).not.toHaveBeenCalled();
   });
 
   it('skips tickScanWatcher when there are no credentials', async () => {
     mockFiles({});
+    await triggerSyncNow(false);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockTickScanWatcher).not.toHaveBeenCalled();
+  });
+});
+
+// ── Manual sync: rules only ────────────────────────────────────────────
+//
+// `node9 policy sync` must not walk the agent history or upload anything
+// besides fetching the rules. After a detector upgrade the scan tick re-scans
+// every session file, and the CLI process stayed alive until it finished.
+
+describe('runCloudSync fetches rules only', () => {
+  beforeEach(() => {
+    mockRunBlast.mockClear();
+    mockTickScanWatcher.mockClear();
+    mockRunPosture.mockClear();
+    mockShipPosture.mockClear();
+    delete process.env.NODE9_BLAST_DISABLE;
+    delete process.env.NODE9_SCAN_DISABLE;
+    delete process.env.NODE9_POSTURE_DISABLE;
+  });
+
+  it('does not scan, blast or ship posture', async () => {
+    mockFiles({
+      [CRED_PATH]: JSON.stringify({
+        default: {
+          apiKey: 'n9_live_abc123',
+          apiUrl: 'https://localhost:1/api/v1/intercept',
+        },
+      }),
+    });
     await runCloudSync();
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockTickScanWatcher).not.toHaveBeenCalled();
+    expect(mockRunBlast).not.toHaveBeenCalled();
+    expect(mockRunPosture).not.toHaveBeenCalled();
+    expect(mockShipPosture).not.toHaveBeenCalled();
   });
 });
 

@@ -75,6 +75,10 @@ const SOFT: Readonly<Record<string, Verdict>> = {
   'files.password-hashes': 'log',
   'files.agent-instructions': 'log',
   'data.pipe-chain': 'log',
+  // node9Firewall#415: the environment sent out, an install from a registry
+  // nobody set up.
+  'data.env-exfil': 'log',
+  'loading.unknown-registry': 'log',
   'behavior.untrusted-content': 'log',
 };
 
@@ -89,6 +93,8 @@ const STRICT: Readonly<Record<string, Verdict>> = {
   'files.password-hashes': 'block',
   'data.secrets-weak': 'block',
   'data.pipe-chain': 'block',
+  'data.env-exfil': 'block',
+  'loading.unknown-registry': 'block',
   'network.unknown-host': 'review',
   'network.internal-addresses': 'block',
   'behavior.prompt-injection': 'log',

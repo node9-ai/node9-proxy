@@ -33,7 +33,9 @@ export interface SmartCondition {
    * Which reading of a `command` field the regex ops test. Absent: the whole
    * command text. 'access': the command as a file-access rule sees it, without
    * a script's interpreter line and with the program each command runs cut to
-   * its name (fileAccessView). Set by the jail's path rules (fw#385).
+   * its name (fileAccessView), and with the code body of a stdin interpreter
+   * kept (node9Firewall#414). Set by the jail's path rules (fw#385) and the
+   * project-jail shield's bash rules.
    */
   reading?: 'access';
 }

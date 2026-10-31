@@ -1,0 +1,86 @@
+{
+  "name": "settings",
+  "description": "Asks before a repository, account or mailbox setting changes through an app: a repository made public, a deploy key or webhook added, a CI secret written, branch protection changed, mail forwarded outside, a public share link. Reads are never asked about.",
+  "aliases": ["repo-settings", "account-settings"],
+  "smartRules": [
+    {
+      "name": "shield:settings:review-visibility-args",
+      "tool": "{,mcp__*__}{update_repository,update_repo,edit_repository,update_repository_settings}",
+      "conditions": [
+        { "field": "private", "op": "matches", "value": "^false$", "flags": "i" },
+        { "field": "visibility", "op": "matches", "value": "^public$", "flags": "i" },
+        { "field": "is_private", "op": "matches", "value": "^false$", "flags": "i" }
+      ],
+      "conditionMode": "any",
+      "verdict": "review",
+      "reason": "This makes a repository public. node9 asks before a repository's visibility changes, whatever the request said (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-deploy-key",
+      "tool": "{,mcp__*__}{add_deploy_key,create_deploy_key,create_repository_deploy_key,add_ssh_key,create_ssh_key,add_gpg_key,create_gpg_key,add_ssh_signing_key}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This adds a key that grants access to a repository or an account. node9 asks before access keys change (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-webhook",
+      "tool": "{,mcp__*__}{create_webhook,create_repository_webhook,create_org_webhook,add_webhook,create_hook,update_webhook,update_repository_webhook,create_integration,install_app}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This adds or changes a webhook or integration that receives the account's events. node9 asks before integrations change (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-ci-secret",
+      "tool": "{,mcp__*__}{create_or_update_repo_secret,create_or_update_org_secret,create_or_update_environment_secret,create_repository_secret,create_org_secret,set_secret,create_secret,update_secret}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This writes a secret into a repository, organisation or environment. node9 asks before stored secrets change (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-branch-protection",
+      "tool": "{,mcp__*__}{update_branch_protection,delete_branch_protection,remove_branch_protection,create_branch_protection,set_branch_protection,disable_branch_protection,create_repository_ruleset,update_repository_ruleset,delete_repository_ruleset,set_required_status_checks}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This changes the rules that protect a branch. node9 asks before branch protection changes (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-mail-forwarding",
+      "tool": "{,mcp__*__}{create_forwarding_address,add_forwarding_address,create_forwarding_rule,set_forwarding,update_forwarding,enable_auto_forwarding,set_auto_forward,update_auto_forwarding,create_delegate,add_delegate}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This forwards or delegates a mailbox to another address. node9 asks before mail leaves the account on its own (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-mail-filter-forward",
+      "tool": "{,mcp__*__}{create_filter,create_mail_filter,create_filter_from_template,create_inbox_rule,create_mail_rule,create_message_rule,update_filter}",
+      "conditions": [
+        { "field": "forward", "op": "exists" },
+        { "field": "forwardTo", "op": "exists" },
+        { "field": "forward_to", "op": "exists" },
+        { "field": "forwarding_email", "op": "exists" },
+        { "field": "forwardingEmail", "op": "exists" },
+        { "field": "action.forward", "op": "exists" },
+        { "field": "actions.forward", "op": "exists" },
+        { "field": "redirect_to", "op": "exists" }
+      ],
+      "conditionMode": "any",
+      "verdict": "review",
+      "reason": "This mail filter forwards messages to another address. node9 asks before mail leaves the account on its own (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-public-link",
+      "tool": "{,mcp__*__}{create_share_link,create_public_link,create_shared_link,set_link_sharing,share_folder,share_document,share_publicly,make_file_public,add_anyone_permission,create_anonymous_link}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This shares a file or folder through a link or with people outside. node9 asks before content is shared outside (Settings shield)."
+    },
+    {
+      "name": "shield:settings:review-org-security",
+      "tool": "{,mcp__*__}{disable_2fa_requirement,disable_two_factor_requirement,update_security_settings,disable_sso,update_sso_settings,update_org_security}",
+      "conditions": [],
+      "verdict": "review",
+      "reason": "This changes an organisation's security settings. node9 asks before security settings change (Settings shield)."
+    }
+  ],
+  "dangerousWords": []
+}

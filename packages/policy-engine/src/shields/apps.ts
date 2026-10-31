@@ -1,7 +1,7 @@
 // App shields and the general action checks, generated from action templates
 // (node9Firewall#390).
 //
-// finance.json, identity.json and publishing.json are TEMPLATES: the list of
+// finance.json, identity.json, publishing.json, settings.json and branches.json are TEMPLATES: the list of
 // actions that move money, change access or publish, named the way MCP
 // servers name their tools. They are no longer shields of their own. Two
 // things are built from them:
@@ -23,8 +23,10 @@ import type { SmartRule } from '../types';
 import finance from './builtin/finance.json';
 import identity from './builtin/identity.json';
 import publishing from './builtin/publishing.json';
+import settings from './builtin/settings.json';
+import branches from './builtin/branches.json';
 
-export type ActionTemplateName = 'finance' | 'identity' | 'publishing';
+export type ActionTemplateName = 'finance' | 'identity' | 'publishing' | 'settings' | 'branches';
 
 interface TemplateFile {
   smartRules: SmartRule[];
@@ -34,6 +36,9 @@ export const ACTION_TEMPLATES: Readonly<Record<ActionTemplateName, readonly Smar
   finance: (finance as TemplateFile).smartRules,
   identity: (identity as TemplateFile).smartRules,
   publishing: (publishing as TemplateFile).smartRules,
+  // node9Firewall#415 items 5 and 6: settings and branches through MCP tools.
+  settings: (settings as TemplateFile).smartRules,
+  branches: (branches as TemplateFile).smartRules,
 };
 
 /** The general check each template feeds, and the word its rules carry. */
@@ -43,6 +48,12 @@ export const ACTION_CHECKS: Readonly<
   finance: { checkId: 'actions.money', slug: 'money', label: 'Money check' },
   identity: { checkId: 'actions.access', slug: 'access', label: 'Accounts and access check' },
   publishing: { checkId: 'actions.publish', slug: 'publish', label: 'Publishing check' },
+  settings: { checkId: 'actions.settings', slug: 'settings', label: 'Settings check' },
+  branches: {
+    checkId: 'actions.protected-branch',
+    slug: 'branches',
+    label: 'Main branch check',
+  },
 };
 
 /** A template rule that names MCP tools (the shell rules of publishing do not). */
@@ -59,7 +70,10 @@ function actionPart(ruleName: string | undefined): string {
 /** Swap the template's trailing "(Finance shield)" for the new owner. */
 function ownReason(reason: string | undefined, owner: string): string | undefined {
   if (!reason) return reason;
-  return reason.replace(/\((?:Finance|Identity|Publishing) shield\)\.?$/, `(${owner}).`);
+  return reason.replace(
+    /\((?:Finance|Identity|Publishing|Settings|Branches) shield\)\.?$/,
+    `(${owner}).`
+  );
 }
 
 // ── Apps ─────────────────────────────────────────────────────────────────────
@@ -712,4 +726,6 @@ export const REPLACED_SHIELDS: Readonly<Record<string, string>> = {
     'finance is now the Money check (actions.money), on by default. For an app: node9 shield enable stripe (or paypal).',
   identity: 'identity is now the Accounts and access check (actions.access), on by default.',
   publishing: 'publishing is now the Publishing check (actions.publish), on by default.',
+  settings: 'settings is the Settings check (actions.settings), on by default.',
+  branches: 'branches is the Main branch check (actions.protected-branch), on by default.',
 };
