@@ -366,8 +366,8 @@ describe('bank routing number with its label (fw#372 B3)', () => {
     expect(detectPii(`routing number: ${BAD}`)).not.toContain('Bank Routing Number');
     expect(detectPii(`order ${RTN} shipped`)).not.toContain('Bank Routing Number');
     expect(detectPii(`id=${RTN}`)).not.toContain('Bank Routing Number');
-    // The label is more than 24 characters away.
-    expect(detectPii(`routing ${'x'.repeat(30)} ${RTN}`)).not.toContain('Bank Routing Number');
+    // The label is more than 48 characters away.
+    expect(detectPii(`routing ${'x'.repeat(60)} ${RTN}`)).not.toContain('Bank Routing Number');
   });
   it('a nine-digit number in an unassigned range is not a routing number even with a label', () => {
     expect(detectPii('routing 987654321')).not.toContain('Bank Routing Number');
@@ -489,5 +489,115 @@ describe('IBAN: the country fixes the BBAN shape (fw#372 X5)', () => {
     'IL620108000000099999999',
   ])('%s keeps its country shape and is an IBAN', (iban) => {
     expect(hasIban('acct ' + iban)).toBe(true);
+  });
+});
+
+// ── Step 5 of node9Firewall#416 (#385): routing labels and twelve more countries ──
+
+describe('routing number: glued labels, key labels, a wider window (node9Firewall#385)', () => {
+  const RTN = ['021', '000', '021'].join('');
+  const BAD = ['021', '000', '022'].join('');
+  it('a label glued to other characters counts', () => {
+    expect(detectPii(`routing_number=${RTN}`)).toContain('Bank Routing Number');
+    expect(detectPii(`routingNumber: ${RTN}`)).toContain('Bank Routing Number');
+    expect(detectPii(`ABA#${RTN}`)).toContain('Bank Routing Number');
+    expect(detectPii(`RTN:${RTN}`)).toContain('Bank Routing Number');
+  });
+  it('a longer word around the label does not count', () => {
+    expect(detectPii(`rerouting ${RTN}`)).not.toContain('Bank Routing Number');
+    expect(detectPii(`Alabama ${RTN}`)).not.toContain('Bank Routing Number');
+  });
+  it('the label may sit up to 48 characters away', () => {
+    expect(detectPii(`Routing number for wire transfers to us: ${RTN}`)).toContain(
+      'Bank Routing Number'
+    );
+    expect(detectPii(`routing ${'x'.repeat(60)} ${RTN}`)).not.toContain('Bank Routing Number');
+  });
+  it("the argument's key is the label of a lone value", () => {
+    expect(detectArgsPii({ routing_number: RTN })).toContain('Bank Routing Number');
+    expect(detectArgsPii({ bank: { aba: RTN } })).toContain('Bank Routing Number');
+    expect(detectArgsPii({ bank: { aba: BAD } })).not.toContain('Bank Routing Number');
+    expect(detectArgsPii({ order_id: RTN })).not.toContain('Bank Routing Number');
+  });
+});
+
+describe('national ids, second round (node9Firewall#385): a check digit and the country word', () => {
+  // Published test values and documentation examples, split in parts.
+  const p = (parts: string[]) => parts.join('');
+  const labelled: Array<[string, string]> = [
+    ['teudat zehut', p(['123', '456', '782'])],
+    ['ת.ז.', p(['123', '456', '782'])],
+    ['תעודת זהות', p(['123', '456', '782'])],
+    ['BSN', p(['111', '222', '333'])],
+    ['burgerservicenummer', p(['123', '456', '782'])],
+    ['Steuer-ID', p(['86095', '742', '719'])],
+    ['IdNr', p(['65929', '970', '489'])],
+    ['CPF', p(['111', '444', '77735'])],
+    ['Aadhaar', p(['2345 ', '6789 ', '0124'])],
+    ['aadhar no', p(['2345', '6789', '0124'])],
+    ['SIN', p(['046 ', '454 ', '286'])],
+    ['social insurance number', p(['130', '692', '544'])],
+    ['TFN', p(['123 ', '456 ', '782'])],
+    ['tax_file_number', p(['876', '543', '210'])],
+    ['NIF', p(['501', '964', '843'])],
+    ['contribuinte', p(['123', '456', '789'])],
+    ['rijksregisternummer', p(['850730', '033', '28'])],
+    ['CUIT', p(['20', '12345678', '6'])],
+    ['TC Kimlik No', p(['10000', '000', '146'])],
+    ['tckn', p(['10000', '000', '146'])],
+  ];
+  it.each(labelled)(
+    '%s: found with its word before it or as the key, not alone',
+    (label, value) => {
+      expect(detectPii(`${label}: ${value}`)).toContain('National ID');
+      expect(detectArgsPii({ [label.replace(/ /g, '_')]: value })).toContain('National ID');
+      expect(detectPii(`value ${value} end`)).not.toContain('National ID');
+      expect(detectPii(`${label} ${'x'.repeat(40)} ${value}`)).not.toContain('National ID');
+    }
+  );
+  const formatted: string[] = [
+    p(['529.', '982.', '247-25']), // CPF
+    p(['85.07.', '30-033', '.28']), // Belgian national number
+    p(['20-', '12345678', '-6']), // CUIT
+    p(['110105', '19491231', '002X']), // Chinese resident id
+  ];
+  it.each(formatted)('a strong written format is found on its check digit alone', (value) => {
+    expect(detectPii(`id ${value} end`)).toContain('National ID');
+    expect(detectArgsPii({ note: `see ${value}` })).toContain('National ID');
+  });
+  it('a wrong check digit or a broken range rule is not an id, even labelled', () => {
+    for (const bad of [
+      `BSN ${p(['111', '222', '334'])}`,
+      `teudat zehut ${p(['123', '456', '783'])}`,
+      `Steuer-ID ${p(['86095', '742', '718'])}`,
+      `CPF ${p(['111', '111', '11111'])}`,
+      `Aadhaar ${p(['1345', '6789', '0124'])}`,
+      `SIN ${p(['846', '454', '286'])}`,
+      `TFN ${p(['123', '456', '783'])}`,
+      `NIF ${p(['501', '964', '844'])}`,
+      `CUIT ${p(['20-', '12345678', '-7'])}`, // the bare form shares its length with other labelled ids
+      `TCKN ${p(['10000', '000', '147'])}`,
+      p(['529.', '982.', '247-26']),
+      p(['110105', '19491331', '002X']),
+    ]) {
+      expect(detectPii(bad), bad).not.toContain('National ID');
+    }
+  });
+  it('the Canadian word is case-sensitive: Math.sin is not a label', () => {
+    const luhnOk = p(['046', '454', '286']);
+    expect(detectPii(`Math.sin(${luhnOk})`)).not.toContain('National ID');
+    expect(detectPii(`sin ${luhnOk}`)).not.toContain('National ID');
+    expect(detectPii(`SIN ${luhnOk}`)).toContain('National ID');
+  });
+  it('ordinary nine- and eleven-digit numbers in code and logs are not ids', () => {
+    for (const t of [
+      'order 123456782 shipped',
+      'pid=111222333 started',
+      '{"createdAt":1729700000000,"id":86095742719}',
+      'commit 5019648437 pushed',
+      'phone +1 555 123 4567',
+    ]) {
+      expect(detectPii(t), t).not.toContain('National ID');
+    }
   });
 });

@@ -48,6 +48,18 @@ import {
   validateSwedishPersonnummer,
   validateNorwegianFnr,
   validateFinnishHetu,
+  validateIsraeliId,
+  validateBsn,
+  validateSteuerId,
+  validateCpf,
+  validateAadhaar,
+  validateSin,
+  validateTfn,
+  validateChineseId,
+  validatePortugueseNif,
+  validateBelgianNationalNumber,
+  validateCuit,
+  validateTckn,
 } from './checksums';
 
 const PII_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
@@ -80,13 +92,16 @@ const PII_CC19_RE = /\b4\d{3}[-\s.]?\d{4}[-\s.]?\d{4}[-\s.]?\d{4}[-\s.]?\d{3}\b/
 const CARD_PATTERNS = [PII_CC16_RE, PII_CC15_RE, PII_CC14_RE, PII_CC13_RE, PII_CC19_RE];
 
 // A US bank routing number (ABA RTN): nine digits whose 3-7-1 weighted sum is
-// 0 mod 10, named as one by a label within 24 characters on either side
+// 0 mod 10, named as one by a label within 48 characters on either side
 // (`routing`, `ABA`, `RTN`). Nine-digit numbers are everywhere and the
 // checksum alone leaves one in ten, so the label is what makes this a
-// finding (fw#372 B3).
+// finding (fw#372 B3). The label is read without `\b` so a glued spelling
+// (`routing_number`, `routingNumber`, `ABA#`) counts, while a longer word
+// around it (`rerouting`, `Alabama`) does not; the leaf's key counts as a
+// label when the value stands alone (node9Firewall#385).
 const PII_ROUTING_RE = /\b\d{9}\b/;
-const ROUTING_LABEL_RE = /\b(?:routing|aba|rtn)\b/i;
-const ROUTING_LABEL_WINDOW = 24;
+const ROUTING_LABEL_RE = /(?<![A-Za-z])(?:[Rr]outing|ROUTING|[Aa]ba|ABA|[Rr]tn|RTN)(?![a-z])/;
+const ROUTING_LABEL_WINDOW = 48;
 
 // National identifiers with a check digit (fw#372 B2). A shape with a strong
 // format of its own (an Italian codice fiscale, a Spanish DNI letter, a Swiss
@@ -118,9 +133,87 @@ const NATIONAL_ID_SHAPES: readonly NationalIdShape[] = [
   { regex: /\b\d{6}[-+]\d{4}\b/, validate: validateSwedishPersonnummer, labelled: true },
   { regex: /\b\d{11}\b/, validate: validateNorwegianFnr, labelled: true },
   { regex: /\b\d{6}[-+A-FU-Y]\d{3}[0-9A-Y]\b/, validate: validateFinnishHetu, labelled: true },
+  // Second round (node9Firewall#385): a strong written format is a finding on
+  // its check digit; a plain digit run needs its country's own word.
+  {
+    regex: /\b\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]\b/,
+    validate: validateChineseId,
+  },
+  { regex: /\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/, validate: validateCpf },
+  { regex: /\b\d{2}\.\d{2}\.\d{2}-\d{3}\.\d{2}\b/, validate: validateBelgianNationalNumber },
+  { regex: /\b(?:2[0347]|3[034])-\d{8}-\d\b/, validate: validateCuit },
+  { regex: /\b\d{9}\b/, validate: validateIsraeliId, labelled: true },
+  { regex: /\b\d{9}\b/, validate: validateBsn, labelled: true },
+  { regex: /\b[1-9]\d{10}\b/, validate: validateSteuerId, labelled: true },
+  { regex: /\b\d{11}\b/, validate: validateCpf, labelled: true },
+  { regex: /\b[2-9]\d{3} ?\d{4} ?\d{4}\b/, validate: validateAadhaar, labelled: true },
+  { regex: /\b[0-79]\d{2}[ -]?\d{3}[ -]?\d{3}\b/, validate: validateSin, labelled: true },
+  { regex: /\b\d{3} ?\d{3} ?\d{3}\b/, validate: validateTfn, labelled: true },
+  { regex: /\b[1-9]\d{8}\b/, validate: validatePortugueseNif, labelled: true },
+  { regex: /\b\d{11}\b/, validate: validateBelgianNationalNumber, labelled: true },
+  { regex: /\b(?:2[0347]|3[034])\d{9}\b/, validate: validateCuit, labelled: true },
+  { regex: /\b[1-9]\d{10}\b/, validate: validateTckn, labelled: true },
 ];
-const NATIONAL_ID_LABEL_RE =
-  /\b(?:personnummer|personal identity number|f[øo]dselsnummer|hetu|henkil[öo]tunnus|pesel|cnp|cod numeric personal|codul numeric personal|national id(?:entification)?(?: number)?)\b/i;
+// The words that name an id, within the window before the value. Multi-word
+// names accept a space, `_` or `-` between the words (`national_id`,
+// `tax-file-number`). Case-insensitive, except the Canadian `SIN`, which is
+// also a trigonometric function in every code base, and the French `NAS`.
+// The Hebrew words are written as escapes (teudat zehut, t.z., mispar
+// zehut) so the source stays ASCII; `\b` is a letter boundary only for
+// ASCII, so they carry their own guards.
+const NATIONAL_ID_LABEL_RE = new RegExp(
+  [
+    '(?<![A-Za-z])(?:',
+    [
+      'personnummer',
+      'personal[ _-]?identity[ _-]?number',
+      'f[\u00f8o]dselsnummer',
+      'hetu',
+      'henkil[\u00f6o]tunnus',
+      'pesel',
+      'cnp',
+      'cod(?:ul)?[ _-]?numeric[ _-]?personal',
+      'national[ _-]?id(?:entification)?(?:[ _-]?number)?',
+      'national[ _-]?number',
+      'teudat[ _-]?zehut',
+      'mispar[ _-]?zehut',
+      'israeli[ _-]?id',
+      'bsn',
+      'burgerservicenummer',
+      'sofi[ _-]?nummer',
+      'steuer[ _-]?id',
+      'steuer(?:liche)?[ _-]?identifikationsnummer',
+      'idnr',
+      'cpf',
+      'cadastro[ _-]?de[ _-]?pessoas[ _-]?f[\u00edi]sicas',
+      'aadhaa?r',
+      'uidai',
+      'social[ _-]?insurance(?:[ _-]?number)?',
+      'assurance[ _-]?sociale',
+      'tfn',
+      'tax[ _-]?file[ _-]?number',
+      'nif',
+      'contribuinte',
+      'identifica[\u00e7c][\u00e3a]o[ _-]?fiscal',
+      'rijksregisternummer',
+      'num[\u00e9e]ro[ _-]?national',
+      'niss',
+      'cuit',
+      'cuil',
+      'tc[ _-]?kimlik(?:[ _-]?no)?',
+      'tckn',
+      'kimlik[ _-]?no',
+    ].join('|'),
+    ')(?![A-Za-z])',
+    // Hebrew: teudat zehut, t.z. (with or without the dots or the gershayim), mispar zehut.
+    '|(?<![\u05d0-\u05ea])(?:\u05ea\u05e2\u05d5\u05d3\u05ea[ _-]?\u05d6\u05d4\u05d5\u05ea|\u05ea[.\u05f4"]?\u05d6\.?|\u05de\u05e1\u05e4\u05e8[ _-]?\u05d6\u05d4\u05d5\u05ea)(?![\u05d0-\u05ea])',
+  ].join(''),
+  'iu'
+);
+// Case-sensitive names: `SIN` is also a trigonometric function, `NAS` a storage box.
+const NATIONAL_ID_LABEL_CS_RE = /(?<![A-Za-z])(?:SIN|NAS)(?![A-Za-z])/;
+const idLabelIn = (text: string): boolean =>
+  NATIONAL_ID_LABEL_RE.test(text) || NATIONAL_ID_LABEL_CS_RE.test(text);
 const NATIONAL_ID_LABEL_WINDOW = 32;
 // Cheap guard: every shape carries a run of three digits, or a codice fiscale's letters.
 const NATIONAL_ID_GUARD_RE = /\d{3}|[A-Z]{6}\d{2}/;
@@ -128,7 +221,7 @@ const NATIONAL_ID_GUARD_RE = /\d{3}|[A-Z]{6}\d{2}/;
 /** True if `text` holds a national identifier whose check digit holds. */
 function hasNationalId(text: string): boolean {
   if (!NATIONAL_ID_GUARD_RE.test(text)) return false;
-  const labelled = NATIONAL_ID_LABEL_RE.test(text);
+  const labelled = idLabelIn(text);
   for (const shape of NATIONAL_ID_SHAPES) {
     if (shape.labelled && !labelled) continue;
     const flags = shape.regex.flags.includes('g') ? shape.regex.flags : shape.regex.flags + 'g';
@@ -138,7 +231,7 @@ function hasNationalId(text: string): boolean {
       if (!shape.validate(m[0])) continue;
       if (!shape.labelled) return true;
       const before = text.slice(Math.max(0, m.index - NATIONAL_ID_LABEL_WINDOW), m.index);
-      if (NATIONAL_ID_LABEL_RE.test(before)) return true;
+      if (idLabelIn(before)) return true;
     }
   }
   return false;
@@ -295,8 +388,13 @@ export type PiiPattern =
  * Detect PII patterns in a string. Returns a deduplicated list — one entry
  * per distinct pattern type, never multiple "Email" findings from one input.
  */
-export function detectPii(text: string): PiiPattern[] {
+export function detectPii(text: string, labelContext?: string): PiiPattern[] {
   const found = new Set<PiiPattern>();
+  // The labelled detectors (routing number, national id) also read the
+  // caller's context, the key of a lone argument value, as the label
+  // (node9Firewall#385). The other detectors read the text alone: a key adds
+  // no digits, and the card rules look at how the value itself begins.
+  const labelled = labelContext ? `${labelContext}: ${text}` : text;
   // Cheap substring guards before the full regex — most strings contain none
   // of these characters and skip the regex engine entirely.
   if (/@/.test(text) && PII_EMAIL_RE.test(text)) found.add('Email');
@@ -304,8 +402,8 @@ export function detectPii(text: string): PiiPattern[] {
   if (PII_PHONE_RE.test(text)) found.add('Phone');
   if (hasValidCard(text)) found.add('Credit Card');
   if (hasValidIban(text)) found.add('IBAN');
-  if (hasRoutingNumber(text)) found.add('Bank Routing Number');
-  if (hasNationalId(text)) found.add('National ID');
+  if (hasRoutingNumber(labelled)) found.add('Bank Routing Number');
+  if (hasNationalId(labelled)) found.add('National ID');
   return [...found];
 }
 
@@ -445,7 +543,10 @@ export function detectArgsPii(args: unknown): PiiPattern[] {
       const destination = isIbanDestination(t, key);
       for (const view of [t, jsonUnescapedView(t)]) {
         if (view === null) continue;
-        for (const p of detectPii(view)) {
+        // The leaf's key is the label of a value that stands alone
+        // (`{"routing_number": "..."}`, `{"bsn": "..."}`): the labelled
+        // detectors read it in front of the value (node9Firewall#385).
+        for (const p of detectPii(view, key)) {
           if (p === 'IBAN' && destination) continue;
           if (REALTIME_PII_PATTERNS.includes(p)) found.add(p);
         }

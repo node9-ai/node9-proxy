@@ -774,7 +774,12 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Folded into v33 before it shipped (release review): the attached `nc
 // -e/bin/sh` and `/proc/$$/environ` (its pid a variable) are found, and
 // `declare -f` is no longer read as the environment.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
+// canonical-v34 (2026-10-31, node9Firewall#385 step 5 of #416): the PII
+// detectors read a routing label glued to other characters or further away
+// (48 characters), the leaf's key as the label of a lone value, and twelve
+// more national and tax ids with a check digit (IL, NL, DE, BR, IN, CA, AU,
+// CN, PT, BE, AR, TR). Histories scanned under v33 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v34';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
 // gained the Dropbox App Secret pattern and an Authorization-header reading of
@@ -834,7 +839,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v33';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '7ee8bbd5101ddc6c';
+export const CANONICAL_EXTRACTOR_HASH = '3a1298745d80d8ae';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
