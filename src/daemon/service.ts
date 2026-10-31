@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { spawnSync, execFileSync } from 'child_process';
-import { DAEMON_STARTUP_LOG } from './startup-log';
+import { DAEMON_STARTUP_LOG, capStartupLog } from './startup-log';
 import { HOST_ALLOW_ENV } from '../auth/api-url';
 
 // ── Paths ──────────────────────────────────────────────────────────────────
@@ -548,6 +548,10 @@ function enableDaemonServiceQuiet(): boolean {
   }
 }
 
+/** `failed`: the unit needed a repair and the enable did not go through
+ *  (distinct from `skipped`, where nothing was to be done). */
+export type HealResult = 'ok' | 'repaired' | 'skipped' | 'failed' | 'unsupported';
+
 /**
  * Best-effort, NON-DISRUPTIVE self-heal called from `init`/`login`: if autostart is
  * wanted and the service is installed-but-DISABLED (the state that silently staled
@@ -555,10 +559,6 @@ function enableDaemonServiceQuiet(): boolean {
  * daemon. Does NOT install a missing unit and does NOT stop a live daemon. Respects
  * the `autoStartDaemon` opt-out. Never throws. Returns what happened.
  */
-/** `failed`: the unit needed a repair and the enable did not go through
- *  (distinct from `skipped`, where nothing was to be done). */
-export type HealResult = 'ok' | 'repaired' | 'skipped' | 'failed' | 'unsupported';
-
 export function ensureAutostartHealthy(autoStartDaemon: boolean): HealResult {
   const decision = autostartRepairDecision({
     installed: isDaemonServiceInstalled(),
@@ -571,8 +571,11 @@ export function ensureAutostartHealthy(autoStartDaemon: boolean): HealResult {
 
 /** How often the running daemon re-checks its own autostart unit. */
 export const AUTOSTART_HEAL_INTERVAL_MS = 24 * 60 * 60 * 1000;
-/** How soon a failed repair is tried again (fw#421 item 10). */
-export const AUTOSTART_HEAL_RETRY_MS = 10 * 60 * 1000;
+/** How soon a failed repair is tried again (fw#421 item 10): twice, then
+ *  daily. The probe is a blocking systemctl call inside the daemon, so a unit
+ *  that can never be enabled (masked, static) must not cost one every few
+ *  minutes forever. */
+export const AUTOSTART_HEAL_RETRY_MS = [10 * 60 * 1000, 60 * 60 * 1000];
 
 /** One line per repair or failure in daemon-startup.log, the file `doctor`
  *  points at. `ok` and `skipped` write nothing: a daily line on every healthy
@@ -582,6 +585,7 @@ function logAutostartHeal(result: HealResult): void {
   try {
     const file = DAEMON_STARTUP_LOG();
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    capStartupLog(file);
     fs.appendFileSync(file, `[${new Date().toISOString()}] [autostart-heal] ${result}\n`);
   } catch {
     /* the log is best effort */
@@ -601,6 +605,7 @@ export function scheduleAutostartSelfHeal(
   heal: (autoStartDaemon: boolean) => HealResult = ensureAutostartHealthy
 ): void {
   if (process.env.NODE9_TESTING === '1') return;
+  let failures = 0;
   const run = () => {
     let result: HealResult = 'skipped';
     try {
@@ -612,7 +617,11 @@ export function scheduleAutostartSelfHeal(
     // A failed enable (systemctl slow or absent for a moment) is retried
     // soon, not tomorrow: one missed attempt used to leave the unit disabled
     // until the next daemon start (seen 2026-10-31).
-    const next = result === 'failed' ? AUTOSTART_HEAL_RETRY_MS : AUTOSTART_HEAL_INTERVAL_MS;
+    failures = result === 'failed' ? failures + 1 : 0;
+    const next =
+      failures > 0 && failures <= AUTOSTART_HEAL_RETRY_MS.length
+        ? AUTOSTART_HEAL_RETRY_MS[failures - 1]
+        : AUTOSTART_HEAL_INTERVAL_MS;
     setTimeout(run, next).unref();
   };
   setTimeout(run, 60_000).unref();

@@ -90,7 +90,7 @@ describe('scheduleAutostartSelfHeal', () => {
 
   // fw#421 item 10: one failed `enable` used to wait a day for its retry, and
   // left no trace. Now: every 10 minutes until it heals, then daily, logged.
-  it('retries every 10 minutes after a failed repair, then once a day', () => {
+  it('retries soon after a failed repair, then once a day after it heals', () => {
     vi.useFakeTimers();
     vi.stubEnv('NODE9_TESTING', '');
     const results: HealResult[] = ['failed', 'failed', 'repaired', 'ok', 'ok'];
@@ -103,13 +103,36 @@ describe('scheduleAutostartSelfHeal', () => {
     scheduleAutostartSelfHeal(() => true, heal);
     vi.advanceTimersByTime(60_000);
     expect(seen).toEqual([t0 + 60_000]);
-    vi.advanceTimersByTime(10 * 60_000);
-    vi.advanceTimersByTime(10 * 60_000);
-    expect(seen.length).toBe(3); // two retries, the second one repaired
+    vi.advanceTimersByTime(10 * 60_000); // first retry
+    vi.advanceTimersByTime(60 * 60_000); // second retry: repaired
+    expect(seen.length).toBe(3);
     vi.advanceTimersByTime(60 * 60_000);
-    expect(seen.length).toBe(3); // healthy: no more 10-minute probes
+    expect(seen.length).toBe(3); // healthy: back to the daily check
     vi.advanceTimersByTime(24 * 60 * 60_000);
     expect(seen.length).toBe(4);
+  });
+
+  it('backs off when the repair keeps failing: 10 min, 1 h, then daily', () => {
+    // Review finding 3: a unit that can never be enabled (masked, static)
+    // must not cost a blocking systemctl call every 10 minutes forever.
+    vi.useFakeTimers();
+    vi.stubEnv('NODE9_TESTING', '');
+    const seen: number[] = [];
+    scheduleAutostartSelfHeal(
+      () => true,
+      () => {
+        seen.push(Date.now());
+        return 'failed';
+      }
+    );
+    const t0 = Date.now();
+    vi.advanceTimersByTime(60_000 + 10 * 60_000 + 60 * 60_000 + 24 * 60 * 60_000);
+    expect(seen.map((t) => t - t0)).toEqual([
+      60_000,
+      60_000 + 10 * 60_000,
+      60_000 + 70 * 60_000,
+      60_000 + 70 * 60_000 + 24 * 60 * 60_000,
+    ]);
   });
 
   it('writes repaired and failed outcomes to daemon-startup.log, ok writes nothing', () => {
