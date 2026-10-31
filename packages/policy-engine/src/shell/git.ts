@@ -72,6 +72,8 @@ export interface GitInvocation {
   env: Map<string, string | null>;
   /** How the call was written, for the reason. */
   shown: string;
+  /** Each `-C <path>` given before the subcommand, in order; null marks a dynamic word. */
+  chdir?: (string | null)[];
 }
 
 /** `git` in any spelling, or a husky hook (`.husky/` holds no "git"). */
@@ -337,6 +339,7 @@ class GitWalk {
     shown: string
   ): void {
     const config = new Map<string, string>();
+    const chdir: (string | null)[] = [];
     let i = 0;
     while (i < rest.length) {
       const w = rest[i];
@@ -359,6 +362,7 @@ class GitWalk {
           i++;
           value = i < rest.length ? rest[i] : null;
         }
+        if (name === '-C') chdir.push(value);
         if (name === '-c' && value !== null) {
           const ceq = value.indexOf('=');
           const key = (ceq > 0 ? value.slice(0, ceq) : value).toLowerCase();
@@ -378,7 +382,7 @@ class GitWalk {
     }
     const subWord = i < rest.length ? rest[i] : undefined;
     const args = rest.slice(i + 1);
-    const inv: GitInvocation = { sub: null, args, config, env, shown };
+    const inv: GitInvocation = { sub: null, args, config, env, shown, chdir };
 
     if (subWord === undefined) {
       // `git` alone prints help; `… | xargs git` reads the subcommand from
@@ -859,15 +863,42 @@ function appliedValue(env: Map<string, string | null>, name: string): string | n
   return word ? resolveWordLiteral(word) : null;
 }
 
+/**
+ * Does pointing `core.hooksPath` at this value take the hooks away? git
+ * reads a relative value from the root of the working tree, so a relative
+ * path that does not climb out of it is a hooks directory inside the
+ * repository (`.githooks`, `.husky`): the project's own hooks keep running
+ * (node9Firewall#413 follow-up). Everything else is a bypass: an absolute
+ * path (`/dev/null`, `/tmp/empty`, `C:\\x`), the home directory, a value
+ * that climbs (`../hooks`), an empty value, a dynamic one.
+ */
+export function hooksPathBypasses(value: string | null | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  const v = value.trim();
+  if (v === '' || v === 'true') return true; // `-c core.hooksPath` with no value reads as true
+  if (/^[\\/~$]/.test(v) || /^[A-Za-z]:/.test(v)) return true;
+  let level = 0;
+  for (const part of v.split(/[\\/]+/)) {
+    if (part === '' || part === '.') continue;
+    level += part === '..' ? -1 : 1;
+    if (level < 0) return true;
+  }
+  return false;
+}
+
 function hooksBypass(inv: GitInvocation): boolean {
-  if (inv.config.has('core.hookspath')) return true;
+  if (inv.config.has('core.hookspath') && hooksPathBypasses(inv.config.get('core.hookspath')))
+    return true;
   for (const [name, value] of inv.env) {
+    // Its quoting is not parsed here: any mention of the key is a bypass.
     if (name === 'GIT_CONFIG_PARAMETERS' && value !== null && /core\.hookspath/i.test(value))
       return true;
+    const key = /^GIT_CONFIG_KEY_(\d+)$/.exec(name);
     if (
-      /^GIT_CONFIG_KEY_\d+$/.test(name) &&
+      key &&
       value !== null &&
-      value.toLowerCase() === 'core.hookspath'
+      value.toLowerCase() === 'core.hookspath' &&
+      hooksPathBypasses(inv.env.get(`GIT_CONFIG_VALUE_${key[1]}`))
     )
       return true;
   }
@@ -928,8 +959,14 @@ function configWritesHooksPath(args: (string | null)[]): boolean {
   }
   const key = args[i];
   if (key === null || key === undefined || key.toLowerCase() !== 'core.hookspath') return false;
-  // A bare `git config core.hooksPath` reads; with a value it writes.
-  return write || i + 1 < args.length;
+  const unset =
+    args.slice(0, i).some((w) => w === '--unset' || w === '--unset-all') || args[0] === 'unset';
+  // `--unset` turns a project's hook manager (husky) off: a bypass.
+  if (unset) return true;
+  // A bare `git config core.hooksPath` reads; with a value it writes, and the
+  // value decides (a hooks directory inside the tree is not a bypass).
+  if (i + 1 < args.length) return hooksPathBypasses(args[i + 1]);
+  return write;
 }
 
 /** A path under a hook directory, read off the word as written. */
@@ -1001,8 +1038,37 @@ function wholeTree(operand: string): boolean {
   return parts.length === 0 && !operand.startsWith('/');
 }
 
+/**
+ * The directory `-C` moved into, relative to where the command runs, when
+ * every `-C` is a literal relative path that does not climb (`sub`,
+ * `packages/a`). Otherwise null: an absolute, climbing (`../app`, often the
+ * root of another repository) or dynamic `-C` keeps the plain reading.
+ */
+function chdirPrefix(inv: GitInvocation): string | null {
+  const dirs = inv.chdir ?? [];
+  if (dirs.length === 0) return null;
+  const parts: string[] = [];
+  for (const d of dirs) {
+    if (d === null || d === '' || /^[\\/~$]/.test(d) || /^[A-Za-z]:/.test(d)) return null;
+    for (const part of d.split(/[\\/]+/)) {
+      if (part === '' || part === '.') continue;
+      if (part === '..') return null;
+      parts.push(part);
+    }
+  }
+  return parts.join('/');
+}
+
 function stagesEverything(inv: GitInvocation): boolean {
   const sub = inv.sub?.toLowerCase();
+  // A pathspec under `-C sub` names a path inside `sub` (node9Firewall#413
+  // follow-up): `git -C sub add .` stages `sub` only; `git -C sub add ..`
+  // is the whole tree again.
+  const prefix = chdirPrefix(inv);
+  const wholeTreeHere = (operand: string): boolean =>
+    prefix && !operand.startsWith(':') && !operand.startsWith('/') && operand !== '*'
+      ? wholeTree(`${prefix}/${operand}`)
+      : wholeTree(operand);
   if (sub === 'add') {
     const o = parseOptions(inv.args, '', ADD_LONG_VALUE);
     if (
@@ -1023,13 +1089,13 @@ function stagesEverything(inv: GitInvocation): boolean {
       o.flags.has('-u') ||
       o.flags.has('--update');
     if (all && o.operands.length === 0) return true;
-    return o.operands.some(wholeTree);
+    return o.operands.some(wholeTreeHere);
   }
   if (sub === 'commit') {
     const o = parseOptions(inv.args, 'mFCcut', COMMIT_LONG_VALUE);
     if (o.flags.has('--dry-run')) return false;
     if (o.flags.has('-a') || o.flags.has('--all')) return true;
-    return o.operands.some(wholeTree);
+    return o.operands.some(wholeTreeHere);
   }
   return false;
 }
