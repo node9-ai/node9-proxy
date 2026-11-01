@@ -10,6 +10,7 @@
 import type {
   AuditAggregates,
   BlastSnapshot,
+  PostureSnapshot,
   ScanSignalsSnapshot,
   SessionForensicAgg,
   ShieldStatus,
@@ -31,11 +32,10 @@ interface HealthInput {
   scanSignals: ScanSignalsSnapshot | null;
   shieldStatus: ShieldStatus | null;
   forensicAgg: SessionForensicAgg;
-  /** Effective score (blast adjusted for protective shields). The
-   *  header chip flips secure / at-risk on this, not on raw blast,
-   *  so enabling a jail shield visibly moves the badge. Computed by
-   *  computeProtection() in data.ts. */
-  effectiveScore: number;
+  /** The posture score and tier (fw#421: the one machine score). Null
+   *  while the first run is in flight; the badge then rests on the other
+   *  signals. */
+  posture: Pick<PostureSnapshot, 'score' | 'tier'> | null;
 }
 
 /**
@@ -44,10 +44,10 @@ interface HealthInput {
  * Severity tiers:
  *   🛑 critical — DLP / loop in this window, severe forensic finding
  *                 (privesc / destructive-op / eval-of-remote, live or
- *                 historical), or blast score < 25
+ *                 historical), or a critical posture tier
  *   ⚠ warning  — non-severe forensic finding (PII / sensitive-file-read /
  *                 pipe-to-shell / long-output-redacted), reachable blast
- *                 paths, inactive shields, or blast score 25–49
+ *                 paths, inactive shields, or an at-risk posture tier
  *   ✓ secure   — none of the above
  *
  * Critical wins over warning. The reasons array is bounded to 3 items
@@ -86,12 +86,10 @@ export function computeHealthBadge(input: HealthInput): HealthBadge {
     reasons.push(`${totalSevere} severe forensic`);
   }
 
-  // Blast score below 25 — exposure threshold consistent with the
-  // existing color scheme in panels.tsx (red below 50, but 25 is the
-  // critical-tier cut for the badge specifically).
-  if (input.effectiveScore < 25) {
+  // A critical posture: the same tier `node9 posture` prints.
+  if (input.posture?.tier === 'critical') {
     severity = 'critical';
-    reasons.push(`score ${input.effectiveScore}/100`);
+    reasons.push(`posture ${input.posture.score}/100`);
   }
 
   // ── WARNING signals ───────────────────────────────────────────────────────
@@ -121,9 +119,9 @@ export function computeHealthBadge(input: HealthInput): HealthBadge {
       severity = 'warning';
       reasons.push(`${input.shieldStatus.inactive.length} shields off`);
     }
-    if (input.effectiveScore >= 25 && input.effectiveScore < 50) {
+    if (input.posture?.tier === 'at-risk') {
       severity = 'warning';
-      reasons.push(`score ${input.effectiveScore}/100`);
+      reasons.push(`posture ${input.posture.score}/100`);
     }
   }
 
@@ -133,6 +131,11 @@ export function computeHealthBadge(input: HealthInput): HealthBadge {
   return {
     severity,
     reasons: cappedReasons,
-    hint: severity === 'secure' ? undefined : 'see node9 scan',
+    hint:
+      severity === 'secure'
+        ? undefined
+        : reasons.some((r) => r.startsWith('posture '))
+          ? 'see node9 posture'
+          : 'see node9 scan',
   };
 }

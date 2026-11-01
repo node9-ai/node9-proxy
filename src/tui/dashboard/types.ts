@@ -98,19 +98,15 @@ export interface AuditAggregates {
   byShell: Array<{ cmd: string; count: number; blocked: number }>;
 }
 
-// BlastPathInfo, BlastSnapshot, ShieldStatus, ProtectionSummary, and
-// PROTECTIVE_SHIELD_DISCOUNTS moved to src/protection.ts on 2026-05-12
-// so the CLI scan renderer can compute "+N pts if you enable
-// project-jail" without taking a layering inversion through
-// tui/dashboard/*. Re-exported here so existing monitor imports keep
-// working without call-site churn.
+// BlastPathInfo, BlastSnapshot, ShieldStatus and PostureSnapshot live in
+// src/protection.ts (a pure module any layer may import). Re-exported here
+// so monitor imports keep working without call-site churn.
 export type {
   BlastPathInfo,
   BlastSnapshot,
   ShieldStatus,
-  ProtectionSummary,
+  PostureSnapshot,
 } from '../../protection.js';
-export { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection.js';
 
 /** Forensic scan-signal counts — derived by walking ~/.claude/projects
  *  JSONL files and running the canonical extractor per line. Reflects

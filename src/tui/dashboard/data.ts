@@ -14,6 +14,9 @@ import os from 'os';
 import path from 'path';
 import http from 'http';
 import { runBlast } from '../../cli/commands/blast.js';
+import { execFile } from 'child_process';
+import { runPosture, type PostureResult } from '../../posture/index.js';
+import { openHeadroom } from '../../posture/score.js';
 import { DAEMON_HOST, DAEMON_PORT, getInternalToken } from '../../auth/daemon.js';
 import { parseJSONLFile, type DailyEntry } from '../../costSync.js';
 import { APP_SHIELD_NAMES } from '@node9/policy-engine';
@@ -50,12 +53,8 @@ import {
   type SessionForensicAgg,
   type SessionShieldsAgg,
   type ShieldStatus,
+  type PostureSnapshot,
 } from './types.js';
-// Re-export computeProtection from the new neutral home so existing
-// monitor imports (e.g. views/report/index.tsx) keep working without
-// a call-site update. See src/protection.ts header for the move
-// rationale.
-export { computeProtection } from '../../protection.js';
 
 // ---------------------------------------------------------------------------
 // Audit log parsing — minimal copy of the report.ts helper.
@@ -740,16 +739,72 @@ export function loadBlast(): BlastSnapshot {
   try {
     const r = runBlast();
     return {
-      score: r.score,
       paths: r.reachable.slice(0, 5).map((f) => ({
         label: shortenPath(f.full),
         description: f.description,
-        score: f.score,
       })),
       envFindings: r.envFindings.length,
     };
   } catch {
-    return { score: 100, paths: [], envFindings: 0 };
+    return { paths: [], envFindings: 0 };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Posture — the one machine score (fw#421). The same checks `node9 posture`
+// runs, in a child process (about a second); the caller refreshes it on the
+// blast cadence. Null when the run fails: the banner shows `—`.
+// ---------------------------------------------------------------------------
+
+/** The part of a PostureResult the snapshot needs; `posture --json` prints it. */
+export type PostureLike = Pick<PostureResult, 'score' | 'tier' | 'headline' | 'findings'>;
+
+/**
+ * Run `node9 posture --json` in a child process. The checks are synchronous
+ * fs and CPU work (a /proc walk, file reads, the gate self-test), so running
+ * them in this process would freeze the Ink render loop for about a second;
+ * a child keeps the dashboard responsive. Falls back to the in-process run
+ * when the CLI entry point is unknown or the child fails.
+ */
+export async function runPostureDetached(): Promise<PostureLike> {
+  const entry = process.argv[1];
+  if (entry && fs.existsSync(entry)) {
+    try {
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(
+          process.execPath,
+          [entry, 'posture', '--json'],
+          {
+            encoding: 'utf8',
+            timeout: 30_000,
+            maxBuffer: 8 * 1024 * 1024,
+            env: { ...process.env, NODE9_NO_AUTO_DAEMON: '1', NODE9_NO_TELEMETRY: '1' },
+          },
+          (err, out) => (err ? reject(err) : resolve(out))
+        );
+      });
+      return JSON.parse(stdout) as PostureLike;
+    } catch {
+      /* fall through to the in-process run */
+    }
+  }
+  return runPosture({ home: os.homedir(), cwd: process.cwd() });
+}
+
+export async function loadPosture(
+  run: () => Promise<PostureLike> = runPostureDetached
+): Promise<PostureSnapshot | null> {
+  try {
+    const r = await run();
+    return {
+      score: r.score,
+      tier: r.tier,
+      action: r.headline?.action ?? null,
+      headroom: openHeadroom(r.findings),
+      at: Date.now(),
+    };
+  } catch {
+    return null;
   }
 }
 

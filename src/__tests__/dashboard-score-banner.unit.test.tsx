@@ -73,13 +73,11 @@ function makeAudit(spend: number = 0): AggregateResult {
   return { data, hasAuditFile: true, responseDlpEntries: [] };
 }
 
-function makeBlast(score: number, paths: number = 0): BlastSnapshot {
+function makeBlast(paths: number = 0): BlastSnapshot {
   return {
-    score,
     paths: Array.from({ length: paths }, (_, i) => ({
       label: `~/.path${i}`,
       description: `desc${i}`,
-      score: 5,
     })),
     envFindings: 0,
   };
@@ -117,143 +115,105 @@ const READY: ScanCache = {
 // Score tier rendering
 // ---------------------------------------------------------------------------
 
-describe('ScoreBanner score tier', () => {
-  it('renders dim "—/100" when blast is null', () => {
+describe('ScoreBanner score (the posture score, fw#421)', () => {
+  const posture = (score: number, tier: 'good' | 'at-risk' | 'critical', action?: string) => ({
+    score,
+    tier,
+    action: action ?? null,
+    headroom: 0,
+    at: 0,
+  });
+
+  it('renders dim "—/100" while the posture has not loaded', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit(1.23)}
-        blast={null}
+        blast={makeBlast()}
+        posture={null}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
     expect(lastFrame()).toContain('Score —/100');
+    expect(lastFrame()).toContain('$1.23');
   });
 
-  it('renders Critical when score < 25', () => {
+  it('renders Critical for the critical tier', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(20)}
+        blast={makeBlast()}
+        posture={posture(0, 'critical')}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
-    expect(lastFrame()).toContain('Score 20/100');
+    expect(lastFrame()).toContain('Score 0/100');
     expect(lastFrame()).toContain('Critical');
   });
 
-  it('renders High risk for 25 ≤ score < 50', () => {
-    const { lastFrame } = render(
+  it('renders At risk and Good for the other tiers', () => {
+    const atRisk = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(30)}
+        blast={makeBlast()}
+        posture={posture(60, 'at-risk')}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
-    expect(lastFrame()).toContain('High risk');
+    expect(atRisk.lastFrame()).toContain('Score 60/100');
+    expect(atRisk.lastFrame()).toContain('At risk');
+    const good = render(
+      <ScoreBanner
+        audit={makeAudit()}
+        blast={makeBlast()}
+        posture={posture(92, 'good')}
+        scanCache={READY}
+        filtered={EMPTY_FILTERED_SCAN}
+      />
+    );
+    expect(good.lastFrame()).toContain('Score 92/100');
+    expect(good.lastFrame()).toContain('Good');
   });
 
-  it('renders Moderate for 50 ≤ score < 80', () => {
+  it('row 2 is the posture action and the hardening headroom, never a blast breakdown', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(70)}
+        blast={makeBlast()}
+        posture={{ ...posture(40, 'critical', 'Lock egress: node9 egress lock'), headroom: 16 }}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
-    expect(lastFrame()).toContain('Moderate');
+    const out = lastFrame() ?? '';
+    expect(out).toContain('Lock egress');
+    expect(out).toContain('16 pts');
+    expect(out).not.toContain('exposed');
+    expect(out).not.toContain('effective');
   });
 
-  it('renders Good for score ≥ 80', () => {
+  it('omits row 2 when there is no action and no headroom', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(95)}
+        blast={makeBlast()}
+        posture={posture(100, 'good')}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
     );
-    expect(lastFrame()).toContain('Good');
-  });
-
-  it('uses effective score (raw + protect) when shieldStatus has a protective shield active', () => {
-    // Raw blast 25/100 → exposed 75. With project-jail active, protect
-    // = round(75 × 0.7) = 53. Effective = 25 + 53 = 78. Headline tier
-    // for 78 is "Moderate" (50-79 range), not "High risk" (raw 25
-    // would tier).
-    const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(25)}
-        shieldStatus={{ active: ['project-jail'], inactive: [] }}
-        scanCache={READY}
-        filtered={EMPTY_FILTERED_SCAN}
-      />
-    );
-    expect(lastFrame()).toContain('Score 78/100');
-    expect(lastFrame()).toContain('Moderate');
-  });
-
-  it('shows exposed/protect/effective breakdown line when exposed > 0', () => {
-    const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(25)}
-        shieldStatus={{ active: ['project-jail'], inactive: [] }}
-        scanCache={READY}
-        filtered={EMPTY_FILTERED_SCAN}
-      />
-    );
-    const out = lastFrame();
-    expect(out).toContain('exposed 75');
-    expect(out).toContain('+53');
-    expect(out).toContain('effective 78');
-  });
-
-  it('suppresses breakdown line when score is perfect (exposed 0)', () => {
-    const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(100)}
-        shieldStatus={{ active: [], inactive: [] }}
-        scanCache={READY}
-        filtered={EMPTY_FILTERED_SCAN}
-      />
-    );
-    // No "exposed" / "effective" line — score already 100/100 and
-    // showing "exposed 0 · protect +0 · effective 100" is noise.
-    expect(lastFrame()).not.toContain('exposed');
-  });
-
-  it('suggests an inactive protective shield in the breakdown row', () => {
-    const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(25)}
-        shieldStatus={{ active: [], inactive: ['project-jail'] }}
-        scanCache={READY}
-        filtered={EMPTY_FILTERED_SCAN}
-      />
-    );
-    const out = lastFrame();
-    expect(out).toContain('enable');
-    expect(out).toContain('project-jail');
+    expect(lastFrame()).not.toContain('pts');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Headline cascade — first match wins
-// ---------------------------------------------------------------------------
 
 describe('ScoreBanner headline cascade', () => {
   it('shows "scanning history…" while scanCache is loading', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(95, 3)} // exposed paths exist but scan still loading
+        blast={makeBlast(3)} // exposed paths exist but scan still loading
         scanCache={{ status: 'loading' }}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -270,7 +230,7 @@ describe('ScoreBanner headline cascade', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(95, 3)}
+        blast={makeBlast(3)}
         scanCache={{ status: 'idle' }}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -282,7 +242,7 @@ describe('ScoreBanner headline cascade', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(95)}
+        blast={makeBlast()}
         scanCache={{ status: 'error', error: new Error('boom') }}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -302,12 +262,7 @@ describe('ScoreBanner headline cascade', () => {
       sessionsWithEarlySecrets: 2,
     };
     const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(95)}
-        scanCache={READY}
-        filtered={filtered}
-      />
+      <ScoreBanner audit={makeAudit()} blast={makeBlast()} scanCache={READY} filtered={filtered} />
     );
     expect(lastFrame()).not.toContain('loaded secrets pre-edit');
   });
@@ -346,12 +301,7 @@ describe('ScoreBanner headline cascade', () => {
       ] as FilteredScan['leaks'],
     };
     const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(95)}
-        scanCache={READY}
-        filtered={filtered}
-      />
+      <ScoreBanner audit={makeAudit()} blast={makeBlast()} scanCache={READY} filtered={filtered} />
     );
     expect(lastFrame()).toContain('3 leaks this period');
   });
@@ -371,12 +321,7 @@ describe('ScoreBanner headline cascade', () => {
       loops,
     };
     const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(95)}
-        scanCache={READY}
-        filtered={filtered}
-      />
+      <ScoreBanner audit={makeAudit()} blast={makeBlast()} scanCache={READY} filtered={filtered} />
     );
     // Was: `150 loops · ~$9.00 wasted`, from Σ(count) × COST_PER_LOOP_ITER_USD.
     // Wrong three ways — it billed the first legitimate call, counted
@@ -398,7 +343,7 @@ describe('ScoreBanner headline cascade', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(40, 4)}
+        blast={makeBlast(4)}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -410,7 +355,7 @@ describe('ScoreBanner headline cascade', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit()}
-        blast={makeBlast(95, 0)}
+        blast={makeBlast()}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -434,12 +379,7 @@ describe('ScoreBanner headline cascade', () => {
       ] as FilteredScan['leaks'],
     };
     const { lastFrame } = render(
-      <ScoreBanner
-        audit={makeAudit()}
-        blast={makeBlast(95)}
-        scanCache={READY}
-        filtered={filtered}
-      />
+      <ScoreBanner audit={makeAudit()} blast={makeBlast()} scanCache={READY} filtered={filtered} />
     );
     expect(lastFrame()).toContain('1 leak this period');
     expect(lastFrame()).not.toContain('1 leaks');
@@ -455,7 +395,7 @@ describe('ScoreBanner spend', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit(4.23)}
-        blast={makeBlast(95)}
+        blast={makeBlast(4)}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -467,7 +407,7 @@ describe('ScoreBanner spend', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit(0)}
-        blast={makeBlast(95)}
+        blast={makeBlast()}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
@@ -479,7 +419,7 @@ describe('ScoreBanner spend', () => {
     const { lastFrame } = render(
       <ScoreBanner
         audit={makeAudit(11678.76)}
-        blast={makeBlast(95)}
+        blast={makeBlast()}
         scanCache={READY}
         filtered={EMPTY_FILTERED_SCAN}
       />
