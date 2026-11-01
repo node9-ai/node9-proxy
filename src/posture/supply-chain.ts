@@ -12,7 +12,7 @@ import os from 'os';
 import path from 'path';
 import { parse as parseToml } from 'smol-toml';
 import { checkProvenance } from '../utils/provenance';
-import { AGENT_SPECS } from '../agent-wiring';
+import { AGENT_SPECS, type McpFormat } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
 import { readCappedText } from '../utils/read-capped';
 
@@ -52,7 +52,7 @@ export function isNode9Managed(command?: string, args: string[] = []): boolean {
 const MAX_CONFIG_BYTES = 10 * 1024 * 1024;
 
 /** Parse an agent's MCP config into server entries. Malformed/absent → []. */
-function readServers(file: string, format: 'json' | 'toml', agent: string): McpEntry[] {
+function readServers(file: string, format: McpFormat, agent: string): McpEntry[] {
   try {
     // Cap enforced by the read; see read-capped.ts.
     const capped = readCappedText(file, MAX_CONFIG_BYTES);
@@ -80,7 +80,7 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
 
   const servers: McpEntry[] = [];
   for (const spec of AGENT_SPECS) {
-    if (!spec.mcpFile) continue;
+    if (!spec.mcpFile || spec.mcpInventory === false) continue;
     servers.push(...readServers(spec.mcpFile(home), spec.mcpFormat ?? 'json', spec.label));
   }
   if (servers.length === 0) return [];

@@ -27,9 +27,9 @@ import {
   teardownOpencode,
   teardownPi,
   teardownHermes,
-  getAgentsStatus,
   type AgentName,
 } from '../../setup';
+import { getAgentWiring } from '../../agent-wiring';
 
 const SETUP_FN: Record<AgentName, () => Promise<void> | void> = {
   claude: setupClaude,
@@ -77,7 +77,16 @@ export function registerAgentsCommand(program: Command): void {
     .command('list')
     .description('Show all supported agents and their Node9 status')
     .action(() => {
-      const statuses = getAgentsStatus();
+      // One registry for every "is it wired" question (fw#421 P3): the same
+      // rows status, doctor and posture read. Wired = any hook event wired or
+      // node9 on the agent's MCP servers.
+      const statuses = getAgentWiring().map((a) => ({
+        name: a.id,
+        label: a.label,
+        installed: a.installed,
+        wired: a.isProtected,
+        mode: a.installed ? a.protection : null,
+      }));
       const anyInstalled = statuses.some((s) => s.installed);
 
       console.log('');
