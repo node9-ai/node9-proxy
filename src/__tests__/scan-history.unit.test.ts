@@ -11,8 +11,6 @@ import os from 'os';
 import path from 'path';
 import {
   appendScanHistory,
-  computeScanDelta,
-  readPreviousScan,
   SCAN_HISTORY_CAP,
   type ScanHistoryRecord,
 } from '../cli/render/scan-history';
@@ -40,38 +38,6 @@ function rec(score: number, daysAgo = 0): ScanHistoryRecord {
     totalCalls: 0,
   };
 }
-
-describe('readPreviousScan', () => {
-  it('returns null when file does not exist', () => {
-    expect(readPreviousScan({ path: historyPath })).toBeNull();
-  });
-
-  it('returns null when file is malformed JSON', () => {
-    fs.writeFileSync(historyPath, '{not valid json');
-    expect(readPreviousScan({ path: historyPath })).toBeNull();
-  });
-
-  it('returns null when file is JSON but not an array', () => {
-    fs.writeFileSync(historyPath, JSON.stringify({ score: 50 }));
-    expect(readPreviousScan({ path: historyPath })).toBeNull();
-  });
-
-  it('returns null when array is empty', () => {
-    fs.writeFileSync(historyPath, '[]');
-    expect(readPreviousScan({ path: historyPath })).toBeNull();
-  });
-
-  it('returns the last record when array is well-formed', () => {
-    fs.writeFileSync(historyPath, JSON.stringify([rec(50, 7), rec(72, 1)]));
-    const got = readPreviousScan({ path: historyPath });
-    expect(got?.score).toBe(72);
-  });
-
-  it('returns null when the last record is shape-invalid', () => {
-    fs.writeFileSync(historyPath, JSON.stringify([{ score: 50 }]));
-    expect(readPreviousScan({ path: historyPath })).toBeNull();
-  });
-});
 
 describe('appendScanHistory', () => {
   it('creates the file and parent directory if missing', () => {
@@ -129,55 +95,5 @@ describe('appendScanHistory', () => {
     } finally {
       process.stderr.write = origWrite;
     }
-  });
-});
-
-describe('computeScanDelta', () => {
-  const NOW = Date.parse('2026-05-07T12:00:00.000Z');
-
-  it('returns null when previous is null', () => {
-    expect(computeScanDelta(rec(50), null, NOW)).toBeNull();
-  });
-
-  it('returns null when scoreDelta is 0 and daysAgo is 0', () => {
-    const t = new Date(NOW).toISOString();
-    expect(
-      computeScanDelta({ ...rec(50), timestamp: t }, { ...rec(50), timestamp: t }, NOW)
-    ).toBeNull();
-  });
-
-  it('returns positive delta when current score is higher (improvement)', () => {
-    const prev: ScanHistoryRecord = {
-      ...rec(50),
-      timestamp: new Date(NOW - 5 * 86_400_000).toISOString(),
-    };
-    const curr = rec(72);
-    const d = computeScanDelta(curr, prev, NOW);
-    expect(d).not.toBeNull();
-    expect(d!.scoreDelta).toBe(22);
-    expect(d!.daysAgo).toBe(5);
-  });
-
-  it('returns negative delta when current score is lower (regression)', () => {
-    const prev: ScanHistoryRecord = {
-      ...rec(80),
-      timestamp: new Date(NOW - 2 * 86_400_000).toISOString(),
-    };
-    const d = computeScanDelta(rec(60), prev, NOW);
-    expect(d!.scoreDelta).toBe(-20);
-    expect(d!.daysAgo).toBe(2);
-  });
-
-  it('floors days (16h ago → 0 days)', () => {
-    const prev: ScanHistoryRecord = {
-      ...rec(50),
-      timestamp: new Date(NOW - 16 * 3_600_000).toISOString(),
-    };
-    expect(computeScanDelta(rec(60), prev, NOW)!.daysAgo).toBe(0);
-  });
-
-  it('returns null when previous timestamp is unparseable', () => {
-    const prev = { ...rec(50), timestamp: 'not-a-date' };
-    expect(computeScanDelta(rec(60), prev, NOW)).toBeNull();
   });
 });

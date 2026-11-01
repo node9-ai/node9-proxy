@@ -300,6 +300,7 @@ Exposure: 0 paths reachable by the agent
 $1.50 AI spend  ·  0 risky operations
 
 
+→  Machine score: run node9 posture for this machine's score and what to fix first.
 →  npx node9-ai scan       run this on your machine
 →  github.com/node9-ai/node9-proxy
 "
@@ -319,6 +320,7 @@ $9025.15 AI spend  ·  4 risky operations
 
 🔭  Blast radius            ssh × gcp × npm × other (5 exposures)
 
+→  Machine score: run node9 posture for this machine's score and what to fix first.
 →  npx node9-ai scan       run this on your machine
 →  github.com/node9-ai/node9-proxy
 "
@@ -329,6 +331,7 @@ exports[`renderNarrativeScorecard — output snapshots > clean fixture (good sco
 
 Exposure: 0 paths reachable by the agent
 
+→  Machine score: run node9 posture for this machine's score and what to fix first.
 →  npx node9-ai scan       run this on your machine
 →  github.com/node9-ai/node9-proxy
 "
@@ -351,6 +354,7 @@ exports[`renderNarrativeScorecard — output snapshots > rich fixture (critical 
      • 2 agent loops (225 repeat calls, 2% of calls, ~$0.2460 wasted)
      • rm calls
 
+→  Machine score: run node9 posture for this machine's score and what to fix first.
 →  npx node9-ai scan       run this on your machine
 →  github.com/node9-ai/node9-proxy
 "

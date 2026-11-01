@@ -1,8 +1,9 @@
 // src/cli/render/scan-history.ts
 //
 // Per-scan trend storage. Each non-screenshot run of `node9 scan`
-// appends a small record to ~/.node9/scan-history.json so the next
-// run can show "▲N since K days ago" next to the headline score.
+// appends a small record to ~/.node9/scan-history.json. Nothing in the CLI
+// reads it since fw#421 (the trend line went with the scan score); the
+// file stays for a later consumer and for users who already have one.
 //
 // Fail-soft: read errors return null (no prior data), write errors
 // warn to stderr but never break the scan. A corrupt history file
@@ -32,28 +33,6 @@ export const SCAN_HISTORY_CAP = 30;
 
 export function defaultHistoryPath(): string {
   return path.join(os.homedir(), '.node9', 'scan-history.json');
-}
-
-/**
- * Read the history file and return the most recent record older than
- * `now`. Used to compute the trend on the current run. Returns null on
- * any error (missing file, parse error, malformed shape).
- */
-export function readPreviousScan(opts: { path?: string } = {}): ScanHistoryRecord | null {
-  const filePath = opts.path ?? defaultHistoryPath();
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    // Records are appended chronologically; the last one is the most
-    // recent prior scan from the caller's perspective.
-    const last = parsed[parsed.length - 1];
-    if (!isValidRecord(last)) return null;
-    return last;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -90,29 +69,6 @@ export function appendScanHistory(
       `[node9] Warning: could not write scan-history.json: ${(err as Error).message}\n`
     );
   }
-}
-
-export interface ScanDelta {
-  scoreDelta: number; // current.score - previous.score
-  daysAgo: number; // floor of (now - previous.timestamp) in days
-}
-
-/**
- * Compute the delta a renderer should show. Returns null if no comparison
- * is meaningful (no prior, same-day double-scan with identical numbers).
- */
-export function computeScanDelta(
-  current: ScanHistoryRecord,
-  previous: ScanHistoryRecord | null,
-  now: number = Date.now()
-): ScanDelta | null {
-  if (!previous) return null;
-  const prevMs = Date.parse(previous.timestamp);
-  if (Number.isNaN(prevMs)) return null;
-  const scoreDelta = current.score - previous.score;
-  const daysAgo = Math.max(0, Math.floor((now - prevMs) / 86_400_000));
-  if (scoreDelta === 0 && daysAgo === 0) return null;
-  return { scoreDelta, daysAgo };
 }
 
 function isValidRecord(x: unknown): x is ScanHistoryRecord {

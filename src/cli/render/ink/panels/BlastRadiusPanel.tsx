@@ -2,8 +2,8 @@
 //
 // Panel under the "High" band. Lists sensitive files an AI agent on
 // this machine can read right now (filesystem-readable by the user's
-// process). The score in the header is derived from these paths
-// (Σ deductions = 100 - blast.score).
+// process). The machine score lives in `node9 posture` (fw#421); this
+// panel lists facts only.
 //
 // Description is split on em-dash and only the noun phrase kept —
 // blast.ts packs "RSA private key — grants SSH access to your
