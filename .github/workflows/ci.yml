@@ -86,6 +86,8 @@ jobs:
         run: |
           node -e "require('fs').existsSync('dist/cli.js') || (console.error('Missing: dist/cli.js'), process.exit(1))"
           node -e "require('fs').existsSync('dist/index.js') || (console.error('Missing: dist/index.js'), process.exit(1))"
+          node -e "require('fs').existsSync('dist/cli-main.js') || (console.error('Missing: dist/cli-main.js'), process.exit(1))"
+          node -e "require('fs').existsSync('dist/hook.js') || (console.error('Missing: dist/hook.js'), process.exit(1))"
 
       - name: Test
         env:

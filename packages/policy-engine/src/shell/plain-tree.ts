@@ -16,10 +16,7 @@
 // `Op` keeps the integer mvdan externalizes, which the engine compares against
 // constants it derives by parsing sample commands.
 
-import mvdanSh from 'mvdan-sh';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
+import { getSyntax } from './mvdan';
 
 /** A converted node. Child fields hold PlainNode | PlainNode[] | null; scalars
  *  hold what mvdan externalized (string, number, boolean). */
@@ -116,7 +113,7 @@ function isGoNode(v: any): boolean {
  *  Go field is read exactly once. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function toPlainTree(goNode: any): PlainNode {
-  const kind: string = syntax.NodeType(goNode);
+  const kind: string = getSyntax().NodeType(goNode);
   const out: PlainNode = { kind, pos: goNode.Pos().Offset(), end: goNode.End().Offset() };
   const spec = KINDS[kind];
   if (!spec) {

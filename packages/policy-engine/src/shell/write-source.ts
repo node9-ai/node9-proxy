@@ -6,16 +6,18 @@
 // `dd of=F`, a download into F, and `tee F < X` bring bytes from elsewhere:
 // those are the writes whose content cannot be seen (node9Firewall#413 part 4).
 import { baseWord, parseShared, resolveWordLiteral, unwrapCommandHead } from './index';
+import { lazy } from './mvdan';
 import { walk } from './plain-tree';
 
 /** mvdan's operator number for `<`, read off the parser rather than written down. */
-const RDR_IN: number | null = (() => {
+// Read off the parser on first use, not at import (fw#425).
+const RDR_IN = lazy((): number | null => {
   try {
     return parseShared('x <y').Stmts[0].Redirs[0].Op as number;
   } catch {
     return null;
   }
-})();
+});
 
 /** Verbs that copy bytes from another file or the network into their target. */
 const COPY_VERBS = new Set([
@@ -66,7 +68,7 @@ export function shellWriteUnseen(command: string, target: string): boolean {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const redirs: any[] = n.Redirs || [];
       const redirectsTo = redirs.some((r) => r.Word && resolveWordLiteral(r.Word) === target);
-      const readsFromFile = redirs.some((r) => r.Op === RDR_IN && r.Word && !r.Hdoc);
+      const readsFromFile = redirs.some((r) => r.Op === RDR_IN() && r.Word && !r.Hdoc);
       const named = words.includes(target);
       if (!redirectsTo && !named) return true;
       const head = unwrapCommandHead(words);

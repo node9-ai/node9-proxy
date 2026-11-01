@@ -1,6 +1,6 @@
 // mvdan-sh exposes untyped AST nodes. Only this adapter knows their shape.
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import mvdanSh from 'mvdan-sh';
+import { getSyntax, lazy } from './mvdan';
 import { toPlainTree, walk } from './plain-tree';
 import {
   parseShared,
@@ -18,7 +18,6 @@ import {
 } from './index';
 import { type FileAccess, type FileAccessContext } from '../files/paths';
 
-const { syntax } = mvdanSh as any;
 interface Word {
   value: string;
   pattern?: string;
@@ -71,7 +70,7 @@ function runnablePrefix(command: string): any | null {
   let text = command;
   for (let attempt = 0; attempt < 32; attempt++) {
     try {
-      return toPlainTree(syntax.NewParser().Parse(text, ''));
+      return toPlainTree(getSyntax().NewParser().Parse(text, ''));
     } catch (error: any) {
       const message = String(typeof error?.Error === 'function' ? error.Error() : error?.message);
       const line = Number(/^(\d+):/.exec(message)?.[1]);
@@ -185,20 +184,24 @@ function merge(a: State, b: State): void {
 function opOf(sample: string): number {
   return parseShared(sample).Stmts[0].Redirs[0].Op;
 }
-const WRITES = new Set(['>x', '>>x', '>|x', '&>x', '&>>x', '<>x'].map(opOf));
-const APPENDS = new Set(['>>x', '&>>x'].map(opOf));
-const READS = new Set(['<x', '<>x'].map(opOf));
-/** `>&word` with a non-numeric word is `&>word` in bash. */
-const DUP_OUT = opOf('>&x');
-const HERE_STRING = opOf('<<<x');
-const AND = parseShared('a && b').Stmts[0].Cmd.Op;
-const OR = parseShared('a || b').Stmts[0].Cmd.Op;
-/** `${x:-d}` `${x-d}` `${x:=d}` `${x=d}`: the default is the value when x is unset. */
-const DEFAULT_OPS = new Set<number>(
-  ['${x:-y}', '${x-y}', '${x:=y}', '${x=y}'].map(
-    (s) => parseShared(`echo ${s}`).Stmts[0].Cmd.Args[1].Parts[0].Exp.Op
-  )
-);
+// Operator numbers read off the parser on first use, not at import (fw#425:
+// mvdan-sh loads lazily, and a Read hook call must not pay its start-up).
+const ops = lazy(() => ({
+  WRITES: new Set(['>x', '>>x', '>|x', '&>x', '&>>x', '<>x'].map(opOf)),
+  APPENDS: new Set(['>>x', '&>>x'].map(opOf)),
+  READS: new Set(['<x', '<>x'].map(opOf)),
+  /** `>&word` with a non-numeric word is `&>word` in bash. */
+  DUP_OUT: opOf('>&x'),
+  HERE_STRING: opOf('<<<x'),
+  AND: parseShared('a && b').Stmts[0].Cmd.Op as number,
+  OR: parseShared('a || b').Stmts[0].Cmd.Op as number,
+  /** `${x:-d}` `${x-d}` `${x:=d}` `${x=d}`: the default is the value when x is unset. */
+  DEFAULT_OPS: new Set<number>(
+    ['${x:-y}', '${x-y}', '${x:=y}', '${x=y}'].map(
+      (s) => parseShared(`echo ${s}`).Stmts[0].Cmd.Args[1].Parts[0].Exp.Op
+    )
+  ),
+}));
 
 function wordValues(word: any, state: State): Word[] {
   const toWords = (values: string[], quoted: boolean): Word[] =>
@@ -222,7 +225,7 @@ function wordValues(word: any, state: State): Word[] {
     const name = node.Param?.Value;
     const known = name === 'PWD' ? state.cwd : state.vars.get(name);
     if (node.Exp) {
-      if (!DEFAULT_OPS.has(node.Exp.Op)) return null;
+      if (!ops().DEFAULT_OPS.has(node.Exp.Op)) return null;
       if (known && known.length) return toWords(known, quoted);
       const fallback = expand(node.Exp.Word?.Parts ?? [], quoted);
       return fallback.dynamic ? null : fallback.out.map(asWord);
@@ -861,7 +864,7 @@ export function collectShellFileAccesses(
   function stdinText(stmt: any): string | null {
     for (const redir of stmt?.Redirs ?? []) {
       if (redir.Hdoc) return resolveWordLiteral(redir.Hdoc);
-      if (redir.Op === HERE_STRING) return resolveWordLiteral(redir.Word);
+      if (redir.Op === ops().HERE_STRING) return resolveWordLiteral(redir.Word);
     }
     return null;
   }
@@ -895,10 +898,10 @@ export function collectShellFileAccesses(
     for (const redir of stmt.Redirs ?? []) {
       substitutions(redir.Word, state, depth);
       for (const word of wordValues(redir.Word, state)) {
-        if (WRITES.has(redir.Op))
-          add('write', word, state, APPENDS.has(redir.Op) ? { append: true } : {});
-        if (READS.has(redir.Op)) add('read', word, state, sends ? { upload: true } : {});
-        if (redir.Op === DUP_OUT && word.value && !/^\d+$/.test(word.value))
+        if (ops().WRITES.has(redir.Op))
+          add('write', word, state, ops().APPENDS.has(redir.Op) ? { append: true } : {});
+        if (ops().READS.has(redir.Op)) add('read', word, state, sends ? { upload: true } : {});
+        if (redir.Op === ops().DUP_OUT && word.value && !/^\d+$/.test(word.value))
           add('write', word, state);
       }
       // An unquoted heredoc can execute substitutions, but its text is not argv.
@@ -945,16 +948,17 @@ export function collectShellFileAccesses(
         const seen = clone(state);
         let pureAnd = true;
         segments.forEach(({ op, part }, i) => {
-          if (op === AND || op === OR) {
-            if (i > 0 && op === AND && pureAnd && state.onSuccess) state.cwd = state.onSuccess;
-            if (i > 0 && op === OR) merge(state, seen);
+          if (op === ops().AND || op === ops().OR) {
+            if (i > 0 && op === ops().AND && pureAnd && state.onSuccess)
+              state.cwd = state.onSuccess;
+            if (i > 0 && op === ops().OR) merge(state, seen);
             statement(part, state, depth + 1);
           } else {
             statement(part, clone(state), depth + 1);
             if (i > 0 && readsScriptFromStdin(part))
               nestedPayload(producedText(segments[i - 1].part), clone(state), depth);
           }
-          if (i > 0 && op !== AND) pureAnd = false;
+          if (i > 0 && op !== ops().AND) pureAnd = false;
           merge(seen, state);
         });
         merge(state, seen);

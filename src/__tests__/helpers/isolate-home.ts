@@ -12,6 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterAll } from 'vitest';
+import { normalizeCommandForPolicy } from '@node9/policy-engine';
 
 // Git exports its repository variables to hooks. A suite run from the pre-commit hook inherited
 // GIT_DIR, so a fixture's `git -C <tmp> init` / `git config user.name t` wrote into the REAL
@@ -26,7 +27,21 @@ for (const k of Object.keys(process.env)) {
     delete process.env[k];
 }
 
+// The engine loads the mvdan-sh parser on its first parse (fw#425), through
+// Node's module loader, which reads files with the same `fs` object many specs
+// replace (`vi.spyOn(fs, 'readFileSync')`). Loaded inside such a spec, the
+// parser would read the mock instead of its own source and every parse would
+// fail. One parse here, before any spec installs a mock, loads it the way the
+// eager import used to.
+normalizeCommandForPolicy('true');
+
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-test-home-'));
+// Spawned node9 processes inherit this: no compile cache, so the launcher
+// (fw#425) writes nothing and every spawn compiles as it did before it.
+// Specs that snapshot a whole HOME (canary plant D4, the keyed write guard)
+// then see only what the command itself wrote. hook-startup.integration
+// removes it on purpose to test the launcher's cache.
+process.env.NODE_DISABLE_COMPILE_CACHE = '1';
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 delete process.env.XDG_CONFIG_HOME;

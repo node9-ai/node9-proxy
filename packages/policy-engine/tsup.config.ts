@@ -10,4 +10,6 @@ export default defineConfig({
   dts: true,
   clean: true,
   splitting: false,
+  // __filename in the ESM build: shell/mvdan.ts loads the parser lazily (fw#425).
+  shims: true,
 });

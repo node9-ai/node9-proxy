@@ -14,9 +14,11 @@
 import { collectFileAccesses } from '../files/protected-access';
 import type { FileAccessContext } from '../files/paths';
 import { parseShared } from './index';
+import { lazy } from './mvdan';
 
-/** mvdan's operator numbers for `&&` and `||`, read off the parser. */
-const SEQUENCE_OPS: ReadonlySet<number> = (() => {
+/** mvdan's operator numbers for `&&` and `||`, read off the parser on first
+ *  use, not at import (fw#425: mvdan-sh loads lazily). */
+const SEQUENCE_OPS = lazy((): ReadonlySet<number> => {
   const ops = new Set<number>();
   for (const text of ['x && y', 'x || y']) {
     try {
@@ -27,7 +29,7 @@ const SEQUENCE_OPS: ReadonlySet<number> = (() => {
     }
   }
   return ops;
-})();
+});
 
 export interface DerivedWrite {
   /** The file read, as the command spells it. */
@@ -70,7 +72,7 @@ export function pipelineTexts(command: string): string[] {
   const visit = (stmt: any, depth: number): void => {
     if (!stmt || depth > 64) return;
     const cmd = stmt.Cmd;
-    if (cmd && cmd.kind === 'BinaryCmd' && SEQUENCE_OPS.has(cmd.Op as number)) {
+    if (cmd && cmd.kind === 'BinaryCmd' && SEQUENCE_OPS().has(cmd.Op as number)) {
       visit(cmd.X, depth + 1);
       visit(cmd.Y, depth + 1);
       return;
