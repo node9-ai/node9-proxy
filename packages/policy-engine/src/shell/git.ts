@@ -23,7 +23,6 @@
 // does not parse is reported as such, and the regex rules keep speaking for
 // it (policy/index.ts, astSuppressed).
 
-import mvdanSh from 'mvdan-sh';
 import {
   baseWord,
   literalShellPayload,
@@ -33,9 +32,6 @@ import {
   unwrapCommandHead,
   walkCommandScope,
 } from './index';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
 
 export type GitCheckId =
   'commands.git-destructive' | 'commands.git-hooks-bypass' | 'commands.git-stage-all';
@@ -221,7 +217,7 @@ class GitWalk {
     if (!node) return false;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
-    const type = syntax.NodeType(n);
+    const type = n.kind;
     // A heredoc on the stdin of a bare shell is the script it runs:
     // `bash <<'EOF' … EOF`. The redirect lives on the Stmt.
     if (type === 'Stmt') {
@@ -235,7 +231,7 @@ class GitWalk {
     if (type === 'ForClause') {
       const loop = n.Loop;
       const name: string | undefined = loop?.Name?.Value;
-      if (name && syntax.NodeType(loop) === 'WordIter') {
+      if (name && loop.kind === 'WordIter') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const items = ((loop.Items || []) as any[]).map((w) => resolveWordLiteral(w));
         const literal = items.length > 0 && items.every((v) => v !== null);
@@ -321,7 +317,7 @@ class GitWalk {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private visitHeredocShell(stmt: any, depth: number): void {
     const cmd = stmt.Cmd;
-    if (!cmd || syntax.NodeType(cmd) !== 'CallExpr' || depth >= MAX_PAYLOAD_DEPTH) return;
+    if (!cmd || cmd.kind !== 'CallExpr' || depth >= MAX_PAYLOAD_DEPTH) return;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const redirs: any[] = stmt.Redirs || [];
     const hdoc = redirs.find((r) => r?.Hdoc && (r.N == null || r.N.Value === '0'));
@@ -538,8 +534,8 @@ const POSITIONAL = '\u0000positional';
 function isPositionalParam(word: any): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let parts: any[] = word?.Parts || [];
-  if (parts.length === 1 && syntax.NodeType(parts[0]) === 'DblQuoted') parts = parts[0].Parts || [];
-  if (parts.length !== 1 || syntax.NodeType(parts[0]) !== 'ParamExp') return false;
+  if (parts.length === 1 && parts[0].kind === 'DblQuoted') parts = parts[0].Parts || [];
+  if (parts.length !== 1 || parts[0].kind !== 'ParamExp') return false;
   return /^(\d+|@|\*)$/.test(parts[0].Param?.Value ?? '');
 }
 
@@ -565,11 +561,11 @@ function plainParamName(word: any): { name: string; quoted: boolean } | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let parts: any[] = word?.Parts || [];
   let quoted = false;
-  if (parts.length === 1 && syntax.NodeType(parts[0]) === 'DblQuoted') {
+  if (parts.length === 1 && parts[0].kind === 'DblQuoted') {
     parts = parts[0].Parts || [];
     quoted = true;
   }
-  if (parts.length !== 1 || syntax.NodeType(parts[0]) !== 'ParamExp') return null;
+  if (parts.length !== 1 || parts[0].kind !== 'ParamExp') return null;
   const p = parts[0];
   if (p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp) return null;
   const name: string | undefined = p.Param?.Value;
@@ -607,7 +603,7 @@ function resolveGitWords(word: any): (string | null)[] {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const parts: any[] = word?.Parts || [];
   const expansion = parts.some((p) => {
-    const t = syntax.NodeType(p);
+    const t = p.kind;
     return t === 'ParamExp' || t === 'CmdSubst';
   });
   return expansion ? splitFields(value) : [value];

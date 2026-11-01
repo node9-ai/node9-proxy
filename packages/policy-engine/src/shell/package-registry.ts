@@ -15,7 +15,6 @@
 // command resolve (`R=https://x; npm i --registry "$R" p`); a value that stays
 // dynamic is skipped, since nothing can be said about it.
 
-import mvdanSh from 'mvdan-sh';
 import {
   baseWord,
   literalShellPayload,
@@ -24,9 +23,6 @@ import {
   walkCommandScope,
 } from './index';
 import { packageManagerValueFlags } from './package-install';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
 
 export interface RegistryOverride {
   /** The front-end: npm, pnpm, yarn, bun, npx, pip, uv, pipx, pipenv. */
@@ -158,7 +154,7 @@ function collect(command: string, out: RegistryOverride[], depth: number): void 
     walkCommandScope(command, (node: unknown) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (!n || syntax.NodeType(n) !== 'CallExpr') return true;
+      if (!n || n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words: (string | null)[] = ((n.Args || []) as any[]).map((a) => resolveWordLiteral(a));
       if (words.length === 0) return true;

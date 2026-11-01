@@ -5,11 +5,8 @@
 // content rule already scanned. `cp X F`, `mv X F`, `install`, `rsync`,
 // `dd of=F`, a download into F, and `tee F < X` bring bytes from elsewhere:
 // those are the writes whose content cannot be seen (node9Firewall#413 part 4).
-import mvdanSh from 'mvdan-sh';
 import { baseWord, parseShared, resolveWordLiteral, unwrapCommandHead } from './index';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
+import { walk } from './plain-tree';
 
 /** mvdan's operator number for `<`, read off the parser rather than written down. */
 const RDR_IN: number | null = (() => {
@@ -57,12 +54,11 @@ export function shellWriteUnseen(command: string, target: string): boolean {
   let unseen = false;
   let seen = false;
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || unseen) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'Stmt' || !n.Cmd || syntax.NodeType(n.Cmd) !== 'CallExpr')
-        return true;
+      if (n.kind !== 'Stmt' || !n.Cmd || n.Cmd.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words: (string | null)[] = ((n.Cmd.Args || []) as any[]).map((a) =>
         resolveWordLiteral(a)

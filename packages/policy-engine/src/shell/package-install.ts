@@ -16,11 +16,8 @@
 // dotnet tool install, nuget install), Maven (mvn dependency:get), Packagist
 // (composer require / create-project) and VS Code extensions from either
 // marketplace (code, codium and their siblings, --install-extension).
-import mvdanSh from 'mvdan-sh';
 import { COMMAND_WRAPPERS, parseShared, resolveWordLiteral } from './index';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
+import { walk } from './plain-tree';
 
 /**
  * The OSV ecosystem name, verbatim: it is the index directory, the bucket path
@@ -1189,7 +1186,7 @@ function localContexts(file: any): Map<number, string[]> {
     if (depth > 64) return null;
     if (!stmt || stmt.Background || stmt.Negated || stmt.Redirs?.length) return null;
     const cmd = stmt.Cmd;
-    const kind = syntax.NodeType(cmd);
+    const kind = cmd.kind;
     if (kind === 'BinaryCmd' && cmd.Op === andOp) {
       const next = visit(cmd.X, steps, depth + 1);
       return next === null ? null : visit(cmd.Y, next, depth + 1);
@@ -1217,7 +1214,7 @@ function localContexts(file: any): Map<number, string[]> {
       )
     )
       return null;
-    contexts.set(cmd.Pos().Offset(), steps);
+    contexts.set(cmd.pos, steps);
     // An arbitrary executable can mutate node_modules before the next call.
     return null;
   }
@@ -1231,13 +1228,13 @@ function collect(command: string, out: PackageInstallRequest[], depth: number): 
   if (typeof f === 'symbol') return;
   const contexts = depth === 0 ? localContexts(f) : new Map<number, string[]>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  syntax.Walk(f, (node: any) => {
-    if (node && syntax.NodeType(node) === 'CallExpr') {
+  walk(f, (node: any) => {
+    if (node && node.kind === 'CallExpr') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words = ((node.Args as any[]) || []).map((a) => resolveWordLiteral(a));
       const start = out.length;
       if (words.length > 0) fromCall(words, out, depth);
-      const steps = contexts.get(node.Pos().Offset());
+      const steps = contexts.get(node.pos);
       for (let i = start; i < out.length; i++) {
         if (['npx', 'bunx', 'npm exec'].includes(out[i].manager)) {
           if (!steps) out[i].localCwd = null;
