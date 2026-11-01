@@ -14,14 +14,28 @@ export default defineConfig([
   {
     entry: {
       index: 'src/index.ts',
-      cli: 'src/cli.ts',
+      // The full CLI; `dist/cli.js` (the binary) is the launcher below.
+      'cli-main': 'src/cli.ts',
     },
     format: ['cjs', 'esm'],
     dts: true,
     clean: true,
     splitting: false,
+    // __filename in the ESM builds: the engine loads mvdan-sh lazily (fw#425).
+    shims: true,
     // Even in the cjs+esm bundles, never bundle ink/react — the cli's
     // dynamic-import path expects them at load time, not inlined.
+    external: ['ink', 'react', 'react/jsx-runtime'],
+  },
+  {
+    // fw#425: `cli` is the dependency-free launcher behind `bin.node9` (compile
+    // cache, then dispatch); `hook` holds only `check` and `log`, the two
+    // commands every agent tool call runs. CJS only: both are entry points.
+    entry: { cli: 'src/launch.ts', hook: 'src/hook-entry.ts' },
+    format: ['cjs'],
+    dts: false,
+    splitting: false,
+    shims: true,
     external: ['ink', 'react', 'react/jsx-runtime'],
   },
   {
@@ -29,6 +43,8 @@ export default defineConfig([
     format: ['esm'],
     dts: false,
     splitting: false,
+    // __filename in the ESM builds: the engine loads mvdan-sh lazily (fw#425).
+    shims: true,
     outExtension: () => ({ js: '.mjs' }),
     external: ['ink', 'react', 'react/jsx-runtime'],
   },
@@ -37,6 +53,8 @@ export default defineConfig([
     format: ['esm'],
     dts: false,
     splitting: false,
+    // __filename in the ESM builds: the engine loads mvdan-sh lazily (fw#425).
+    shims: true,
     outExtension: () => ({ js: '.mjs' }),
     external: ['ink', 'react', 'react/jsx-runtime'],
   },
