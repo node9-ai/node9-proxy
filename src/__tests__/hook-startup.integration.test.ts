@@ -56,6 +56,11 @@ function run(
       LOCALAPPDATA: cacheHome,
       NODE9_TESTING: '1',
       NODE9_NO_AUTO_DAEMON: '1',
+      // The agent, stated: a review then takes Claude Code's inline-ask path on
+      // every machine. Inherited from a developer's Claude Code shell it passed
+      // locally and, absent on CI, sent reviews into the approval race, whose
+      // only racer in test mode is the 120 s timeout.
+      CLAUDECODE: '1',
       ...extraEnv,
     },
   });
@@ -99,6 +104,7 @@ function runWatched(
         LOCALAPPDATA: cacheHome,
         NODE9_TESTING: '1',
         NODE9_NO_AUTO_DAEMON: '1',
+        CLAUDECODE: '1',
         ...(posix
           ? {
               NODE_OPTIONS: `--report-on-signal --report-signal=SIGUSR2 --report-directory=${reports}`,
