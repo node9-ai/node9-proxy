@@ -9,6 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { getAgentWiring, AGENT_SPECS } from '../agent-wiring';
+import { claudeDesktopConfigPath } from '../setup';
 
 const NODE9_HOOK = { command: 'node9 check' };
 const matcher = { matcher: '*', hooks: [NODE9_HOOK] };
@@ -31,7 +32,7 @@ describe('agent-wiring registry', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it('covers all nine supported agents', () => {
+  it('covers all twelve supported agents', () => {
     expect(AGENT_SPECS.map((s) => s.id).sort()).toEqual(
       [
         'antigravity',
@@ -43,8 +44,39 @@ describe('agent-wiring registry', () => {
         'hermes',
         'opencode',
         'pi',
+        'claudeDesktop',
+        'vscode',
+        'windsurf',
       ].sort()
     );
+  });
+
+  // ── MCP-only agents the old getAgentsStatus knew and this registry lacked (fw#421 P3) ──
+  it('wires Windsurf, VSCode and Claude Desktop through their MCP config', () => {
+    const node9 = { mcpServers: { node9: { command: 'node9', args: ['mcp-server'] } } };
+    writeJson('.codeium/windsurf/mcp_config.json', node9);
+    // VSCode keys its MCP config under `servers`, not `mcpServers`.
+    writeJson('.vscode/mcp.json', { servers: node9.mcpServers });
+    const desktop = claudeDesktopConfigPath(home);
+    if (desktop) {
+      fs.mkdirSync(path.dirname(desktop), { recursive: true });
+      fs.writeFileSync(desktop, JSON.stringify(node9));
+    }
+    const rows = getAgentWiring(home);
+    for (const id of ['windsurf', 'vscode', ...(desktop ? ['claudeDesktop'] : [])]) {
+      const row = rows.find((a) => a.id === id);
+      expect(row?.installed, id).toBe(true);
+      expect(row?.mcpProtected, id).toBe(true);
+      expect(row?.isProtected, id).toBe(true);
+      expect(row?.hooks, id).toEqual([]);
+    }
+  });
+
+  it('an installed Windsurf without node9 on its servers is not protected', () => {
+    writeJson('.codeium/windsurf/mcp_config.json', { mcpServers: { github: { command: 'npx' } } });
+    const row = getAgentWiring(home).find((a) => a.id === 'windsurf');
+    expect(row?.installed).toBe(true);
+    expect(row?.isProtected).toBe(false);
   });
 
   // ── Codex MCP via TOML (#3) ──────────────────────────────────────────────

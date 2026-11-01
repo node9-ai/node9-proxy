@@ -85,6 +85,10 @@ export interface CheckContext {
   cwd: string;
   /** Optional agent name, threaded into the policy evaluation. */
   agent?: string;
+  /** The environment the agent inherits, for the Secrets env-var check.
+   *  Defaults to this process's; the daemon passes {} because its own
+   *  environment is not the shell the agent runs from. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface PostureCheck {

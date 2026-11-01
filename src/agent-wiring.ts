@@ -13,7 +13,13 @@ import path from 'path';
 import os from 'os';
 import * as yaml from 'yaml';
 import { parse as parseToml } from 'smol-toml';
-import { isNode9Hook, hermesConfigPath, detectAgents, opencodeConfigDir } from './setup';
+import {
+  isNode9Hook,
+  hermesConfigPath,
+  detectAgents,
+  opencodeConfigDir,
+  claudeDesktopConfigPath,
+} from './setup';
 
 // ── Low-level detectors (this module is now the shared home for them) ─────────
 
@@ -84,7 +90,8 @@ export interface McpServer {
   args?: string[];
 }
 
-export type McpFormat = 'json' | 'toml';
+/** `vscode`: JSON keyed under `servers` (VSCode's own shape), read-only here. */
+export type McpFormat = 'json' | 'toml' | 'vscode';
 
 // node9 wraps an upstream server as { command: 'node9', args: [...] } and also
 // installs a standalone { command: 'node9', args: ['mcp-server'] } entry — both
@@ -113,9 +120,12 @@ export function readMcpServers(filePath: string, format: McpFormat): Record<stri
       };
       return parsed?.mcp_servers ?? {};
     }
-    const parsed = readJson<{ mcpServers?: Record<string, McpServer> }>(filePath);
+    const parsed = readJson<{
+      mcpServers?: Record<string, McpServer>;
+      servers?: Record<string, McpServer>;
+    }>(filePath);
     if (parsed === null || parsed === 'invalid') return {};
-    return parsed.mcpServers ?? {};
+    return (format === 'vscode' ? parsed.servers : parsed.mcpServers) ?? {};
   } catch {
     return {};
   }
@@ -132,9 +142,12 @@ function readMcp(filePath: string, format: McpFormat): { wrapped: string[]; pres
       };
       return detectMcp(parsed?.mcp_servers);
     }
-    const parsed = readJson<{ mcpServers?: Record<string, McpServer> }>(filePath);
+    const parsed = readJson<{
+      mcpServers?: Record<string, McpServer>;
+      servers?: Record<string, McpServer>;
+    }>(filePath);
     if (parsed === null || parsed === 'invalid') return { wrapped: [], present: false };
-    return detectMcp(parsed.mcpServers);
+    return detectMcp(format === 'vscode' ? parsed.servers : parsed.mcpServers);
   } catch {
     return { wrapped: [], present: false };
   }
@@ -152,7 +165,11 @@ interface AgentSpec {
   hookEvents: HookEvent[];
   // Present → the agent has an MCP surface node9 can wrap (path to its config).
   mcpFile?: (home: string) => string;
-  mcpFormat?: McpFormat; // defaults to 'json'; Codex is 'toml'
+  mcpFormat?: McpFormat; // defaults to 'json'; Codex is 'toml'; VSCode is 'vscode'
+  // False: the MCP file is read for wiring and the posture secrets scan only.
+  // The server inventory (status, pins, the daemon's gateway reconciler, the
+  // supply-chain check) skips it: node9 does not wrap these agents' servers yet.
+  mcpInventory?: boolean;
   // Plugin-shim agents (OpenCode, Pi) — node9 protects them via a node9-authored
   // plugin/extension file rather than hooks or MCP. Presence of this file = wired.
   shimFile?: (home: string) => string;
@@ -181,8 +198,9 @@ const DEFAULT_LABEL_PAD = 11; // width of 'PostToolUse'
 const hookLabelOf = (ev: HookEvent, pad: number): string =>
   `${ev.key.padEnd(pad)} (node9 ${ev.kind})`;
 
-// All nine supported agents. Most are hook-wired; Cursor is MCP-only;
-// OpenCode and Pi are plugin-shim agents (wired = a node9-authored file exists).
+// All twelve supported agents (the `AgentName` set). Most are hook-wired;
+// Cursor, Windsurf, VSCode and Claude Desktop are MCP-only; OpenCode and Pi
+// are plugin-shim agents (wired = a node9-authored file exists).
 //
 // Cursor is MCP-ONLY: node9 does NOT wire it via hooks (setup.ts:1334 —
 // "Cursor does not yet support a pre-execution hooks file"); its protection is
@@ -256,6 +274,44 @@ export const AGENT_SPECS: AgentSpec[] = [
     mcpFile: (h) => path.join(h, '.cursor', 'mcp.json'),
     present: (h) => exists(path.join(h, '.cursor', 'mcp.json')),
   },
+  // The three MCP-only agents below came over from `getAgentsStatus` (fw#421
+  // P3), so one registry answers every "is it wired" question.
+  {
+    id: 'windsurf',
+    label: 'Windsurf',
+    setupCommand: 'node9 agents add windsurf',
+    hookFormat: 'flat',
+    hookEvents: [],
+    mcpFile: (h) => path.join(h, '.codeium', 'windsurf', 'mcp_config.json'),
+    mcpInventory: false,
+    present: (h) => exists(path.join(h, '.codeium', 'windsurf')),
+  },
+  {
+    id: 'vscode',
+    label: 'VSCode',
+    setupCommand: 'node9 agents add vscode',
+    hookFormat: 'flat',
+    hookEvents: [],
+    mcpFile: (h) => path.join(h, '.vscode', 'mcp.json'),
+    mcpFormat: 'vscode',
+    mcpInventory: false,
+    present: (h) => exists(path.join(h, '.vscode')),
+  },
+  {
+    id: 'claudeDesktop',
+    label: 'Claude Desktop',
+    setupCommand: 'node9 agents add claudeDesktop',
+    hookFormat: 'flat',
+    hookEvents: [],
+    // The per-platform config path; its parent directory is the footprint.
+    mcpFile: (h) =>
+      claudeDesktopConfigPath(h) ?? path.join(h, '.config', 'Claude', 'claude_desktop_config.json'),
+    mcpInventory: false,
+    present: (h) => {
+      const p = claudeDesktopConfigPath(h);
+      return p !== null && exists(path.dirname(p));
+    },
+  },
   {
     id: 'hermes',
     label: 'Hermes Agent',
@@ -318,6 +374,8 @@ export interface AgentWiringRow {
   // ── Rollup ──
   /** node9 is protecting this agent: any hook wired OR an MCP entry present. */
   isProtected: boolean;
+  /** How node9 attaches to this agent: a hook file, or its MCP servers. */
+  protection: 'hooks' | 'mcp';
 }
 
 /**
@@ -378,6 +436,7 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
       mcpServers: mcp ? mcp.wrapped : null,
       mcpProtected: mcp ? mcp.present : false,
       isProtected: anyHookWired || (mcp?.present ?? false),
+      protection: spec.hookEvents.length > 0 || spec.shimFile ? 'hooks' : 'mcp',
     };
   });
 }

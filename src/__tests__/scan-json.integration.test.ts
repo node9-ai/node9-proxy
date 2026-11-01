@@ -80,11 +80,11 @@ describe('node9 scan --json', () => {
     }).not.toThrow();
 
     const env = parsed as Record<string, unknown>;
-    expect(env.schemaVersion).toBe(1);
+    expect(env.schemaVersion).toBe(2);
     expect(typeof env.generatedAt).toBe('string');
     expect(typeof env.isWired).toBe('boolean');
-    expect(typeof env.score).toBe('number');
-    expect(['good', 'at-risk', 'critical']).toContain(env.band);
+    expect(env).not.toHaveProperty('score');
+    expect(env).not.toHaveProperty('band');
     expect(env.totals).toMatchObject({
       blocked: expect.any(Number),
       review: expect.any(Number),

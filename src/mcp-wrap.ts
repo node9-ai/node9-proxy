@@ -103,7 +103,7 @@ export function fromGateway(s: McpServer): McpServer | null {
 export function inventoryMcp(home: string = os.homedir()): McpEntry[] {
   const out: McpEntry[] = [];
   for (const spec of AGENT_SPECS) {
-    if (!spec.mcpFile) continue;
+    if (!spec.mcpFile || spec.mcpInventory === false) continue;
     const mcpFile = spec.mcpFile(home);
     const format: McpFormat = spec.mcpFormat ?? 'json';
     const servers = readMcpServers(mcpFile, format);

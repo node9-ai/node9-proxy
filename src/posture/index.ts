@@ -44,6 +44,8 @@ export interface RunPostureOptions {
   home?: string;
   cwd?: string;
   agent?: string;
+  /** See CheckContext.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -94,6 +96,7 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
     home: opts.home ?? os.homedir(),
     cwd: opts.cwd ?? process.cwd(),
     agent: opts.agent,
+    env: opts.env,
   };
 
   const {

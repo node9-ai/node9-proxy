@@ -157,12 +157,10 @@ describe('S. node9 scan report', () => {
     const { r } = scanJson();
     const doc = JSON.parse(r.stdout) as Record<string, unknown>;
     expect(Object.keys(doc).sort()).toEqual([
-      'band',
       'blast',
       'generatedAt',
       'isWired',
       'schemaVersion',
-      'score',
       'summary',
       'totals',
     ]);

@@ -13,7 +13,6 @@
 import type { ScanResult } from '../commands/scan';
 import type { ScanSummary } from '../../scan-summary';
 import type { BlastResult } from '../commands/blast';
-import { classifyScore, type ScoreBand } from './scan-derive';
 
 /**
  * Wire schema for `node9 scan --json`. schemaVersion is locked at 1;
@@ -21,14 +20,11 @@ import { classifyScore, type ScoreBand } from './scan-derive';
  * automatically. A breaking rename or removal must bump schemaVersion.
  */
 export interface ScanJsonOutput {
-  schemaVersion: 1;
+  /** 2 since fw#421 P3: `score`, `band` and `blast.score` are gone; the
+   *  machine score is `node9 posture --json`. */
+  schemaVersion: 2;
   generatedAt: string; // ISO 8601
   isWired: boolean; // node9 hooks installed in any agent's settings
-  /** @deprecated The blast score, kept for schemaVersion 1 consumers; the
-   *  machine score is `node9 posture --json`. Removed in schemaVersion 2. */
-  score: number;
-  /** @deprecated See `score`. */
-  band: ScoreBand; // 'good' | 'at-risk' | 'critical'
   /** Convenience block — same numbers as summary.byVerdict, hoisted. */
   totals: {
     blocked: number;
@@ -42,7 +38,6 @@ export interface ScanJsonOutput {
   summary: ScanSummary;
   /** Reachable credentials + env findings the user has on disk. */
   blast: {
-    score: number;
     reachable: BlastResult['reachable'];
     envFindings: BlastResult['envFindings'];
   };
@@ -59,13 +54,10 @@ export interface BuildScanJsonInput {
 
 export function buildScanJson(input: BuildScanJsonInput): ScanJsonOutput {
   const { summary, blast, isWired, generatedAt } = input;
-  const { band } = classifyScore(blast.score);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt,
     isWired,
-    score: blast.score,
-    band,
     totals: {
       blocked: summary.byVerdict.blocked,
       review: summary.byVerdict.supervised,
@@ -76,7 +68,6 @@ export function buildScanJson(input: BuildScanJsonInput): ScanJsonOutput {
     },
     summary,
     blast: {
-      score: blast.score,
       reachable: blast.reachable,
       envFindings: blast.envFindings,
     },

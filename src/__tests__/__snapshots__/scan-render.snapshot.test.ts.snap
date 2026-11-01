@@ -104,11 +104,9 @@ exports[`N6 — state-aware phrasing (enabledShields injected) > ink scorecard: 
 
 exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
 "{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedAt": "2026-05-07T12:00:00.000Z",
   "isWired": false,
-  "score": 25,
-  "band": "critical",
   "totals": {
     "blocked": 8,
     "review": 56,
@@ -255,7 +253,6 @@ exports[`buildScanJson — envelope snapshot > rich fixture 1`] = `
     }
   },
   "blast": {
-    "score": 25,
     "reachable": [
       {
         "full": "/home/u/.ssh/id_rsa",

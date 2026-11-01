@@ -81,7 +81,8 @@ describe('node9 blast prints facts, not a score', () => {
   it('lists the reachable file and points at posture, with no N/100', () => {
     const r = run(['blast']);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('~/.ssh/id_rsa');
+    // blast is posture's Secrets section since P3: the platform separator.
+    expect(r.stdout).toMatch(/~[\\/]\.ssh[\\/]id_rsa/);
     expect(r.stdout).toMatch(/node9 posture/);
     expect(r.stdout).not.toMatch(/\/100/);
     expect(r.stdout).not.toMatch(/Security Score/);
@@ -104,13 +105,13 @@ describe('node9 scan prints counts and one pointer', () => {
     expect(r.stdout).toMatch(/Machine score: run .*node9 posture/);
   });
 
-  it('--json keeps score and band until P3 (schemaVersion 1 contract)', () => {
+  it('--json is schemaVersion 2 without score or band (P3)', () => {
     const r = run(['scan', '--json', '--days', '7']);
     expect(r.status).toBe(0);
-    const env = JSON.parse(r.stdout) as { schemaVersion: number; score: number; band: string };
-    expect(env.schemaVersion).toBe(1);
-    expect(typeof env.score).toBe('number');
-    expect(['good', 'at-risk', 'critical']).toContain(env.band);
+    const env = JSON.parse(r.stdout) as Record<string, unknown>;
+    expect(env.schemaVersion).toBe(2);
+    expect(env).not.toHaveProperty('score');
+    expect(env).not.toHaveProperty('band');
   });
 });
 

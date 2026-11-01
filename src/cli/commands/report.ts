@@ -22,6 +22,7 @@ import {
   type BuildReportJsonInput,
   type ReportPeriod,
 } from '../render/report-json';
+import { runSessionsView } from './sessions';
 
 // ---------------------------------------------------------------------------
 // Display helpers (rendering only — no I/O, no aggregation)
@@ -88,86 +89,122 @@ export function registerReportCommand(program: Command): void {
     .option('--period <period>', 'today | 7d | 30d | 90d | month', '30d')
     .option('--no-tests', 'exclude test runner calls (npm test, vitest, pytest…) from stats')
     .option('--json', 'Emit machine-readable JSON to stdout (suppresses renderer)')
-    .action((options: { period: string; tests: boolean; json?: boolean }) => {
-      const period: ReportPeriod = (['today', '7d', '30d', '90d', 'month'] as const).includes(
-        options.period as ReportPeriod
-      )
-        ? (options.period as ReportPeriod)
-        : '30d';
+    .option('--sessions', 'List the sessions in the period: tool calls, cost, file changes')
+    .option('--session <sessionId>', 'Show the full tool trace of one session')
+    .action(
+      (options: {
+        period: string;
+        tests: boolean;
+        json?: boolean;
+        sessions?: boolean;
+        session?: string;
+      }) => {
+        const period: ReportPeriod = (['today', '7d', '30d', '90d', 'month'] as const).includes(
+          options.period as ReportPeriod
+        )
+          ? (options.period as ReportPeriod)
+          : '30d';
 
-      const excludeTests = options.tests === false;
-      const { data, hasAuditFile, responseDlpEntries } = aggregateReportFromAudit(period, {
-        excludeTests,
-      });
+        // The sessions view (fw#421 P3: `node9 sessions` folded in here). It
+        // has no wire shape yet, so --json names the limit instead of printing
+        // a half envelope.
+        if (options.sessions || options.session) {
+          if (options.json) {
+            console.error('error: --sessions / --session have no --json output yet');
+            process.exitCode = 1;
+            return;
+          }
+          runSessionsView({ days: periodDays(period), detail: options.session });
+          return;
+        }
 
-      // Top-of-output unacked-DLP banner — lifetime count, not period-scoped
-      if (data.unackedDlp > 0 && !options.json) {
-        console.log('');
-        console.log(
-          chalk.bgRed.white.bold(
-            ` ⚠️  DLP ALERT: ${data.unackedDlp} secret${data.unackedDlp !== 1 ? 's' : ''} found in Claude response text `
-          ) +
-            '  ' +
-            chalk.yellow('→ run: node9 dlp')
+        const excludeTests = options.tests === false;
+        const { data, hasAuditFile, responseDlpEntries } = aggregateReportFromAudit(period, {
+          excludeTests,
+        });
+
+        // Top-of-output unacked-DLP banner — lifetime count, not period-scoped
+        if (data.unackedDlp > 0 && !options.json) {
+          console.log('');
+          console.log(
+            chalk.bgRed.white.bold(
+              ` ⚠️  DLP ALERT: ${data.unackedDlp} secret${data.unackedDlp !== 1 ? 's' : ''} found in Claude response text `
+            ) +
+              '  ' +
+              chalk.yellow('→ run: node9 dlp')
+          );
+        }
+
+        if (!hasAuditFile && !options.json) {
+          console.log(
+            chalk.yellow(
+              '\n  No audit data found. Run node9 with Claude Code to generate entries.\n'
+            )
+          );
+          return;
+        }
+
+        // ── JSON output mode ────────────────────────────────────────────────
+        // Emits one valid JSON object to stdout and returns. The unacked-DLP
+        // banner above is gated on !options.json so stdout stays clean for
+        // CI gates and external integrations.
+        if (options.json) {
+          const envelope = buildReportJson(data);
+          process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+          return;
+        }
+
+        if (data.total === 0) {
+          console.log(chalk.yellow(`\n  No activity for period "${period}".\n`));
+          return;
+        }
+
+        renderTerminalReport(data, responseDlpEntries, excludeTests);
+
+        // fw#390: what node9 found and protects, and the dashboard when it helps.
+        // The shields the config applied: the workspace's on a keyed machine.
+        const cfg = getConfig();
+        const workspaceGoverned = cfg.policySource === 'workspace';
+        const appliedShields = cfg.policy.appliedShields ?? readActiveShields();
+        // fw#390 section 19: the dashboard at the one moment it helps, once.
+        const nudge = dashboardNudge(
+          {
+            loggedIn: readCredentials() !== null,
+            unanswered: data.timedOut ?? 0,
+            asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
+            team: () => teamProject(observeAudit(LOCAL_AUDIT_LOG).projects),
+          },
+          readShownNudges()
         );
+        if (nudge) markNudgeShown(nudge.key);
+        const appLines = [
+          ...appsReportLines(readAppsFile(), appliedShields, { workspaceGoverned }),
+          ...(nudge ? [nudge.line] : []),
+          // fw#390 phase 4: the smallest change that stops a question a person
+          // keeps approving. Never applied by itself.
+          ...suggestionLines(
+            approvalsFromAudit(LOCAL_AUDIT_LOG, periodStartMs(period)),
+            workspaceGoverned
+          ),
+        ];
+        if (appLines.length > 0) {
+          console.log('');
+          for (const line of appLines) console.log('  ' + chalk.cyan(line));
+          console.log('');
+        }
       }
+    );
+}
 
-      if (!hasAuditFile && !options.json) {
-        console.log(
-          chalk.yellow('\n  No audit data found. Run node9 with Claude Code to generate entries.\n')
-        );
-        return;
-      }
-
-      // ── JSON output mode ────────────────────────────────────────────────
-      // Emits one valid JSON object to stdout and returns. The unacked-DLP
-      // banner above is gated on !options.json so stdout stays clean for
-      // CI gates and external integrations.
-      if (options.json) {
-        const envelope = buildReportJson(data);
-        process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
-        return;
-      }
-
-      if (data.total === 0) {
-        console.log(chalk.yellow(`\n  No activity for period "${period}".\n`));
-        return;
-      }
-
-      renderTerminalReport(data, responseDlpEntries, excludeTests);
-
-      // fw#390: what node9 found and protects, and the dashboard when it helps.
-      // The shields the config applied: the workspace's on a keyed machine.
-      const cfg = getConfig();
-      const workspaceGoverned = cfg.policySource === 'workspace';
-      const appliedShields = cfg.policy.appliedShields ?? readActiveShields();
-      // fw#390 section 19: the dashboard at the one moment it helps, once.
-      const nudge = dashboardNudge(
-        {
-          loggedIn: readCredentials() !== null,
-          unanswered: data.timedOut ?? 0,
-          asked: (data.userApproved ?? 0) + (data.userDenied ?? 0) + (data.timedOut ?? 0),
-          team: () => teamProject(observeAudit(LOCAL_AUDIT_LOG).projects),
-        },
-        readShownNudges()
-      );
-      if (nudge) markNudgeShown(nudge.key);
-      const appLines = [
-        ...appsReportLines(readAppsFile(), appliedShields, { workspaceGoverned }),
-        ...(nudge ? [nudge.line] : []),
-        // fw#390 phase 4: the smallest change that stops a question a person
-        // keeps approving. Never applied by itself.
-        ...suggestionLines(
-          approvalsFromAudit(LOCAL_AUDIT_LOG, periodStartMs(period)),
-          workspaceGoverned
-        ),
-      ];
-      if (appLines.length > 0) {
-        console.log('');
-        for (const line of appLines) console.log('  ' + chalk.cyan(line));
-        console.log('');
-      }
-    });
+/** The report period as the sessions view's window. `buildSessions` cuts at
+ *  midnight `days` days back, so today = 0 and this month = days since the 1st,
+ *  the same edges `getDateRange` uses. */
+function periodDays(period: ReportPeriod): number {
+  if (period === 'today') return 0;
+  if (period === '7d') return 7;
+  if (period === '90d') return 90;
+  if (period === 'month') return new Date().getDate() - 1;
+  return 30;
 }
 
 // ---------------------------------------------------------------------------

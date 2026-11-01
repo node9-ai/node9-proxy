@@ -12,6 +12,8 @@ import path from 'path';
 import os from 'os';
 import { scanArgs } from '../../dlp';
 import { homeCredentialFiles } from '../../credential-files';
+import { runPosture } from '../../posture';
+import { renderPostureSection } from '../../posture/render';
 
 // ---------------------------------------------------------------------------
 // Sensitive path definitions
@@ -122,78 +124,19 @@ export function labelColumnWidth(labels: string[]): number {
 // Command
 // ---------------------------------------------------------------------------
 
+/** Alias of `node9 posture` (fw#421 P3): the Secrets section, no score. */
 export function registerBlastCommand(program: Command): void {
   program
     .command('blast')
-    .description('Map what an AI agent can currently reach on this machine')
-    .action(() => {
-      const home = os.homedir();
-      const cwd = process.cwd();
-      // The score stays computed (the daemon ships it to the dashboard) but
-      // is not printed: the posture score is the one machine score (fw#421).
-      const { reachable, envFindings } = runBlast();
-      const width = labelColumnWidth([
-        ...reachable.map((p) => p.label),
-        ...envFindings.map((f) => f.key),
-      ]);
-
-      console.log('');
+    .description('Alias of `node9 posture` (Secrets section): what an AI agent can read here')
+    .action(async () => {
+      const result = await runPosture();
+      console.log(renderPostureSection(result, 'Secrets'));
       console.log(
-        chalk.bold('  🔭  Node9 Blast Radius') +
-          chalk.dim('  ·  what an AI agent can reach from here')
-      );
-      console.log(chalk.dim('  Running in: ') + chalk.white(cwd.replace(home, '~')));
-      console.log('');
-
-      if (reachable.length > 0) {
-        console.log('  ' + chalk.red.bold('Sensitive files reachable:'));
-        for (const p of reachable) {
-          console.log(
-            '    ' +
-              chalk.red('✗  ') +
-              chalk.yellow(p.label.padEnd(width)) +
-              chalk.dim(p.description)
-          );
-        }
-        console.log('');
-      }
-
-      if (envFindings.length > 0) {
-        console.log('  ' + chalk.red.bold('Secrets in active environment:'));
-        for (const f of envFindings) {
-          console.log(
-            '    ' + chalk.red('✗  ') + chalk.yellow(f.key.padEnd(width)) + chalk.dim(f.patternName)
-          );
-        }
-        console.log('');
-      }
-
-      console.log('  ' + chalk.dim('─'.repeat(70)));
-
-      if (reachable.length === 0 && envFindings.length === 0) {
-        console.log('  ' + chalk.green('✅  No sensitive files or environment secrets found.'));
-      } else {
-        console.log(
-          chalk.bold(
-            `  ${reachable.length} file${reachable.length !== 1 ? 's' : ''} and ` +
-              `${envFindings.length} env var${envFindings.length !== 1 ? 's' : ''}`
-          ) + chalk.dim(' every AI agent you start can read.')
-        );
-        console.log('');
-        console.log(
-          chalk.dim(
-            '  Run `node9 shield enable project-jail` to restrict agent file access.\n' +
-              '  Run `node9 mask` to redact secrets from existing session history.'
-          )
-        );
-      }
-      console.log('');
-      console.log(
-        chalk.dim('  Machine score: ') +
+        chalk.dim('  Full scorecard: ') +
           chalk.cyan('node9 posture') +
-          chalk.dim(' (this list is its Secrets section)')
+          chalk.dim(' (score, every category, what to fix first)')
       );
-
       console.log('');
     });
 }
