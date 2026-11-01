@@ -101,6 +101,7 @@ export async function runProxy(targetCommand: string) {
               kind: result.blockKind,
               path: result.blockedPath,
               redirect: !!result.redirect,
+              ruleDescription: result.ruleDescription,
             }
           );
 

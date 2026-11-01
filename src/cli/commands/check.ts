@@ -671,7 +671,12 @@ export function registerCheckCommand(program: Command): void {
               humanDecision,
               msg,
               result?.recoveryCommand,
-              { kind: result?.blockKind, path: result?.blockedPath, redirect: !!result?.redirect }
+              {
+                kind: result?.blockKind,
+                path: result?.blockedPath,
+                redirect: !!result?.redirect,
+                ruleDescription: result?.ruleDescription,
+              }
             );
 
             // 5. Send the structured JSON back to the LLM agent
