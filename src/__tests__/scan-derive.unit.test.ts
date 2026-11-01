@@ -6,49 +6,8 @@
  * so a regression in either direction is caught here.
  */
 import { describe, it, expect } from 'vitest';
-import chalk from 'chalk';
-import {
-  classifyScore,
-  topDlpPatterns,
-  topRulesByVerdict,
-  computeLoopWaste,
-} from '../cli/render/scan-derive';
+import { topDlpPatterns, topRulesByVerdict, computeLoopWaste } from '../cli/render/scan-derive';
 import type { Section } from '../scan-summary';
-
-describe('classifyScore', () => {
-  it('100 → good', () => {
-    const c = classifyScore(100);
-    expect(c.band).toBe('good');
-    expect(c.label).toBe('Good');
-    expect(c.color).toBe(chalk.green);
-  });
-
-  it('80 → good (lower bound)', () => {
-    expect(classifyScore(80).band).toBe('good');
-  });
-
-  it('79 → at-risk', () => {
-    const c = classifyScore(79);
-    expect(c.band).toBe('at-risk');
-    expect(c.label).toBe('At Risk');
-    expect(c.color).toBe(chalk.yellow);
-  });
-
-  it('50 → at-risk (lower bound)', () => {
-    expect(classifyScore(50).band).toBe('at-risk');
-  });
-
-  it('49 → critical', () => {
-    const c = classifyScore(49);
-    expect(c.band).toBe('critical');
-    expect(c.label).toBe('Critical');
-    expect(c.color).toBe(chalk.red);
-  });
-
-  it('0 → critical', () => {
-    expect(classifyScore(0).band).toBe('critical');
-  });
-});
 
 describe('topDlpPatterns', () => {
   it('returns empty for empty input', () => {

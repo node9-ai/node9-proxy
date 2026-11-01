@@ -129,17 +129,13 @@ if [ -n "$LEAK_MISSING" ]; then
   echo "    missing session files:$LEAK_MISSING"
 fi
 
-# ── Score envelope (internal consistency, not external) ───────────────────
-# Headline score = max(0, 100 - sum of per-path deductions). Per-path
-# deduction is on `blast.reachable[].score` (the field name is confusing;
-# it's a deduction value, not a per-path score). Internal check —
-# verifies scan didn't drift its own arithmetic, doesn't need a raw
-# source.
-SCORE=$(echo "$SCAN_JSON" | jq -r '.score')
-DEDUCT_SUM=$(echo "$SCAN_JSON" \
-  | jq -r '[.blast.reachable[].score // 0, .blast.envFindings[].score // 0] | add // 0')
-EXPECTED_SCORE=$(( DEDUCT_SUM > 100 ? 0 : 100 - DEDUCT_SUM ))
-check "Score envelope (100 − deductions)" "$SCORE" "$EXPECTED_SCORE"
+# ── Blast envelope (internal consistency, not external) ───────────────────
+# schemaVersion 2 carries no score (the machine score is `node9 posture`);
+# the hoisted total must equal the rows it summarises.
+EXPOSURES=$(echo "$SCAN_JSON" | jq -r '.totals.blastExposures')
+ROW_COUNT=$(echo "$SCAN_JSON" \
+  | jq -r '(.blast.reachable | length) + (.blast.envFindings | length)')
+check "Blast envelope (totals = rows)" "$EXPOSURES" "$ROW_COUNT"
 
 echo ""
 if [ $exit_code -eq 0 ]; then

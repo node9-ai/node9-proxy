@@ -8,32 +8,12 @@
 // These helpers are the single source of truth so the renderers stay
 // in sync. No I/O, no console — safe to unit-test.
 import chalk from 'chalk';
-import type { ChalkInstance } from 'chalk';
 import stringWidth from 'string-width';
 import type { Section } from '../../scan-summary';
 
 // ---------------------------------------------------------------------------
 // Score classification
 // ---------------------------------------------------------------------------
-
-export type ScoreBand = 'good' | 'at-risk' | 'critical';
-
-export interface ScoreClassification {
-  band: ScoreBand;
-  label: string; // 'Good' | 'At Risk' | 'Critical'
-  color: ChalkInstance; // green / yellow / red — matches band
-}
-
-/**
- * Bucket a 0–100 security score into a band, plus a display label and a
- * chalk colorizer. Thresholds match the existing renderers exactly:
- *   ≥80 good · ≥50 at-risk · <50 critical
- */
-export function classifyScore(score: number): ScoreClassification {
-  if (score >= 80) return { band: 'good', label: 'Good', color: chalk.green };
-  if (score >= 50) return { band: 'at-risk', label: 'At Risk', color: chalk.yellow };
-  return { band: 'critical', label: 'Critical', color: chalk.red };
-}
 
 // ---------------------------------------------------------------------------
 // Top-N DLP patterns by frequency

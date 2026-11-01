@@ -67,7 +67,7 @@ function blastWith(score: number, overrides: Partial<BlastResult> = {}): BlastRe
 }
 
 describe('buildScanJson', () => {
-  it('emits schemaVersion 1 and the supplied generatedAt', () => {
+  it('emits schemaVersion 2 and the supplied generatedAt', () => {
     const out = buildScanJson({
       scan: emptyScan(),
       summary: emptySummary(),
@@ -75,7 +75,7 @@ describe('buildScanJson', () => {
       isWired: true,
       generatedAt: FIXED_TIME,
     });
-    expect(out.schemaVersion).toBe(1);
+    expect(out.schemaVersion).toBe(2);
     expect(out.generatedAt).toBe(FIXED_TIME);
   });
 
@@ -98,21 +98,17 @@ describe('buildScanJson', () => {
     expect(unwired.isWired).toBe(false);
   });
 
-  it('classifies band at each boundary (mirrors classifyScore)', () => {
-    const at = (score: number) =>
-      buildScanJson({
-        scan: emptyScan(),
-        summary: emptySummary(),
-        blast: blastWith(score),
-        isWired: false,
-        generatedAt: FIXED_TIME,
-      }).band;
-    expect(at(100)).toBe('good');
-    expect(at(80)).toBe('good');
-    expect(at(79)).toBe('at-risk');
-    expect(at(50)).toBe('at-risk');
-    expect(at(49)).toBe('critical');
-    expect(at(0)).toBe('critical');
+  it('carries no score and no band (fw#421: the posture score is the machine score)', () => {
+    const out = buildScanJson({
+      scan: emptyScan(),
+      summary: emptySummary(),
+      blast: blastWith(20),
+      isWired: false,
+      generatedAt: FIXED_TIME,
+    });
+    expect(out).not.toHaveProperty('score');
+    expect(out).not.toHaveProperty('band');
+    expect(out.blast).not.toHaveProperty('score');
   });
 
   it('hoists totals from summary.byVerdict and blast', () => {
@@ -139,7 +135,6 @@ describe('buildScanJson', () => {
       loops: 290,
       blastExposures: 3, // 2 reachable + 1 envFinding
     });
-    expect(out.score).toBe(25);
   });
 
   it('embeds the supplied summary verbatim (no field rewrite)', () => {
@@ -168,8 +163,8 @@ describe('buildScanJson', () => {
     });
     const json = JSON.stringify(out);
     const parsed = JSON.parse(json);
-    expect(parsed.schemaVersion).toBe(1);
-    expect(parsed.band).toBe('at-risk');
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed).not.toHaveProperty('band');
     expect(parsed.summary.stats.sessions).toBe(5);
   });
 });
