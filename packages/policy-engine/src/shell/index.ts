@@ -12,7 +12,7 @@
 //
 // All inputs are strings; no fs/path/os/process imports.
 
-import mvdanSh from 'mvdan-sh';
+import { getSyntax, lazy } from './mvdan';
 import { toPlainTree, walk } from './plain-tree';
 import { matchesPattern } from '../rules';
 import { isShellShapedTool, type InspectionInput } from './tool-input';
@@ -36,11 +36,10 @@ export type {
   ShellInputResolution,
 } from './tool-input';
 
+// One parser instance, created on first use (fw#425: mvdan-sh loads lazily);
+// avoids parser object creation per call (~5x faster).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
-// Cached parser instance — avoids WASM object creation overhead per call (~5x faster)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const sharedParser: { Parse(src: string, name: string): any } = syntax.NewParser();
+const sharedParser = lazy((): { Parse(src: string, name: string): any } => getSyntax().NewParser());
 
 // Flags whose values are plain text (messages, descriptions) — safe to strip
 // so their content doesn't trigger shell security rules.
@@ -185,7 +184,7 @@ export function parseShared(command: string): any | typeof PARSE_FAIL {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let parsed: any | typeof PARSE_FAIL;
   try {
-    parsed = toPlainTree(sharedParser.Parse(command, 'cmd'));
+    parsed = toPlainTree(sharedParser().Parse(command, 'cmd'));
   } catch {
     parsed = PARSE_FAIL;
   }
@@ -2234,7 +2233,7 @@ function redirStdinOps(): Set<number> {
 // empty and every BinaryCmd RHS is treated as pipe-fed (fails toward review).
 function deriveBinaryOp(sample: string): number {
   try {
-    const f = toPlainTree(sharedParser.Parse(sample, 'cmd'));
+    const f = toPlainTree(sharedParser().Parse(sample, 'cmd'));
     let op = -1;
     walk(f, (node: unknown) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3334,7 +3333,7 @@ function recordTopLevelAssignments(f: any): void {
 function probeBinOp(src: string): number | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cmd: any = toPlainTree(syntax.NewParser().Parse(src, 'probe'))?.Stmts?.[0]?.Cmd;
+    const cmd: any = toPlainTree(getSyntax().NewParser().Parse(src, 'probe'))?.Stmts?.[0]?.Cmd;
     if (cmd && cmd.kind === 'BinaryCmd') return cmd.Op;
   } catch {
     /* a parser that cannot parse `a && b` leaves these null, and the whole
@@ -3342,10 +3341,15 @@ function probeBinOp(src: string): number | null {
   }
   return null;
 }
-const AND_OP = probeBinOp('a && b');
-const OR_OP = probeBinOp('a || b');
-/** `&&` and `||`: the LEFT operand of both runs unconditionally. */
-const AND_OR_OPS: Set<number> = new Set([AND_OP, OR_OP].filter((o): o is number => o !== null));
+// Read off the parser on first use, not at import (fw#425: mvdan-sh loads lazily).
+const andOrOps = lazy(() => {
+  const and = probeBinOp('a && b');
+  const or = probeBinOp('a || b');
+  return {
+    AND_OP: and,
+    AND_OR_OPS: new Set([and, or].filter((o): o is number => o !== null)) as Set<number>,
+  };
+});
 
 /**
  * Record one top-level statement's assignments. Returns whether the statement is
@@ -3362,7 +3366,7 @@ function recordTopLevelStmt(stmt: any): boolean {
   // left side: the right one is exactly the conditional case this excludes. A
   // pipe is deliberately not here -- `K=v | cat` assigns in a subshell.
   if (t === 'BinaryCmd') {
-    if (!AND_OR_OPS.has(stmt.Cmd.Op)) return false;
+    if (!andOrOps().AND_OR_OPS.has(stmt.Cmd.Op)) return false;
     // The right operand runs whenever the left is a bare assignment, because an
     // assignment always exits 0 -- and if it is not recorded, a benign left value
     // (`K=/tmp/a && K=KEY`) is the last one seen and OVERWRITES an earlier jailed
@@ -3375,7 +3379,7 @@ function recordTopLevelStmt(stmt: any): boolean {
     // its right operand is the one branch the shell never takes
     // (`K=KEY || K=/tmp/a; cat $K` went block -> ALLOW when this recorded it).
     // The chain still counts as bare either way: it exits 0 either way.
-    if (stmt.Cmd.Op === AND_OP) return recordTopLevelStmt(stmt.Cmd.Y);
+    if (stmt.Cmd.Op === andOrOps().AND_OP) return recordTopLevelStmt(stmt.Cmd.Y);
     return true;
   }
   if (t !== 'CallExpr' && t !== 'DeclClause') return false;
@@ -4150,7 +4154,7 @@ function isWaivableCleanupTarget(p: string): boolean {
 // classed as "created" → the waiver never fires (safe degrade to review).
 function deriveRedirOp(sample: string): number {
   try {
-    const f = toPlainTree(sharedParser.Parse(sample, 'cmd'));
+    const f = toPlainTree(sharedParser().Parse(sample, 'cmd'));
     let op = -1;
     walk(f, (node: unknown) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4168,19 +4172,20 @@ function deriveRedirOp(sample: string): number {
 // `>>` (append) is intentionally NOT here — append PRESERVES a pre-existing file's
 // content, so `cat >> victim <<E; rm victim` would delete an intact file (same
 // class as touch). Only a `>` truncate counts.
-const REDIR_TRUNCATE_OPS = new Set<number>([deriveRedirOp('>_f')]);
+// These three are read off the parser on first use, not at import (fw#425).
+const REDIR_TRUNCATE_OPS = lazy(() => new Set<number>([deriveRedirOp('>_f')]));
 // Redirects that open a FILE for reading: `<` (RdrIn) and `<>` (RdrInOut).
 // Both hand the file's bytes to whatever consumes stdin -- see
 // jailedRedirectRead. `<<` / `<<-` / `<<<` supply TEXT and are excluded, which
 // is why this is not redirStdinOps(). A failed derivation drops out rather
 // than becoming -1; the spec's `cat <` and `cat <>` rows are the guard.
-const REDIR_FILE_IN_OPS = new Set<number>(
-  [deriveRedirOp('cat < f'), deriveRedirOp('cat <> f')].filter((op) => op >= 0)
+const REDIR_FILE_IN_OPS = lazy(
+  () =>
+    new Set<number>([deriveRedirOp('cat < f'), deriveRedirOp('cat <> f')].filter((op) => op >= 0))
 );
-const REDIR_HEREDOC_OPS = new Set<number>([
-  deriveRedirOp('cat <<X\nX'),
-  deriveRedirOp('cat <<-X\nX'),
-]);
+const REDIR_HEREDOC_OPS = lazy(
+  () => new Set<number>([deriveRedirOp('cat <<X\nX'), deriveRedirOp('cat <<-X\nX')])
+);
 
 // Files written with content in this command via a heredoc (`cat > f <<EOF`).
 // A "created" file is the target of a `>` truncate redirect on the DEFAULT fd
@@ -4211,9 +4216,9 @@ function collectSameCommandCreations(f: any): Set<string> {
       if (!stmt || !stmt.Cmd || stmt.Cmd.kind !== 'CallExpr') continue;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const redirs: any[] = stmt.Redirs || [];
-      if (!redirs.some((r) => r && REDIR_HEREDOC_OPS.has(r.Op))) continue;
+      if (!redirs.some((r) => r && REDIR_HEREDOC_OPS().has(r.Op))) continue;
       for (const r of redirs) {
-        if (r && REDIR_TRUNCATE_OPS.has(r.Op) && r.N == null) {
+        if (r && REDIR_TRUNCATE_OPS().has(r.Op) && r.N == null) {
           const w = resolveWordLiteral(r.Word);
           if (w) created.add(stripDotSlash(w));
         }
@@ -5368,7 +5373,7 @@ function jailedRedirectRead(stmt: any): FsOpVerdict | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const redirs: any[] = stmt.Redirs || [];
   for (const r of redirs) {
-    if (!r || !REDIR_FILE_IN_OPS.has(r.Op)) continue;
+    if (!r || !REDIR_FILE_IN_OPS().has(r.Op)) continue;
     const p = resolveWordLiteral(r.Word);
     if (p === null || p === '') continue; // dynamic operand: unknowable, skip
     const hit = matchSensitivePath(p);
