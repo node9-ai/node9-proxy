@@ -64,7 +64,8 @@ function check(
   where: { home: string; project: string },
   sessionId: string,
   command: string,
-  agentFlag?: string
+  agentFlag?: string,
+  extra: Record<string, unknown> = {}
 ) {
   const env = { ...process.env };
   delete env.NODE9_API_KEY;
@@ -75,6 +76,7 @@ function check(
     tool_input: { command },
     cwd: where.project,
     session_id: sessionId,
+    ...extra,
   };
   const args = [CLI, 'check'];
   if (agentFlag) args.push('--agent', agentFlag);
@@ -139,6 +141,28 @@ describe('the session level notice at the real hook (fw#420)', () => {
     expect(blocked.json?.hookSpecificOutput?.permissionDecision).toBe('deny');
     expect(blocked.json?.hookSpecificOutput?.additionalContext).toBeUndefined();
     expect(check(where, 'sess-block', 'ls').json?.systemMessage).toBe(STANDARD);
+  });
+
+  // fw#420 step 3: the CLI shows systemMessage directly, so a block carries
+  // node9's own line there as well as in the reason the agent quotes.
+  itUnix('a block carries the user line as systemMessage', () => {
+    const where = makeHome('block-cli');
+    const blocked = check(where, 'sess-block-cli', 'cat .env');
+    const reason = String(blocked.json?.hookSpecificOutput?.permissionDecisionReason ?? '');
+    expect(blocked.json?.systemMessage).toBe(reason.split('\n')[0]);
+    expect(blocked.json?.systemMessage).toMatch(/^\u{1F6E1}\uFE0F Node9 blocked/u);
+  });
+
+  // /code-review: a subagent's reply goes to the parent agent, not the user.
+  itUnix("a subagent's call neither shows nor spends the notice", () => {
+    const where = makeHome('subagent');
+    const sub = check(where, 'sess-sub', 'ls', undefined, {
+      agent_id: 'a1debb48f698832fb',
+      agent_type: 'Explore',
+    });
+    expect(sub.status).toBe(0);
+    expect(sub.out).toBe('');
+    expect(check(where, 'sess-sub', 'ls').json?.systemMessage).toBe(STANDARD);
   });
 
   itUnix('another agent gets no notice', () => {

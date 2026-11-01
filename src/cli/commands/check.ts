@@ -16,6 +16,7 @@ import { getConfig, type Config } from '../../config';
 import {
   buildNegotiationMessage,
   buildReviewMessage,
+  userLineOf,
   isHumanDecision,
 } from '../../policy/negotiation';
 import {
@@ -715,10 +716,16 @@ export function registerCheckCommand(program: Command): void {
               );
               process.exit(0);
             }
+            // fw#420: the CLI shows systemMessage to the user directly, so a
+            // Claude Code user sees node9's own line even if the agent does not
+            // quote it. Claude Code only: other agents' schemas are unverified,
+            // and an unknown field must never put a block at risk.
+            const userLine = userLineOf(aiFeedbackMessage);
             process.stdout.write(
               JSON.stringify({
                 decision: 'block',
                 reason: aiFeedbackMessage, // This is the core instruction
+                ...(agent === 'Claude Code' && userLine ? { systemMessage: userLine } : {}),
                 hookSpecificOutput: {
                   hookEventName: 'PreToolUse',
                   permissionDecision: 'deny',
@@ -1004,14 +1011,22 @@ export function registerCheckCommand(program: Command): void {
           // the user node9 is on and at which level (Audit says nothing is
           // blocked). Never on a block or a review, never with a decision, and a
           // failure here only drops the notice.
+          // A subagent's call (payload agent_id) shares the session id, but its
+          // reply goes to the parent agent, not the user: it must not spend the
+          // flag. The write is synchronous so exit cannot cut it off (pipes are
+          // asynchronous on macOS) after the flag is already claimed.
+          const isSubagentCall =
+            typeof (payload as { agent_id?: unknown }).agent_id === 'string' &&
+            (payload as { agent_id: string }).agent_id !== '';
           const allowExit = (): never => {
             if (
               agent === 'Claude Code' &&
+              !isSubagentCall &&
               sessionNoticeEnabled() &&
               claimSessionNotice(safeSessionId)
             ) {
               try {
-                process.stdout.write(sessionNoticeOutput(config.settings.mode) + '\n');
+                fs.writeSync(1, sessionNoticeOutput(config.settings.mode) + '\n');
               } catch {
                 /* UX only */
               }

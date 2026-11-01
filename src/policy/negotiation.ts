@@ -3,6 +3,8 @@
 // Instead of a generic "blocked" message, the AI gets actionable instructions
 // based on WHY it was blocked so it can pivot intelligently.
 
+import { stripTerminalEscapes } from '@node9/policy-engine';
+
 /** What the block was about, from the verdict itself (AuthResult.blockKind /
  *  blockedPath), so the message does not have to guess from the label. */
 export interface BlockContext {
@@ -35,18 +37,16 @@ const USER_LINE_PART_MAX = 160;
  *  the agent's text (MSG-3) nor a quoted sentence wants them. */
 const PICTOGRAPHS = /[\p{Extended_Pictographic}\u200D\uFE0F]/gu;
 
-/** One line: no control characters, no em dash, single spaces. Paths, rule
+/** One line: no terminal escapes or control characters (the engine's
+ *  stripTerminalEscapes, shared with the terminal and the logs), no em dash,
+ *  single spaces. Paths, rule
  *  sentences and reasons come from config or from the agent's own arguments,
  *  so a newline in them must not start a second "instruction". */
 function oneLine(text: string): string {
-  return (
-    text
-      // eslint-disable-next-line no-control-regex -- stripping them is the point
-      .replace(/[\u0000-\u001F\u007F]+/g, ' ')
-      .replace(/\s*\u2014\s*/g, ', ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  );
+  return stripTerminalEscapes(text)
+    .replace(/\s*\u2014\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function bounded(text: string, max = USER_LINE_PART_MAX): string {
@@ -63,6 +63,13 @@ export function userLinePart(text: string): string {
 function userLineValue(text: string, max = 80): string {
   const v = bounded(oneLine(text).replace(/`/g, "'"), max);
   return v ? `\`${v}\`` : '';
+}
+
+/** The user line of a block message, or undefined when it has none (a
+ *  person's redirect carries only the agent's instruction). */
+export function userLineOf(message: string): string | undefined {
+  const first = message.split('\n', 1)[0];
+  return first.startsWith(USER_LINE_ICON) ? first : undefined;
 }
 
 /** The message with the user line and the quote instruction on top. The

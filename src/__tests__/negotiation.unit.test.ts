@@ -6,6 +6,7 @@ import {
   buildReviewMessage,
   isHumanDecision,
   QUOTE_INSTRUCTION,
+  userLineOf,
   userLinePart,
 } from '../policy/negotiation';
 
@@ -437,7 +438,21 @@ describe('the user line cannot be split or stretched by its inputs (fw#420)', ()
     expect(part.endsWith('...')).toBe(true);
   });
 
-  it('control characters and em dashes are removed', () => {
-    expect(userLinePart('a\u0007b \u2014 c\t\td.')).toBe('a b, c d');
+  it('control characters, terminal escapes and em dashes are removed', () => {
+    expect(userLinePart('a\u0007b \u2014 c\t\td.')).toBe('ab, c d');
+    expect(userLinePart('\u001b[31mred\u001b[0m text\nnext')).toBe('red text next');
+  });
+
+  it('userLineOf finds the line, and nothing in a redirect', () => {
+    expect(userLineOf(buildNegotiationMessage('User Decision (Native)', true, 'no'))).toBe(
+      `${SHIELD} Node9: you blocked this action`
+    );
+    expect(
+      userLineOf(
+        buildNegotiationMessage('Steered Redirect', true, 'use staging', undefined, {
+          redirect: true,
+        })
+      )
+    ).toBeUndefined();
   });
 });
