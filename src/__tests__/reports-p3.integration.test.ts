@@ -55,6 +55,16 @@ beforeEach(() => {
   // One recent Claude session with a Bash call, laid out as Claude Code
   // writes it: ~/.claude/history.jsonl indexes the session by project, the
   // transcript sits under projects/<project path with / as ->/<id>.jsonl.
+  // That encoding is POSIX-only (a Windows path keeps its drive colon), a
+  // pre-existing limit of buildSessions, so the sessions cases skip on win32.
+  if (process.platform !== 'win32') seedClaudeSession();
+  // Cursor protected through MCP only (no hook file exists for it).
+  writeJson('.cursor/mcp.json', {
+    mcpServers: { node9: { command: 'node9', args: ['mcp-server'] } },
+  });
+});
+
+function seedClaudeSession(): void {
   const project = path.join(home, 'proj');
   const projDir = path.join(home, '.claude', 'projects', project.replace(/\//g, '-'));
   fs.mkdirSync(projDir, { recursive: true });
@@ -91,17 +101,13 @@ beforeEach(() => {
       }),
     ].join('\n') + '\n'
   );
-  // Cursor protected through MCP only (no hook file exists for it).
-  writeJson('.cursor/mcp.json', {
-    mcpServers: { node9: { command: 'node9', args: ['mcp-server'] } },
-  });
-});
+}
 
 afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
-describe('sessions fold into report', () => {
+describe.skipIf(process.platform === 'win32')('sessions fold into report', () => {
   it('report --sessions lists the session in the report window', () => {
     const r = run(['report', '--sessions']);
     expect(r.status).toBe(0);
