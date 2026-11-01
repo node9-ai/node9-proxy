@@ -33,6 +33,10 @@ const SOURCES = [
   // 2026-08-20 matcher change through with no version bump.
   'packages/policy-engine/src/rules/index.ts',
   'packages/policy-engine/src/shell/index.ts',
+  // Every detector reads the AST through plain-tree.ts (fw#410): its field
+  // table decides which children and scalars exist. Dropping `Hdoc` there
+  // would silently blind the heredoc detectors with this gate still green.
+  'packages/policy-engine/src/shell/plain-tree.ts',
   'packages/policy-engine/src/shell/tool-input.ts',
   // canonical.ts:297 runs scanArgs (dlp/index.ts) over tool args and ships the
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output

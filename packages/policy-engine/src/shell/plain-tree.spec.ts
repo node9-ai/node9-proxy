@@ -150,6 +150,84 @@ describe('toPlainTree mirrors the Go tree', () => {
     expect(echo.Args[2].Parts[0].Parts[0].Param.Value).toBe('y');
   });
 
+  it('fields the Go walk skips are still converted: DeclClause.Variant and the ParamExp structs', () => {
+    // The review asked for this: a typo in one of these table entries would
+    // leave every walked (kind, pos, end) sequence intact and only the readers
+    // of `n.Variant`, `Exp.Op`, `Repl.Orig`, `Slice.Offset` would go blind.
+    const f = parser.Parse('declare -x A=1; echo ${v:1:2} ${v/a/b} ${v:-def} ${v//x/y}', 'cmd');
+    const p = toPlainTree(f);
+    const decl = p.Stmts[0].Cmd;
+    expect(decl.kind).toBe('DeclClause');
+    expect(decl.Variant.kind).toBe('Lit');
+    expect(decl.Variant.Value).toBe(f.Stmts[0].Cmd.Variant.Value);
+    expect(decl.Args[1].Name.Value).toBe('A');
+    const words = p.Stmts[1].Cmd.Args;
+    const goWords = f.Stmts[1].Cmd.Args;
+    const pe = (i: number) => words[i].Parts[0];
+    const goPe = (i: number) => goWords[i].Parts[0];
+    // ${v:1:2}
+    expect(pe(1).Slice.Offset.Parts[0].Value).toBe('1');
+    expect(pe(1).Slice.Length.Parts[0].Value).toBe('2');
+    expect(pe(1).Slice.Offset.pos).toBe(goPe(1).Slice.Offset.Pos().Offset());
+    // ${v/a/b} and ${v//x/y}
+    expect(pe(2).Repl.Orig.Parts[0].Value).toBe('a');
+    expect(pe(2).Repl.With.Parts[0].Value).toBe('b');
+    expect(pe(2).Repl.All).toBe(false);
+    expect(pe(4).Repl.All).toBe(true);
+    // ${v:-def}
+    expect(pe(3).Exp.Op).toBe(goPe(3).Exp.Op);
+    expect(pe(3).Exp.Word.Parts[0].Value).toBe('def');
+    // every scalar of a ParamExp, against Go
+    for (const k of ['Short', 'Excl', 'Length', 'Width']) {
+      expect(pe(3)[k], k).toBe(goPe(3)[k]);
+    }
+  });
+
+  it('every scalar in the table equals the Go value across the corpus', () => {
+    const SCALARS: Record<string, string[]> = {
+      Stmt: ['Negated', 'Background', 'Coprocess'],
+      Assign: ['Append', 'Naked'],
+      Lit: ['Value'],
+      SglQuoted: ['Value', 'Dollar'],
+      DblQuoted: ['Dollar'],
+      ParamExp: ['Short', 'Excl', 'Length', 'Width'],
+      CmdSubst: ['Backquotes', 'TempFile', 'ReplyVar'],
+      ArithmExp: ['Bracket', 'Unsigned'],
+      ArithmCmd: ['Unsigned'],
+      ProcSubst: ['Op'],
+      ExtGlob: ['Op'],
+      BinaryCmd: ['Op'],
+      BinaryArithm: ['Op'],
+      UnaryArithm: ['Op', 'Post'],
+      BinaryTest: ['Op'],
+      UnaryTest: ['Op'],
+      Redirect: ['Op'],
+      WhileClause: ['Until'],
+      ForClause: ['Select'],
+      CaseItem: ['Op'],
+      FuncDecl: ['RsrvWord'],
+      TimeClause: ['PosixFormat'],
+    };
+    let checked = 0;
+    for (const cmd of CORPUS) {
+      const f = parser.Parse(cmd, 'cmd');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const goNodes: any[] = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      syntax.Walk(f, (n: any) => (n && goNodes.push(n), true));
+      const plainNodes: PlainNode[] = [];
+      walk(toPlainTree(f), (n) => (plainNodes.push(n), true));
+      expect(plainNodes.length).toBe(goNodes.length);
+      plainNodes.forEach((pn, i) => {
+        for (const k of SCALARS[pn.kind] ?? []) {
+          expect(pn[k], `${pn.kind}.${k} in ${cmd}`).toBe(goNodes[i][k]);
+          checked++;
+        }
+      });
+    }
+    expect(checked).toBeGreaterThan(500);
+  });
+
   it('walk stops at a node whose callback returns false, like syntax.Walk', () => {
     const p = toPlainTree(parser.Parse('echo $(cat a) | grep b', 'cmd'));
     const seen: string[] = [];
