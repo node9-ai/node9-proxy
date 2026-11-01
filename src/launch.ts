@@ -79,7 +79,7 @@ export function pruneOld(root: string, keep: string, now: number): void {
 /**
  * Enable the compile cache for this node9 version. Returns the directory, or
  * null when the cache is not used: an old Node, a cache the environment chose
- * (NODE_COMPILE_CACHE), root, an install this user cannot write, an untrusted
+ * or disabled (NODE_COMPILE_CACHE, NODE_DISABLE_COMPILE_CACHE), root, an install this user cannot write, an untrusted
  * cache directory, or any failure.
  */
 export function enableCompileCache(
@@ -91,7 +91,8 @@ export function enableCompileCache(
   try {
     const api = nodeModule as unknown as CompileCacheApi;
     if (typeof api.enableCompileCache !== 'function') return null;
-    if (process.env.NODE_COMPILE_CACHE) return null;
+    // A cache the environment chose, or switched off, wins.
+    if (process.env.NODE_COMPILE_CACHE || process.env.NODE_DISABLE_COMPILE_CACHE) return null;
     if (!VERSION_NAME.test(version)) return null;
     if (process.getuid?.() === 0) return null;
     fs.accessSync(installDir, fs.constants.W_OK);

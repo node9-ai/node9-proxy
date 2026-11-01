@@ -32,16 +32,21 @@ function run(
   args: string[],
   input?: string,
   extraEnv: Record<string, string> = {},
-  entry: string = CLI
+  entry: string = CLI,
+  cache: boolean = true
 ): { status: number | null; stdout: string; stderr: string } {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.NODE9_API_KEY;
   delete env.NODE9_API_URL;
   delete env.NODE_COMPILE_CACHE;
+  // The shared test setup switches the cache off for every spawn; these specs
+  // test the launcher's own cache, so they turn it back on unless told not to.
+  if (cache) delete env.NODE_DISABLE_COMPILE_CACHE;
+  else env.NODE_DISABLE_COMPILE_CACHE = '1';
   const r = spawnSync(process.execPath, [entry, ...args], {
     input,
     encoding: 'utf-8',
-    timeout: 60_000,
+    timeout: 25_000,
     cwd: home,
     env: {
       ...env,
@@ -54,7 +59,12 @@ function run(
       ...extraEnv,
     },
   });
-  expect(r.error).toBeUndefined();
+  // On a timeout, say which call and what it printed (fw#425: a CI-only stall).
+  expect(
+    r.error,
+    `${entry} ${args.join(' ')} cache=${cache} input=${String(input).slice(0, 80)} ` +
+      `stderr=${String(r.stderr ?? '').slice(-400)}`
+  ).toBeUndefined();
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
@@ -103,13 +113,21 @@ describe('launcher dispatch', () => {
       '',
       'not json',
     ];
+    // Bundle parity, not the cache: both sides compile without it.
     for (const input of cases) {
-      const viaHook = run(['check'], input);
-      const viaFull = run(['check'], input, {}, path.join(DIST, 'cli-main.js'));
+      const viaHook = run(['check'], input, {}, CLI, false);
+      const viaFull = run(['check'], input, {}, path.join(DIST, 'cli-main.js'), false);
       expect({ status: viaHook.status, out: viaHook.stdout }, input).toEqual({
         status: viaFull.status,
         out: viaFull.stdout,
       });
+    }
+  });
+
+  it('a Bash call with the launcher cache on answers, cold and warm', () => {
+    for (let i = 0; i < 3; i++) {
+      const r = run(['check'], payload('Bash', { command: 'git status --short | head -5' }));
+      expect(r.status, `call ${i}`).toBe(0);
     }
   });
 
@@ -122,8 +140,8 @@ describe('launcher dispatch', () => {
         fs.copyFileSync(path.join(DIST, f), path.join(partial, f));
       }
       const input = payload('Bash', { command: 'rm -rf /' });
-      const r = run(['check'], input, {}, path.join(partial, 'cli.js'));
-      const full = run(['check'], input, {}, path.join(DIST, 'cli-main.js'));
+      const r = run(['check'], input, {}, path.join(partial, 'cli.js'), false);
+      const full = run(['check'], input, {}, path.join(DIST, 'cli-main.js'), false);
       expect({ status: r.status, out: r.stdout }).toEqual({
         status: full.status,
         out: full.stdout,

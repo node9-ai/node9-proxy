@@ -36,20 +36,18 @@ for (const k of Object.keys(process.env)) {
 normalizeCommandForPolicy('true');
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-test-home-'));
-// Spawned node9 processes inherit this: Node compiles into a cache outside every
-// test HOME, and the launcher (fw#425) leaves its own cache alone when the
-// environment chose one. Specs that snapshot a whole HOME (canary plant D4,
-// the keyed write guard) then see only what the command itself wrote.
-// hook-startup.integration removes it on purpose to test the launcher's cache.
-const compileCache = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-test-compile-cache-'));
-process.env.NODE_COMPILE_CACHE = compileCache;
+// Spawned node9 processes inherit this: no compile cache, so the launcher
+// (fw#425) writes nothing and every spawn compiles as it did before it.
+// Specs that snapshot a whole HOME (canary plant D4, the keyed write guard)
+// then see only what the command itself wrote. hook-startup.integration
+// removes it on purpose to test the launcher's cache.
+process.env.NODE_DISABLE_COMPILE_CACHE = '1';
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 delete process.env.XDG_CONFIG_HOME;
 
 afterAll(() => {
   try {
-    fs.rmSync(compileCache, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   } catch (err) {
     // A leftover temp dir is harmless; say so instead of failing the file.
