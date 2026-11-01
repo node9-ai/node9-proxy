@@ -10,7 +10,7 @@
 // (the component is a dashboard); the user-facing command is
 // `node9 monitor`. Internal symbols use neither name as gospel —
 // the components are named for what they show, not the command.
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import {
   EMPTY_SESSION_ACTIVITY,
@@ -30,6 +30,7 @@ import {
   type ShieldStatus,
   type TimeWindow,
   type View,
+  type PostureSnapshot,
 } from './types.js';
 import {
   aggregateAudit,
@@ -38,8 +39,8 @@ import {
   applyForensicEvent,
   applyResolveStatus,
   buildRuleToShieldMap,
-  computeProtection,
   loadBlast,
+  loadPosture,
   loadReportAuditAsync,
   loadShieldStatus,
   readAuditEntriesAsync,
@@ -184,6 +185,7 @@ export function App(): React.ReactElement {
   const [sseError, setSseError] = useState<string | undefined>();
   const [agg, setAgg] = useState<AuditAggregates | null>(null);
   const [blast, setBlast] = useState<BlastSnapshot | null>(null);
+  const [posture, setPosture] = useState<PostureSnapshot | null>(null);
   const [shieldStatus, setShieldStatus] = useState<ShieldStatus | null>(null);
   // scanSignals is intentionally never set on Realtime (Phase 1: the
   // walk that fed it was removed, since Risk now uses SSE-driven
@@ -508,6 +510,24 @@ export function App(): React.ReactElement {
     return () => clearInterval(id);
   }, []);
 
+  // Posture — the one machine score (fw#421). A child process (about a
+  // second), on the blast cadence and on [r]; one run at a time, so a
+  // repeated [r] cannot let an older result land after a newer one.
+  const postureInFlight = useRef(false);
+  const refreshPosture = useCallback(() => {
+    if (postureInFlight.current) return;
+    postureInFlight.current = true;
+    void loadPosture().then((p) => {
+      postureInFlight.current = false;
+      if (p) setPosture(p);
+    });
+  }, []);
+  useEffect(() => {
+    refreshPosture();
+    const id = setInterval(refreshPosture, BLAST_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [refreshPosture]);
+
   // Shield status — re-read every 5s so toggling a shield via
   // `node9 shield enable/disable` is reflected promptly in the
   // RISK box and SHIELDS panel. Previously this shared the 5-min
@@ -692,6 +712,7 @@ export function App(): React.ReactElement {
       }
       setBlast(loadBlast());
       setShieldStatus(loadShieldStatus());
+      refreshPosture();
     }
   });
 
@@ -790,7 +811,7 @@ export function App(): React.ReactElement {
 
     if (!candidate) {
       stickyRef.current = null;
-      return { kind: 'idle', protection: computeProtection(blast, shieldStatus) };
+      return { kind: 'idle', posture };
     }
 
     // If we've been showing a different sticky notification for less
@@ -820,16 +841,7 @@ export function App(): React.ReactElement {
     }
     return candidate;
     // tick is intentionally a dep so age windows + sticky expiry re-eval each second.
-  }, [
-    pendingApproval,
-    approvalStatus,
-    resolvedApproval,
-    recentForensic,
-    events,
-    blast,
-    shieldStatus,
-    tick,
-  ]);
+  }, [pendingApproval, approvalStatus, resolvedApproval, recentForensic, events, posture, tick]);
 
   // Unified security-health badge for the Header. Pure compute over
   // every signal source the dashboard already tracks. Re-runs whenever
@@ -851,13 +863,13 @@ export function App(): React.ReactElement {
           byBlock: [],
           byShell: [],
         },
-        blast: blast ?? { score: 100, paths: [], envFindings: 0 },
+        blast: blast ?? { paths: [], envFindings: 0 },
         scanSignals,
         shieldStatus,
         forensicAgg: sessionForensicAgg,
-        effectiveScore: computeProtection(blast, shieldStatus).effective,
+        posture,
       }),
-    [agg, blast, scanSignals, shieldStatus, sessionForensicAgg]
+    [agg, blast, scanSignals, shieldStatus, sessionForensicAgg, posture]
   );
 
   // Render Header + StatusBar in every state (including loading) so the
@@ -924,6 +936,7 @@ export function App(): React.ReactElement {
           period={reportPeriod}
           audit={reportAudit}
           blast={blast}
+          posture={posture}
           scanCache={scanCache}
           shieldStatus={shieldStatus}
         />

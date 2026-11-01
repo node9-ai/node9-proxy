@@ -273,18 +273,17 @@ describe('BlastRadius', () => {
   });
 
   it('renders "no exposed sensitive files" when paths is empty', () => {
-    const blast: BlastSnapshot = { score: 100, paths: [], envFindings: 0 };
+    const blast: BlastSnapshot = { paths: [], envFindings: 0 };
     const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={false} />);
     expect(lastFrame()).toContain('no exposed sensitive files');
   });
 
   it('renders one row per exposed path with description', () => {
     const blast: BlastSnapshot = {
-      score: 30,
       envFindings: 0,
       paths: [
-        { label: '~/.ssh/id_rsa', description: 'RSA private key', score: 20 },
-        { label: '~/.npmrc', description: 'npm auth token', score: 10 },
+        { label: '~/.ssh/id_rsa', description: 'RSA private key' },
+        { label: '~/.npmrc', description: 'npm auth token' },
       ],
     };
     const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={false} />);
@@ -296,9 +295,8 @@ describe('BlastRadius', () => {
 
   it('shows "blocked by project-jail" when shield is active', () => {
     const blast: BlastSnapshot = {
-      score: 30,
       envFindings: 0,
-      paths: [{ label: '~/.npmrc', description: 'npm auth token', score: 10 }],
+      paths: [{ label: '~/.npmrc', description: 'npm auth token' }],
     };
     const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={true} />);
     expect(lastFrame()).toContain('blocked by project-jail');
@@ -307,9 +305,8 @@ describe('BlastRadius', () => {
 
   it('uses singular grammar for exactly 1 path on disk', () => {
     const blast: BlastSnapshot = {
-      score: 80,
       envFindings: 0,
-      paths: [{ label: '~/.npmrc', description: 'npm auth token', score: 10 }],
+      paths: [{ label: '~/.npmrc', description: 'npm auth token' }],
     };
     const { lastFrame } = render(<BlastRadius blast={blast} protectedByProjectJail={false} />);
     expect(lastFrame()).toContain('1 path on disk');

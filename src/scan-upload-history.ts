@@ -377,7 +377,7 @@ export async function runUploadHistory(opts: UploadHistoryOptions): Promise<void
         `(skipped ${linesSkipped} malformed)`
     )
   );
-  console.log(chalk.gray(`   Findings: ${findings.length}, score: ${summary.score}/100`));
+  console.log(chalk.gray(`   Findings: ${findings.length}`));
 
   // POST /scan/report — same endpoint the daemon uses, with the new
   // sessionTotals field. The BE branches on this to set backfilledAt.

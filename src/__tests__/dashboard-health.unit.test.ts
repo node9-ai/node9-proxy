@@ -30,7 +30,7 @@ function emptyAgg(overrides: Partial<AuditAggregates> = {}): AuditAggregates {
 }
 
 function blast(overrides: Partial<BlastSnapshot> = {}): BlastSnapshot {
-  return { score: 100, paths: [], envFindings: 0, ...overrides };
+  return { paths: [], envFindings: 0, ...overrides };
 }
 
 function scan(overrides: Partial<ScanSignalsSnapshot> = {}): ScanSignalsSnapshot {
@@ -57,9 +57,9 @@ const baseInput = {
   scanSignals: scan(),
   shieldStatus: shields(),
   forensicAgg: { ...EMPTY_SESSION_FORENSIC },
-  // Default: secure baseline (matches blast({ score: 100 })). Tests
-  // exercising the score-tier gating override this alongside `blast`.
-  effectiveScore: 100,
+  // Default: a healthy posture. The score cases override `posture` (fw#421:
+  // the posture score is the one machine score; blast carries no score).
+  posture: { score: 100, tier: 'good' as const },
 };
 
 describe('computeHealthBadge', () => {
@@ -117,24 +117,26 @@ describe('computeHealthBadge', () => {
     expect(b.reasons.some((r) => r.includes('severe forensic'))).toBe(true);
   });
 
-  it('flips to critical when effective score < 25', () => {
+  it('flips to critical on a critical posture tier', () => {
     const b = computeHealthBadge({
       ...baseInput,
-      blast: blast({ score: 24 }),
-      effectiveScore: 24,
+      posture: { score: 24, tier: 'critical' },
     });
     expect(b.severity).toBe('critical');
-    expect(b.reasons).toContain('score 24/100');
+    expect(b.reasons).toContain('posture 24/100');
   });
 
-  it('reports warning when effective score is 25-49', () => {
+  it('stays secure while the posture is still loading (null)', () => {
+    expect(computeHealthBadge({ ...baseInput, posture: null }).severity).toBe('secure');
+  });
+
+  it('reports warning on an at-risk posture tier', () => {
     const b = computeHealthBadge({
       ...baseInput,
-      blast: blast({ score: 30 }),
-      effectiveScore: 30,
+      posture: { score: 60, tier: 'at-risk' },
     });
     expect(b.severity).toBe('warning');
-    expect(b.reasons).toContain('score 30/100');
+    expect(b.reasons).toContain('posture 60/100');
   });
 
   it('reports warning on PII alone', () => {
@@ -151,8 +153,8 @@ describe('computeHealthBadge', () => {
       ...baseInput,
       blast: blast({
         paths: [
-          { label: '/home/user/.ssh', description: '', score: 0 },
-          { label: '/home/user/.aws', description: '', score: 0 },
+          { label: '/home/user/.ssh', description: '' },
+          { label: '/home/user/.aws', description: '' },
         ],
       }),
     });
@@ -174,8 +176,7 @@ describe('computeHealthBadge', () => {
       ...baseInput,
       agg: emptyAgg({ dlpHits: 2 }),
       blast: blast({
-        score: 30,
-        paths: [{ label: '/home/user/.ssh', description: '', score: 0 }],
+        paths: [{ label: '/home/user/.ssh', description: '' }],
       }),
       shieldStatus: shields({ inactive: ['block-force-push'] }),
     });
@@ -189,8 +190,7 @@ describe('computeHealthBadge', () => {
     const b = computeHealthBadge({
       ...baseInput,
       agg: emptyAgg({ dlpHits: 1, loops: 1 }),
-      blast: blast({ score: 10 }),
-      effectiveScore: 10,
+      posture: { score: 10, tier: 'critical' },
       forensicAgg: { ...EMPTY_SESSION_FORENSIC, privilegeEscalation: 1 },
     });
     expect(b.severity).toBe('critical');
@@ -210,8 +210,8 @@ describe('computeHealthBadge', () => {
   it('omits hint on secure, includes hint on warning/critical', () => {
     expect(computeHealthBadge(baseInput).hint).toBeUndefined();
     expect(
-      computeHealthBadge({ ...baseInput, blast: blast({ score: 40 }), effectiveScore: 40 }).hint
-    ).toBe('see node9 scan');
+      computeHealthBadge({ ...baseInput, posture: { score: 40, tier: 'critical' } }).hint
+    ).toBe('see node9 posture');
     expect(computeHealthBadge({ ...baseInput, agg: emptyAgg({ dlpHits: 1 }) }).hint).toBe(
       'see node9 scan'
     );

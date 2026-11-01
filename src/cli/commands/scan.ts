@@ -56,7 +56,6 @@ import { getAgentsStatus } from '../../setup';
 import { runBlast, type BlastFinding } from './blast';
 import {
   boxPanel,
-  classifyScore,
   computeLoopWaste,
   originForRule,
   relativeDate,
@@ -65,16 +64,11 @@ import {
   topDlpPatterns,
   topRulesByVerdict,
 } from '../render/scan-derive';
-import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../protection';
+import { isProtectiveShield } from '../../protection';
 import stringWidth from 'string-width';
 import { buildScanJson } from '../render/scan-json';
 import { listSessionFiles, sessionIdOf } from '../../session-files';
-import {
-  appendScanHistory,
-  computeScanDelta,
-  readPreviousScan,
-  type ScanHistoryRecord,
-} from '../render/scan-history';
+import { appendScanHistory, type ScanHistoryRecord } from '../render/scan-history';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2998,6 +2992,11 @@ export function renderCompactScorecard(input: CompactInput): void {
 
   // ── CTA ──────────────────────────────────────────────────────────────
   console.log(
+    chalk.dim('→  Machine score: run ') +
+      chalk.cyan('node9 posture') +
+      chalk.dim(" for this machine's score and what to fix first.")
+  );
+  console.log(
     chalk.dim('→  ') +
       chalk.cyan('npx node9-ai scan') +
       chalk.dim('       run this on your machine')
@@ -3168,6 +3167,11 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 
   // ── CTA ────────────────────────────────────────────────────────────
   console.log(
+    chalk.dim('→  Machine score: run ') +
+      chalk.cyan('node9 posture') +
+      chalk.dim(" for this machine's score and what to fix first.")
+  );
+  console.log(
     chalk.dim('→  ') +
       chalk.cyan('npx node9-ai scan') +
       chalk.dim('       run this on your machine')
@@ -3182,7 +3186,7 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 //
 // The default `node9 scan` output. Designed as the polished forecast
 // the user opens to act on — concise, scannable, with a SHIELDS panel
-// that converts hits into a "+N pts if you enable X" recommendation.
+// that ranks the protective shields first and names the one to enable.
 //
 // Mental model: 7 box-drawn panels stacked vertically.
 //   1. TOP FINDINGS      4 auto-derived bullets ranking severity
@@ -3191,10 +3195,10 @@ export function renderNarrativeScorecard(input: CompactInput): void {
 //   4. REVIEW QUEUE      per-rule counts that node9 would have flagged
 //   5. AGENT LOOPS       efficiency breakdown by tool + top stuck files
 //   6. BLAST RADIUS      paths an AI could reach on disk right now
-//   7. SHIELDS           recommendations w/ score deltas
+//   7. SHIELDS           recommendations, protective shields first
 //
 // Empty categories are skipped (no "0 leaks" filler rows). The hero
-// block (score line + stat card + spend) is emitted by the caller
+// block (stat card + spend) is emitted by the caller
 // before this function runs — we only render the panels themselves.
 //
 // `--drill-down` bypasses this renderer and uses the legacy verbose
@@ -3522,37 +3526,36 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   }
 
   // ── SHIELDS panel — the action recommendation ─────────────────────
-  // Per-shield "would catch N ops" with a score delta for protective
-  // shields (project-jail today; future protective shields auto-extend
-  // via PROTECTIVE_SHIELD_DISCOUNTS).
+  // Per-shield "would catch N ops"; protective shields (project-jail today;
+  // see PROTECTIVE_SHIELDS) rank first and carry the in-path hint.
   const shieldImpacts = rollupByShield(summary.sections);
   const shieldLines: Line[] = [];
 
   // Sort: protective shields with score impact first, then by hit count.
   const ranked = [...shieldImpacts].sort((a, b) => {
-    const aDiscount = PROTECTIVE_SHIELD_DISCOUNTS[a.shieldName] ?? 0;
-    const bDiscount = PROTECTIVE_SHIELD_DISCOUNTS[b.shieldName] ?? 0;
-    if (aDiscount !== bDiscount) return bDiscount - aDiscount;
+    const aProt = isProtectiveShield(a.shieldName) ? 1 : 0;
+    const bProt = isProtectiveShield(b.shieldName) ? 1 : 0;
+    if (aProt !== bProt) return bProt - aProt;
     return b.totalCatches - a.totalCatches;
   });
 
   for (const impact of ranked) {
     if (impact.totalCatches === 0) continue; // hit shields only — zero-hits go to footer
-    const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
+    const protective = isProtectiveShield(impact.shieldName);
     const isOn = enabledSet.has(impact.shieldName);
-    const icon = discount > 0 ? '🛡️  ' : '☐   ';
+    const icon = protective ? '🛡️  ' : '☐   ';
     const wouldCatch = `catches ${impact.totalCatches} op${impact.totalCatches !== 1 ? 's' : ''}`;
     // Option B (N1): no `+N pts (5 → 72)` — score arithmetic the reader
     // cannot check (this chalk twin lagged the ink fix in 3c10119).
     // Tense honesty (N6): `✓ enabled` is a statement about NOW; whether
     // PAST events were blocked is report's claim to make, not scan's.
-    const suffix = isOn ? '✓ enabled' : discount > 0 ? '→ blocks these reads in-path' : '';
+    const suffix = isOn ? '✓ enabled' : protective ? '→ blocks these reads in-path' : '';
     shieldLines.push(
       mkLine(
-        [icon, discount > 0 ? chalk.cyan : chalk.dim],
+        [icon, protective ? chalk.cyan : chalk.dim],
         [impact.shieldName.padEnd(14), chalk.bold],
         [wouldCatch.padEnd(22), chalk.dim],
-        [suffix, isOn || discount > 0 ? chalk.green.bold : chalk.dim]
+        [suffix, isOn || protective ? chalk.green.bold : chalk.dim]
       )
     );
     // Top rule descriptions on a sub-line.
@@ -3599,18 +3602,12 @@ export function renderPanelScorecard(input: CompactInput, now: Date = new Date()
   // (N6 — never hand the user a command that is already true). Option B
   // (N1): "widest coverage", not `+N pts` (chalk twin of ink 3c10119).
   const topRec = ranked.find(
-    (r) =>
-      r.totalCatches > 0 &&
-      (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0 &&
-      !enabledSet.has(r.shieldName)
+    (r) => r.totalCatches > 0 && isProtectiveShield(r.shieldName) && !enabledSet.has(r.shieldName)
   );
   const allCovered =
     !topRec &&
     ranked.some(
-      (r) =>
-        r.totalCatches > 0 &&
-        (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0 &&
-        enabledSet.has(r.shieldName)
+      (r) => r.totalCatches > 0 && isProtectiveShield(r.shieldName) && enabledSet.has(r.shieldName)
     );
   if (topRec) {
     const cta = `→ node9 shield enable ${topRec.shieldName}   (start here — widest coverage)`;
@@ -3917,9 +3914,8 @@ export function registerScanCommand(program: Command): void {
         const blockedCount = scan.findings.filter((f) => f.source.rule.verdict === 'block').length;
         const reviewCount = totalFindings - blockedCount;
 
-        // Run blast scan up front so the Security Score can lead the report.
-        // Used both in the top hero block and the detailed Blast Radius section
-        // at the end of the output.
+        // Run blast up front: the Blast Radius section, the JSON envelope and
+        // the history record read it. Its score is not printed (fw#421).
         const blast = runBlast();
         const blastExposures = blast.reachable.length + blast.envFindings.length;
 
@@ -3944,9 +3940,7 @@ export function registerScanCommand(program: Command): void {
         // and shows a delta. Compact / narrative modes are deterministic
         // screenshot artifacts; --json already returned above. Fail-soft:
         // any history I/O error is swallowed inside the helpers.
-        let scanDelta: ReturnType<typeof computeScanDelta> = null;
         if (!screenshotMode) {
-          const previous = readPreviousScan();
           const currentRecord: ScanHistoryRecord = {
             timestamp: new Date().toISOString(),
             score: blast.score,
@@ -3958,7 +3952,6 @@ export function registerScanCommand(program: Command): void {
             totalCalls: scan.totalToolCalls,
           };
           appendScanHistory(currentRecord);
-          scanDelta = computeScanDelta(currentRecord, previous);
         }
 
         // ── Compact scorecard mode ──────────────────────────────────────────
@@ -4032,37 +4025,14 @@ export function registerScanCommand(program: Command): void {
           // first 5 lines, not buried at the bottom. The detailed per-section
           // breakdowns below provide the rest.
           const totalRisky = scan.canaryFindings.length + totalFindings + scan.dlpFindings.length;
-          const score = classifyScore(blast.score);
-          const severityDisplay =
-            score.band === 'critical' ? chalk.red.bold(score.label) : score.color(score.label);
-          // Trend suffix vs the user's last scan (if any). Higher score =
-          // safer, so a positive scoreDelta is good (green ▲); negative is
-          // bad (red ▼). Hidden when no prior data or unchanged same-day.
-          const trendSuffix = (() => {
-            if (!scanDelta) return '';
-            const { scoreDelta, daysAgo } = scanDelta;
-            if (scoreDelta === 0) return '';
-            const arrow =
-              scoreDelta > 0
-                ? chalk.green(`▲${scoreDelta}`)
-                : chalk.red(`▼${Math.abs(scoreDelta)}`);
-            const since =
-              daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
-            return chalk.dim('  ·  ') + arrow + chalk.dim(` since ${since}`);
-          })();
-          if (!useInkForHero) {
+          // No score here (fw#421): the posture score is the machine score and
+          // the pointer at the end of the report names it. A clean history
+          // already said so above.
+          if (!useInkForHero && totalRisky > 0) {
             console.log(
               '  ' +
-                (score.band === 'critical' ? chalk.red.bold('⚠  ') : '') +
-                chalk.bold('Security Score ') +
-                score.color.bold(`${blast.score}/100`) +
-                '  ' +
-                severityDisplay +
-                trendSuffix +
-                chalk.dim('  ·  ') +
-                (totalRisky > 0
-                  ? chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`)
-                  : chalk.green('No risky operations'))
+                chalk.red.bold(`${totalRisky} risky operation${totalRisky !== 1 ? 's' : ''}`) +
+                chalk.dim(' in the scanned history')
             );
           }
 
@@ -4192,6 +4162,14 @@ export function registerScanCommand(program: Command): void {
             // verbose render. Points to monitor (live dashboard) and
             // drill-down (forensic deep-dive) — NOT `node9 report`
             // which is a different command for installed users.
+            // The one machine score lives in posture (fw#421): say so before
+            // the CTAs, in every scorecard mode.
+            console.log(
+              chalk.dim('  Machine score: run ') +
+                chalk.cyan('node9 posture') +
+                chalk.dim(" for this machine's score and what to fix first.")
+            );
+            console.log('');
             const cta = isWired ? '✅ node9 is active' : '→ install node9 to enable protection';
             console.log('  ' + chalk.green(cta));
             console.log(
@@ -4459,8 +4437,8 @@ export function registerScanCommand(program: Command): void {
         }
 
         // ── Blast Radius detail ───────────────────────────────────────────────
-        // Note: Security Score itself is shown in the hero block at the top.
-        // This section is the per-file detail of what's exposed.
+        // The per-file detail of what's exposed; the score for it lives in
+        // `node9 posture` (fw#421).
         if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
           console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
@@ -4499,6 +4477,14 @@ export function registerScanCommand(program: Command): void {
           );
           console.log('');
         }
+
+        // ── The one machine score lives in posture (fw#421) ───────────────────
+        console.log(
+          chalk.dim('  Machine score: run ') +
+            chalk.cyan('node9 posture') +
+            chalk.dim(" for this machine's score and what to fix first.")
+        );
+        console.log('');
 
         // ── CTA ───────────────────────────────────────────────────────────────
         if (isWired) {

@@ -11,7 +11,7 @@ import type {
   BlastSnapshot,
   CostSnapshot,
   ForensicSseEvent,
-  ProtectionSummary,
+  PostureSnapshot,
   SessionActivityAgg,
   SessionForensicAgg,
   SessionShieldsAgg,
@@ -208,7 +208,7 @@ export type Notification =
   | { kind: 'block'; event: ActivityEvent; ageMs: number }
   | { kind: 'review'; event: ActivityEvent; ageMs: number }
   | { kind: 'loop'; event: ActivityEvent; ageMs: number }
-  | { kind: 'idle'; protection: ProtectionSummary };
+  | { kind: 'idle'; posture: PostureSnapshot | null };
 
 export const NOTIFICATION_HEIGHT = 4;
 /** Fixed height for the REPORT panel (see Report() for the row math).
@@ -267,7 +267,7 @@ function renderNotificationBody(n: Notification): React.ReactNode {
   if (n.kind === 'review') return renderEventInfo(n.event, '🟡 REVIEWED', COL.panelHigh, n.ageMs);
   if (n.kind === 'loop')
     return renderEventInfo(n.event, '🔁 LOOP DETECTED', COL.panelHigh, n.ageMs);
-  return renderIdle(n.protection);
+  return renderIdle(n.posture);
 }
 
 function renderForensic(
@@ -401,31 +401,33 @@ function renderEventInfo(
   );
 }
 
-function renderIdle(p: ProtectionSummary): React.ReactNode {
-  // RISK box — replaces the old "blast 25/100" placeholder. Shows the
-  // user where they stand (exposed vs effective) AND gives them the
-  // single highest-value action they can take to improve it. The
-  // suggestion line drops away when no protective shield is left to
-  // enable, or when effective score is already in the safe zone.
-  const effectiveColor =
-    p.effective >= 80 ? '#5BF58C' : p.effective >= 50 ? COL.panelHigh : COL.liveOff;
-  const headlineIcon = p.effective >= 80 ? '✓' : '⚠';
+function renderIdle(p: PostureSnapshot | null): React.ReactNode {
+  // RISK box: the posture score (the one machine score, fw#421) and its
+  // first action, the same two lines `node9 posture` leads with.
+  if (!p) {
+    return (
+      <>
+        <Text dimColor>Score —/100 · posture running…</Text>
+        <Text dimColor>(approvals + recent blocks/loops appear here)</Text>
+      </>
+    );
+  }
+  const color = p.tier === 'good' ? '#5BF58C' : p.tier === 'at-risk' ? COL.panelHigh : COL.liveOff;
+  const label = p.tier === 'good' ? 'Good' : p.tier === 'at-risk' ? 'At risk' : 'Critical';
   return (
     <>
       <Text wrap="truncate-end">
-        <Text color={effectiveColor} bold>{`${headlineIcon} `}</Text>
-        <Text dimColor>exposed </Text>
-        <Text bold>{p.exposed}</Text>
-        <Text dimColor>{' · protect '}</Text>
-        <Text bold color={p.protect > 0 ? '#5BF58C' : undefined}>{`+${p.protect}`}</Text>
-        <Text dimColor>{' · effective '}</Text>
-        <Text bold color={effectiveColor}>{`${p.effective}/100`}</Text>
+        <Text color={color} bold>{`${p.tier === 'good' ? '✓' : '⚠'} `}</Text>
+        <Text bold color={color}>{`Score ${p.score}/100`}</Text>
+        <Text color={color}>{`  ${label}`}</Text>
+        {p.headroom > 0 ? (
+          <Text dimColor>{` · ${p.headroom} pts of hardening to close`}</Text>
+        ) : null}
       </Text>
-      {p.suggestedShield ? (
+      {p.action ? (
         <Text wrap="truncate-end">
-          <Text dimColor>↑ enable </Text>
-          <Text bold>{p.suggestedShield}</Text>
-          <Text dimColor>{` → +${p.suggestedBonus}`}</Text>
+          <Text dimColor>→ </Text>
+          <Text>{p.action}</Text>
         </Text>
       ) : (
         <Text dimColor>(approvals + recent blocks/loops appear here)</Text>

@@ -67,13 +67,6 @@ function isReadable(filePath: string): boolean {
   }
 }
 
-export function scoreLabel(score: number): string {
-  if (score >= 80) return chalk.green(`${score}/100  Good`);
-  if (score >= 50) return chalk.yellow(`${score}/100  Moderate risk`);
-  if (score >= 25) return chalk.red(`${score}/100  High risk`);
-  return chalk.red.bold(`${score}/100  Critical`);
-}
-
 // ---------------------------------------------------------------------------
 // Core logic — exported so node9 scan can embed the results
 // ---------------------------------------------------------------------------
@@ -136,7 +129,9 @@ export function registerBlastCommand(program: Command): void {
     .action(() => {
       const home = os.homedir();
       const cwd = process.cwd();
-      const { reachable, envFindings, score } = runBlast();
+      // The score stays computed (the daemon ships it to the dashboard) but
+      // is not printed: the posture score is the one machine score (fw#421).
+      const { reachable, envFindings } = runBlast();
       const width = labelColumnWidth([
         ...reachable.map((p) => p.label),
         ...envFindings.map((f) => f.key),
@@ -177,25 +172,27 @@ export function registerBlastCommand(program: Command): void {
 
       if (reachable.length === 0 && envFindings.length === 0) {
         console.log('  ' + chalk.green('✅  No sensitive files or environment secrets found.'));
-        console.log('  Security Score: ' + scoreLabel(score));
       } else {
         console.log(
-          '  Security Score: ' +
-            scoreLabel(score) +
-            chalk.dim(
-              `  (${reachable.length} file${reachable.length !== 1 ? 's' : ''}, ` +
-                `${envFindings.length} env var${envFindings.length !== 1 ? 's' : ''})`
-            )
+          chalk.bold(
+            `  ${reachable.length} file${reachable.length !== 1 ? 's' : ''} and ` +
+              `${envFindings.length} env var${envFindings.length !== 1 ? 's' : ''}`
+          ) + chalk.dim(' every AI agent you start can read.')
         );
         console.log('');
         console.log(
           chalk.dim(
-            '  Every AI agent you start can read the files and env vars listed above.\n' +
-              '  Run `node9 shield enable project-jail` to restrict agent file access.\n' +
+            '  Run `node9 shield enable project-jail` to restrict agent file access.\n' +
               '  Run `node9 mask` to redact secrets from existing session history.'
           )
         );
       }
+      console.log('');
+      console.log(
+        chalk.dim('  Machine score: ') +
+          chalk.cyan('node9 posture') +
+          chalk.dim(' (this list is its Secrets section)')
+      );
 
       console.log('');
     });

@@ -29,7 +29,7 @@ import {
   buildRuleToShieldMap,
   compactPath,
   compactPathsInCommand,
-  computeProtection,
+  loadPosture,
   isValidForensicEvent,
   mapResultStatus,
   readAuditEntriesAsync,
@@ -811,67 +811,39 @@ describe('applyActivityEvent', () => {
   });
 });
 
-// ── computeProtection ────────────────────────────────────────────────────────
+// ── loadPosture ──────────────────────────────────────────────────────────────
 
-describe('computeProtection', () => {
-  const blast = (score: number) => ({ score, paths: [], envFindings: 0 });
-  const shields = (active: string[] = [], inactive: string[] = []) => ({ active, inactive });
-
-  it('returns full 100/100 when blast is perfect', () => {
-    const p = computeProtection(blast(100), shields());
+describe('loadPosture', () => {
+  it('maps a posture result to the snapshot the banner and the badge read (fw#421)', async () => {
+    const p = await loadPosture(async () => ({
+      score: 61,
+      tier: 'at-risk',
+      headline: { risk: 'x', action: 'Lock egress: node9 egress lock' },
+      findings: [
+        // open hardening: counts toward the headroom
+        { category: 'Isolation', severity: 'advisory', scoreWeight: 10 } as never,
+        // covered: not open, not counted
+        {
+          category: 'Secrets',
+          severity: 'high',
+          scoreWeight: 6,
+          coverage: { state: 'covered' },
+        } as never,
+        // open exposure without a weight: not headroom
+        { category: 'Egress', severity: 'high' } as never,
+      ],
+    }));
     expect(p).toEqual({
-      exposed: 0,
-      protect: 0,
-      effective: 100,
-      suggestedShield: null,
-      suggestedBonus: 0,
+      score: 61,
+      tier: 'at-risk',
+      action: 'Lock egress: node9 egress lock',
+      headroom: 10,
+      at: expect.any(Number),
     });
   });
 
-  it('exposes deductions with a suggestion when project-jail is inactive', () => {
-    const p = computeProtection(blast(25), shields([], ['project-jail']));
-    expect(p.exposed).toBe(75);
-    expect(p.protect).toBe(0);
-    expect(p.effective).toBe(25);
-    expect(p.suggestedShield).toBe('project-jail');
-    expect(p.suggestedBonus).toBe(53); // round(75 × 0.7)
-  });
-
-  it('applies the 70% discount when project-jail is active', () => {
-    const p = computeProtection(blast(25), shields(['project-jail']));
-    expect(p.exposed).toBe(75);
-    expect(p.protect).toBe(53); // round(75 × 0.7)
-    expect(p.effective).toBe(78);
-    expect(p.suggestedShield).toBe(null); // best (and only) protection already on
-  });
-
-  it('ignores non-protective shields like dlp / bash-safe / filesystem', () => {
-    // `filesystem`, `bash-safe`, `dlp-*` etc. defend other risk surfaces
-    // and don't reduce blast-path exposure — they contribute 0.
-    const p = computeProtection(
-      blast(25),
-      shields(['filesystem', 'bash-safe', 'dlp-bash'], ['project-jail'])
-    );
-    expect(p.protect).toBe(0); // none of the active shields are protective
-    expect(p.suggestedShield).toBe('project-jail');
-    expect(p.suggestedBonus).toBe(53);
-  });
-
-  it('clamps effective to [0, 100]', () => {
-    expect(computeProtection(blast(0), shields()).effective).toBe(0);
-    expect(computeProtection(blast(100), shields()).effective).toBe(100);
-  });
-
-  it('handles null blast and null shieldStatus gracefully', () => {
-    const p = computeProtection(null, null);
-    expect(p.effective).toBe(100); // no blast = perfect
-    expect(p.suggestedShield).toBe(null);
-  });
-
-  it('omits suggestion when no inactive protective shield exists', () => {
-    const p = computeProtection(blast(25), shields([], ['bash-safe']));
-    expect(p.suggestedShield).toBe(null); // bash-safe isn't protective
-    expect(p.protect).toBe(0);
+  it('returns null when the run fails, so the banner shows a dash', async () => {
+    expect(await loadPosture(async () => Promise.reject(new Error('boom')))).toBeNull();
   });
 });
 

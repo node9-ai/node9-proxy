@@ -18,6 +18,7 @@ import {
 } from '../../daemon/service';
 import { agoLabel } from '../../lib/relative-time';
 import { undoLeftoverPaths } from '../../utils/undo-leftovers';
+import { runPosture } from '../../posture';
 import { levelLabel } from '../render/level-label';
 
 // Renders one agent's wiring: a header, ✓/✗ rows for each hook event, and the
@@ -142,6 +143,21 @@ export function registerStatusCommand(program: Command): void {
       console.log('');
       const modeLabel = levelLabel(settings.mode);
       console.log(`  Mode:    ${modeLabel}`);
+      // The one machine score (fw#421): the same number `node9 posture`
+      // prints. About a second; on any failure the line is simply absent.
+      const posture = await runPosture().catch(() => null);
+      if (posture) {
+        const tier =
+          posture.tier === 'good'
+            ? chalk.green('Good')
+            : posture.tier === 'at-risk'
+              ? chalk.yellow('At risk')
+              : chalk.red('Critical');
+        console.log(
+          `  Score:   ${chalk.bold(`${posture.score}/100`)} (${tier})` +
+            chalk.gray('  · node9 posture for the breakdown')
+        );
+      }
 
       // I1: on a keyed machine the local config files are present but INERT
       // for policy — saying "Active" here would be a lie the user acts on.

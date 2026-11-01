@@ -15,7 +15,7 @@ import { Box, Text } from 'ink';
 
 import type { ScanSummary } from '../../../../scan-summary.js';
 import { rollupByShield } from '../../scan-derive.js';
-import { PROTECTIVE_SHIELD_DISCOUNTS } from '../../../../protection.js';
+import { isProtectiveShield } from '../../../../protection.js';
 import { APP_SHIELD_NAMES, BUILTIN_SHIELDS } from '@node9/policy-engine';
 
 interface Props {
@@ -37,8 +37,8 @@ export function ShieldsPanel({ summary, width, enabledShields = [] }: Props): Re
   // rendered as points.
   // Sort: protective shields first, then by hit count.
   const ranked = [...impacts].sort((a, b) => {
-    const aDiscount = PROTECTIVE_SHIELD_DISCOUNTS[a.shieldName] ?? 0;
-    const bDiscount = PROTECTIVE_SHIELD_DISCOUNTS[b.shieldName] ?? 0;
+    const aDiscount = isProtectiveShield(a.shieldName) ? 1 : 0;
+    const bDiscount = isProtectiveShield(b.shieldName) ? 1 : 0;
     if (aDiscount !== bDiscount) return bDiscount - aDiscount;
     return b.totalCatches - a.totalCatches;
   });
@@ -59,14 +59,12 @@ export function ShieldsPanel({ summary, width, enabledShields = [] }: Props): Re
   // The CTA must never hand the user a command that is already true —
   // recommend the highest-impact protective shield they have NOT enabled.
   const topRec = hitShields.find(
-    (r) => (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0 && !enabled.has(r.shieldName)
+    (r) => isProtectiveShield(r.shieldName) && !enabled.has(r.shieldName)
   );
   // All protective hit shields already on → say so instead of silence.
   const allCovered =
     !topRec &&
-    hitShields.some(
-      (r) => (PROTECTIVE_SHIELD_DISCOUNTS[r.shieldName] ?? 0) > 0 && enabled.has(r.shieldName)
-    );
+    hitShields.some((r) => isProtectiveShield(r.shieldName) && enabled.has(r.shieldName));
 
   return (
     <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column" width={width}>
@@ -75,7 +73,7 @@ export function ShieldsPanel({ summary, width, enabledShields = [] }: Props): Re
       </Text>
 
       {hitShields.map((impact) => {
-        const discount = PROTECTIVE_SHIELD_DISCOUNTS[impact.shieldName] ?? 0;
+        const discount = isProtectiveShield(impact.shieldName) ? 1 : 0;
         const isOn = enabled.has(impact.shieldName);
         const noun = `op${impact.totalCatches !== 1 ? 's' : ''}`;
         // No icon column — emoji variation-selector widths caused

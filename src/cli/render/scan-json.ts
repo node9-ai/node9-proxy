@@ -24,7 +24,10 @@ export interface ScanJsonOutput {
   schemaVersion: 1;
   generatedAt: string; // ISO 8601
   isWired: boolean; // node9 hooks installed in any agent's settings
-  score: number; // 0–100, headline blast score
+  /** @deprecated The blast score, kept for schemaVersion 1 consumers; the
+   *  machine score is `node9 posture --json`. Removed in schemaVersion 2. */
+  score: number;
+  /** @deprecated See `score`. */
   band: ScoreBand; // 'good' | 'at-risk' | 'critical'
   /** Convenience block — same numbers as summary.byVerdict, hoisted. */
   totals: {

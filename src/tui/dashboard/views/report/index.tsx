@@ -16,8 +16,13 @@ import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 
 import { COL } from '../../panels.js';
-import { computeProtection } from '../../data.js';
-import type { BlastSnapshot, ReportPeriod, ScanCache, ShieldStatus } from '../../types.js';
+import type {
+  BlastSnapshot,
+  PostureSnapshot,
+  ReportPeriod,
+  ScanCache,
+  ShieldStatus,
+} from '../../types.js';
 import type { AggregateResult } from '../../../../cli/aggregate/report-audit.js';
 
 import { Protection } from './panels/Protection.js';
@@ -34,8 +39,10 @@ export interface ReportViewProps {
   period: ReportPeriod;
   /** Result of loadReportAudit(period) — null while initial load runs. */
   audit: AggregateResult | null;
-  /** Blast snapshot — same data the Realtime Risk panel uses. */
+  /** Blast snapshot — the reachable paths the BlastRadius panel lists. */
   blast: BlastSnapshot | null;
+  /** The posture score (fw#421): the one machine score, same as the RISK box. */
+  posture: PostureSnapshot | null;
   /** Background scan cache. Phase 3f reads results.{claude,gemini,codex}. */
   scanCache: ScanCache;
   /** Shield activation state — Realtime Risk panel uses the same. */
@@ -54,6 +61,7 @@ export function ReportView({
   period,
   audit,
   blast,
+  posture,
   scanCache,
   shieldStatus,
 }: ReportViewProps): React.ReactElement {
@@ -72,7 +80,7 @@ export function ReportView({
       <ScoreBanner
         audit={audit}
         blast={blast}
-        shieldStatus={shieldStatus}
+        posture={posture}
         scanCache={scanCache}
         filtered={filtered}
       />
@@ -184,18 +192,15 @@ function PeriodKey({
 }
 
 // ---------------------------------------------------------------------------
-// Score banner — effective score + breakdown + headline + spend
+// Score banner — the posture score + its action + headline + spend
 //
-// Score: the EFFECTIVE score from computeProtection (blast exposure
-// adjusted for active protective shields). Same headline number the
-// `[1]` Realtime RISK box uses, so users see one consistent risk
-// figure across both views. Prior versions of this banner showed raw
-// blast.score (e.g. 25/100) while `[1]` showed effective (78/100)
-// after project-jail kicked in — confusing inconsistency.
+// Score: the posture score (fw#421), the one machine score. The `[1]`
+// Realtime RISK box shows the same number, so the two views agree.
+// Earlier versions showed blast discounted by shields here ("effective"),
+// a third score beside blast and posture; it is gone.
 //
-// Breakdown line: shows the three-number story (exposed N · protect
-// +X · effective Y) so the user can see WHY the score is what it is
-// and what changes if shields toggle.
+// Row 2: posture's first action ("do this first") and the hardening
+// headroom (points the user can still close), when either exists.
 //
 // Headline: priority cascade — first match wins. Surfaces the most
 // alarming signal in one line so users glance at the banner and know
@@ -206,34 +211,29 @@ function PeriodKey({
 export function ScoreBanner({
   audit,
   blast,
-  shieldStatus,
+  posture = null,
   scanCache,
   filtered,
 }: {
   audit: AggregateResult | null;
   blast: BlastSnapshot | null;
-  /** Optional. When omitted, the effective score equals the raw blast
-   *  score (no protect bonus applied). The dashboard always passes
-   *  it; some unit tests render the banner in isolation without
-   *  shield state. */
-  shieldStatus?: ShieldStatus | null;
+  /** Null until the first posture run lands: the banner shows `—/100`. */
+  posture?: PostureSnapshot | null;
   scanCache: ScanCache;
   filtered: FilteredScan;
 }): React.ReactElement {
   const data = audit?.data;
   const spend = data ? data.cost.claudeUSD + data.cost.codexUSD : 0;
-  const protection = computeProtection(blast, shieldStatus ?? null);
-  const hasBlast = blast !== null;
-  const tier = hasBlast ? scoreTier(protection.effective) : null;
+  const tier = posture ? scoreTier(posture.tier) : null;
   const headline = computeHeadline(scanCache, filtered, blast);
 
   return (
     <Box flexDirection="column">
-      {/* Row 1: Effective score + tier + headline + spend */}
+      {/* Row 1: posture score + tier + headline + spend */}
       <Box>
-        {hasBlast && tier ? (
+        {posture && tier ? (
           <>
-            <Text bold color={tier.color}>{`Score ${protection.effective}/100`}</Text>
+            <Text bold color={tier.color}>{`Score ${posture.score}/100`}</Text>
             <Text>{'  '}</Text>
             <Text color={tier.color}>{tier.icon + ' ' + tier.label}</Text>
           </>
@@ -250,22 +250,18 @@ export function ScoreBanner({
         <Text>💰 </Text>
         <Text bold>{fmtCost(spend)}</Text>
       </Box>
-      {/* Row 2: Score breakdown — exposed / protect / effective. Only
-          when blast is loaded; suppressed if exposed is 0 (perfect
-          score, breakdown is just "100 = 100, nothing to explain"). */}
-      {hasBlast && protection.exposed > 0 ? (
+      {/* Row 2: what posture says to do first, and the headroom. Absent
+          when the scorecard is clean (nothing to explain). */}
+      {posture && (posture.action || posture.headroom > 0) ? (
         <Box marginTop={0}>
-          <Text dimColor>{`  exposed ${protection.exposed} · protect `}</Text>
-          <Text bold color={protection.protect > 0 ? '#5BF58C' : undefined}>
-            {`+${protection.protect}`}
-          </Text>
-          <Text dimColor>{` · effective ${protection.effective}/100`}</Text>
-          {protection.suggestedShield ? (
+          {posture.action ? (
             <>
-              <Text dimColor>{'     ↑ enable '}</Text>
-              <Text bold>{protection.suggestedShield}</Text>
-              <Text dimColor>{` → +${protection.suggestedBonus}`}</Text>
+              <Text dimColor>{'  → '}</Text>
+              <Text>{posture.action}</Text>
             </>
+          ) : null}
+          {posture.headroom > 0 ? (
+            <Text dimColor>{`  · ${posture.headroom} pts of hardening to close`}</Text>
           ) : null}
         </Box>
       ) : null}
@@ -279,10 +275,10 @@ interface ScoreTier {
   color: string;
 }
 
-function scoreTier(score: number): ScoreTier {
-  if (score >= 80) return { label: 'Good', icon: '✓', color: 'green' };
-  if (score >= 50) return { label: 'Moderate', icon: '⚠', color: 'yellow' };
-  if (score >= 25) return { label: 'High risk', icon: '⚠', color: 'red' };
+/** Posture's own bands, so the monitor and `node9 posture` use one word. */
+function scoreTier(tier: PostureSnapshot['tier']): ScoreTier {
+  if (tier === 'good') return { label: 'Good', icon: '✓', color: 'green' };
+  if (tier === 'at-risk') return { label: 'At risk', icon: '⚠', color: 'yellow' };
   return { label: 'Critical', icon: '⚠', color: 'red' };
 }
 
