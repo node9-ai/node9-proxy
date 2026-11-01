@@ -16,8 +16,13 @@ import { registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { getConfig } from './config';
 
+const { version } = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
+) as { version: string };
+
 const program = new Command();
-program.name('node9');
+// Same name and version as the full CLI, so `node9 check --version` answers too.
+program.name('node9').description('The Sudo Command for AI Agents').version(version);
 registerCheckCommand(program);
 registerLogCommand(program);
 
