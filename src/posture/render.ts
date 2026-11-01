@@ -97,6 +97,44 @@ function renderFinding(
   return lines;
 }
 
+/**
+ * One category's rows, without the score or the headline: what `node9 blast`
+ * prints as an alias of posture's Secrets section (fw#421 P3). Covered rows
+ * keep their ✅ line, open rows render as in the full scorecard, a clean
+ * category says so.
+ */
+export function renderPostureSection(result: PostureResult, category: string): string {
+  const lines: string[] = [''];
+  const rows = result.findings.filter((f) => f.category === category);
+  const covered = rows.filter((f) => f.coverage?.state === 'covered');
+  const open = rows.filter((f) => f.coverage?.state !== 'covered');
+  // Same qualifiers as the full scorecard when both sides are present.
+  const both = covered.length > 0 && open.length > 0;
+  for (const f of covered) {
+    const gated = f.coverage?.level === 'review' ? 'approval-gating' : 'blocking';
+    const via = f.coverage?.via ?? 'node9';
+    const lbl = both ? `${category} (guarded)` : category;
+    lines.push(
+      `  ${chalk.green('✅')} ${label(lbl)}${chalk.gray(`${via} is ${gated} ${guardedWhat(f)}`)}`
+    );
+  }
+  for (const f of open) {
+    // The +N weight shows where the full scorecard shows it: node9's own
+    // levers and the hardening it offers, not OS-only rows.
+    const showWeight = f.owner === 'node9' || !!f.node9Reduces;
+    lines.push(...renderFinding(f, showWeight, both ? `${category} (exposed)` : category));
+  }
+  if (rows.length === 0) {
+    if (result.erroredCategories.includes(category)) {
+      lines.push(`  ${chalk.gray('•')}  ${label(category)}${chalk.gray('could not be checked')}`);
+    } else {
+      lines.push(`  ${chalk.green('✅')} ${label(category)}${chalk.gray('no issues found')}`);
+    }
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 export function renderPosture(result: PostureResult): string {
   const lines: string[] = [];
   const tier = TIER_LABEL[result.tier];

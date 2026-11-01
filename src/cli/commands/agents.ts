@@ -90,8 +90,9 @@ export function registerAgentsCommand(program: Command): void {
       const anyInstalled = statuses.some((s) => s.installed);
 
       console.log('');
-      console.log(`  ${'Agent'.padEnd(14)}${'Installed'.padEnd(11)}${'Wired'.padEnd(8)}Mode`);
-      console.log('  ' + '─'.repeat(44));
+      // 16 columns: the longest labels (GitHub Copilot, Claude Desktop) are 14.
+      console.log(`  ${'Agent'.padEnd(16)}${'Installed'.padEnd(11)}${'Wired'.padEnd(8)}Mode`);
+      console.log('  ' + '─'.repeat(46));
 
       for (const s of statuses) {
         const installed = s.installed ? chalk.green('✓') : chalk.gray('✗');
@@ -103,7 +104,7 @@ export function registerAgentsCommand(program: Command): void {
         const mode = s.mode ? chalk.gray(s.mode) : chalk.gray('—');
         const hint = s.installed && !s.wired ? chalk.gray(`  ← node9 agents add ${s.name}`) : '';
         // Use fixed-width columns without padEnd on colored strings (escape codes break alignment)
-        console.log(`  ${s.label.padEnd(14)}${installed}          ${wired}       ${mode}${hint}`);
+        console.log(`  ${s.label.padEnd(16)}${installed}          ${wired}       ${mode}${hint}`);
       }
 
       console.log('');

@@ -416,6 +416,21 @@ describe('checkSecrets', () => {
     expect(serialized).not.toContain(FAKE_TOKEN);
   });
 
+  // fw#421 P3: the env-var check reads the environment it is given, so the
+  // daemon (env: {}) never grades its own shell, and no value ever leaks.
+  it('reports a secret environment variable by name and pattern, from the given env', () => {
+    const findings = checkSecrets({ home, cwd: home, env: { MY_TOKEN: FAKE_TOKEN } });
+    const f = findings.find((x) => /environment variable/.test(x.title));
+    expect(f?.severity).toBe('high');
+    expect(f?.detail.join(' ')).toContain('MY_TOKEN');
+    expect(JSON.stringify(findings)).not.toContain(FAKE_TOKEN);
+  });
+
+  it('with an empty env (the daemon) no env-var finding is produced', () => {
+    const findings = checkSecrets({ home, cwd: home, env: {} });
+    expect(findings.some((x) => /environment variable/.test(x.title))).toBe(false);
+  });
+
   it('flags credential material (~/.ssh/id_rsa) as high', () => {
     fs.mkdirSync(path.join(home, '.ssh'));
     // Existence is what's checked; contents are irrelevant (and kept innocuous).

@@ -1112,7 +1112,10 @@ async function pushBlastSnapshot(creds: { apiKey: string; apiUrl: string }): Pro
 async function pushPostureSnapshot(creds: { apiKey: string; apiUrl: string }): Promise<void> {
   try {
     const home = os.homedir();
-    const result = await runPosture({ home, cwd: home });
+    // env: {} — the daemon's environment is not the shell the agent runs
+    // from, so the shipped score carries no env-var secrets finding; the CLI
+    // run on the user's shell does (fw#421 P3).
+    const result = await runPosture({ home, cwd: home, env: {} });
     await shipPosture(result, creds);
   } catch {
     // Silent — never break sync over a posture push.

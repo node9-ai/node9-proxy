@@ -18,6 +18,7 @@ import type { CheckContext, Finding } from './types';
 import { loadCanaries } from '../canary/registry';
 import { readCappedText } from '../utils/read-capped';
 import { homeCredentialFiles } from '../credential-files';
+import { scanArgs } from '../dlp';
 
 const MAX_FILE_BYTES = 256 * 1024;
 
@@ -149,6 +150,28 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       fix: 'Fix it now: run `node9 shield enable project-jail` (blocks ~/.ssh, ~/.aws, .env reads in-path).',
       owner: 'node9',
       coverageProbe: { kind: 'fileRead', paths: credPaths },
+    });
+  }
+  // ── Secrets in the environment the agent inherits (high) ─────────────────
+  // The one fact `node9 blast` reported that posture did not (fw#421 P3).
+  // Names and pattern names only, never a value.
+  const envSecrets: string[] = [];
+  for (const [key, value] of Object.entries(ctx.env ?? process.env)) {
+    if (!value) continue;
+    const match = scanArgs({ [key]: value });
+    if (match) envSecrets.push(`${key} (${match.patternName})`);
+  }
+  if (envSecrets.length > 0) {
+    findings.push({
+      category: 'Secrets',
+      severity: 'high',
+      title: `${envSecrets.length} secret environment variable${envSecrets.length === 1 ? '' : 's'} visible to the agent`,
+      what: 'A key or token is exported in the shell the agent runs from.',
+      why: 'Every program the agent starts inherits the environment, so the value is one `env` away.',
+      who: 'A tricked agent can read it and send it anywhere a command can reach.',
+      detail: envSecrets,
+      fix: 'Unset it in the shell that starts the agent, or pass it to the one command that needs it (`env KEY=... cmd`) or a secrets manager.',
+      owner: 'os',
     });
   }
   if (planted.size > 0) {
