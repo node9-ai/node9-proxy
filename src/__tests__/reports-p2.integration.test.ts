@@ -81,7 +81,8 @@ describe('node9 blast prints facts, not a score', () => {
   it('lists the reachable file and points at posture, with no N/100', () => {
     const r = run(['blast']);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('~/.ssh/id_rsa');
+    // blast is posture's Secrets section since P3: the platform separator.
+    expect(r.stdout).toMatch(/~[\\/]\.ssh[\\/]id_rsa/);
     expect(r.stdout).toMatch(/node9 posture/);
     expect(r.stdout).not.toMatch(/\/100/);
     expect(r.stdout).not.toMatch(/Security Score/);
