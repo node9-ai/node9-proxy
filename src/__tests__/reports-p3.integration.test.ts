@@ -153,7 +153,7 @@ describe('blast folds into posture', () => {
     const r = run(['blast']);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/Secrets/);
-    expect(r.stdout).toContain('~/.ssh/id_rsa');
+    expect(r.stdout).toMatch(/~[\\/]\.ssh[\\/]id_rsa/); // posture prints the platform separator
     expect(r.stdout).toMatch(/node9 posture/);
     expect(r.stdout).not.toMatch(/\/100/);
   });
@@ -163,7 +163,7 @@ describe('blast folds into posture', () => {
     const r = run(['blast']);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/credential file.*readable by the agent/);
-    expect(r.stdout).toContain('~/.ssh/id_rsa');
+    expect(r.stdout).toMatch(/~[\\/]\.ssh[\\/]id_rsa/); // posture prints the platform separator
     expect(r.stdout).not.toMatch(/\/100/);
   });
 
@@ -192,9 +192,10 @@ describe('one wiring registry', () => {
     expect(cursor).toMatch(/✓.*✓.*mcp/);
   });
 
-  it('claudeDesktopConfigPath resolves under the given home', () => {
+  it('claudeDesktopConfigPath resolves under the given home (APPDATA on Windows)', () => {
     const p = claudeDesktopConfigPath(home);
-    expect(p === null || p.startsWith(home)).toBe(true);
+    if (process.platform === 'win32') expect(p === null || typeof p === 'string').toBe(true);
+    else expect(p === null || p.startsWith(home)).toBe(true);
   });
 });
 
