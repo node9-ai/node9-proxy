@@ -442,7 +442,10 @@ describe('checkSecrets', () => {
   });
 
   it('returns no findings on a clean home', () => {
-    const findings = checkSecrets({ home, cwd: home });
+    // env: {} — the check reads the environment it is given; the real one
+    // holds a publish token on the release runner (the 2.46.0 publish failed
+    // on exactly this case).
+    const findings = checkSecrets({ home, cwd: home, env: {} });
     expect(findings).toEqual([]);
   });
 });
