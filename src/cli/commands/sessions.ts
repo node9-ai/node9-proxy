@@ -903,7 +903,7 @@ function renderList(summaries: SessionSummary[], totalCost: number): void {
   console.log(
     chalk.dim('  Run') +
       ' ' +
-      chalk.cyan('node9 sessions --detail <session-id>') +
+      chalk.cyan('node9 report --session <session-id>') +
       chalk.dim(' for full tool trace.')
   );
   console.log('');
@@ -990,58 +990,64 @@ function renderDetail(s: SessionSummary): void {
 // Registered command
 // ---------------------------------------------------------------------------
 
+/** The sessions view (list or one session's trace). Shared by `report
+ *  --sessions` / `--session` and the `sessions` alias (fw#421 P3). `days` is
+ *  the window; `detail` searches all time, so an old session id still resolves. */
+export function runSessionsView(opts: { days: number | null; detail?: string }): void {
+  console.log('');
+  console.log(chalk.cyan.bold('📋  node9 sessions') + chalk.dim('  — what your AI agent did'));
+  console.log('');
+
+  // Claude history is no longer a hard gate — buildSessions merges Codex
+  // and Gemini sessions too, so a Codex/Gemini-only user still sees their
+  // work. renderList shows a friendly empty state when nothing is found.
+  const days = opts.detail ? null : opts.days;
+  const rangeLabel = days === null ? 'all time' : `last ${String(days)} days`;
+  console.log(chalk.dim('  ' + rangeLabel));
+  console.log('');
+
+  process.stdout.write(chalk.dim('  Loading…'));
+  const summaries = buildSessions(days);
+  if (process.stdout.isTTY) {
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+  } else {
+    process.stdout.write('\n');
+  }
+
+  // ── Detail view ────────────────────────────────────────────────────────
+  if (opts.detail) {
+    const target = summaries.find(
+      (s) => s.sessionId === opts.detail || s.sessionId.startsWith(opts.detail as string)
+    );
+    if (!target) {
+      console.log(chalk.red(`  Session not found: ${opts.detail}`));
+      console.log(chalk.dim('  Run `node9 report --sessions` to list recent sessions.\n'));
+      return;
+    }
+    renderDetail(target);
+    return;
+  }
+
+  // ── List view ──────────────────────────────────────────────────────────
+  const totalCost = summaries.reduce((sum, s) => sum + s.costUSD, 0);
+  if (summaries.length > 0) renderSummary(summaries);
+  renderList(summaries, totalCost);
+}
+
+/** Alias of `node9 report --sessions` (fw#421 P3): same view, same 30-day
+ *  default window; `--days` and `--detail` keep working. */
 export function registerSessionsCommand(program: Command): void {
   program
     .command('sessions')
-    .description('Show what your AI agent did — sessions, tool calls, cost, and file changes')
-    .option('--all', 'Show all sessions (default: last 7 days)')
-    .option('--days <n>', 'Show last N days of sessions', '7')
-    .option('--detail <sessionId>', 'Show full tool trace for a session')
+    .description('Alias of `node9 report --sessions`: sessions, tool calls, cost, and file changes')
+    .option('--all', 'Show all sessions (default: last 30 days)')
+    .option('--days <n>', 'Show last N days of sessions', '30')
+    .option('--detail <sessionId>', 'Show full tool trace for a session (also: report --session)')
     .action((options: { all?: boolean; days: string; detail?: string }) => {
-      console.log('');
-      console.log(chalk.cyan.bold('📋  node9 sessions') + chalk.dim('  — what your AI agent did'));
-      console.log('');
-
-      // Claude history is no longer a hard gate — buildSessions merges Codex
-      // and Gemini sessions too, so a Codex/Gemini-only user still sees their
-      // work. renderList shows a friendly empty state when nothing is found.
-      // --detail always loads all sessions so the session-id can be found regardless of age
-      const days =
-        options.detail || options.all ? null : Math.max(1, parseInt(options.days, 10) || 7);
-      const rangeLabel = options.detail
-        ? 'all time'
-        : options.all
-          ? 'all time'
-          : `last ${String(days)} days`;
-      console.log(chalk.dim('  ' + rangeLabel));
-      console.log('');
-
-      process.stdout.write(chalk.dim('  Loading…'));
-      const summaries = buildSessions(days);
-      if (process.stdout.isTTY) {
-        process.stdout.clearLine(0);
-        process.stdout.cursorTo(0);
-      } else {
-        process.stdout.write('\n');
-      }
-
-      // ── Detail view ────────────────────────────────────────────────────────
-      if (options.detail) {
-        const target = summaries.find(
-          (s) => s.sessionId === options.detail || s.sessionId.startsWith(options.detail as string)
-        );
-        if (!target) {
-          console.log(chalk.red(`  Session not found: ${options.detail}`));
-          console.log(chalk.dim('  Run `node9 sessions` to list recent sessions.\n'));
-          return;
-        }
-        renderDetail(target);
-        return;
-      }
-
-      // ── List view ──────────────────────────────────────────────────────────
-      const totalCost = summaries.reduce((sum, s) => sum + s.costUSD, 0);
-      if (summaries.length > 0) renderSummary(summaries);
-      renderList(summaries, totalCost);
+      runSessionsView({
+        days: options.all ? null : Math.max(1, parseInt(options.days, 10) || 30),
+        detail: options.detail,
+      });
     });
 }

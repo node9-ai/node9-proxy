@@ -854,8 +854,11 @@ function handleReportMcp(args: Record<string, unknown>): string {
 }
 
 function handleSessionMcp(args: Record<string, unknown>): string {
-  const cliArgs = ['sessions'];
-  if (typeof args.detail === 'string' && args.detail) cliArgs.push('--detail', args.detail);
+  // `node9 sessions` folded into report (fw#421 P3).
+  const cliArgs =
+    typeof args.detail === 'string' && args.detail
+      ? ['report', '--session', args.detail]
+      : ['report', '--sessions'];
   return runCliCommand(cliArgs);
 }
 

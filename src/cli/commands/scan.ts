@@ -52,8 +52,8 @@ import {
   type ScanSummary,
   wouldHaveVerb,
 } from '../../scan-summary';
-import { getAgentsStatus } from '../../setup';
-import { runBlast, type BlastFinding } from './blast';
+import { getAgentWiring } from '../../agent-wiring';
+import { runBlast, labelColumnWidth, type BlastFinding } from './blast';
 import {
   boxPanel,
   computeLoopWaste,
@@ -3729,7 +3729,7 @@ export function registerScanCommand(program: Command): void {
         // This is the real signal that future sessions are protected — checking
         // for ~/.node9/audit.log alone falsely treats npx users as installed
         // after their first run.
-        const isWired = getAgentsStatus().some((a) => a.wired);
+        const isWired = getAgentWiring().some((a) => a.isProtected);
 
         // What the gate is ACTUALLY enforcing (N6) — the apply loop's own
         // testimony, never shields.json / rules-cache.json directly (the
@@ -4440,6 +4440,10 @@ export function registerScanCommand(program: Command): void {
         // The per-file detail of what's exposed; the score for it lives in
         // `node9 posture` (fw#421).
         if (blast.reachable.length > 0 || blast.envFindings.length > 0) {
+          const width = labelColumnWidth([
+            ...blast.reachable.map((p) => p.label),
+            ...blast.envFindings.map((f) => f.key),
+          ]);
           console.log('  ' + chalk.dim('─'.repeat(70)));
           console.log(
             '  ' +
@@ -4454,7 +4458,7 @@ export function registerScanCommand(program: Command): void {
               console.log(
                 '    ' +
                   chalk.red('✗  ') +
-                  chalk.yellow(p.label.padEnd(38)) +
+                  chalk.yellow(p.label.padEnd(width)) +
                   chalk.dim(p.description)
               );
             }
@@ -4464,7 +4468,7 @@ export function registerScanCommand(program: Command): void {
               console.log(
                 '    ' +
                   chalk.red('✗  ') +
-                  chalk.yellow(f.key.padEnd(38)) +
+                  chalk.yellow(f.key.padEnd(width)) +
                   chalk.dim(f.patternName + ' in environment')
               );
             }
@@ -4497,7 +4501,7 @@ export function registerScanCommand(program: Command): void {
           if (drillDown) {
             console.log(
               chalk.dim('  Run ') +
-                chalk.cyan('node9 sessions --detail <session-id>') +
+                chalk.cyan('node9 report --session <session-id>') +
                 chalk.dim(' to see the full conversation for any session above.')
             );
           } else {
