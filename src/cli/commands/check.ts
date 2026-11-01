@@ -41,6 +41,11 @@ import {
   agentLabelFromFlag,
 } from '../../utils/hook-payload';
 import { stripControlChars } from '../../utils/safe-text';
+import {
+  claimSessionNotice,
+  sessionNoticeEnabled,
+  sessionNoticeOutput,
+} from '../../notices/session-notice';
 
 /**
  * Identify the AI agent running this tool call. Source of truth for the
@@ -995,12 +1000,31 @@ export function registerCheckCommand(program: Command): void {
             }
           }
 
+          // fw#420: once per Claude Code session, the first ALLOWED call tells
+          // the user node9 is on and at which level (Audit says nothing is
+          // blocked). Never on a block or a review, never with a decision, and a
+          // failure here only drops the notice.
+          const allowExit = (): never => {
+            if (
+              agent === 'Claude Code' &&
+              sessionNoticeEnabled() &&
+              claimSessionNotice(safeSessionId)
+            ) {
+              try {
+                process.stdout.write(sessionNoticeOutput(config.settings.mode) + '\n');
+              } catch {
+                /* UX only */
+              }
+            }
+            process.exit(0);
+          };
+
           if (result.approved) {
             // Only write to stderr in debug mode — Claude Code treats any stderr
             // output as a hook error regardless of exit code (see GitHub issue).
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')
               process.stderr.write(`✓ node9 [${result.checkedBy}]: "${toolName}" allowed\n`);
-            process.exit(0);
+            allowExit();
           }
 
           // Inline-ask: a deferred review → hand the approve/deny prompt to the
@@ -1038,7 +1062,7 @@ export function registerCheckCommand(program: Command): void {
               if (retry.approved) {
                 if (retry.checkedBy && process.env.NODE9_DEBUG === '1')
                   process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);
-                process.exit(0);
+                allowExit();
               }
               // Denials communicate via exit code (non-zero) and JSON on stdout —
               // stderr is intentionally unused so Claude Code never treats a block
