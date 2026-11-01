@@ -1,6 +1,7 @@
 // mvdan-sh exposes untyped AST nodes. Only this adapter knows their shape.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import mvdanSh from 'mvdan-sh';
+import { toPlainTree, walk } from './plain-tree';
 import {
   parseShared,
   resolveWordLiteral,
@@ -70,7 +71,7 @@ function runnablePrefix(command: string): any | null {
   let text = command;
   for (let attempt = 0; attempt < 32; attempt++) {
     try {
-      return syntax.NewParser().Parse(text, '');
+      return toPlainTree(syntax.NewParser().Parse(text, ''));
     } catch (error: any) {
       const message = String(typeof error?.Error === 'function' ? error.Error() : error?.message);
       const line = Number(/^(\d+):/.exec(message)?.[1]);
@@ -244,7 +245,7 @@ function wordValues(word: any, state: State): Word[] {
       out = next.slice(0, MAX_ALTERNATIVES);
     };
     for (const node of nodes) {
-      const kind = syntax.NodeType(node);
+      const kind = node.kind;
       let pieces: Word[] | null;
       if (kind === 'ParamExp') pieces = paramValues(node, quoted);
       else if (kind === 'DblQuoted') {
@@ -334,9 +335,9 @@ export function collectShellFileAccesses(
   }
   function substitutions(word: any, state: State, depth: number): void {
     if (!word) return;
-    syntax.Walk(word, (node: any) => {
+    walk(word, (node: any) => {
       if (!node) return false;
-      if (['CmdSubst', 'ProcSubst'].includes(syntax.NodeType(node))) {
+      if (['CmdSubst', 'ProcSubst'].includes(node.kind)) {
         statements(node.Stmts ?? [], clone(state), depth + 1);
         return false;
       }
@@ -851,7 +852,7 @@ export function collectShellFileAccesses(
   /** A shell with no script operand reads its program from stdin. */
   function readsScriptFromStdin(stmt: any): boolean {
     const cmd = stmt?.Cmd;
-    if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return false;
+    if (!cmd || cmd.kind !== 'CallExpr') return false;
     const words = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
     const head = unwrapCommandHead(words);
     return SHELL_INTERPRETERS.has(base(words[head])) && shellConsumesPipe(words.slice(head + 1));
@@ -867,7 +868,7 @@ export function collectShellFileAccesses(
   /** The literal text a pipeline stage writes: `cat <<EOF`, `echo ...`, `printf '...'`. */
   function producedText(stmt: any): string | null {
     const cmd = stmt?.Cmd;
-    if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return null;
+    if (!cmd || cmd.kind !== 'CallExpr') return null;
     const words: (string | null)[] = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
     if (words.some((w) => w === null)) return null;
     const head = unwrapCommandHead(words);
@@ -889,9 +890,7 @@ export function collectShellFileAccesses(
     if (stmt.Background) state = clone(state);
     // `nc host 9000 < F`: a network tool's standard input leaves the machine.
     const headWord =
-      stmt.Cmd && syntax.NodeType(stmt.Cmd) === 'CallExpr'
-        ? base(resolveWordLiteral(stmt.Cmd.Args?.[0]))
-        : '';
+      stmt.Cmd && stmt.Cmd.kind === 'CallExpr' ? base(resolveWordLiteral(stmt.Cmd.Args?.[0])) : '';
     const sends = SENDING_STDIN.has(headWord);
     for (const redir of stmt.Redirs ?? []) {
       substitutions(redir.Word, state, depth);
@@ -908,7 +907,7 @@ export function collectShellFileAccesses(
     const cmd = stmt.Cmd;
     if (!cmd) return;
     stdinScript(stmt, state, depth);
-    switch (syntax.NodeType(cmd)) {
+    switch (cmd.kind) {
       case 'CallExpr':
         call(cmd, state, depth);
         break;
@@ -926,7 +925,7 @@ export function collectShellFileAccesses(
           const left = node.X;
           if (
             left?.Cmd &&
-            syntax.NodeType(left.Cmd) === 'BinaryCmd' &&
+            left.Cmd.kind === 'BinaryCmd' &&
             !left.Redirs?.length &&
             !left.Negated &&
             !left.Background

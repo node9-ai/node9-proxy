@@ -26,7 +26,6 @@
 // Wrappers (`sudo`, `env X=1`, `timeout 5`) are stripped with
 // unwrapCommandHead; `sh -c '...'`, `bash -c` payloads are parsed in turn.
 
-import mvdanSh from 'mvdan-sh';
 import {
   parseShared,
   resolveWordLiteral,
@@ -37,10 +36,8 @@ import {
   devNetRedirectHost,
   VALUE_FLAGS,
 } from '../shell';
+import { walk } from '../shell/plain-tree';
 import { gitRepoPath } from './destinations';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
 
 export interface ShellExposure {
   /** The command brings outside content in: its output is a source. */
@@ -583,9 +580,10 @@ function classifyCall(
 function walkCalls(command: string, out: ShellExposure, depth: number, state: WalkState): void {
   const f = parseShared(command);
   if (typeof f === 'symbol' || !f) return;
-  syntax.Walk(f, (node: unknown) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  walk(f, (node: any) => {
     if (!node) return false;
-    const type = syntax.NodeType(node);
+    const type = node.kind;
     // `export GH_REPO=x && gh ...`, `declare -x GIT_DIR=...`, `GH_REPO=x; ...`:
     // the variable reaches every later call of the command.
     if (type === 'DeclClause') {

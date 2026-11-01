@@ -13,6 +13,7 @@
 // All inputs are strings; no fs/path/os/process imports.
 
 import mvdanSh from 'mvdan-sh';
+import { toPlainTree, walk } from './plain-tree';
 import { matchesPattern } from '../rules';
 import { isShellShapedTool, type InspectionInput } from './tool-input';
 import { foldHomoglyphs } from '../dlp/normalize';
@@ -96,7 +97,7 @@ export const DOWNLOAD_CMDS = new Set([
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isCatHeredocOrLit(part: any): boolean {
   if (!part) return false;
-  const t = syntax.NodeType(part);
+  const t = part.kind;
   if (t === 'Lit') return true;
   if (t !== 'CmdSubst') return false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -110,10 +111,10 @@ function isCatHeredocOrLit(part: any): boolean {
   if (!hasHeredoc) return false;
   // The command must be `cat` (any flags fine). Reject `bash`, `sh`, etc.
   const cmd = stmt.Cmd;
-  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return false;
+  if (!cmd || cmd.kind !== 'CallExpr') return false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const firstArg: any[] = cmd.Args?.[0]?.Parts || [];
-  if (firstArg.length !== 1 || syntax.NodeType(firstArg[0]) !== 'Lit') return false;
+  if (firstArg.length !== 1 || firstArg[0].kind !== 'Lit') return false;
   return (firstArg[0].Value || '').toLowerCase() === 'cat';
 }
 
@@ -159,13 +160,17 @@ const codeBodiesCache = new Map<string, CommandReadings>();
 // for both consumers (Walk doesn't mutate), so a single cached tree is safe
 // to hand out. Sentinel `PARSE_FAIL` marks commands that failed to parse so
 // we don't retry — both consumers fall back to "no result" on parse error.
-const AST_CACHE_MAX = 5_000;
+// 256 (fw#410, from 5,000): the hit that matters is the same command analysed
+// ten times within one judged call; a plain tree is tens of kilobytes and the
+// daemon keeps this engine alive for hours.
+const AST_CACHE_MAX = 256;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const astCache = new Map<string, any>();
 const PARSE_FAIL = Symbol('parse-fail');
 
 // Exported for the sibling detectors (package-install.ts) so they share the
 // cache; the result is a read-only AST or the PARSE_FAIL symbol.
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseShared(command: string): any | typeof PARSE_FAIL {
   const cached = astCache.get(command);
@@ -174,10 +179,13 @@ export function parseShared(command: string): any | typeof PARSE_FAIL {
     astCache.set(command, cached);
     return cached;
   }
+  // The Go tree is converted once into plain objects (fw#410, plain-tree.ts):
+  // every analysis of this command walks the plain copy, not the GopherJS tree.
+  // Typed loosely, as before: the probes below read `.Stmts[0]...` straight off it.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let parsed: any | typeof PARSE_FAIL;
   try {
-    parsed = sharedParser.Parse(command, 'cmd');
+    parsed = toPlainTree(sharedParser.Parse(command, 'cmd'));
   } catch {
     parsed = PARSE_FAIL;
   }
@@ -309,11 +317,11 @@ function fileAccessViewImpl(command: string): string {
     toCharIndex === null ? byteOffset : toCharIndex(byteOffset);
   const edits: Array<[number, number, string]> = [];
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
       const words = args.map((a) => resolveWordLiteral(a));
@@ -326,8 +334,8 @@ function fileAccessViewImpl(command: string): string {
         if (!PROGRAM_DIR.test(word)) continue;
         const name = word.split(/[\\/]/).pop() ?? '';
         if (!name) continue;
-        const s = at(args[i].Pos().Offset());
-        const e = at(args[i].End().Offset());
+        const s = at(args[i].pos);
+        const e = at(args[i].end);
         if (s < 0 || e < 0) continue;
         edits.push([s, e, name]);
       }
@@ -391,11 +399,11 @@ function literalPayloadsOf(command: string, depth: number): string[] {
   if (f === PARSE_FAIL) return [];
   const out: string[] = [];
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || out.length >= MAX_READING_PAYLOADS) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words: (string | null)[] = (n.Args || []).map((a: any) => resolveWordLiteral(a));
       if (words.length === 0) return true;
@@ -426,11 +434,11 @@ function foldCommandWords(reading: string): string {
     toCharIndex === null ? byteOffset : toCharIndex(byteOffset);
   const edits: Array<[number, number, string]> = [];
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
       const words = args.map((a) => resolveWordLiteral(a));
@@ -440,13 +448,13 @@ function foldCommandWords(reading: string): string {
       for (let i = 0; i <= head && i < args.length; i++) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const parts: any[] = args[i].Parts || [];
-        if (parts.length !== 1 || syntax.NodeType(parts[0]) !== 'Lit') continue;
+        if (parts.length !== 1 || parts[0].kind !== 'Lit') continue;
         const value: string = parts[0].Value ?? '';
         const word = folded[i];
         if (word === null || word === value || !/[^\x00-\x7f]/.test(value)) continue;
         if (!/^[A-Za-z0-9._/-]+$/.test(word)) continue;
-        const s = at(args[i].Pos().Offset());
-        const e = at(args[i].End().Offset());
+        const s = at(args[i].pos);
+        const e = at(args[i].end);
         if (s < 0 || e < 0) continue;
         edits.push([s, e, word]);
       }
@@ -543,11 +551,11 @@ function interpreterHeredocSpans(f: any, at: (byte: number) => number): Array<[n
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const candidates: any[] = [];
   let unsafe = false;
-  syntax.Walk(f, (node: unknown) => {
+  walk(f, (node: unknown) => {
     if (!node || unsafe) return false;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
-    const t = syntax.NodeType(n);
+    const t = n.kind;
     if (t === 'FuncDecl') {
       unsafe = true;
       return false;
@@ -568,7 +576,7 @@ function interpreterHeredocSpans(f: any, at: (byte: number) => number): Array<[n
   });
   if (unsafe) return [];
   for (const st of stmts) {
-    if (!st?.Cmd || syntax.NodeType(st.Cmd) !== 'CallExpr') continue;
+    if (!st?.Cmd || st.Cmd.kind !== 'CallExpr') continue;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const words = (st.Cmd.Args || []).map((a: any) => resolveWordLiteral(a));
     // The interpreter must be the FIRST word: a wrapper before it (`env -S`,
@@ -591,8 +599,8 @@ function interpreterHeredocSpans(f: any, at: (byte: number) => number): Array<[n
     if (stdin.length !== 1 || others > 0) continue;
     const r = stdin[0];
     if (heredocText(r.Hdoc) === null) continue;
-    const hs = at(r.Hdoc.Pos().Offset());
-    const he = at(r.Hdoc.End().Offset());
+    const hs = at(r.Hdoc.pos);
+    const he = at(r.Hdoc.end);
     if (hs < 0 || he < 0 || he <= hs) continue;
     spans.push([hs, he]);
   }
@@ -627,11 +635,11 @@ function normalizeCommandForPolicyImpl(command: string, codeBodies: boolean): Co
       msgSpans.add(`${hs}:${he}`);
     }
 
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
@@ -641,7 +649,7 @@ function normalizeCommandForPolicyImpl(command: string, codeBodies: boolean): Co
         // Check if this arg is a known message flag (single Lit word starting with -)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const argParts: any[] = args[i].Parts || [];
-        if (argParts.length !== 1 || syntax.NodeType(argParts[0]) !== 'Lit') continue;
+        if (argParts.length !== 1 || argParts[0].kind !== 'Lit') continue;
         const flagVal: string = argParts[0].Value || '';
         if (!MESSAGE_FLAGS.has(flagVal.toLowerCase())) continue;
 
@@ -654,10 +662,10 @@ function normalizeCommandForPolicyImpl(command: string, codeBodies: boolean): Co
         if (nextParts.length !== 1) continue;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const quotedNode = nextParts[0] as any;
-        const nt: string = syntax.NodeType(quotedNode);
+        const nt: string = quotedNode.kind;
         const markStrip = (): void => {
-          const s = at(next.Pos().Offset());
-          const e = at(next.End().Offset());
+          const s = at(next.pos);
+          const e = at(next.end);
           if (s < 0 || e < 0) return; // not a character boundary: leave it alone
           strips.push([s, e]);
           msgSpans.add(`${s}:${e}`); // exclude from de-obfuscation below
@@ -667,9 +675,7 @@ function normalizeCommandForPolicyImpl(command: string, codeBodies: boolean): Co
         } else if (nt === 'DblQuoted') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const innerParts: any[] = quotedNode.Parts || [];
-          const allLit =
-            innerParts.length === 0 ||
-            innerParts.every((p: unknown) => syntax.NodeType(p) === 'Lit');
+          const allLit = innerParts.length === 0 || innerParts.every((p: any) => p.kind === 'Lit');
           if (allLit) {
             markStrip();
           } else if (innerParts.every((p: unknown) => isCatHeredocOrLit(p))) {
@@ -691,8 +697,8 @@ function normalizeCommandForPolicyImpl(command: string, codeBodies: boolean): Co
       // message-flag values stripped above. Operators/positions are preserved,
       // so the rules' command-boundary anchoring still holds.
       for (const arg of args) {
-        const s = at(arg.Pos().Offset());
-        const e = at(arg.End().Offset());
+        const s = at(arg.pos);
+        const e = at(arg.end);
         if (s < 0 || e < 0) continue; // not a character boundary: leave it alone
         if (msgSpans.has(`${s}:${e}`)) continue; // already a stripped message value
         const resolved = resolveWordLiteral(arg);
@@ -760,11 +766,11 @@ function scanArgsForDynamicExec(args: any[], startIdx: number): 'block' | 'revie
   let hasCurl = false;
 
   for (let i = startIdx; i < args.length; i++) {
-    syntax.Walk(args[i], (inner: unknown) => {
+    walk(args[i], (inner: unknown) => {
       if (!inner) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const inn = inner as any;
-      const it: string = syntax.NodeType(inn);
+      const it: string = inn.kind;
       if (it === 'CmdSubst') hasCmdSubst = true;
       if (it === 'ParamExp') hasParamExp = true;
       if (it === 'Lit' && DOWNLOAD_CMDS.has(inn.Value?.toLowerCase())) hasCurl = true;
@@ -792,17 +798,19 @@ function scanArgsForDynamicExec(args: any[], startIdx: number): 'block' | 'revie
  */
 export function detectDangerousShellExec(command: string): 'block' | 'review' | null {
   try {
-    const f = sharedParser.Parse(command, 'cmd');
+    // One parse per command (fw#410): the shared tree, not a third parse.
+    const f = parseShared(command);
+    if (f === PARSE_FAIL) return null; // parse error → fail open, as the catch below did
     let result: 'block' | 'review' | null = null;
     const assigned = assignedNames(f);
 
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || result === 'block') return false; // short-circuit once blocked
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
+      if (n.kind === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
         const call = n.Y.Cmd;
-        if (call && syntax.NodeType(call) === 'CallExpr') {
+        if (call && call.kind === 'CallExpr') {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const words = (call.Args || []).map((a: any) => resolveWordLiteral(a));
           const head = unwrapCommandHead(words);
@@ -825,7 +833,7 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
             result = 'review';
         }
       }
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
@@ -851,7 +859,7 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
       // Resolve the command name (first arg, single Lit)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const firstParts: any[] = (args[0] as any).Parts || [];
-      if (firstParts.length !== 1 || syntax.NodeType(firstParts[0]) !== 'Lit') return true;
+      if (firstParts.length !== 1 || firstParts[0].kind !== 'Lit') return true;
       const cmdName: string = firstParts[0].Value?.toLowerCase() ?? '';
 
       if (cmdName === 'eval') {
@@ -863,11 +871,7 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
         for (let i = 1; i < args.length - 1; i++) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const flagParts: any[] = (args[i] as any).Parts || [];
-          if (
-            flagParts.length !== 1 ||
-            syntax.NodeType(flagParts[0]) !== 'Lit' ||
-            flagParts[0].Value !== '-c'
-          )
+          if (flagParts.length !== 1 || flagParts[0].kind !== 'Lit' || flagParts[0].Value !== '-c')
             continue;
           const v = scanArgsForDynamicExec(args, i + 1);
           if (v === 'block' || (v === 'review' && result === null)) result = v;
@@ -899,8 +903,7 @@ function isDefaultExpansion(part: any): boolean {
 /** `$(which X)` / `$(command -v X)` / `$(type -p X)` resolve to the literal X. */
 function lookupSubstitution(part: any): string | null {
   const stmts: any[] = part.Stmts ?? [];
-  if (stmts.length !== 1 || !stmts[0].Cmd || syntax.NodeType(stmts[0].Cmd) !== 'CallExpr')
-    return null;
+  if (stmts.length !== 1 || !stmts[0].Cmd || stmts[0].Cmd.kind !== 'CallExpr') return null;
   const words = (stmts[0].Cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
   if (words.some((w: string | null) => w === null)) return null;
   if (words.length === 2 && words[0] === 'which') return words[1];
@@ -933,9 +936,9 @@ const VARIABLE_READERS = new Set([
 ]);
 function assignedNames(f: any): Set<string> {
   const names = new Set<string>();
-  syntax.Walk(f, (node: any) => {
+  walk(f, (node: any) => {
     if (!node) return false;
-    const kind = syntax.NodeType(node);
+    const kind = node.kind;
     if (kind === 'Assign' && node.Name?.Value) names.add(node.Name.Value);
     if (kind === 'ForClause' && node.Loop?.Name?.Value) names.add(node.Loop.Name.Value);
     if (kind === 'CallExpr') {
@@ -950,7 +953,7 @@ function assignedNames(f: any): Set<string> {
 
 function executableParts(word: any, assigned: Set<string>, quoted = false): ExecutablePart[] {
   return (word?.Parts ?? []).flatMap((part: any): ExecutablePart[] => {
-    const kind = syntax.NodeType(part);
+    const kind = part.kind;
     if (kind === 'DblQuoted') return executableParts(part, assigned, true);
     if (kind === 'Lit') return [{ kind: 'Lit', value: part.Value ?? '', quoted }];
     if (kind === 'SglQuoted')
@@ -2065,11 +2068,11 @@ function chmodHasOpenPermMode(command: string): boolean {
   if (f === PARSE_FAIL) return false; // fail open for FPs, not FNs
   let found = false;
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || found) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words: (string | null)[] = (n.Args || []).map((a: any) => resolveWordLiteral(a));
       if (words.length === 0) return true;
@@ -2231,12 +2234,12 @@ function redirStdinOps(): Set<number> {
 // empty and every BinaryCmd RHS is treated as pipe-fed (fails toward review).
 function deriveBinaryOp(sample: string): number {
   try {
-    const f = sharedParser.Parse(sample, 'cmd');
+    const f = toPlainTree(sharedParser.Parse(sample, 'cmd'));
     let op = -1;
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (n && syntax.NodeType(n) === 'BinaryCmd' && op < 0) op = n.Op;
+      if (n && n.kind === 'BinaryCmd' && op < 0) op = n.Op;
       return true;
     });
     return op;
@@ -2401,7 +2404,7 @@ function heredocText(word: any): string | null {
   const parts: any[] = word?.Parts ?? [];
   let out = '';
   for (const p of parts) {
-    if (syntax.NodeType(p) !== 'Lit') return null;
+    if (p.kind !== 'Lit') return null;
     out += p.Value ?? '';
   }
   return out;
@@ -2460,7 +2463,7 @@ function attachedCode(interp: string, flag: string): string | null {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   const cmd = stmt?.Cmd;
-  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return null;
+  if (!cmd || cmd.kind !== 'CallExpr') return null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
@@ -2588,11 +2591,11 @@ function shellPayloadNeedsReview(payload: string): boolean {
   let review = false;
   payloadNesting++;
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || review) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words: (string | null)[] = (n.Args || []).map((a: any) => resolveWordLiteral(a));
       if (words.length === 0) return true;
@@ -2636,11 +2639,11 @@ function inlineExecCalls(command: string): InlineCall[] | typeof PARSE_FAIL {
   if (f === PARSE_FAIL) return PARSE_FAIL;
   const calls: InlineCall[] = [];
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || calls.length >= MAX_INLINE_CALLS) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      const t = syntax.NodeType(n);
+      const t = n.kind;
       // A pipeline's RHS reads the LHS's stdout. It must be judged HERE, at the
       // BinaryCmd, and not via a set of "pipe-fed statements": the mvdan JS
       // binding hands out a NEW wrapper object on every property access, so
@@ -2834,7 +2837,7 @@ export function isProtectedHomePath(rawPath: string): boolean {
  * (anything starting with `-`) and ParamExp/CmdSubst (dynamic) parts. Returns
  * the resolved string for each arg that is purely literal text.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 // ── Stage 3: argument position ───────────────────────────────────────────────
 // Until 2026-09-11 the line `if (v.startsWith('-')) flags.push(v); else
 // paths.push(v);` turned every command into a bag of words. Which word came
@@ -2943,7 +2946,7 @@ export function shellScriptOperands(command: string): string[] {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const callArgs: any[] = n.Args || [];
       if (callArgs.length === 0) return true;
@@ -2995,7 +2998,7 @@ export function shellScriptOperands(command: string): string[] {
 function windowsDrivePathSpelling(word: any): string | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const parts: any[] = word?.Parts || [];
-  if (parts.length === 0 || !parts.every((p) => syntax.NodeType(p) === 'Lit')) return null;
+  if (parts.length === 0 || !parts.every((p) => p.kind === 'Lit')) return null;
   const raw = parts.map((p) => p.Value ?? '').join('');
   return /^[A-Za-z]:\\[^\s'"$`]*$/.test(raw) ? raw : null;
 }
@@ -3205,7 +3208,7 @@ export const VALUE_FLAGS: Record<string, Set<string>> = {
 // Resolve one Word node to its literal text, or null if it has any dynamic part
 // (param/command/arithmetic expansion) — we must not treat dynamic content as a
 // host, but a dynamic flag-VALUE must still consume its flag's skip slot.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+
 /**
  * JAIL-15 (stage 6, step 1): the variables that NAME THE HOME DIRECTORY. A
  * ParamExp is "dynamic" to this resolver, and a dynamic word occupies no slot,
@@ -3331,8 +3334,8 @@ function recordTopLevelAssignments(f: any): void {
 function probeBinOp(src: string): number | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cmd: any = syntax.NewParser().Parse(src, 'probe')?.Stmts?.[0]?.Cmd;
-    if (cmd && syntax.NodeType(cmd) === 'BinaryCmd') return cmd.Op;
+    const cmd: any = toPlainTree(syntax.NewParser().Parse(src, 'probe'))?.Stmts?.[0]?.Cmd;
+    if (cmd && cmd.kind === 'BinaryCmd') return cmd.Op;
   } catch {
     /* a parser that cannot parse `a && b` leaves these null, and the whole
        branch degrades to the earlier behaviour: chains are not recorded. */
@@ -3353,7 +3356,7 @@ const AND_OR_OPS: Set<number> = new Set([AND_OP, OR_OP].filter((o): o is number 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function recordTopLevelStmt(stmt: any): boolean {
   if (!stmt || !stmt.Cmd) return false;
-  const t = syntax.NodeType(stmt.Cmd);
+  const t = stmt.Cmd.kind;
   // The LEFT operand of `&&` and `||` always runs, and a bare assignment always
   // exits 0, so `K=KEY && cat $K` is not control-flow dependent at all. Only the
   // left side: the right one is exactly the conditional case this excludes. A
@@ -3378,7 +3381,7 @@ function recordTopLevelStmt(stmt: any): boolean {
   if (t !== 'CallExpr' && t !== 'DeclClause') return false;
   let at = 0;
   try {
-    at = stmt.Pos().Offset();
+    at = stmt.pos;
   } catch {
     at = 0;
   }
@@ -3397,7 +3400,7 @@ function recordTopLevelStmt(stmt: any): boolean {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function recordAssignments(n: any, at: number): void {
   if (!assignmentTable) return;
-  const t = syntax.NodeType(n);
+  const t = n.kind;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let assigns: any[] = [];
   if (t === 'CallExpr') {
@@ -3406,7 +3409,7 @@ function recordAssignments(n: any, at: number): void {
   } else if (t === 'DeclClause') {
     if (!ASSIGNMENT_HEADS.has(n.Variant?.Value ?? '')) return;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    assigns = (n.Args || []).filter((a: any) => syntax.NodeType(a) === 'Assign');
+    assigns = (n.Args || []).filter((a: any) => a.kind === 'Assign');
   } else return;
   for (const a of assigns) {
     const name: string | undefined = a?.Name?.Value;
@@ -3436,14 +3439,14 @@ function recordAssignments(n: any, at: number): void {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function resolveTrivialSubst(part: any): string | undefined {
-  if (syntax.NodeType(part) !== 'CmdSubst') return undefined;
+  if (part.kind !== 'CmdSubst') return undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const stmts: any[] = part.Stmts || [];
   if (stmts.length !== 1) return undefined;
   const st = stmts[0];
   if ((st.Redirs || []).length > 0 || st.Negated || st.Background) return undefined;
   const cmd = st.Cmd;
-  if (!cmd || syntax.NodeType(cmd) !== 'CallExpr') return undefined;
+  if (!cmd || cmd.kind !== 'CallExpr') return undefined;
   if ((cmd.Assigns || []).length > 0) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
@@ -3473,7 +3476,7 @@ function recordedExpansion(name: string | undefined): string | null | undefined 
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isPlainParam(p: any): boolean {
-  if (syntax.NodeType(p) !== 'ParamExp') return false;
+  if (p.kind !== 'ParamExp') return false;
   // Any modifier means the value is computed, not the variable itself.
   return !(p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp);
 }
@@ -3524,10 +3527,10 @@ let callWalks = 0;
 export function functionBodies(f: any): Map<string, any[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const out = new Map<string, any[]>();
-  syntax.Walk(f, (node: unknown) => {
+  walk(f, (node: unknown) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
-    if (n && syntax.NodeType(n) === 'FuncDecl' && n.Name?.Value && n.Body) {
+    if (n && n.kind === 'FuncDecl' && n.Name?.Value && n.Body) {
       const list = out.get(n.Name.Value) ?? [];
       list.push(n.Body);
       out.set(n.Name.Value, list);
@@ -3545,11 +3548,11 @@ export function functionBodies(f: any): Map<string, any[]> {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function rebindsPositionals(body: any): boolean {
   let found = false;
-  syntax.Walk(body, (node: unknown) => {
+  walk(body, (node: unknown) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
     if (found || !n) return false;
-    if (syntax.NodeType(n) === 'CallExpr') {
+    if (n.kind === 'CallExpr') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const words = ((n.Args as any[]) || []).map((a) => resolveWordLiteral(a));
       if (words[0] === 'shift') found = true;
@@ -3574,7 +3577,7 @@ function tableBindings(): string {
 }
 
 /**
- * `syntax.Walk(f, visit)`, plus a second walk of each called function's body
+ * `walk(f, visit)`, plus a second walk of each called function's body
  * with its arguments bound (see above). Runs inside an assignment table: the
  * caller sets `assignmentTable` (a body walk needs somewhere to bind).
  */
@@ -3582,7 +3585,7 @@ function tableBindings(): string {
 function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
   const bodies = functionBodies(f);
   if (bodies.size === 0) {
-    syntax.Walk(f, visit);
+    walk(f, visit);
     return;
   }
   const seenCalls = new Set<string>();
@@ -3623,8 +3626,8 @@ function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
       currentStmtOffset = Number.MAX_SAFE_INTEGER;
       callDepth++;
       try {
-        if (body.Cmd && syntax.NodeType(body.Cmd) === 'Block') recordTopLevelAssignments(body.Cmd);
-        syntax.Walk(body, step);
+        if (body.Cmd && body.Cmd.kind === 'Block') recordTopLevelAssignments(body.Cmd);
+        walk(body, step);
       } finally {
         callDepth--;
         assignmentTable = outerTable;
@@ -3636,10 +3639,10 @@ function walkWithCalls(f: any, visit: (node: unknown) => boolean): void {
     if (!node) return false;
     const go = visit(node);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (go !== false && syntax.NodeType(node as any) === 'CallExpr') inline(node);
+    if (go !== false && (node as any).kind === 'CallExpr') inline(node);
     return go;
   };
-  syntax.Walk(f, step);
+  walk(f, step);
 }
 
 /**
@@ -3687,7 +3690,7 @@ export function walkCommandScope(
   withAssignments(f, () => {
     walkWithCalls(f, (node: unknown) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (node && syntax.NodeType(node as any) === 'Stmt') trackStatement(node);
+      if (node && (node as any).kind === 'Stmt') trackStatement(node);
       return visit(node);
     });
   });
@@ -3698,7 +3701,7 @@ export function walkCommandScope(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function trackStatement(n: any): void {
   try {
-    currentStmtOffset = n.Pos().Offset();
+    currentStmtOffset = n.pos;
   } catch {
     currentStmtOffset = Number.MAX_SAFE_INTEGER;
   }
@@ -3770,7 +3773,7 @@ export function resolveWordPrefix(w: any): { prefix: string; dynamic: boolean } 
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function resolvePart(p: any, inQuotes: boolean): string | null | undefined {
-  const t = syntax.NodeType(p);
+  const t = p.kind;
   if (t === 'Lit') {
     const raw = p.Value ?? '';
     if (!inQuotes) return raw.replace(/\\(.)/g, '$1');
@@ -3904,7 +3907,7 @@ export function extractShellDestinations(command: string): ShellDestination[] {
         if (!node) return false;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const n = node as any;
-        if (syntax.NodeType(n) === 'Stmt') {
+        if (n.kind === 'Stmt') {
           trackStatement(n);
           // A redirect into /dev/tcp or /dev/udp is a destination of its own.
           for (const raw of redirectWords(n)) {
@@ -3917,7 +3920,7 @@ export function extractShellDestinations(command: string): ShellDestination[] {
             out.push({ host, binary, raw: raw as string });
           }
         }
-        if (syntax.NodeType(n) !== 'CallExpr') return true;
+        if (n.kind !== 'CallExpr') return true;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const callArgs: any[] = n.Args || [];
         if (callArgs.length === 0) return true;
@@ -3978,7 +3981,7 @@ export function extractShellDestTokens(command: string): ShellDestToken[] {
         if (!node) return false;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const n = node as any;
-        if (syntax.NodeType(n) === 'Stmt') {
+        if (n.kind === 'Stmt') {
           trackStatement(n);
           // The host of a /dev/tcp or /dev/udp redirect, so the SSRF floor
           // judges `>& /dev/tcp/169.254.169.254/80` like `curl 169.254.169.254`.
@@ -3992,7 +3995,7 @@ export function extractShellDestTokens(command: string): ShellDestToken[] {
             out.push({ token: host, binary });
           }
         }
-        if (syntax.NodeType(n) !== 'CallExpr') return true;
+        if (n.kind !== 'CallExpr') return true;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const callArgs: any[] = n.Args || [];
         if (callArgs.length === 0) return true;
@@ -4147,12 +4150,12 @@ function isWaivableCleanupTarget(p: string): boolean {
 // classed as "created" → the waiver never fires (safe degrade to review).
 function deriveRedirOp(sample: string): number {
   try {
-    const f = sharedParser.Parse(sample, 'cmd');
+    const f = toPlainTree(sharedParser.Parse(sample, 'cmd'));
     let op = -1;
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (n && syntax.NodeType(n) === 'Redirect' && op < 0) op = n.Op;
+      if (n && n.kind === 'Redirect' && op < 0) op = n.Op;
       return true;
     });
     return op;
@@ -4205,7 +4208,7 @@ function collectSameCommandCreations(f: any): Set<string> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stmts: any[] = Array.isArray(f?.Stmts) ? f.Stmts : [];
     for (const stmt of stmts) {
-      if (!stmt || !stmt.Cmd || syntax.NodeType(stmt.Cmd) !== 'CallExpr') continue;
+      if (!stmt || !stmt.Cmd || stmt.Cmd.kind !== 'CallExpr') continue;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const redirs: any[] = stmt.Redirs || [];
       if (!redirs.some((r) => r && REDIR_HEREDOC_OPS.has(r.Op))) continue;
@@ -4238,11 +4241,11 @@ export function isRmCreatedInCommandCleanup(command: string): boolean {
   let sawRm = false;
   let ok = true;
   try {
-    syntax.Walk(f, (node: unknown) => {
+    walk(f, (node: unknown) => {
       if (!node || !ok) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args || [];
       const name = (resolveWordLiteral(args[0]) ?? '').toLowerCase();
@@ -4312,14 +4315,14 @@ function analyzeFsOperationImpl(command: string, depth = 0): FsOpVerdict | null 
       if (!node || result?.verdict === 'block') return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      const nodeType = syntax.NodeType(n);
+      const nodeType = n.kind;
 
       // A redirect lives on the Stmt, not the CallExpr -- and `$(< X)` is a
       // Stmt whose Cmd is null, `while ...; done < X` a WhileClause. Judge the
       // redirect here, for any Cmd, then keep walking into the children.
       if (nodeType === 'Stmt') {
         try {
-          currentStmtOffset = n.Pos().Offset();
+          currentStmtOffset = n.pos;
         } catch {
           currentStmtOffset = Number.MAX_SAFE_INTEGER;
         }
@@ -5401,20 +5404,21 @@ export function analyzeShellCommand(command: string): ShellCommandAnalysis {
   };
 
   try {
-    const f = sharedParser.Parse(command, 'cmd');
-    syntax.Walk(f, (node: unknown) => {
+    // One parse per command (fw#410); a failed parse takes the regex fallback below.
+    const f = parseShared(command);
+    if (f === PARSE_FAIL) throw new Error('parse failed');
+    walk(f, (node: unknown) => {
       if (!node) return false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (syntax.NodeType(n) !== 'CallExpr') return true;
+      if (n.kind !== 'CallExpr') return true;
 
       // Collect literal text from each word argument (skip pure flag tokens).
       // Unescape Lit values so `r\m` is treated as `rm` (shell backslash-escaping).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const wordValues: string[] = (n.Args || [])
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .map((arg: any) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return (
             (arg.Parts || [])
               // eslint-disable-next-line @typescript-eslint/no-explicit-any

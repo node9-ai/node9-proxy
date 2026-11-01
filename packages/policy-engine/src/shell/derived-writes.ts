@@ -11,13 +11,9 @@
 // listing (files/protected-access.ts), the same one the gate judges, so a
 // spelling the gate reads (a redirect, dd's of=, a pipe) is a spelling this
 // reads too.
-import mvdanSh from 'mvdan-sh';
 import { collectFileAccesses } from '../files/protected-access';
 import type { FileAccessContext } from '../files/paths';
 import { parseShared } from './index';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
 
 /** mvdan's operator numbers for `&&` and `||`, read off the parser. */
 const SEQUENCE_OPS: ReadonlySet<number> = (() => {
@@ -74,13 +70,13 @@ export function pipelineTexts(command: string): string[] {
   const visit = (stmt: any, depth: number): void => {
     if (!stmt || depth > 64) return;
     const cmd = stmt.Cmd;
-    if (cmd && syntax.NodeType(cmd) === 'BinaryCmd' && SEQUENCE_OPS.has(cmd.Op as number)) {
+    if (cmd && cmd.kind === 'BinaryCmd' && SEQUENCE_OPS.has(cmd.Op as number)) {
       visit(cmd.X, depth + 1);
       visit(cmd.Y, depth + 1);
       return;
     }
-    const s = at(stmt.Pos().Offset());
-    const e = at(stmt.End().Offset());
+    const s = at(stmt.pos);
+    const e = at(stmt.end);
     // A statement's end includes its own `;` or `&`.
     const text = s >= 0 && e > s ? command.slice(s, e).replace(/[\s;&]+$/, '') : '';
     if (text) out.push(text);

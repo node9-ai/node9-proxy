@@ -29,7 +29,6 @@
 // a shell's stdin are re-parsed. A command that does not parse yields nothing
 // (`parsed: false`); the other tiers still judge it.
 
-import mvdanSh from 'mvdan-sh';
 import {
   SHELL_INTERPRETERS,
   baseWord,
@@ -43,9 +42,7 @@ import {
   resolveWordLiteral,
   unwrapCommandHead,
 } from './index';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { syntax } = mvdanSh as any;
+import { walk } from './plain-tree';
 
 export type OutboundCheckId = 'commands.reverse-shell' | 'data.env-exfil';
 
@@ -123,9 +120,9 @@ function isDupInOp(op: number): boolean {
   if (dupInOp === null) {
     let found = -1;
     try {
-      syntax.Walk(parseShared('cat <&3'), (node: unknown) => {
+      walk(parseShared('cat <&3'), (node: unknown) => {
         const n = node as Node;
-        if (found === -1 && n && syntax.NodeType(n) === 'Stmt' && n.Redirs?.[0]) {
+        if (found === -1 && n && n.kind === 'Stmt' && n.Redirs?.[0]) {
           found = n.Redirs[0].Op;
         }
         return true;
@@ -179,7 +176,7 @@ function wordShape(word: Node): string {
   const parts: Node[] = word?.Parts || [];
   let out = '';
   for (const p of parts) {
-    const t = syntax.NodeType(p);
+    const t = p.kind;
     if (t === 'Lit' || t === 'SglQuoted') out += p.Value ?? '';
     else if (t === 'DblQuoted') out += wordShape(p);
     else out += 'X';
@@ -398,7 +395,7 @@ class OutboundWalk {
     const f = parseShared(command);
     if (!f || typeof f !== 'object' || !f.Stmts) return false;
     try {
-      syntax.Walk(f, (node: unknown) => this.visit(node as Node, depth));
+      walk(f, (node: unknown) => this.visit(node as Node, depth));
     } catch {
       return false;
     }
@@ -444,7 +441,7 @@ class OutboundWalk {
 
   private visit(n: Node, depth: number): boolean {
     if (!n) return false;
-    const type = syntax.NodeType(n);
+    const type = n.kind;
     if (type === 'Stmt') {
       this.visitStmt(n, depth);
       return true;
@@ -465,7 +462,7 @@ class OutboundWalk {
     const redirs = redirectWords(stmt);
     const toSocket = redirs.some((w) => w !== null && DEV_NET_RE.test(w));
     if (!cmd) return;
-    const type = syntax.NodeType(cmd);
+    const type = cmd.kind;
     if (type !== 'CallExpr' || wordsOf(cmd).length > 0) {
       // Anything that reads a socket fd `exec` opened: `sh <&5 >&5`,
       // `while read l; do $l; done <&5`.
@@ -567,7 +564,7 @@ class OutboundWalk {
     const stages: Node[] = [];
     const flatten = (s: Node): void => {
       const c = s?.Cmd;
-      if (c && syntax.NodeType(c) === 'BinaryCmd' && isPipeOp(c.Op)) {
+      if (c && c.kind === 'BinaryCmd' && isPipeOp(c.Op)) {
         flatten(c.X);
         flatten(c.Y);
       } else stages.push(s);
@@ -591,9 +588,9 @@ class OutboundWalk {
         sinks.set(i, socketHosts(st));
       }
       if (!c) return;
-      if (syntax.NodeType(c) === 'DeclClause' && declDumpsEnv(c) && dump < 0) dump = i;
+      if (c.kind === 'DeclClause' && declDumpsEnv(c) && dump < 0) dump = i;
       // A loop that runs each line it reads (`while read l; do $l; done`).
-      if (syntax.NodeType(c) !== 'CallExpr') {
+      if (c.kind !== 'CallExpr') {
         if (runsCommandsIn(st)) shell = i;
         return;
       }
@@ -637,10 +634,10 @@ class OutboundWalk {
   /** A word (or assignment value) whose text includes an env dump's output. */
   private carriesEnv(word: Node): boolean {
     let hit = false;
-    syntax.Walk(word, (node: unknown) => {
+    walk(word, (node: unknown) => {
       if (hit || !node) return false;
       const n = node as Node;
-      const t = syntax.NodeType(n);
+      const t = n.kind;
       if (t === 'ParamExp' && n.Param?.Value && this.envVars.has(n.Param.Value)) {
         hit = true;
         return false;
@@ -658,11 +655,11 @@ class OutboundWalk {
   private stmtsDumpEnv(stmts: Node[]): boolean {
     let hit = false;
     for (const s of stmts) {
-      syntax.Walk(s, (node: unknown) => {
+      walk(s, (node: unknown) => {
         if (hit || !node) return false;
         const n = node as Node;
-        const t = syntax.NodeType(n);
-        if (t === 'Stmt' && n.Cmd && syntax.NodeType(n.Cmd) === 'CallExpr') {
+        const t = n.kind;
+        if (t === 'Stmt' && n.Cmd && n.Cmd.kind === 'CallExpr') {
           const words = wordsOf(n.Cmd);
           if (words.length > 0 && dumpsEnv(words, n)) hit = true;
         }
@@ -684,18 +681,18 @@ class OutboundWalk {
 /** The variable a word is, when it is only one (`$line`, `${line}`, `"$line"`). */
 function paramName(word: Node): string | null {
   let parts: Node[] = word?.Parts || [];
-  if (parts.length === 1 && syntax.NodeType(parts[0]) === 'DblQuoted') parts = parts[0].Parts || [];
-  if (parts.length !== 1 || syntax.NodeType(parts[0]) !== 'ParamExp') return null;
+  if (parts.length === 1 && parts[0].kind === 'DblQuoted') parts = parts[0].Parts || [];
+  if (parts.length !== 1 || parts[0].kind !== 'ParamExp') return null;
   return parts[0].Param?.Value ?? null;
 }
 
 /** A word that expands one of these variables anywhere inside it. */
 function refersTo(word: Node, names: Set<string>): boolean {
   let hit = false;
-  syntax.Walk(word, (node: unknown) => {
+  walk(word, (node: unknown) => {
     if (hit || !node) return false;
     const n = node as Node;
-    if (syntax.NodeType(n) === 'ParamExp' && names.has(n.Param?.Value)) hit = true;
+    if (n.kind === 'ParamExp' && names.has(n.Param?.Value)) hit = true;
     return !hit;
   });
   return hit;
@@ -710,10 +707,10 @@ function refersTo(word: Node, names: Set<string>): boolean {
 function runsCommandsIn(stmt: Node): boolean {
   const readVars = new Set<string>();
   let hit = false;
-  syntax.Walk(stmt, (node: unknown) => {
+  walk(stmt, (node: unknown) => {
     if (hit || !node) return false;
     const n = node as Node;
-    if (syntax.NodeType(n) !== 'CallExpr') return true;
+    if (n.kind !== 'CallExpr') return true;
     const words = wordsOf(n);
     if (words.length === 0) return true;
     const { head, at } = headOf(words);
