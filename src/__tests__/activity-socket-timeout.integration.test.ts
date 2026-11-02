@@ -24,6 +24,7 @@ afterEach(async () => {
 
 describe.skipIf(process.platform === 'win32')('node9 check with a stuck activity socket', () => {
   it('answers within seconds instead of waiting on the socket', async () => {
+    expect(fs.existsSync(CLI), 'dist/cli.js missing: run npm run build').toBe(true);
     // Short private paths: TMPDIR decides where the hook looks for the socket.
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'n9st-'));
     const home = path.join(root, 'h');

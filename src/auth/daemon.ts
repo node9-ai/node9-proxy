@@ -34,8 +34,10 @@ export const ACTIVITY_SOCKET_TIMEOUT_MS = 500;
  * Bounded: every hook awaits this before the gate judges and again after, so a
  * daemon that accepts the connection and never closes it (event loop blocked,
  * a debugger, SIGSTOP) used to hold every agent tool call. After `timeoutMs`
- * the socket is destroyed and the answer is false; the daemon then emits the
- * line itself, so `node9 tail` may show it twice, never zero times.
+ * the socket is destroyed and the answer is false. On the review path the
+ * daemon then emits the line itself (it may show twice in `node9 tail`); an
+ * allow or block line that times out mid-write can be lost. Either is a
+ * flight-recorder gap, never a gating one.
  */
 export function notifyActivitySocket(
   data: Record<string, unknown>,
