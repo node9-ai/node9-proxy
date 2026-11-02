@@ -36,31 +36,37 @@ afterEach(async () => {
 });
 
 describe('notifyActivitySocket', () => {
-  it('a listener that accepts and never closes: false after the timeout, and the client socket is released', async () => {
-    const p = socketPath();
-    // allowHalfOpen: the server keeps its side open after the client's end,
-    // as a daemon whose event loop never runs again would.
-    const stuck = net.createServer({ allowHalfOpen: true }, (c) => accepted.add(c));
-    await listen(stuck, p);
-    const pipes = () => process.getActiveResourcesInfo().filter((r) => r === 'PipeWrap').length;
-    const before = pipes();
-    const t0 = Date.now();
-    const ok = await notifyActivitySocket(
-      { id: 'x', status: 'pending' },
-      { timeoutMs: 200, socketPath: p }
-    );
-    const took = Date.now() - t0;
-    expect(ok).toBe(false);
-    expect(took).toBeGreaterThanOrEqual(190);
-    expect(took).toBeLessThan(1200);
-    // The server's accepted side stays open (half-open); the client side is
-    // gone once libuv has run its close callback (a loop turn or two).
-    const deadline = Date.now() + 500;
-    while (pipes() > before + 1 && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 10));
+  // POSIX only: on a Windows named pipe the client's half-close ends the
+  // connection, so an in-process listener cannot play a daemon that never
+  // closes; the timeout itself is platform-neutral.
+  it.skipIf(process.platform === 'win32')(
+    'a listener that accepts and never closes: false after the timeout, and the client socket is released',
+    async () => {
+      const p = socketPath();
+      // allowHalfOpen: the server keeps its side open after the client's end,
+      // as a daemon whose event loop never runs again would.
+      const stuck = net.createServer({ allowHalfOpen: true }, (c) => accepted.add(c));
+      await listen(stuck, p);
+      const pipes = () => process.getActiveResourcesInfo().filter((r) => r === 'PipeWrap').length;
+      const before = pipes();
+      const t0 = Date.now();
+      const ok = await notifyActivitySocket(
+        { id: 'x', status: 'pending' },
+        { timeoutMs: 200, socketPath: p }
+      );
+      const took = Date.now() - t0;
+      expect(ok).toBe(false);
+      expect(took).toBeGreaterThanOrEqual(190);
+      expect(took).toBeLessThan(1200);
+      // The server's accepted side stays open (half-open); the client side is
+      // gone once libuv has run its close callback (a loop turn or two).
+      const deadline = Date.now() + 500;
+      while (pipes() > before + 1 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(pipes()).toBe(before + 1);
     }
-    expect(pipes()).toBe(before + 1);
-  });
+  );
 
   it('a listener that reads to the end and closes: true, and the payload arrived', async () => {
     const p = socketPath();
