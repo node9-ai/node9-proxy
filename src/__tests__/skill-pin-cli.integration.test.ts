@@ -115,6 +115,25 @@ describe('node9 skill pin', () => {
     expect(pins.roots[key]).toBeUndefined();
   });
 
+  // A linked skill-sessions directory: reset removes the link, never what it
+  // points to.
+  itBuilt('reset: a linked skill-sessions/ loses the link, its target keeps its files', () => {
+    if (process.platform === 'win32') return;
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skreset-outside-'));
+    try {
+      fs.writeFileSync(path.join(outside, 'important.txt'), 'keep me');
+      fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
+      const sessionsDir = path.join(tmpHome, '.node9', 'skill-sessions');
+      fs.symlinkSync(outside, sessionsDir);
+      const r = runCli(['skill', 'pin', 'reset'], { HOME: tmpHome });
+      expect(r.status).toBe(0);
+      expect(fs.existsSync(sessionsDir)).toBe(false);
+      expect(fs.readFileSync(path.join(outside, 'important.txt'), 'utf-8')).toBe('keep me');
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   itBuilt('reset: clears pins AND wipes skill-sessions/', () => {
     seedPin(tmpHome, getRootKey('/p'), '/p');
     const sessionsDir = path.join(tmpHome, '.node9', 'skill-sessions');

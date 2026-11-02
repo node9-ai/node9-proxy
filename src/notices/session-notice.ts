@@ -16,6 +16,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { levelOf, type Level } from '@node9/policy-engine';
+import { ensureOwnDir } from '../utils/own-dir';
 
 const ICON = '\u{1F6E1}\uFE0F';
 
@@ -71,24 +72,15 @@ export function sessionNoticeEnabled(env: NodeJS.ProcessEnv = process.env): bool
 export function claimSessionNotice(sessionId: string | undefined, home = os.homedir()): boolean {
   if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) return false;
   const dir = path.join(home, '.node9', 'notice-sessions');
+  // The agent can reach ~/.node9 with mv and ln: a link here would point the
+  // flag write and the clean-up below at a directory of its choosing.
+  if (!ensureOwnDir(dir)) return false;
   try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // The agent can reach ~/.node9 with mv and ln: a link here would point the
-    // flag write and the clean-up below at a directory of its choosing.
-    if (!isOwnRealDir(dir)) return false;
     fs.closeSync(fs.openSync(path.join(dir, sessionId), 'wx'));
   } catch {
     return false;
   }
   removeOldFlags(dir);
-  return true;
-}
-
-/** A real directory (not a link) owned by this user. */
-function isOwnRealDir(dir: string): boolean {
-  const st = fs.lstatSync(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) return false;
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false;
   return true;
 }
 

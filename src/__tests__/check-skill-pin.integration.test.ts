@@ -310,3 +310,79 @@ describe('policy.skillPinning.roots extends the default scope', () => {
     expect(pinnedPaths).toEqual([path.join(tmpProject, 'AGENTS.md')]);
   });
 });
+
+// ── the session memo cannot be redirected by a planted link ─────────────────
+// An agent can reach ~/.node9 with mv and ln. The per-session memo must not
+// become a way to write or delete elsewhere, or to skip the check.
+
+const itUnix = it.skipIf(process.platform === 'win32');
+const THIRTY_DAYS_AGO = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+
+describe('skill-sessions memo and planted links', () => {
+  let tmpHome: string;
+  let tmpProject: string;
+  let outside: string;
+  const sessionsDir = () => path.join(tmpHome, '.node9', 'skill-sessions');
+  beforeEach(() => {
+    tmpHome = makeTempHome({ enabled: true, mode: 'block' });
+    tmpProject = makeTempProject();
+    outside = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skhook-outside-'));
+  });
+  afterEach(() => {
+    for (const d of [tmpHome, tmpProject, outside]) fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  itUnix('a linked sessions directory gets no flag, and its old files stay', () => {
+    const old = path.join(outside, 'old-notes.txt');
+    fs.writeFileSync(old, 'keep me');
+    fs.utimesSync(old, THIRTY_DAYS_AGO, THIRTY_DAYS_AGO);
+    fs.symlinkSync(outside, sessionsDir());
+    const r = runCheck(payload('lnk1', tmpProject), { HOME: tmpHome }, tmpProject);
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(old, 'utf-8')).toBe('keep me');
+    expect(fs.existsSync(path.join(outside, 'lnk1.json'))).toBe(false);
+  });
+
+  itUnix('a planted "verified" flag behind a link does not skip the check', () => {
+    runCheck(payload('prime', tmpProject), { HOME: tmpHome }, tmpProject); // pin
+    tamperInstalledSkill(tmpHome);
+    fs.rmSync(sessionsDir(), { recursive: true, force: true });
+    fs.writeFileSync(path.join(outside, 'planted.json'), '{"state":"verified"}');
+    fs.symlinkSync(outside, sessionsDir());
+    const r = runCheck(payload('planted', tmpProject), { HOME: tmpHome }, tmpProject);
+    expect(r.status).toBe(2);
+    expect(JSON.parse(r.stdout.trim().split('\n').pop()!).decision).toBe('block');
+  });
+
+  itUnix('a link in place of the flag file is replaced, its target is not written', () => {
+    fs.mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
+    const target = path.join(outside, 'important.txt');
+    fs.writeFileSync(target, 'keep me');
+    fs.symlinkSync(target, path.join(sessionsDir(), 'lnk2.json'));
+    const r = runCheck(payload('lnk2', tmpProject), { HOME: tmpHome }, tmpProject);
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('keep me');
+    const flagPath = path.join(sessionsDir(), 'lnk2.json');
+    expect(fs.lstatSync(flagPath).isSymbolicLink()).toBe(false);
+    expect(JSON.parse(fs.readFileSync(flagPath, 'utf-8')).state).toBe('verified');
+  });
+
+  itUnix('clean-up removes only old session flags, never other entries', () => {
+    fs.mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
+    const oldFlag = path.join(sessionsDir(), 'old-session.json');
+    const notes = path.join(sessionsDir(), 'notes.txt');
+    const target = path.join(outside, 'target.txt');
+    const linkFlag = path.join(sessionsDir(), 'linked.json');
+    fs.writeFileSync(oldFlag, '{"state":"verified"}');
+    fs.writeFileSync(notes, 'not a flag');
+    fs.writeFileSync(target, 'keep me');
+    fs.symlinkSync(target, linkFlag);
+    for (const p of [oldFlag, notes, target]) fs.utimesSync(p, THIRTY_DAYS_AGO, THIRTY_DAYS_AGO);
+    fs.lutimesSync(linkFlag, THIRTY_DAYS_AGO, THIRTY_DAYS_AGO);
+    expect(runCheck(payload('gc', tmpProject), { HOME: tmpHome }, tmpProject).status).toBe(0);
+    expect(fs.existsSync(oldFlag)).toBe(false);
+    expect(fs.existsSync(notes)).toBe(true);
+    expect(fs.lstatSync(linkFlag).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(target, 'utf-8')).toBe('keep me');
+  });
+});

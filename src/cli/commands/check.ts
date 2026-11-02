@@ -42,6 +42,8 @@ import {
   agentLabelFromFlag,
 } from '../../utils/hook-payload';
 import { stripControlChars } from '../../utils/safe-text';
+import { atomicWriteSync } from '../../utils/atomic-write';
+import { ensureOwnDir } from '../../utils/own-dir';
 import {
   claimSessionNotice,
   sessionNoticeEnabled,
@@ -845,17 +847,24 @@ export function registerCheckCommand(program: Command): void {
             try {
               const sessionsDir = path.join(os.homedir(), '.node9', 'skill-sessions');
               const flagPath = path.join(sessionsDir, `${safeSessionId}.json`);
+              // The memo is used only in a real directory of this user: a link
+              // planted under ~/.node9 must not supply a "verified" flag, receive
+              // writes or steer the clean-up. Without it the check runs every call.
+              const memo = ensureOwnDir(sessionsDir);
               let flag: { state?: string; detail?: string } | null = null;
               try {
-                flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
+                if (memo && fs.lstatSync(flagPath).isFile())
+                  flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
               } catch {
                 /* missing/unreadable — treat as fresh */
               }
 
+              // Temp file + rename: a link planted at the flag path is replaced,
+              // never written through.
               const writeFlag = (data: { state: string; detail?: string }) => {
+                if (!memo) return;
                 try {
-                  fs.mkdirSync(sessionsDir, { recursive: true });
-                  fs.writeFileSync(
+                  atomicWriteSync(
                     flagPath,
                     JSON.stringify({ ...data, timestamp: new Date().toISOString() }, null, 2),
                     { mode: 0o600 }
@@ -955,20 +964,24 @@ export function registerCheckCommand(program: Command): void {
                   writeFlag({ state: 'verified' });
                 }
 
-                // Best-effort GC of session flags older than 7 days.
-                try {
-                  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-                  for (const name of fs.readdirSync(sessionsDir)) {
-                    const p = path.join(sessionsDir, name);
-                    try {
-                      if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
-                    } catch {
-                      /* ignore */
+                // Best-effort GC of session flags older than 7 days: only regular
+                // files with a flag's name, and only in the user's own directory.
+                if (memo)
+                  try {
+                    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                    for (const name of fs.readdirSync(sessionsDir)) {
+                      if (!/^[A-Za-z0-9_-]{1,128}\.json$/.test(name)) continue;
+                      const p = path.join(sessionsDir, name);
+                      try {
+                        const st = fs.lstatSync(p);
+                        if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(p);
+                      } catch {
+                        /* ignore */
+                      }
                     }
+                  } catch {
+                    /* ignore */
                   }
-                } catch {
-                  /* ignore */
-                }
               }
             } catch (err) {
               if (process.env.NODE9_DEBUG === '1') {
