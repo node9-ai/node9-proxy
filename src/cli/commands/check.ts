@@ -16,6 +16,7 @@ import { getConfig, type Config } from '../../config';
 import {
   buildNegotiationMessage,
   buildReviewMessage,
+  userLineOf,
   isHumanDecision,
 } from '../../policy/negotiation';
 import {
@@ -41,6 +42,18 @@ import {
   agentLabelFromFlag,
 } from '../../utils/hook-payload';
 import { stripControlChars } from '../../utils/safe-text';
+import { atomicWriteSync } from '../../utils/atomic-write';
+import {
+  ensureOwnDir,
+  isSameOwnDir,
+  removeOldFlag,
+  SESSION_FLAG_SUFFIX,
+} from '../../utils/own-dir';
+import {
+  claimSessionNotice,
+  sessionNoticeEnabled,
+  sessionNoticeOutput,
+} from '../../notices/session-notice';
 
 /**
  * Identify the AI agent running this tool call. Source of truth for the
@@ -671,7 +684,12 @@ export function registerCheckCommand(program: Command): void {
               humanDecision,
               msg,
               result?.recoveryCommand,
-              { kind: result?.blockKind, path: result?.blockedPath, redirect: !!result?.redirect }
+              {
+                kind: result?.blockKind,
+                path: result?.blockedPath,
+                redirect: !!result?.redirect,
+                ruleDescription: result?.ruleDescription,
+              }
             );
 
             // 5. Send the structured JSON back to the LLM agent
@@ -705,10 +723,16 @@ export function registerCheckCommand(program: Command): void {
               );
               process.exit(0);
             }
+            // fw#420: the CLI shows systemMessage to the user directly, so a
+            // Claude Code user sees node9's own line even if the agent does not
+            // quote it. Claude Code only: other agents' schemas are unverified,
+            // and an unknown field must never put a block at risk.
+            const userLine = userLineOf(aiFeedbackMessage);
             process.stdout.write(
               JSON.stringify({
                 decision: 'block',
                 reason: aiFeedbackMessage, // This is the core instruction
+                ...(agent === 'Claude Code' && userLine ? { systemMessage: userLine } : {}),
                 hookSpecificOutput: {
                   hookEventName: 'PreToolUse',
                   permissionDecision: 'deny',
@@ -827,18 +851,27 @@ export function registerCheckCommand(program: Command): void {
           if (skillPinCfg.enabled && safeSessionId) {
             try {
               const sessionsDir = path.join(os.homedir(), '.node9', 'skill-sessions');
-              const flagPath = path.join(sessionsDir, `${safeSessionId}.json`);
+              const flagPath = path.join(sessionsDir, `${safeSessionId}${SESSION_FLAG_SUFFIX}`);
+              // The memo is used only in a real directory of this user: a link
+              // planted under ~/.node9 must not supply a "verified" flag, receive
+              // writes or steer the clean-up. Without it the check runs every call.
+              const memo = ensureOwnDir(sessionsDir);
               let flag: { state?: string; detail?: string } | null = null;
               try {
-                flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
+                // One name only: a hard link or a moved file is not node9's flag.
+                const st = memo ? fs.lstatSync(flagPath) : null;
+                if (st && st.isFile() && st.nlink === 1)
+                  flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
               } catch {
                 /* missing/unreadable — treat as fresh */
               }
 
+              // Temp file + rename: a link planted at the flag path is replaced,
+              // never written through.
               const writeFlag = (data: { state: string; detail?: string }) => {
+                if (!memo || !isSameOwnDir(sessionsDir, memo)) return;
                 try {
-                  fs.mkdirSync(sessionsDir, { recursive: true });
-                  fs.writeFileSync(
+                  atomicWriteSync(
                     flagPath,
                     JSON.stringify({ ...data, timestamp: new Date().toISOString() }, null, 2),
                     { mode: 0o600 }
@@ -938,20 +971,17 @@ export function registerCheckCommand(program: Command): void {
                   writeFlag({ state: 'verified' });
                 }
 
-                // Best-effort GC of session flags older than 7 days.
-                try {
-                  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-                  for (const name of fs.readdirSync(sessionsDir)) {
-                    const p = path.join(sessionsDir, name);
-                    try {
-                      if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
-                    } catch {
-                      /* ignore */
-                    }
+                // Best-effort GC of session flags older than 7 days: only regular
+                // files named <id>.node9-flag, and only while the directory is
+                // still the one checked above (a swap mid-call stops it).
+                if (memo)
+                  try {
+                    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+                    for (const name of fs.readdirSync(sessionsDir))
+                      removeOldFlag(sessionsDir, memo, name, cutoff);
+                  } catch {
+                    /* ignore */
                   }
-                } catch {
-                  /* ignore */
-                }
               }
             } catch (err) {
               if (process.env.NODE9_DEBUG === '1') {
@@ -990,12 +1020,42 @@ export function registerCheckCommand(program: Command): void {
             }
           }
 
+          // fw#420: once per Claude Code session, the first ALLOWED call tells
+          // the user node9 is on and at which level (Audit says nothing is
+          // blocked). Never on a block or a review, never with a decision, and a
+          // failure here only drops the notice.
+          // A subagent's call (payload agent_id) shares the session id, but its
+          // reply goes to the parent agent, not the user: it must not spend the
+          // flag. The write is synchronous so exit cannot cut it off (pipes are
+          // asynchronous on macOS) after the flag is already claimed.
+          const isSubagentCall =
+            typeof (payload as { agent_id?: unknown }).agent_id === 'string' &&
+            (payload as { agent_id: string }).agent_id !== '';
+          // A paused node9 checks nothing: no "is on" notice, and the flag stays
+          // free for the first checked call after the pause.
+          const allowExit = (checkedBy?: string): never => {
+            if (
+              checkedBy !== 'paused' &&
+              agent === 'Claude Code' &&
+              !isSubagentCall &&
+              sessionNoticeEnabled() &&
+              claimSessionNotice(safeSessionId)
+            ) {
+              try {
+                fs.writeSync(1, sessionNoticeOutput(config.settings.mode) + '\n');
+              } catch {
+                /* UX only */
+              }
+            }
+            process.exit(0);
+          };
+
           if (result.approved) {
             // Only write to stderr in debug mode — Claude Code treats any stderr
             // output as a hook error regardless of exit code (see GitHub issue).
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')
               process.stderr.write(`✓ node9 [${result.checkedBy}]: "${toolName}" allowed\n`);
-            process.exit(0);
+            allowExit(result.checkedBy);
           }
 
           // Inline-ask: a deferred review → hand the approve/deny prompt to the
@@ -1033,7 +1093,7 @@ export function registerCheckCommand(program: Command): void {
               if (retry.approved) {
                 if (retry.checkedBy && process.env.NODE9_DEBUG === '1')
                   process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);
-                process.exit(0);
+                allowExit(retry.checkedBy);
               }
               // Denials communicate via exit code (non-zero) and JSON on stdout —
               // stderr is intentionally unused so Claude Code never treats a block

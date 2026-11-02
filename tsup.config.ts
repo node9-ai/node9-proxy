@@ -1,8 +1,9 @@
 import { defineConfig } from 'tsup';
 
 // Three builds:
-//   1) cli + sdk: cjs + esm, main bundles consumed by `bin: dist/cli.js`
-//      and the @node9/proxy SDK exports.
+//   1) sdk: cjs + esm, the @node9/proxy SDK exports.
+//   1b) cli: cjs only, the launcher behind `bin: dist/cli.js`, the hook
+//      bundle and the full CLI (fw#425).
 //   2) dashboard: esm only, loaded at runtime via dynamic import
 //      because ink@7 + react@19 are ESM with top-level await — they
 //      can't be require()'d from a cjs bundle. Marked as runtime
@@ -12,11 +13,7 @@ import { defineConfig } from 'tsup';
 //      See scan-redesign plan.
 export default defineConfig([
   {
-    entry: {
-      index: 'src/index.ts',
-      // The full CLI; `dist/cli.js` (the binary) is the launcher below.
-      'cli-main': 'src/cli.ts',
-    },
+    entry: { index: 'src/index.ts' },
     format: ['cjs', 'esm'],
     dts: true,
     clean: true,
@@ -30,8 +27,11 @@ export default defineConfig([
   {
     // fw#425: `cli` is the dependency-free launcher behind `bin.node9` (compile
     // cache, then dispatch); `hook` holds only `check` and `log`, the two
-    // commands every agent tool call runs. CJS only: both are entry points.
-    entry: { cli: 'src/launch.ts', hook: 'src/hook-entry.ts' },
+    // commands every agent tool call runs; `cli-main` is the full CLI the
+    // launcher loads for every other command. CJS only: all three are entry
+    // points, and an ESM build of the CLI failed at load (a bundled dependency
+    // calls require), so nothing could use it.
+    entry: { cli: 'src/launch.ts', hook: 'src/hook-entry.ts', 'cli-main': 'src/cli.ts' },
     format: ['cjs'],
     dts: false,
     splitting: false,

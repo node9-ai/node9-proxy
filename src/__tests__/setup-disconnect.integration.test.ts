@@ -44,6 +44,9 @@ catch (error) { console.error(error.message); process.exitCode = 1; }`
       cwd: home,
       env: {
         PATH: path.dirname(process.execPath),
+        // A fresh HOME per spawn would fill a new compile cache every time
+        // (about 2 s on Windows); the suite runs without one (fw#425).
+        NODE_DISABLE_COMPILE_CACHE: '1',
         HOME: home,
         USERPROFILE: home,
         NODE9_TESTING: '1',

@@ -124,9 +124,29 @@ describe('a protected file is reported as a protected file (MSG-1)', () => {
     expect(viaBash.decision).toBe('deny');
     for (const claim of FALSE_CLAIMS) expect(viaBash.reason).not.toMatch(claim);
     expect(viaBash.reason).not.toMatch(/Action blocked by security policy/);
-    // Same instructions; only the spelling of the path may differ.
-    const body = (s: string) => s.replace(/^.*?protected/i, '');
+    // Same instructions; only the spelling of the path may differ. The first
+    // two lines are the user line and the quote instruction (fw#420).
+    const body = (s: string) =>
+      s
+        .split('\n')
+        .slice(2)
+        .join('\n')
+        .replace(/^.*?protected/i, '');
     expect(body(viaBash.reason)).toBe(body(viaRead.reason));
+    expect(body(viaRead.reason)).not.toBe('');
+  });
+
+  // fw#420: what the user sees in the desktop app is the agent's reply, so the
+  // reason the real hook hands back opens with a line the agent is told to quote.
+  itUnix('Read .env: the reason opens with the node9 user line and the quote instruction', () => {
+    const r = check('Read', { file_path: path.join(project, '.env') });
+    const [line, instruction] = r.reason.split('\n');
+    expect(line).toBe(
+      `\u{1F6E1}\uFE0F Node9 blocked access to \`${path.join(project, '.env')}\` (protected file)`
+    );
+    expect(instruction).toBe(
+      'Start your reply with the line above, exactly as written, on its own line.'
+    );
   });
 
   itUnix('Read ~/.ssh/id_rsa: the protected-file message', () => {

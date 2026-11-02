@@ -525,7 +525,12 @@ export async function runMcpGateway(
             humanDecision,
             result.reason,
             undefined,
-            { kind: result.blockKind, path: result.blockedPath, redirect: !!result.redirect }
+            {
+              kind: result.blockKind,
+              path: result.blockedPath,
+              redirect: !!result.redirect,
+              ruleDescription: result.ruleDescription,
+            }
           );
 
           const errorResponse = {
