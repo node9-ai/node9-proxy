@@ -19,6 +19,7 @@ import { generalActionRuleNames } from './shields/apps';
 import { isStrictGatedTier, type SsrfTier } from './egress/ssrf';
 import { CHECK_TEXT } from './catalog-text';
 import { levelCheckValue, isBlockAll } from './levels';
+import { packRowOwasp, type AsiId } from './owasp';
 
 // ── Vocabulary ────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,8 @@ export interface CheckDef {
   /** `group.name`, stable forever: audit rows and config files key on it. */
   id: string;
   group: CheckGroup;
+  /** The OWASP Agentic Top 10 risk the check guards against (owasp.ts). */
+  owasp: AsiId;
   title: string;
   /** One line, shown under the title: what the check catches. */
   catches: string;
@@ -91,6 +94,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'files.shell-startup',
     group: 'files',
+    owasp: 'ASI02',
     title: 'Shell startup files',
     catches: 'Writes, replacements and removals of personal shell startup files',
     values: ALL,
@@ -100,6 +104,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'files.system-auth',
     group: 'files',
+    owasp: 'ASI03',
     title: 'System authentication files',
     catches: 'Changes to system authentication files and PAM configuration',
     values: ['block'],
@@ -110,6 +115,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'files.password-hashes',
     group: 'files',
+    owasp: 'ASI03',
     title: 'System password hashes',
     catches: 'Reads and copies of /etc/shadow and /etc/gshadow',
     values: ALL,
@@ -119,6 +125,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'files.system-dirs',
     group: 'files',
+    owasp: 'ASI02',
     title: 'System directories',
     catches:
       'Writes, new files and removals under /usr, /etc, /boot, /bin, /sbin, /lib and /var/log, and uploads of system files',
@@ -129,6 +136,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'files.agent-instructions',
     group: 'files',
+    owasp: 'ASI06',
     title: 'Agent instruction and memory files',
     catches:
       "writes to the files every later agent session loads as instructions (CLAUDE.md, AGENTS.md, memory, agents, commands) and changes to the agent's hooks; Standard asks only when the text carries an instruction to hide, skip approvals or touch secrets",
@@ -140,6 +148,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.inline-exec',
     group: 'commands',
+    owasp: 'ASI05',
     title: 'Inline code execution',
     catches:
       'inline code (python -c, node -e, a heredoc into an interpreter) that deletes, sends, opens a socket, runs commands, reads protected files or decodes and runs; unreadable inline code',
@@ -150,6 +159,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.eval-dynamic',
     group: 'commands',
+    owasp: 'ASI05',
     title: 'Eval of dynamic content',
     catches: 'generated executable names, shell code from stdin, or dynamic eval/-c payloads',
     values: ALL,
@@ -159,6 +169,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.eval-remote',
     group: 'commands',
+    owasp: 'ASI05',
     title: 'Eval of a remote download',
     catches: 'eval or sh over the output of curl or wget',
     values: ['block'],
@@ -169,6 +180,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.curl-pipe-shell',
     group: 'commands',
+    owasp: 'ASI05',
     title: 'Remote script piped into a shell',
     catches: 'curl or wget piped into sh, bash, zsh or PowerShell',
     values: ALL,
@@ -178,6 +190,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.rm',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Delete files',
     catches: 'rm outside the known build-artifact paths',
     values: ALL,
@@ -187,6 +200,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.rm-home',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Recursive delete of the home directory',
     catches: 'rm -rf on ~, $HOME, /home or /',
     values: ['block'],
@@ -197,6 +211,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.chmod',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'World-writable permissions',
     catches: 'chmod 777, 0777 or a+rwx',
     values: ALL,
@@ -206,6 +221,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.sudo',
     group: 'commands',
+    owasp: 'ASI03',
     title: 'Elevated privileges',
     catches: 'a command run through sudo',
     values: ALL,
@@ -215,6 +231,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.git-destructive',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Destructive git operation',
     catches:
       'force push, reset --hard, clean -f, branch -D or tag delete, also through -C, env, wrappers, variables and aliases',
@@ -225,6 +242,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.git-hooks-bypass',
     group: 'commands',
+    owasp: 'ASI10',
     title: 'Git hooks bypassed',
     catches:
       'the agent switches off the git hooks that check its own work: --no-verify, core.hooksPath, HUSKY=0 and its peers, or a hook file removed, emptied or made non-executable',
@@ -235,6 +253,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.git-stage-all',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Stage everything at once',
     catches:
       'git add -A, git add ., git commit -a and other ways to stage every change instead of naming the files; off unless you switch it on',
@@ -245,6 +264,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.reverse-shell',
     group: 'commands',
+    owasp: 'ASI05',
     title: 'Reverse shell',
     catches:
       'a shell wired to a network socket: bash -i >& /dev/tcp/…, nc -e, socat exec:, a socket fd read by a shell, a shell piped to and from nc or telnet',
@@ -255,6 +275,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.node9-disarm',
     group: 'commands',
+    owasp: 'ASI10',
     title: 'node9 disarmed from the shell',
     catches:
       'a node9 command that clears a session flag, trusts a destination, pauses the gate or weakens a shield, run by the agent',
@@ -265,6 +286,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.sql-ddl',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Drop or truncate',
     catches: 'DROP or TRUNCATE through a database CLI or a database tool',
     values: ALL,
@@ -279,6 +301,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.sql-no-where',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Unscoped SQL mutation',
     catches: 'DELETE or UPDATE without a WHERE clause',
     values: ALL,
@@ -288,6 +311,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.temp-binary',
     group: 'commands',
+    owasp: 'ASI05',
     title: 'Binary from a temp directory',
     catches: 'an absolute path under /tmp, /var/tmp, /dev/shm or a world-writable file',
     values: ALL,
@@ -297,6 +321,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.disk-destroy',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Disk or filesystem destruction',
     catches: 'mkfs, shred, dd and the manual-terminal disaster list',
     values: ALL,
@@ -306,6 +331,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.dangerous-word',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Dangerous word',
     catches: 'a word from a pack or from the config dangerousWords list',
     values: ALL,
@@ -314,6 +340,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.unanalysable',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Command too nested to analyse',
     catches: 'wrappers nested past the depth the shell parser follows',
     values: ALL,
@@ -323,6 +350,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'commands.unknown',
     group: 'commands',
+    owasp: 'ASI02',
     title: 'Any command no check recognised',
     catches: 'the strict-mode catch-all',
     values: ['off', 'review'],
@@ -334,6 +362,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.secrets',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Secret in arguments',
     catches: 'an API key, token or private key matching one of the DLP patterns',
     values: ALL,
@@ -343,6 +372,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.secrets-weak',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Weak credential in arguments',
     catches: 'a JWT or a bearer token',
     values: ALL,
@@ -352,6 +382,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.pii',
     group: 'data',
+    owasp: 'ASI02',
     title: 'Personal data in arguments',
     catches: 'a social security number or a credit card number',
     values: ALL,
@@ -361,6 +392,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.credential-files',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Credential file read',
     catches: '~/.ssh, ~/.aws and .env files, through any reader or any file tool',
     values: ALL,
@@ -369,6 +401,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.credential-files-other',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Other credential file',
     catches: '.netrc, .npmrc, kube and docker config, and a copy of any credential file',
     values: ALL,
@@ -386,6 +419,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.pipe-chain',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Sensitive file piped to the network',
     catches: 'a credential file read and piped into curl, nc or ssh',
     values: ALL,
@@ -395,6 +429,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.pipe-chain-obfuscated',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Obfuscated exfiltration',
     catches: 'a sensitive file encoded or compressed on its way to the network',
     values: ALL,
@@ -407,6 +442,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.env-exfil',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Environment sent out',
     catches:
       'the whole environment (env, printenv, set, export -p, /proc/*/environ) handed to curl, nc or another sender, through $(…), a pipe or a variable',
@@ -417,6 +453,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.output-secrets',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Secret in tool output',
     catches: 'a credential a tool returned; the session is tainted, nothing is stopped',
     values: ['off', 'log'],
@@ -425,6 +462,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.prompt-secrets',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Secret in the prompt',
     catches: 'a credential pasted into the conversation',
     values: ALL,
@@ -433,6 +471,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.canary',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Decoy credential used',
     catches: 'a planted decoy value appears in a tool call',
     values: ALL,
@@ -444,6 +483,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'network.unknown-host',
     group: 'network',
+    owasp: 'ASI02',
     title: 'Unknown host',
     catches: 'a destination on neither the allowlist nor the builtin list',
     values: ['off', 'review', 'block'],
@@ -453,6 +493,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'network.internal-addresses',
     group: 'network',
+    owasp: 'ASI02',
     title: 'Internal address',
     catches: 'loopback, the RFC 1918 ranges and carrier-grade NAT',
     values: ['off', 'block'],
@@ -461,6 +502,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'network.metadata',
     group: 'network',
+    owasp: 'ASI02',
     title: 'Cloud metadata address',
     catches: '169.254.169.254 and its peers, link-local and multicast',
     values: ['block'],
@@ -471,6 +513,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'network.taint-egress',
     group: 'network',
+    owasp: 'ASI01',
     title: 'Tainted data sent out',
     catches:
       'a file or an output flagged earlier in the session reaches a host not on the allowlist',
@@ -486,6 +529,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'files.jail',
     group: 'files',
+    owasp: 'ASI03',
     title: 'Jailed path',
     catches: 'a path the workspace or the developer added to the jail',
     values: ALL,
@@ -496,6 +540,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'behavior.loops',
     group: 'behavior',
+    owasp: 'ASI08',
     title: 'Runaway loop',
     catches: 'the same tool call repeated past the threshold inside the window',
     values: ['off', 'block'],
@@ -505,6 +550,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'behavior.prompt-injection',
     group: 'behavior',
+    owasp: 'ASI01',
     title: 'Prompt injection in tool output',
     catches: 'instructions aimed at the model inside content a tool returned',
     values: ['off', 'log'],
@@ -513,6 +559,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'behavior.session-taint',
     group: 'behavior',
+    owasp: 'ASI01',
     title: 'Action after tainted output',
     catches: 'a network call or a write after a flagged file or a flagged tool output',
     values: ALL,
@@ -522,6 +569,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'behavior.untrusted-content',
     group: 'behavior',
+    owasp: 'ASI01',
     title: 'Send after reading outside content',
     catches:
       'a send to an unknown destination, a destination found in what was read, or a destructive call after the session read an email, a web page or an issue',
@@ -534,6 +582,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'loading.skill-tamper',
     group: 'loading',
+    owasp: 'ASI04',
     title: 'Skill file changed',
     catches: 'a skill or plugin file whose hash differs from the one approved',
     values: ['off', 'log', 'block'],
@@ -543,6 +592,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'loading.mcp-tamper',
     group: 'loading',
+    owasp: 'ASI04',
     title: 'MCP server changed',
     catches: 'tool definitions that differ from the pinned ones',
     values: ALL,
@@ -552,6 +602,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'loading.malicious-package',
     group: 'loading',
+    owasp: 'ASI04',
     title: 'Malicious package',
     catches: 'an install of a package the index flags',
     values: ALL,
@@ -561,6 +612,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'loading.unknown-registry',
     group: 'loading',
+    owasp: 'ASI04',
     title: 'Package from an unknown registry',
     catches:
       'an install that names a registry on the command line (--registry, --index-url, -i, npm_config_registry=…) that is not the public one, not in your npm, yarn, bun, pip or uv config and not on the allowlist',
@@ -576,6 +628,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'actions.money',
     group: 'actions',
+    owasp: 'ASI09',
     title: 'Money moves',
     catches:
       'a refund, payout, transfer, charge or withdrawal through an app with no protection of its own',
@@ -589,6 +642,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'actions.access',
     group: 'actions',
+    owasp: 'ASI09',
     title: 'Accounts and access change',
     catches:
       'a password, key, role, permission or user changed through an app with no protection of its own',
@@ -599,6 +653,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'actions.publish',
     group: 'actions',
+    owasp: 'ASI09',
     title: 'Something is published',
     catches:
       'a release, package, deploy or public post through an app with no protection of its own',
@@ -612,6 +667,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'actions.settings',
     group: 'actions',
+    owasp: 'ASI09',
     title: 'Repository, account and mailbox settings change',
     catches:
       'a repository made public, a deploy key, webhook or CI secret added, branch protection changed, mail forwarded outside or a public share link, through an app',
@@ -622,6 +678,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'actions.protected-branch',
     group: 'actions',
+    owasp: 'ASI09',
     title: 'The main branch changes through an app',
     catches:
       'a merge, a commit straight to main or master, or a CI workflow file written through an app',
@@ -659,9 +716,12 @@ function packRows(): CheckDef[] {
       if (!rule.name || SHIELD_RULES_FOLDED_INTO_PRODUCT[rule.name]) continue;
       const id = packRowId(shield.name, rule.name);
       if (!id) continue;
+      const owasp = packRowOwasp(id, shield.name);
+      if (!owasp) throw new Error(`pack row ${id} has no OWASP risk: add the shield to owasp.ts`);
       rows.push({
         id,
         group: 'commands',
+        owasp,
         title: rule.name.replace(SHIELD_RULE_NAME, '$3').replace(/-/g, ' '),
         catches: rule.description ?? rule.reason ?? '',
         values: ALL,
