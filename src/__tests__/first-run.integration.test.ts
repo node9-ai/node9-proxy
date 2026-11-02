@@ -44,7 +44,8 @@ fs.accessSync = function(file, ...args) {
       NODE9_NO_AUTO_DAEMON: '1',
     },
     encoding: 'utf8',
-    timeout: 10000,
+    // A loaded Windows runner can take over 10 s to start the full CLI.
+    timeout: 30000,
   });
 }
 afterEach(() => {
