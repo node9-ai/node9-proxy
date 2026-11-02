@@ -8,11 +8,11 @@
  * Requirements: `npm run build` first. Skipped on Windows (/dev/tty, stdio).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { claimSessionNotice, SESSION_NOTICE_INSTRUCTION } from '../notices/session-notice';
+import { claimSessionNotice, SESSION_NOTICE_NOTE } from '../notices/session-notice';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const cliExists = fs.existsSync(CLI);
@@ -24,6 +24,13 @@ const itUnix = it.skipIf(process.platform === 'win32' || !cliExists);
 const SHIELD = '\u{1F6E1}\uFE0F';
 const STANDARD = `${SHIELD} Node9 is on (Standard). Every action in this session is checked.`;
 const AUDIT = `${SHIELD} Node9 is in Audit mode: actions are logged, nothing is blocked.`;
+const CHANGED_AUDIT = `${SHIELD} Node9 level changed to Audit: actions are logged, nothing is blocked.`;
+const CHANGED_STRICT = `${SHIELD} Node9 level changed to Strict. Every action in this session is checked.`;
+const setMode = (home: string, mode: string) =>
+  fs.writeFileSync(
+    path.join(home, '.node9', 'config.json'),
+    JSON.stringify({ settings: { mode } })
+  );
 
 interface HookOut {
   hookSpecificOutput?: Record<string, unknown>;
@@ -111,7 +118,7 @@ describe('the session level notice at the real hook (fw#420)', () => {
     expect(r.status).toBe(0);
     const h = r.json?.hookSpecificOutput ?? {};
     expect(h.hookEventName).toBe('PreToolUse');
-    expect(h.additionalContext).toBe(`${STANDARD}\n${SESSION_NOTICE_INSTRUCTION}`);
+    expect(h.additionalContext).toBe(`${STANDARD}\n${SESSION_NOTICE_NOTE}`);
     expect(h.permissionDecision).toBeUndefined();
     expect(r.json?.systemMessage).toBe(STANDARD);
   });
@@ -194,18 +201,18 @@ describe('the session level notice at the real hook (fw#420)', () => {
 describe('claimSessionNotice', () => {
   it('is true once per session id', () => {
     const home = fs.mkdtempSync(path.join(room, 'claim-'));
-    expect(claimSessionNotice('s1', home)).toBe(true);
-    expect(claimSessionNotice('s1', home)).toBe(false);
-    expect(claimSessionNotice('s2', home)).toBe(true);
+    expect(claimSessionNotice('s1', home)).toBe('first');
+    expect(claimSessionNotice('s1', home)).toBeNull();
+    expect(claimSessionNotice('s2', home)).toBe('first');
   });
 
   it('removes flags older than seven days when a new session claims one', () => {
     const home = fs.mkdtempSync(path.join(room, 'gc-'));
-    expect(claimSessionNotice('old', home)).toBe(true);
+    expect(claimSessionNotice('old', home)).toBe('first');
     const old = path.join(home, '.node9', 'notice-sessions', 'old.node9-flag');
     const eightDays = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
     fs.utimesSync(old, eightDays, eightDays);
-    expect(claimSessionNotice('new', home)).toBe(true);
+    expect(claimSessionNotice('new', home)).toBe('first');
     expect(fs.existsSync(old)).toBe(false);
   });
 
@@ -220,14 +227,14 @@ describe('claimSessionNotice', () => {
     fs.utimesSync(oldFile, thirtyDays, thirtyDays);
     fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
     fs.symlinkSync(victim, path.join(home, '.node9', 'notice-sessions'));
-    expect(claimSessionNotice('s-link', home)).toBe(false);
+    expect(claimSessionNotice('s-link', home)).toBeNull();
     expect(fs.existsSync(oldFile)).toBe(true);
     expect(fs.readdirSync(victim)).toEqual(['old-notes.txt']);
   });
 
   itUnix('clean-up removes only old flag files, never other entries', () => {
     const home = fs.mkdtempSync(path.join(room, 'only-flags-'));
-    expect(claimSessionNotice('first', home)).toBe(true);
+    expect(claimSessionNotice('first', home)).toBe('first');
     const dir = path.join(home, '.node9', 'notice-sessions');
     const eightDays = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
     const notAFlag = path.join(dir, 'not a flag.txt');
@@ -244,7 +251,7 @@ describe('claimSessionNotice', () => {
     for (const p of [notAFlag, makefile, subdir, outsideFile])
       fs.utimesSync(p, eightDays, eightDays);
     fs.lutimesSync(link, eightDays, eightDays);
-    expect(claimSessionNotice('second', home)).toBe(true);
+    expect(claimSessionNotice('second', home)).toBe('first');
     expect(fs.existsSync(notAFlag)).toBe(true);
     expect(fs.existsSync(makefile)).toBe(true);
     expect(fs.existsSync(subdir)).toBe(true);
@@ -254,8 +261,67 @@ describe('claimSessionNotice', () => {
 
   it('refuses an id that is not a plain name', () => {
     const home = fs.mkdtempSync(path.join(room, 'bad-'));
-    expect(claimSessionNotice('../x', home)).toBe(false);
-    expect(claimSessionNotice('', home)).toBe(false);
-    expect(claimSessionNotice(undefined, home)).toBe(false);
+    expect(claimSessionNotice('../x', home)).toBeNull();
+    expect(claimSessionNotice('', home)).toBeNull();
+    expect(claimSessionNotice(undefined, home)).toBeNull();
+  });
+});
+
+// 2026-11-02, after 2.48.0: Claude repeated the notice in every later reply,
+// because the quote instruction stays in the conversation, and after the
+// founder moved the workspace back to Audit the repeated line named the old
+// level. Design: docs/roadmap/active/notice-repeat-fix-code-design.md.
+describe('the notice is shown once, and once more only when the level changes', () => {
+  // Fallback c: the measured "once" wording still repeated (1 session in 5).
+  it('the session notice asks the agent for nothing but silence', () => {
+    expect(SESSION_NOTICE_NOTE).not.toMatch(/start your|show the line|quote/i);
+    expect(SESSION_NOTICE_NOTE).toMatch(/do not mention it/i);
+  });
+
+  itUnix('a level change mid-session gives one notice with the new level, then nothing', () => {
+    const where = makeHome('change', 'standard');
+    expect(check(where, 'sess-chg', 'ls').json?.systemMessage).toBe(STANDARD);
+    setMode(where.home, 'audit');
+    const changed = check(where, 'sess-chg', 'ls');
+    expect(changed.status).toBe(0);
+    expect(changed.json?.systemMessage).toBe(CHANGED_AUDIT);
+    expect(String(changed.json?.hookSpecificOutput?.additionalContext)).toContain(CHANGED_AUDIT);
+    expect(check(where, 'sess-chg', 'pwd').out).toBe('');
+    setMode(where.home, 'strict');
+    expect(check(where, 'sess-chg', 'ls').json?.systemMessage).toBe(CHANGED_STRICT);
+  });
+
+  itUnix('a flag written by 2.48.0 (no level) is filled in without a second notice', () => {
+    const where = makeHome('legacy', 'standard');
+    const dir = path.join(where.home, '.node9', 'notice-sessions');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const flag = path.join(dir, 'sess-old.node9-flag');
+    fs.writeFileSync(flag, '');
+    expect(check(where, 'sess-old', 'ls').out).toBe('');
+    expect(fs.readFileSync(flag, 'utf8')).toBe('standard');
+    setMode(where.home, 'audit');
+    expect(check(where, 'sess-old', 'ls').json?.systemMessage).toBe(CHANGED_AUDIT);
+  });
+
+  // Review: a FIFO (or a link to one) in place of the flag must not stall the
+  // hook: it is not a regular file, so it is not read.
+  itUnix('a FIFO in place of the flag gives no notice and does not hang', () => {
+    const where = makeHome('fifo', 'standard');
+    const dir = path.join(where.home, '.node9', 'notice-sessions');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    execFileSync('mkfifo', [path.join(dir, 'sess-fifo.node9-flag')]);
+    const started = Date.now();
+    const r = check(where, 'sess-fifo', 'ls');
+    expect(r.status).toBe(0);
+    expect(r.out).toBe('');
+    expect(Date.now() - started).toBeLessThan(20_000);
+  });
+
+  it('claimSessionNotice says first, then nothing, then changed', () => {
+    const home = fs.mkdtempSync(path.join(room, 'kinds-'));
+    expect(claimSessionNotice('k1', home, 'standard')).toBe('first');
+    expect(claimSessionNotice('k1', home, 'standard')).toBeNull();
+    expect(claimSessionNotice('k1', home, 'audit')).toBe('changed');
+    expect(claimSessionNotice('k1', home, 'audit')).toBeNull();
   });
 });

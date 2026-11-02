@@ -10,7 +10,7 @@ import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { checkPause } from '../../auth/state';
 import { isDaemonRunning, notifyUserMentions } from '../../auth/daemon';
-import { extractContentDestinations } from '@node9/policy-engine';
+import { extractContentDestinations, levelOf } from '@node9/policy-engine';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import {
@@ -1034,15 +1034,17 @@ export function registerCheckCommand(program: Command): void {
           // A paused node9 checks nothing: no "is on" notice, and the flag stays
           // free for the first checked call after the pause.
           const allowExit = (checkedBy?: string): never => {
-            if (
+            // Once per session, and once more when the level changes mid-session.
+            const notice =
               checkedBy !== 'paused' &&
               agent === 'Claude Code' &&
               !isSubagentCall &&
-              sessionNoticeEnabled() &&
-              claimSessionNotice(safeSessionId)
-            ) {
+              sessionNoticeEnabled()
+                ? claimSessionNotice(safeSessionId, os.homedir(), levelOf(config.settings.mode))
+                : null;
+            if (notice) {
               try {
-                fs.writeSync(1, sessionNoticeOutput(config.settings.mode) + '\n');
+                fs.writeSync(1, sessionNoticeOutput(config.settings.mode, notice) + '\n');
               } catch {
                 /* UX only */
               }

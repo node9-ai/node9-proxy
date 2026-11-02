@@ -352,6 +352,12 @@ describe('every block message opens with a quotable node9 line (fw#420)', () => 
   });
 });
 
+describe('the block line is quoted once (after 2.48.0)', () => {
+  it('the instruction keeps the line out of later replies', () => {
+    expect(QUOTE_INSTRUCTION).toMatch(/leave it out of later replies/i);
+  });
+});
+
 describe('the user line cannot be split or stretched by its inputs (fw#420)', () => {
   // Review: the egress rule sentence is the reason itself, which opens with
   // "Blocked:"; the line must not read "Node9 blocked: Blocked: ...".
