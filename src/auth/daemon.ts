@@ -20,26 +20,50 @@ const ACTIVITY_SOCKET_PATH =
     ? '\\\\.\\pipe\\node9-activity'
     : path.join(os.tmpdir(), 'node9-activity.sock');
 
+/** How long a hook waits for the daemon to take an activity line. A healthy
+ *  local socket closes in a few milliseconds; the same bound as
+ *  isDaemonReachable. */
+export const ACTIVITY_SOCKET_TIMEOUT_MS = 500;
+
 /**
  * Write a message to the activity Unix socket (flight recorder + session counters).
  * Returns true if the send succeeded, false if the daemon is not reachable.
  * Callers that set fromCLI=true on POST /check must check this return value —
  * if it's false, pass fromCLI=false so the daemon emits the activity event itself.
+ *
+ * Bounded: every hook awaits this before the gate judges and again after, so a
+ * daemon that accepts the connection and never closes it (event loop blocked,
+ * a debugger, SIGSTOP) used to hold every agent tool call. After `timeoutMs`
+ * the socket is destroyed and the answer is false; the daemon then emits the
+ * line itself, so `node9 tail` may show it twice, never zero times.
  */
-export function notifyActivitySocket(data: Record<string, unknown>): Promise<boolean> {
+export function notifyActivitySocket(
+  data: Record<string, unknown>,
+  opts: { timeoutMs?: number; socketPath?: string } = {}
+): Promise<boolean> {
   // A forecast run never opens the socket.
   if (forecastRun()) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let sock: net.Socket | null = null;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!ok) sock?.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), opts.timeoutMs ?? ACTIVITY_SOCKET_TIMEOUT_MS);
     try {
       const payload = JSON.stringify(data);
-      const sock = net.createConnection(ACTIVITY_SOCKET_PATH);
+      sock = net.createConnection(opts.socketPath ?? ACTIVITY_SOCKET_PATH);
       sock.on('connect', () => {
-        sock.on('close', () => resolve(true));
-        sock.end(payload);
+        sock!.on('close', () => finish(true));
+        sock!.end(payload);
       });
-      sock.on('error', () => resolve(false));
+      sock.on('error', () => finish(false));
     } catch {
-      resolve(false);
+      finish(false);
     }
   });
 }
