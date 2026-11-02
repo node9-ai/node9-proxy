@@ -796,6 +796,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // arrays, `while read` fed by a here-string, a heredoc or a literal pipe,
 // `echo NAMES | xargs CMD`, `$'...'` strings, diff/cmp/comm/paste/join as
 // readers, and `source .env` followed by a print of the environment.
+// Folded in after the independent review: `source .env; echo $X`, export -p
+// and declare -px as prints, `. "$PWD/.env"`, `printf '%s\n' NAMES | xargs`,
+// a here-string into xargs, `for f; do` over "$@", a glob in a directory part
+// (`~/.ss?/id_rsa`), `[!...]` classes, and `find -name .env | xargs cat` as a
+// read; an `xargs -I` expansion is bounded (16 KB).
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v36';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
@@ -856,7 +861,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v36';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'd4fea1fb072a38b9';
+export const CANONICAL_EXTRACTOR_HASH = '891010ee9720deb4';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

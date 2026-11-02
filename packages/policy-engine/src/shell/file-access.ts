@@ -51,6 +51,9 @@ interface State {
 const MAX_ALTERNATIVES = 64;
 const MAX_CALL_DEPTH = 4;
 const MAX_CALL_WALKS = 256;
+/** Longest script `echo NAMES | xargs CMD` is expanded into. */
+const MAX_XARGS_PAYLOAD = 16_384;
+
 const POSITIONAL = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '@', '*', '#'];
 const MAX_DEPTH = 64;
 const MAX_PAYLOAD_DEPTH = 24;
@@ -931,11 +934,20 @@ export function collectShellFileAccesses(
       .slice(0, MAX_ALTERNATIVES);
     if (!items.length) return null;
     const q = (w: string): string => `'${w.replace(/'/g, `'\\''`)}'`;
-    if (replace)
-      return items
-        .map((it) => run.map((w) => q(w.split(replace as string).join(it))).join(' '))
-        .join('\n');
-    return [...run, ...items].map(q).join(' ');
+    // `-I X` with many X in the command multiplies its length by the item
+    // count: past a bound the names are left unknown (review, 2026-11-02: a
+    // 4 KB command took seconds to parse).
+    const out: string[] = [];
+    let size = 0;
+    const lines = replace
+      ? items.map((it) => run.map((w) => q(w.split(replace as string).join(it))).join(' '))
+      : [[...run, ...items].map(q).join(' ')];
+    for (const line of lines) {
+      size += line.length + 1;
+      if (size > MAX_XARGS_PAYLOAD) return null;
+      out.push(line);
+    }
+    return out.join('\n');
   }
   /**
    * A call of a function defined in this script: walk its body again with $1..
@@ -997,8 +1009,17 @@ export function collectShellFileAccesses(
     const rest = words.slice(head + 1) as string[];
     if (name === 'cat' && rest.length === 0) return stdinText(stmt);
     if (name === 'echo') return rest.filter((w) => !/^-[neE]+$/.test(w)).join(' ');
-    if (name === 'printf' && rest.length === 1 && !rest[0].includes('%'))
-      return rest[0].replace(/\\n/g, '\n');
+    const unescape = (t: string): string =>
+      t.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\0/g, '\0');
+    if (name === 'printf' && rest.length === 1 && !rest[0].includes('%')) return unescape(rest[0]);
+    // `printf '%s\n' a b`: each argument, then the separator.
+    if (name === 'printf' && rest.length > 1 && /^%s(\\n|\\0|\\t| )?$/.test(rest[0])) {
+      const sep = unescape(rest[0].slice(2)) || '';
+      return rest
+        .slice(1)
+        .map((a) => a + sep)
+        .join('');
+    }
     return null;
   }
   /** `bash <<EOF`, `bash <<< '...'`: the shell runs its stdin text. */
@@ -1028,6 +1049,9 @@ export function collectShellFileAccesses(
     const cmd = stmt.Cmd;
     if (!cmd) return;
     stdinScript(stmt, state, depth);
+    // `xargs CMD <<< NAMES`: the names reach CMD as operands.
+    const fedText = stdinText(stmt);
+    if (fedText !== null) nestedPayload(xargsPayload(stmt, fedText), clone(state), depth);
     switch (cmd.kind) {
       case 'CallExpr':
         call(cmd, state, depth);
@@ -1114,7 +1138,10 @@ export function collectShellFileAccesses(
       }
       case 'ForClause': {
         const local = clone(state);
-        if (cmd.Loop?.Name?.Value) {
+        if (cmd.Loop?.Name?.Value && !(cmd.Loop.Items ?? []).length) {
+          // `for f; do ...` loops over "$@".
+          local.vars.set(cmd.Loop.Name.Value, state.vars.get('@') ?? null);
+        } else if (cmd.Loop?.Name?.Value) {
           const items = (cmd.Loop.Items ?? []).flatMap((w: any) => wordValues(w, state));
           local.vars.set(
             cmd.Loop.Name.Value,

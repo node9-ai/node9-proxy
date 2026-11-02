@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { evaluatePolicy, type PolicyConfig } from './index';
+import { analyzeFsOperation } from '../shell/index';
 import projectJail from '../shields/builtin/project-jail.json';
 import type { SmartRule } from '../types';
 
@@ -118,7 +119,6 @@ describe('step 3: names node9 cannot know', () => {
     'find . | xargs cat',
     'find . -type f -print0 | xargs -0 cat',
     'ls -A | while read f; do cat "$f"; done',
-    'find . -name ".e*" | while read -r f; do sed -n 1p "$f"; done',
     'cat $(find . -type f)',
     'for f in $(find ~/.ssh -type f); do cat "$f"; done',
     'fd -H . | xargs grep -l KEY',
@@ -142,5 +142,52 @@ describe('step 3: names node9 cannot know', () => {
     const strict = await D(command, 'strict');
     expect(strict.checkId ?? '').not.toBe('data.credential-files-unknown');
     expect(JSON.stringify(await D(command))).not.toContain('data.credential-files-unknown');
+  });
+});
+
+// Independent review, 2026-11-02 (before release).
+describe('review: shapes the first build still missed', () => {
+  it.each([
+    ['source, then echo of a variable', 'source .env; echo $OPENAI_API_KEY'],
+    ['dot-source, then export -p', '. .env; export -p'],
+    ['source, then declare -px', 'source .env; declare -px'],
+    ['source of $PWD/.env, then env', '. "$PWD/.env"; env'],
+    ["printf '%s\\n' into xargs", "printf '%s\\n' .env | xargs cat"],
+    ["printf '%s\\n' of a key into xargs", "printf '%s\\n' ~/.ssh/id_rsa | xargs cat"],
+    ['a glob in the directory part', 'cat ~/.ss?/id_rsa'],
+    ['a bracket glob in the directory part', 'cat ~/.[s]sh/id_rsa'],
+    ['find -name .env into xargs', 'find . -name .env | xargs cat'],
+    [
+      'find -name .e* into a read loop',
+      'find . -name ".e*" | while read -r f; do sed -n 1p "$f"; done',
+    ],
+    ['find -name .env -print0 into xargs -0', 'find . -name .env -print0 | xargs -0 cat'],
+    ['a negated bracket glob', 'cat .[!a]nv'],
+    ['a for loop over "$@"', 'set -- .env; for f; do cat "$f"; done'],
+    ['a here-string into xargs', 'xargs cat <<< .env'],
+    ['printf with \\0 into xargs -0', "printf '.env\\0' | xargs -0 cat"],
+    ['a one-character suffix glob', 'cat .env.?'],
+  ])('blocks %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+
+  it('a find that excludes a pattern still counts as a listing', async () => {
+    const strict = { ...config, settings: { mode: 'strict' } } as unknown as PolicyConfig;
+    const v = await evaluatePolicy(
+      strict,
+      'Bash',
+      { command: "find . -not -name '*.ts' | xargs cat" },
+      { agent: 'claude' },
+      {}
+    );
+    expect(v.checkId).toBe('data.credential-files-unknown');
+  });
+
+  it('a short xargs -I command cannot blow up into a slow check', async () => {
+    const items = Array.from({ length: 64 }, (_, i) => `item${i}`.padEnd(40, 'x')).join(' ');
+    const command = `echo ${items} | xargs -I X cat ${'X'.repeat(1000)}`;
+    const started = Date.now();
+    analyzeFsOperation(command);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

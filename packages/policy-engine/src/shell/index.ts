@@ -5055,12 +5055,35 @@ function sourcedAndPrinted(command: string): FsOpVerdict | null {
   const sourced: string[] = [];
   let printed = false;
   walk(f, (node) => {
-    if (node.kind !== 'CallExpr') return true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const words = ((node as any).Args ?? []).map((a: any) => resolveWordLiteral(a));
+    const n = node as any;
+    if (n.kind === 'DeclClause') {
+      // `export -p`, `declare -px`, a bare `export`: no names, only flags.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any[] = n.Args ?? [];
+      const flagsOnly = args.every(
+        (a) => !a.Name?.Value && /^-[a-zA-Z]*$/.test(resolveWordLiteral(a.Value) ?? '')
+      );
+      if (flagsOnly) printed = true;
+      return true;
+    }
+    if (n.kind !== 'CallExpr') return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const args: any[] = n.Args ?? [];
+    const head = resolveWordLiteral(args[0]);
+    if ((head === 'source' || head === '.') && args[1]) {
+      const p = resolveWordLiteral(args[1]) ?? pathWithKnownDirs(args[1]);
+      if (p) sourced.push(p);
+      return true;
+    }
+    // `echo $KEY` after sourcing prints a value from the file.
+    if ((head === 'echo' || head === 'printf') && args.slice(1).some(hasParamExp)) {
+      printed = true;
+      return true;
+    }
+    const words = args.map((a) => resolveWordLiteral(a));
     if (words.some((w: string | null) => w === null) || !words.length) return true;
-    if ((words[0] === 'source' || words[0] === '.') && words[1]) sourced.push(words[1]);
-    else if (printsEnvironment(words as string[])) printed = true;
+    if (printsEnvironment(words as string[])) printed = true;
     return true;
   });
   if (!printed) return null;
@@ -5069,6 +5092,105 @@ function sourcedAndPrinted(command: string): FsOpVerdict | null {
     if (hit) return hit;
   }
   return null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasParamExp(word: any): boolean {
+  let found = false;
+  walk(word, (n) => {
+    if (n.kind === 'ParamExp') found = true;
+    return !found;
+  });
+  return found;
+}
+
+/** A word whose only variables are $PWD and $HOME, spelt out: `"$PWD/.env"`
+ *  is `./.env`. Null for any other variable or substitution. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function pathWithKnownDirs(word: any): string | null {
+  let out = '';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const visit = (parts: any[]): boolean => {
+    for (const p of parts ?? []) {
+      if (p.kind === 'DblQuoted') {
+        if (!visit(p.Parts)) return false;
+      } else if (p.kind === 'ParamExp') {
+        const name = p.Param?.Value;
+        if (p.Exp || p.Index || p.Slice || p.Repl || p.Length || p.Excl) return false;
+        if (name === 'PWD') out += '.';
+        else if (name === 'HOME') out += '~';
+        else return false;
+      } else {
+        const v = resolveWordLiteral({ Parts: [p] });
+        if (v === null) return false;
+        out += v;
+      }
+    }
+    return true;
+  };
+  return visit(word?.Parts) ? out : null;
+}
+
+/** find's -name / -iname patterns that restrict what it lists. A pattern
+ *  behind -not or ! excludes instead, so it restricts nothing. */
+function findNamePatterns(rest: (string | null)[]): string[] {
+  const patterns: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const negated = rest[i - 1] === '-not' || rest[i - 1] === '!';
+    if (['-name', '-iname'].includes(rest[i] ?? '') && rest[i + 1] != null && !negated)
+      patterns.push(rest[i + 1] as string);
+  }
+  return patterns;
+}
+
+/** `find . -name .env | xargs cat`: a find whose -name patterns all aim at
+ *  jailed names, feeding a reader, reads those files as surely as
+ *  `find -name .env -exec cat {} +` (which the jail blocks). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function findOfJailedNames(stmt: any): FsOpVerdict | null {
+  const cmd = stmt?.Cmd;
+  if (cmd?.kind !== 'CallExpr') return null;
+  const words = callWords(cmd);
+  const head = unwrapCommandHead(words);
+  if (baseWord(words[head]) !== 'find') return null;
+  const patterns = findNamePatterns(words.slice(head + 1));
+  if (!patterns.length) return null;
+  let hit: FsOpVerdict | null = null;
+  for (const p of patterns) {
+    let m: (n: string) => boolean;
+    try {
+      m = picomatch(shellGlob(p), { dot: true });
+    } catch {
+      return null;
+    }
+    if (m('n9-any-name') || m('.n9-any-name')) return null;
+    const name = JAILED_GLOB_NAMES.find((n) => m(n));
+    if (!name) return null;
+    hit ??= matchSensitivePath(name);
+  }
+  return hit;
+}
+
+/** A find of jailed names piped into xargs READER or a read loop with a reader. */
+function findPipedToReader(command: string): FsOpVerdict | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  let hit: FsOpVerdict | null = null;
+  walk(f, (n) => {
+    if (hit) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (node.kind !== 'BinaryCmd' || !node.Y) return true;
+    const found = findOfJailedNames(node.X);
+    if (!found) return true;
+    const y = node.Y.Cmd;
+    if (y?.kind === 'CallExpr') {
+      const words = callWords(y);
+      if (baseWord(words[0]) === 'xargs' && hasReader(y)) hit = found;
+    } else if (y?.kind === 'WhileClause' && hasReader({ kind: 'Block', Stmts: y.Do })) hit = found;
+    return !hit;
+  });
+  return hit;
 }
 
 /** A listing command whose output can name a jailed file: `find` without a
@@ -5087,16 +5209,12 @@ function listsJailedNames(words: (string | null)[]): boolean {
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '-type' && rest[i + 1] === 'd') return false;
   }
-  const patterns: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    if (['-name', '-iname'].includes(rest[i] ?? '') && rest[i + 1] != null)
-      patterns.push(rest[i + 1] as string);
-  }
+  const patterns = findNamePatterns(rest);
   if (!patterns.length) return true;
   const names = [...JAILED_GLOB_NAMES, 'id_rsa', 'id_ed25519', 'credentials'];
   return patterns.some((p) => {
     try {
-      const m = picomatch(p, { dot: true, nocase: true });
+      const m = picomatch(shellGlob(p), { dot: true, nocase: true });
       return names.some((n) => m(n));
     } catch {
       return true;
@@ -5204,14 +5322,40 @@ export function analyzeUnknownCredentialReads(command: string): { reason: string
 /** The jailed names a glob in a directory is tested against. Credential file
  *  names (a review rule) are left out on purpose: `*.json` would match
  *  credentials.json in every project, so only a literal name reaches them. */
-const JAILED_GLOB_NAMES = ['.env', '.env.local', '.env.production', '.env.development.local'];
+const JAILED_GLOB_NAMES = [
+  '.env',
+  '.env.x',
+  '.env.local',
+  '.env.production',
+  '.env.development.local',
+];
+/** Credential directories a glob segment can stand for (`~/.ss?/id_rsa`). */
+const JAILED_DIR_NAMES = ['.ssh', '.aws'];
+
+/** picomatch reads `[!a]` literally; the shell's negated class is `[^a]`. */
+const shellGlob = (p: string): string => p.replace(/\[!/g, '[^');
 const GLOB_META = /(?<!\\)[*?[]/;
 
 /** The jail verdict for a glob operand: anything inside a jailed directory
  *  (`~/.ssh/id_*`, `~/.aws/*`), or a last segment that can select a jailed name
  *  (`.e*`, `.en?`). Shell `*` does not select dotfiles; find's does (dotGlob). */
 function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null {
-  const parts = glob.split('/');
+  // A glob segment in the directory part that can be a credential directory
+  // is read as that directory: `~/.ss?/id_rsa` is `~/.ssh/id_rsa`.
+  const raw = glob.split('/');
+  const parts = raw.map((seg, i) => {
+    if (i === raw.length - 1 || !GLOB_META.test(seg)) return seg;
+    try {
+      // Shell rules: `*` and `**` do not select a dot directory, and a segment
+      // that selects any name is not aimed at a credential directory.
+      const m = picomatch(shellGlob(seg), { dot: false });
+      if (m('n9-any-name') || m('.n9-any-name')) return seg;
+      return JAILED_DIR_NAMES.find((d) => m(d)) ?? seg;
+    } catch {
+      return seg;
+    }
+  });
+  glob = parts.join('/');
   const first = parts.findIndex((seg) => GLOB_META.test(seg));
   if (first < 0) return matchSensitivePath(glob);
   const prefix = parts.slice(0, first).join('/');
@@ -5224,7 +5368,7 @@ function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null 
   }
   let selects: (name: string) => boolean;
   try {
-    selects = picomatch(last, { dot: dotGlob });
+    selects = picomatch(shellGlob(last), { dot: dotGlob });
   } catch {
     return null;
   }
@@ -5250,6 +5394,8 @@ function structuralJailRead(command: string): FsOpVerdict | null {
   } catch {
     return null;
   }
+  const piped = findPipedToReader(command);
+  if (piped) return piped;
   const sourcedHit = sourcedAndPrinted(command);
   if (sourcedHit?.verdict === 'block') return sourcedHit;
   let review: FsOpVerdict | null = sourcedHit;
