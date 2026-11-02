@@ -32,6 +32,8 @@ const USER_LINE_ICON = '\u{1F6E1}\uFE0F';
 export const QUOTE_INSTRUCTION =
   'Start your reply with the line above, exactly as written, on its own line.';
 const USER_LINE_PART_MAX = 160;
+/** Input kept before cleaning a part of the user line (bounds the regex work). */
+const ONE_LINE_INPUT_MAX = 1000;
 
 /** Pictographs and their joiners. Labels carry them for the dashboard; neither
  *  the agent's text (MSG-3) nor a quoted sentence wants them. */
@@ -43,7 +45,9 @@ const PICTOGRAPHS = /[\p{Extended_Pictographic}\u200D\uFE0F]/gu;
  *  sentences and reasons come from config or from the agent's own arguments,
  *  so a newline in them must not start a second "instruction". */
 function oneLine(text: string): string {
-  return stripTerminalEscapes(text)
+  // Cut first: every later step is linear or worse in the input, and the line
+  // keeps at most USER_LINE_PART_MAX characters of it anyway.
+  return stripTerminalEscapes(text.slice(0, ONE_LINE_INPUT_MAX))
     .replace(/\s*\u2014\s*/g, ', ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -91,6 +95,11 @@ function firstSentence(text: string): string {
   return plain.split(/(?<=[.!?])\s+(?=[A-Z])/)[0] ?? plain;
 }
 
+/** Drops a leading "Node9:" and "Blocked:" that the line already says. */
+function withoutLeadingVerdict(text: string): string {
+  return text.replace(/^node9\b\s*:?\s*/i, '').replace(/^blocked\b\s*:?\s*/i, '');
+}
+
 const IS_BLOCKED_BY = /^(.+?) (?:is|are) blocked by (.+?)\.?$/i;
 const IS_BLOCKED = /^(.+?) (?:is|are) blocked\.?$/i;
 const COMMA_BLOCKED_BY = /^(.+?), blocked by (.+?)\.?$/i;
@@ -101,7 +110,8 @@ const COMMA_BLOCKED_BY = /^(.+?), blocked by (.+?)\.?$/i;
  *  sentence, a user's own rule included, is kept as written. */
 function ruleWhat(description: string | undefined): string {
   if (!description) return '';
-  const s = firstSentence(description);
+  // An egress rule sentence is the reason itself ("Blocked: <address> is ...").
+  const s = withoutLeadingVerdict(firstSentence(description));
   const by = s.match(IS_BLOCKED_BY) ?? s.match(COMMA_BLOCKED_BY);
   if (by) return userLinePart(`${by[1]} (${by[2]})`);
   const bare = s.match(IS_BLOCKED);
@@ -113,9 +123,7 @@ function ruleWhat(description: string | undefined): string {
  *  the line already says. A bare 'Node9 blocked "Bash".' adds nothing: ''. */
 function reasonSentence(reason: string | undefined): string {
   if (!reason) return '';
-  const s = firstSentence(reason)
-    .replace(/^node9\b\s*:?\s*/i, '')
-    .replace(/^blocked\b\s*:?\s*/i, '');
+  const s = withoutLeadingVerdict(firstSentence(reason));
   if (/^("[^"]*")?\.?$/.test(s)) return '';
   return userLinePart(s);
 }

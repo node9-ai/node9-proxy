@@ -72,7 +72,10 @@ export function claimSessionNotice(sessionId: string | undefined, home = os.home
   if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) return false;
   const dir = path.join(home, '.node9', 'notice-sessions');
   try {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // The agent can reach ~/.node9 with mv and ln: a link here would point the
+    // flag write and the clean-up below at a directory of its choosing.
+    if (!isOwnRealDir(dir)) return false;
     fs.closeSync(fs.openSync(path.join(dir, sessionId), 'wx'));
   } catch {
     return false;
@@ -81,13 +84,25 @@ export function claimSessionNotice(sessionId: string | undefined, home = os.home
   return true;
 }
 
+/** A real directory (not a link) owned by this user. */
+function isOwnRealDir(dir: string): boolean {
+  const st = fs.lstatSync(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) return false;
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false;
+  return true;
+}
+
+/** Removes old flag files only: regular files with a session-id name. Links,
+ *  directories and any other name are left alone. */
 function removeOldFlags(dir: string): void {
   const cutoff = Date.now() - FLAG_TTL_MS;
   try {
     for (const name of fs.readdirSync(dir)) {
+      if (!SAFE_SESSION_ID.test(name)) continue;
       const p = path.join(dir, name);
       try {
-        if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+        const st = fs.lstatSync(p);
+        if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(p);
       } catch {
         /* another hook removed it, or it is unreadable: leave it */
       }

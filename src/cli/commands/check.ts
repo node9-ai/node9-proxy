@@ -1018,8 +1018,11 @@ export function registerCheckCommand(program: Command): void {
           const isSubagentCall =
             typeof (payload as { agent_id?: unknown }).agent_id === 'string' &&
             (payload as { agent_id: string }).agent_id !== '';
-          const allowExit = (): never => {
+          // A paused node9 checks nothing: no "is on" notice, and the flag stays
+          // free for the first checked call after the pause.
+          const allowExit = (checkedBy?: string): never => {
             if (
+              checkedBy !== 'paused' &&
               agent === 'Claude Code' &&
               !isSubagentCall &&
               sessionNoticeEnabled() &&
@@ -1039,7 +1042,7 @@ export function registerCheckCommand(program: Command): void {
             // output as a hook error regardless of exit code (see GitHub issue).
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')
               process.stderr.write(`✓ node9 [${result.checkedBy}]: "${toolName}" allowed\n`);
-            allowExit();
+            allowExit(result.checkedBy);
           }
 
           // Inline-ask: a deferred review → hand the approve/deny prompt to the
@@ -1077,7 +1080,7 @@ export function registerCheckCommand(program: Command): void {
               if (retry.approved) {
                 if (retry.checkedBy && process.env.NODE9_DEBUG === '1')
                   process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);
-                allowExit();
+                allowExit(retry.checkedBy);
               }
               // Denials communicate via exit code (non-zero) and JSON on stdout —
               // stderr is intentionally unused so Claude Code never treats a block

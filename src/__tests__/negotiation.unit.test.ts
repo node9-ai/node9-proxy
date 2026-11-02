@@ -353,6 +353,37 @@ describe('every block message opens with a quotable node9 line (fw#420)', () => 
 });
 
 describe('the user line cannot be split or stretched by its inputs (fw#420)', () => {
+  // Review: the egress rule sentence is the reason itself, which opens with
+  // "Blocked:"; the line must not read "Node9 blocked: Blocked: ...".
+  it('a rule sentence that opens with "Blocked:" is not repeated', () => {
+    const reason =
+      'Blocked: 169.254.169.254 is a cloud instance-metadata endpoint, the classic credential-theft target. This address cannot be allowlisted.';
+    const msg = buildNegotiationMessage(
+      '\u{1F310} Node9 Egress (Protected Address)',
+      false,
+      reason,
+      undefined,
+      {
+        ruleDescription: reason,
+      }
+    );
+    expect(lines(msg)[0]).toBe(
+      `${SHIELD} Node9 blocked: 169.254.169.254 is a cloud instance-metadata endpoint, the classic credential-theft target`
+    );
+  });
+
+  // Review: a long run of dots in agent-reachable text made the trailing-dot
+  // trim quadratic (seconds per block message). The line is built in time.
+  it('a long run of dots in the reason or the rule sentence stays fast', () => {
+    const dots = 'x' + '.'.repeat(40_000) + 'y';
+    const started = Date.now();
+    const msg = buildNegotiationMessage('x', false, dots + ' ' + '.'.repeat(40_000), undefined, {
+      ruleDescription: dots + ' ' + '.'.repeat(40_000),
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(lines(msg)[0].length).toBeLessThan(400);
+  });
+
   it('a newline in a path does not start a second line', () => {
     const msg = buildNegotiationMessage('x', false, undefined, undefined, {
       kind: 'protected-path',

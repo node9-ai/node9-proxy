@@ -65,9 +65,10 @@ function check(
   sessionId: string,
   command: string,
   agentFlag?: string,
-  extra: Record<string, unknown> = {}
+  extra: Record<string, unknown> = {},
+  envExtra: Record<string, string> = {}
 ) {
-  const env = { ...process.env };
+  const env = { ...process.env, ...envExtra };
   delete env.NODE9_API_KEY;
   delete env.NODE9_API_URL;
   const payload = {
@@ -172,6 +173,16 @@ describe('the session level notice at the real hook (fw#420)', () => {
     expect(r.out).toBe('');
   });
 
+  // Review: a paused node9 checks nothing, so it must not say it does, and the
+  // flag stays free for the first checked call after the pause.
+  itUnix('a paused node9 shows no notice and keeps the flag for later', () => {
+    const where = makeHome('paused');
+    const paused = check(where, 'sess-paused', 'ls', undefined, {}, { NODE9_PAUSED: '1' });
+    expect(paused.status).toBe(0);
+    expect(paused.out).toBe('');
+    expect(check(where, 'sess-paused', 'ls').json?.systemMessage).toBe(STANDARD);
+  });
+
   itUnix('a session id that cannot be a file name gets no notice', () => {
     const where = makeHome('badid');
     const r = check(where, '../../etc/x', 'ls');
@@ -196,6 +207,45 @@ describe('claimSessionNotice', () => {
     fs.utimesSync(old, eightDays, eightDays);
     expect(claimSessionNotice('new', home)).toBe(true);
     expect(fs.existsSync(old)).toBe(false);
+  });
+
+  // Review: the flag directory sits under ~/.node9, which the agent can reach
+  // with mv and ln. A link there must not let node9 delete files elsewhere.
+  itUnix('a flag directory that is a link is not used, and nothing it points to is removed', () => {
+    const home = fs.mkdtempSync(path.join(room, 'link-'));
+    const victim = fs.mkdtempSync(path.join(room, 'victim-'));
+    const oldFile = path.join(victim, 'old-notes.txt');
+    fs.writeFileSync(oldFile, 'keep me');
+    const thirtyDays = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(oldFile, thirtyDays, thirtyDays);
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.symlinkSync(victim, path.join(home, '.node9', 'notice-sessions'));
+    expect(claimSessionNotice('s-link', home)).toBe(false);
+    expect(fs.existsSync(oldFile)).toBe(true);
+    expect(fs.existsSync(path.join(victim, 's-link'))).toBe(false);
+  });
+
+  itUnix('clean-up removes only old flag files, never other entries', () => {
+    const home = fs.mkdtempSync(path.join(room, 'only-flags-'));
+    expect(claimSessionNotice('first', home)).toBe(true);
+    const dir = path.join(home, '.node9', 'notice-sessions');
+    const eightDays = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+    const notAFlag = path.join(dir, 'not a flag.txt');
+    const subdir = path.join(dir, 'subdir');
+    const outside = fs.mkdtempSync(path.join(room, 'outside-'));
+    const outsideFile = path.join(outside, 'target');
+    fs.writeFileSync(outsideFile, 'x');
+    const link = path.join(dir, 'linkflag');
+    fs.writeFileSync(notAFlag, 'x');
+    fs.mkdirSync(subdir);
+    fs.symlinkSync(outsideFile, link);
+    for (const p of [notAFlag, subdir, outsideFile]) fs.utimesSync(p, eightDays, eightDays);
+    fs.lutimesSync(link, eightDays, eightDays);
+    expect(claimSessionNotice('second', home)).toBe(true);
+    expect(fs.existsSync(notAFlag)).toBe(true);
+    expect(fs.existsSync(subdir)).toBe(true);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(outsideFile)).toBe(true);
   });
 
   it('refuses an id that is not a plain name', () => {
