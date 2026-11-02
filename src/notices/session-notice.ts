@@ -172,8 +172,8 @@ function levelChange(dir: string, seen: OwnDir, flag: string, level: string): 'c
  *  the hook or make it read a large file. */
 function readFlag(flag: string): string | null {
   const c = fs.constants;
-  const lst = fs.lstatSync(flag);
-  if (!lst.isFile()) return null;
+  // No lstat first: the checks run on the opened descriptor (CodeQL
+  // js/file-system-race), and the open itself refuses a link and a FIFO wait.
   const fd = fs.openSync(flag, c.O_RDONLY | (c.O_NOFOLLOW ?? 0) | (c.O_NONBLOCK ?? 0));
   try {
     const st = fs.fstatSync(fd);
