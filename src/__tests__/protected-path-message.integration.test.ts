@@ -145,7 +145,7 @@ describe('a protected file is reported as a protected file (MSG-1)', () => {
       `\u{1F6E1}\uFE0F Node9 blocked access to \`${path.join(project, '.env')}\` (protected file)`
     );
     expect(instruction).toBe(
-      'Start your reply with the line above, exactly as written, on its own line.'
+      'Start your reply about this blocked action with the line above, exactly as written, on its own line. Leave it out of later replies.'
     );
   });
 

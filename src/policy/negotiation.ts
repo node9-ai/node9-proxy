@@ -29,8 +29,10 @@ export interface BlockContext {
 // Unlike the agent-facing label (MSG-3), this line is the user's text: it keeps
 // the shield and the "Node9" spelling, and has no em dash (product copy).
 const USER_LINE_ICON = '\u{1F6E1}\uFE0F';
+// "Leave it out of later replies": the instruction stays in the conversation, and without it
+// Claude opened later replies with the block line too (after 2.48.0).
 export const QUOTE_INSTRUCTION =
-  'Start your reply with the line above, exactly as written, on its own line.';
+  'Start your reply about this blocked action with the line above, exactly as written, on its own line. Leave it out of later replies.';
 const USER_LINE_PART_MAX = 160;
 /** Input kept before cleaning a part of the user line (bounds the regex work). */
 const ONE_LINE_INPUT_MAX = 1000;
