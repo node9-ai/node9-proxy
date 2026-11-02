@@ -2,10 +2,14 @@
 // Orchestrates `node9 posture`: run all checks → score → assemble result.
 // Phase 0 checks: secrets · egress · gate-bypass self-test.
 
+import { postureCategoryOwasp } from '@node9/policy-engine';
 import os from 'os';
 import { checkSecrets } from './secrets';
 import { checkEgress } from './egress';
 import { checkGate } from './gate';
+import { checkAgentPermissions } from './agent-permissions';
+import { checkOutsideContent } from './outside-content';
+import { checkInstructionFiles } from './instruction-files';
 import { checkSupplyChain } from './supply-chain';
 import { checkPrivilege } from './privilege';
 import { checkContainment } from './containment';
@@ -27,7 +31,10 @@ export const POSTURE_CHECKS: PostureCheck[] = [
   { category: 'Secrets', run: checkSecrets },
   { category: 'Egress', run: checkEgress },
   { category: 'Approval gate', run: checkGate },
+  { category: 'Agent permissions', run: checkAgentPermissions },
+  { category: 'Outside content', run: checkOutsideContent },
   { category: 'Supply chain', run: checkSupplyChain },
+  { category: 'Instruction files', run: checkInstructionFiles },
   { category: 'Privilege', run: checkPrivilege },
   { category: 'Isolation', run: checkContainment },
   { category: 'Inbound', run: checkInbound },
@@ -117,6 +124,9 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
   // Drop findings that are open ONLY because node9 isn't enforcing (Coverage
   // already reports that gap) — no double-surfacing.
   const findings = dropEnforcementRedundant(rawFindings);
+  // Every finding names its OWASP risk, from the one table the catalog uses
+  // (node9Firewall#320): `node9 owasp` and the dashboard group rows by it.
+  for (const f of findings) f.owasp ??= postureCategoryOwasp(f.category);
 
   const { score, tier } = scorePosture(findings, POSTURE_CHECKS.length);
 

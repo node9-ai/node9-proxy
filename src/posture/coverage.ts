@@ -9,6 +9,7 @@ import os from 'os';
 import { getConfig } from '../config';
 import { isRecordOnly, levelOf } from '@node9/policy-engine';
 import { getAgentWiring } from '../agent-wiring';
+import { autostartState } from '../daemon/service';
 import type { CheckContext, Finding } from './types';
 
 export function checkCoverage(ctx: CheckContext): Finding[] {
@@ -49,6 +50,29 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       owner: 'node9',
       fix: 'Set mode to `standard` (or `strict`) to enforce in-path.',
     });
+  }
+
+  // Self-protection (OWASP ASI10): a guard that does not come back after a
+  // reboot leaves the next sessions ungoverned until someone notices.
+  const config = getConfig(ctx.cwd);
+  if (config.settings.autoStartDaemon !== false) {
+    const state = autostartState();
+    if (state === 'disabled' || state === 'absent') {
+      findings.push({
+        category: 'Coverage',
+        severity: 'medium',
+        title: "node9's daemon will not start after a reboot",
+        what: 'The daemon that answers approvals and syncs the policy is not registered to start with the machine.',
+        why:
+          state === 'absent'
+            ? 'No autostart entry is installed for it.'
+            : 'Its autostart entry is installed but disabled.',
+        who: 'After the next reboot, approvals time out and the policy stops syncing until the daemon is started by hand.',
+        detail: [],
+        owner: 'node9',
+        fix: 'Run `node9 doctor` to install and enable the autostart entry.',
+      });
+    }
   }
 
   return findings;

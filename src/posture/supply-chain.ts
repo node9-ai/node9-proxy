@@ -12,6 +12,9 @@ import os from 'os';
 import path from 'path';
 import { parse as parseToml } from 'smol-toml';
 import { checkProvenance } from '../utils/provenance';
+import { checkValue } from '@node9/policy-engine';
+import { getConfig, catalogSettingsFrom } from '../config';
+import { defaultSkillRoots, getRootKey, readSkillPinsSafe } from '../skill-pin';
 import { AGENT_SPECS, type McpFormat } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
 import { readCappedText } from '../utils/read-capped';
@@ -83,9 +86,8 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
     if (!spec.mcpFile || spec.mcpInventory === false) continue;
     servers.push(...readServers(spec.mcpFile(home), spec.mcpFormat ?? 'json', spec.label));
   }
-  if (servers.length === 0) return [];
-
-  const findings: Finding[] = [];
+  const findings: Finding[] = [...pluginsAndPackages(ctx, home)];
+  if (servers.length === 0) return findings;
 
   // node9-wrapped servers are gated; anything else runs direct (bypasses node9).
   const unmanaged = servers.filter((s) => s.command && !isNode9Managed(s.command, s.args));
@@ -123,5 +125,70 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
     });
   }
 
+  return findings;
+}
+
+// ── Plugins and packages (OWASP ASI04, node9Firewall#320 phase 1) ───────────
+//
+// Skills and plugins the agent loads are code that runs with the agent's
+// rights. node9 pins each plugin root by content hash (`loading.skill-tamper`,
+// `node9 skill-pin`); a root with no pin is loaded unverified. The package
+// check (`loading.malicious-package`) is the other door into the supply chain.
+
+/** Installed plugin roots and which of them have a pin. Exported for tests. */
+export function pluginPinState(home: string): { roots: string[]; unpinned: string[] } {
+  const roots = defaultSkillRoots(undefined, home);
+  const pins = readSkillPinsSafe();
+  const pinned = pins.ok ? pins.pins.roots : {};
+  return { roots, unpinned: roots.filter((r) => !pinned[getRootKey(r)]) };
+}
+
+function pluginsAndPackages(ctx: CheckContext, home: string): Finding[] {
+  const findings: Finding[] = [];
+  const config = getConfig(ctx.cwd);
+  const settings = catalogSettingsFrom(config.settings, config.policy);
+  const { roots, unpinned } = pluginPinState(home);
+  const tamper = checkValue(settings, 'loading.skill-tamper');
+  if (roots.length > 0 && tamper === 'off') {
+    findings.push({
+      category: 'Supply chain',
+      severity: 'medium',
+      title: `${roots.length} installed plugin${roots.length === 1 ? '' : 's'} load${roots.length === 1 ? 's' : ''} unverified`,
+      what: 'Plugins and skills the agent loads are code that runs with its rights, and no content hash is kept for them.',
+      why: 'The check loading.skill-tamper is off, so node9 does not pin them.',
+      who: 'An update or a tampered file runs with the agent on the next session, unnoticed.',
+      detail: roots.slice(0, 6).map((r) => (r.startsWith(home) ? '~' + r.slice(home.length) : r)),
+      owner: 'node9',
+      fix: 'Set loading.skill-tamper to block (the Checks page, or `checks.loading.skill-tamper` in the config file); node9 pins each plugin the first time it loads.',
+    });
+  } else if (unpinned.length > 0) {
+    findings.push({
+      category: 'Supply chain',
+      severity: 'medium',
+      title: `${unpinned.length} of ${roots.length} installed plugin${roots.length === 1 ? '' : 's'} ${unpinned.length === 1 ? 'has' : 'have'} no pin yet`,
+      what: 'A plugin the agent can load has no recorded content hash yet.',
+      why: 'node9 pins a plugin the first time it loads; these have not loaded since pinning was turned on.',
+      who: 'Until the first load, a changed file in one of them is not noticed.',
+      detail: unpinned
+        .slice(0, 6)
+        .map((r) => (r.startsWith(home) ? '~' + r.slice(home.length) : r)),
+      owner: 'node9',
+      fix: 'Run `node9 skill pin list` to see the pins; the next session that loads a plugin pins it.',
+    });
+  }
+  const pkg = checkValue(settings, 'loading.malicious-package');
+  if (pkg === 'off') {
+    findings.push({
+      category: 'Supply chain',
+      severity: 'medium',
+      title: 'Package installs are not checked against the malicious-package index',
+      what: 'An install of a package the index flags goes through unnoticed.',
+      why: 'The check loading.malicious-package is off.',
+      who: "A typosquat or a compromised release installs with the agent's rights.",
+      detail: [],
+      owner: 'node9',
+      fix: 'Set loading.malicious-package to block (the Checks page, or `checks.loading.malicious-package` in the config file).',
+    });
+  }
   return findings;
 }

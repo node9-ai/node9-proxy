@@ -288,8 +288,8 @@ export function verifyAndPinRoots(roots: string[]): VerifyResult {
  * User-authored files (CLAUDE.md, .cursor/rules/) are not included.
  * Extend via `config.policy.skillPinning.roots`.
  */
-export function defaultSkillRoots(_cwd: string | undefined): string[] {
-  const marketplaces = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces');
+export function defaultSkillRoots(_cwd: string | undefined, home: string = os.homedir()): string[] {
+  const marketplaces = path.join(home, '.claude', 'plugins', 'marketplaces');
   const roots: string[] = [];
   let registries: fs.Dirent[];
   try {

@@ -5,6 +5,8 @@
 // or classification-only: it never executes a payload, never mutates state,
 // and never emits a secret value (only the secret *type* + location).
 
+import type { AsiId } from '@node9/policy-engine';
+
 export type Severity = 'critical' | 'high' | 'medium' | 'advisory';
 
 /** Whose job it is to fix a finding. `node9` = there's a lever (a command);
@@ -31,6 +33,7 @@ export type CoverageProbe =
   | { kind: 'fileRead'; paths: string[] } // → scanFilePath (DLP layer)
   | { kind: 'command'; command: string } // → evaluatePolicy (policy layer)
   | { kind: 'egress' } // → config.policy.egress
+  | { kind: 'gateWired' } // → partial while node9 enforces (its hook judges the call)
   | { kind: 'cantFix' }; // → always advisory (OS/infra)
 
 export interface Finding {
@@ -67,6 +70,9 @@ export interface Finding {
   cost?: string;
   /** The enforcement bridge: what node9 can do about it (the free→paid hook). */
   fix?: string;
+  /** The OWASP Agentic Top 10 risk this finding falls under, from the
+   *  category (policy-engine owasp.ts). Set by `runPosture`, shipped. */
+  owasp?: AsiId;
   /** Set by `annotateCoverage` — node9's enforcement relationship to this finding. */
   coverage?: Coverage;
   /** How to assess coverage for this finding (internal; not shipped — render

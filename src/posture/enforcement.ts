@@ -83,6 +83,25 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
 
     if (probe.kind === 'egress') {
       f.coverage = egressCoverage(env);
+      // The setting is there and the mode is what is missing: say so, instead
+      // of advising a command the user already ran (fw#408, #320 phase 1).
+      if (
+        f.coverage.state === 'open' &&
+        config.policy.egress.enabled &&
+        config.policy.egress.mode !== 'off' &&
+        isRecordOnly(mode)
+      )
+        f.fix = auditModeFix(mode, 'node9 egress is set');
+      continue;
+    }
+
+    if (probe.kind === 'gateWired') {
+      // The agent's own gate is off; node9's hook still judges the calls its
+      // checks know, so the finding is partial while node9 enforces, never
+      // covered: the agent's prompt also guarded calls no check names.
+      f.coverage = env.enforcing
+        ? { state: 'partial', level: 'review', via: 'node9 hook' }
+        : { state: 'open' };
       continue;
     }
 
@@ -141,5 +160,16 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
       env,
       viaFromRule(verdict.ruleName)
     );
+    if (f.coverage.state === 'open' && verdict.decision !== 'allow' && isRecordOnly(mode))
+      f.fix = auditModeFix(mode, 'node9 already stops this');
   }
+}
+
+/** The fix text when a setting is in place and only the mode holds it back:
+ *  one sentence, the same for every check (no path, ships as is). */
+export function auditModeFix(mode: string | undefined, whatIsSet: string): string {
+  return (
+    `${whatIsSet}, but node9 is in ${levelOf(mode)} mode, which records and lets through. ` +
+    'Fix it now: set mode to `standard` (or `strict`) to enforce it.'
+  );
 }
