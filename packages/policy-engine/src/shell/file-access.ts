@@ -928,26 +928,23 @@ export function collectShellFileAccesses(
     }
     const run = (words.slice(i) as string[]).length ? (words.slice(i) as string[]) : ['echo'];
     if (sep === '\\n') sep = '\n';
+    // Every item: a name past the 64th must not escape (second review).
     const items = (sep === null ? text.split(/\s+/) : text.split(sep))
       .map((t) => (sep === null ? t : t.trim()))
-      .filter(Boolean)
-      .slice(0, MAX_ALTERNATIVES);
+      .filter(Boolean);
     if (!items.length) return null;
     const q = (w: string): string => `'${w.replace(/'/g, `'\\''`)}'`;
-    // `-I X` with many X in the command multiplies its length by the item
-    // count: past a bound the names are left unknown (review, 2026-11-02: a
-    // 4 KB command took seconds to parse).
-    const out: string[] = [];
-    let size = 0;
-    const lines = replace
-      ? items.map((it) => run.map((w) => q(w.split(replace as string).join(it))).join(' '))
-      : [[...run, ...items].map(q).join(' ')];
-    for (const line of lines) {
-      size += line.length + 1;
-      if (size > MAX_XARGS_PAYLOAD) return null;
-      out.push(line);
-    }
-    return out.join('\n');
+    // Without -I the items are appended once: the script grows with the input.
+    if (!replace) return [...run, ...items].map(q).join(' ');
+    // `-I X` with many X multiplies the command by the item count. Past a
+    // bound, each item still reaches the command it runs, as its only operand:
+    // the names are never dropped (a dropped name was a bypass).
+    const lines = items.map((it) =>
+      run.map((w) => q(w.split(replace as string).join(it))).join(' ')
+    );
+    const size = lines.reduce((n, l) => n + l.length + 1, 0);
+    if (size <= MAX_XARGS_PAYLOAD) return lines.join('\n');
+    return items.map((it) => `${q(run[0])} ${q(it)}`).join('\n');
   }
   /**
    * A call of a function defined in this script: walk its body again with $1..
@@ -1011,6 +1008,7 @@ export function collectShellFileAccesses(
     if (name === 'echo') return rest.filter((w) => !/^-[neE]+$/.test(w)).join(' ');
     const unescape = (t: string): string =>
       t.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\0/g, '\0');
+    if (name === 'printf' && rest[0] === '--') rest.shift();
     if (name === 'printf' && rest.length === 1 && !rest[0].includes('%')) return unescape(rest[0]);
     // `printf '%s\n' a b`: each argument, then the separator.
     if (name === 'printf' && rest.length > 1 && /^%s(\\n|\\0|\\t| )?$/.test(rest[0])) {

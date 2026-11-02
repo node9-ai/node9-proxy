@@ -5054,6 +5054,19 @@ function sourcedAndPrinted(command: string): FsOpVerdict | null {
   if (typeof f === 'symbol') return null;
   const sourced: string[] = [];
   let printed = false;
+  // Names the command itself sets (loop and read variables): echoing them
+  // prints nothing from the sourced file.
+  const local = new Set<string>();
+  walk(f, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.kind === 'ForClause' && n.Loop?.Name?.Value) local.add(n.Loop.Name.Value);
+    if (n.kind === 'CallExpr') {
+      const w = callWords(n);
+      if (w[0] === 'read') for (const v of w.slice(1)) if (v && !v.startsWith('-')) local.add(v);
+    }
+    return true;
+  });
   walk(f, (node) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
@@ -5061,10 +5074,12 @@ function sourcedAndPrinted(command: string): FsOpVerdict | null {
       // `export -p`, `declare -px`, a bare `export`: no names, only flags.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const args: any[] = n.Args ?? [];
-      const flagsOnly = args.every(
-        (a) => !a.Name?.Value && /^-[a-zA-Z]*$/.test(resolveWordLiteral(a.Value) ?? '')
-      );
-      if (flagsOnly) printed = true;
+      const flags = args
+        .filter((a) => !a.Name?.Value)
+        .map((a) => resolveWordLiteral(a.Value) ?? '');
+      const flagsOnly = flags.length === args.length && flags.every((f) => /^-[a-zA-Z]*$/.test(f));
+      // `declare -p NAME` prints NAME's value too.
+      if (flagsOnly || flags.some((f) => /^-[a-zA-Z]*p/.test(f))) printed = true;
       return true;
     }
     if (n.kind !== 'CallExpr') return true;
@@ -5077,7 +5092,10 @@ function sourcedAndPrinted(command: string): FsOpVerdict | null {
       return true;
     }
     // `echo $KEY` after sourcing prints a value from the file.
-    if ((head === 'echo' || head === 'printf') && args.slice(1).some(hasParamExp)) {
+    if (
+      (head === 'echo' || head === 'printf') &&
+      args.slice(1).some((a) => hasEnvParam(a, local))
+    ) {
       printed = true;
       return true;
     }
@@ -5094,11 +5112,36 @@ function sourcedAndPrinted(command: string): FsOpVerdict | null {
   return null;
 }
 
+/** Variables the shell sets itself: echoing them prints nothing from a file. */
+const SHELL_SET_VARS = new Set([
+  'PWD',
+  'OLDPWD',
+  'HOME',
+  'PATH',
+  'USER',
+  'SHELL',
+  'PPID',
+  'RANDOM',
+  'LINENO',
+  'SECONDS',
+  'IFS',
+]);
+
+/** An expansion of a plain variable a sourced file could have set: not `$?`,
+ *  `$1`, `$@`, a shell variable, or a name the command sets itself. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function hasParamExp(word: any): boolean {
+function hasEnvParam(word: any, local: ReadonlySet<string>): boolean {
   let found = false;
   walk(word, (n) => {
-    if (n.kind === 'ParamExp') found = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const name = n.kind === 'ParamExp' ? (n as any).Param?.Value : undefined;
+    if (
+      typeof name === 'string' &&
+      /^[A-Za-z_]\w*$/.test(name) &&
+      !SHELL_SET_VARS.has(name) &&
+      !local.has(name)
+    )
+      found = true;
     return !found;
   });
   return found;
@@ -5133,12 +5176,14 @@ function pathWithKnownDirs(word: any): string | null {
 
 /** find's -name / -iname patterns that restrict what it lists. A pattern
  *  behind -not or ! excludes instead, so it restricts nothing. */
-function findNamePatterns(rest: (string | null)[]): string[] {
-  const patterns: string[] = [];
+function findNamePatterns(rest: (string | null)[]): Array<{ pattern: string; nocase: boolean }> {
+  const patterns: Array<{ pattern: string; nocase: boolean }> = [];
   for (let i = 0; i < rest.length; i++) {
     const negated = rest[i - 1] === '-not' || rest[i - 1] === '!';
-    if (['-name', '-iname'].includes(rest[i] ?? '') && rest[i + 1] != null && !negated)
-      patterns.push(rest[i + 1] as string);
+    // `-name .env -prune` keeps .env OUT of the listing.
+    const pruned = rest[i + 2] === '-prune';
+    if (['-name', '-iname'].includes(rest[i] ?? '') && rest[i + 1] != null && !negated && !pruned)
+      patterns.push({ pattern: rest[i + 1] as string, nocase: rest[i] === '-iname' });
   }
   return patterns;
 }
@@ -5153,25 +5198,57 @@ function findOfJailedNames(stmt: any): FsOpVerdict | null {
   const words = callWords(cmd);
   const head = unwrapCommandHead(words);
   if (baseWord(words[head]) !== 'find') return null;
-  const patterns = findNamePatterns(words.slice(head + 1));
-  if (!patterns.length) return null;
-  let hit: FsOpVerdict | null = null;
-  for (const p of patterns) {
+  // One pattern aimed at a jailed name is enough: `-o` adds names, it never
+  // takes .env away (only -not / -prune do, and those are skipped).
+  for (const { pattern, nocase } of findNamePatterns(words.slice(head + 1))) {
     let m: (n: string) => boolean;
     try {
-      m = picomatch(shellGlob(p), { dot: true });
+      m = picomatch(shellGlob(pattern), { dot: true, nocase });
     } catch {
-      return null;
+      continue;
     }
-    if (m('n9-any-name') || m('.n9-any-name')) return null;
+    if (m('n9-any-name') || m('.n9-any-name')) continue;
     const name = JAILED_GLOB_NAMES.find((n) => m(n));
-    if (!name) return null;
-    hit ??= matchSensitivePath(name);
+    const hit = name ? matchSensitivePath(name) : null;
+    if (hit) return hit;
   }
-  return hit;
+  return null;
 }
 
-/** A find of jailed names piped into xargs READER or a read loop with a reader. */
+const pipeOps = lazy(
+  () =>
+    new Set(
+      ['a | b', 'a |& b'].map((t) => {
+        const f = parseShared(t);
+        return typeof f === 'symbol' ? -1 : f.Stmts[0].Cmd.Op;
+      })
+    )
+);
+
+/** A pipeline stage that reads the names it is fed: `xargs READER` (also
+ *  behind a wrapper, `sudo xargs cat`) or a read loop with a reader, also
+ *  inside braces or a subshell. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function readsFedNames(stmt: any): boolean {
+  let reads = false;
+  walk(stmt, (n) => {
+    if (reads) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (
+      node.kind === 'CallExpr' &&
+      callWords(node).some((w) => baseWord(w) === 'xargs') &&
+      hasReader(node)
+    )
+      reads = true;
+    if (node.kind === 'WhileClause' && hasReader({ kind: 'Block', Stmts: node.Do })) reads = true;
+    return !reads;
+  });
+  return reads;
+}
+
+/** A find of jailed names earlier in a pipeline than a stage that reads the
+ *  names it is fed (`find . -name .env | sort | xargs cat`). */
 function findPipedToReader(command: string): FsOpVerdict | null {
   const f = parseShared(command);
   if (typeof f === 'symbol') return null;
@@ -5180,14 +5257,24 @@ function findPipedToReader(command: string): FsOpVerdict | null {
     if (hit) return false;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const node = n as any;
-    if (node.kind !== 'BinaryCmd' || !node.Y) return true;
-    const found = findOfJailedNames(node.X);
-    if (!found) return true;
-    const y = node.Y.Cmd;
-    if (y?.kind === 'CallExpr') {
-      const words = callWords(y);
-      if (baseWord(words[0]) === 'xargs' && hasReader(y)) hit = found;
-    } else if (y?.kind === 'WhileClause' && hasReader({ kind: 'Block', Stmts: y.Do })) hit = found;
+    if (node.kind !== 'BinaryCmd' || !pipeOps().has(node.Op)) return true;
+    // A pipeline nests to the left: collect its stages in order.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stages: any[] = [];
+    let cur = node;
+    while (cur?.kind === 'BinaryCmd' && pipeOps().has(cur.Op)) {
+      stages.unshift(cur.Y);
+      const left = cur.X;
+      if (left?.Cmd?.kind === 'BinaryCmd' && pipeOps().has(left.Cmd.Op)) cur = left.Cmd;
+      else {
+        stages.unshift(left);
+        break;
+      }
+    }
+    for (let i = 0; i < stages.length - 1 && !hit; i++) {
+      const found = findOfJailedNames(stages[i]);
+      if (found && stages.slice(i + 1).some(readsFedNames)) hit = found;
+    }
     return !hit;
   });
   return hit;
@@ -5212,9 +5299,9 @@ function listsJailedNames(words: (string | null)[]): boolean {
   const patterns = findNamePatterns(rest);
   if (!patterns.length) return true;
   const names = [...JAILED_GLOB_NAMES, 'id_rsa', 'id_ed25519', 'credentials'];
-  return patterns.some((p) => {
+  return patterns.some(({ pattern }) => {
     try {
-      const m = picomatch(shellGlob(p), { dot: true, nocase: true });
+      const m = picomatch(shellGlob(pattern), { dot: true, nocase: true });
       return names.some((n) => m(n));
     } catch {
       return true;

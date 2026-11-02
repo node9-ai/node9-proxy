@@ -191,3 +191,36 @@ describe('review: shapes the first build still missed', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+// Second review, 2026-11-02 (on the first review's fixes).
+describe('second review: the cap, special variables, and find pipelines', () => {
+  it.each([
+    ['xargs -I padded past the cap', `echo .env | xargs -I X cat X ${'/dev/null '.repeat(2000)}`],
+    ['a long junk word before the name', `echo ${'j'.repeat(17_000)} .env | xargs -I X cat X`],
+    [
+      'the 65th name into xargs',
+      `printf '%s\\n' ${Array.from({ length: 64 }, (_, i) => `x${i}`).join(' ')} .env | xargs cat`,
+    ],
+    ['find -name .env -o another name', 'find . -name .env -o -name zz | xargs cat'],
+    ['find -iname in another case', 'find . -iname .ENV | xargs cat'],
+    ['find, then sort, then xargs', 'find . -name .env | sort | xargs cat'],
+    ['a read loop in braces', 'find . -name .env | { while read f; do cat "$f"; done; }'],
+    ['sudo xargs', 'find . -name .env | sudo xargs cat'],
+    ['declare -p of a sourced name', 'source .env; declare -p DB_PASS'],
+    ['printf -- into xargs', "printf -- '%s\\n' .env | xargs cat"],
+  ])('blocks %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+
+  it.each([
+    'source .env && npm run dev; echo $?',
+    '[ -f .env ] && source .env || echo "no .env in $PWD"',
+    'source .env && for f in m/*.sql; do echo "$f"; done',
+    'source .env && echo "$1"',
+    'source .env && echo "$PATH"',
+    'find . -name .env -print && xargs cat < list.txt',
+    "find . -name .env -prune -o -name '*.ts' -print | xargs cat",
+  ])('allows %s', async (command) => {
+    expect(await G(command)).not.toBe('block');
+  });
+});
