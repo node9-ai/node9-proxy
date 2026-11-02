@@ -94,6 +94,8 @@ const STRICT: Readonly<Record<string, Verdict>> = {
   'data.secrets-weak': 'block',
   'data.pipe-chain': 'block',
   'data.env-exfil': 'block',
+  // Names a listing produces at run time: Standard records, Strict asks.
+  'data.credential-files-unknown': 'review',
   'loading.unknown-registry': 'block',
   'network.unknown-host': 'review',
   'network.internal-addresses': 'block',

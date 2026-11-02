@@ -375,6 +375,15 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'review',
   },
   {
+    id: 'data.credential-files-unknown',
+    group: 'data',
+    title: 'Files read by names known only at run time',
+    catches:
+      'a reader fed names from a listing that can include credential files (find . | xargs cat)',
+    values: ALL,
+    defaultValue: 'log',
+  },
+  {
     id: 'data.pipe-chain',
     group: 'data',
     title: 'Sensitive file piped to the network',

@@ -1081,6 +1081,13 @@ export const FS_READ_TOOLS = new Set([
   'tac',
   'nl',
   'dd',
+  // Compare or merge files and print their lines (jail-indirect-reads,
+  // 2026-11-02): `diff .env /dev/null` printed every line of the file.
+  'diff',
+  'cmp',
+  'comm',
+  'paste',
+  'join',
   // — PowerShell, absent until 2026-09-22 —
   // Same membership test, "does it emit file contents": Get-Content/gc print
   // the file (cat), Select-String/sls print matching lines (grep), Format-Hex
@@ -3777,6 +3784,38 @@ export function resolveWordPrefix(w: any): { prefix: string; dynamic: boolean } 
  * gated on the jail walk, because the NORMALIZER shares this resolver and its
  * output is the text the regex rules and the historical scanner read.
  */
+/** The text bash makes of a `$'...'` string: `$'\x2eenv'` is `.env`. */
+export function decodeAnsiC(raw: string): string {
+  const simple: Record<string, string> = {
+    a: '\x07',
+    b: '\b',
+    e: '\x1b',
+    E: '\x1b',
+    f: '\f',
+    n: '\n',
+    r: '\r',
+    t: '\t',
+    v: '\v',
+    '\\': '\\',
+    "'": "'",
+    '"': '"',
+    '?': '?',
+  };
+  return raw.replace(
+    /\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)/g,
+    (all, esc: string) => {
+      const c = esc[0];
+      if (c === 'x' || c === 'u' || c === 'U') {
+        const code = parseInt(esc.slice(1), 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : all;
+      }
+      if (/[0-7]/.test(c)) return String.fromCharCode(parseInt(esc, 8) & 0xff);
+      if (c === 'c' && esc.length === 2) return String.fromCharCode(esc.charCodeAt(1) & 0x1f);
+      return simple[esc] ?? all;
+    }
+  );
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function resolvePart(p: any, inQuotes: boolean): string | null | undefined {
   const t = p.kind;
@@ -3785,7 +3824,7 @@ function resolvePart(p: any, inQuotes: boolean): string | null | undefined {
     if (!inQuotes) return raw.replace(/\\(.)/g, '$1');
     return assignmentTable ? raw.replace(/\\([$`"\\])/g, '$1') : raw;
   }
-  if (t === 'SglQuoted') return p.Value ?? '';
+  if (t === 'SglQuoted') return p.Dollar ? decodeAnsiC(p.Value ?? '') : (p.Value ?? '');
   if (t === 'ParamExp') return expandPlainParam(p);
   if (t === 'CmdSubst') return assignmentTable ? resolveTrivialSubst(p) : undefined;
   if (t === 'DblQuoted' && !inQuotes) {
@@ -4089,7 +4128,12 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // alike would share whichever verdict was computed first.
   const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  if (!FS_OP_PRESCREEN_RE.test(normalized) && !FS_OP_PRESCREEN_RE.test(command)) return null;
+  if (
+    !FS_OP_PRESCREEN_RE.test(normalized) &&
+    !FS_OP_PRESCREEN_RE.test(command) &&
+    !SOURCES_FILE_RE.test(command)
+  )
+    return null;
   if (fsOpCache.has(command)) {
     const hit = fsOpCache.get(command) ?? null;
     fsOpCache.delete(command);
@@ -4988,6 +5032,175 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
 const INDIRECT_SHAPE_RE =
   /\b(?:for|while|until|find|xargs|set|source)\b|\$\{?PWD\b|[*?[]|(?:^|[;&|(\s])\.\s/;
 
+/** `source FILE` / `. FILE`: no reader word, so the prescreen needs this. */
+const SOURCES_FILE_RE = /(?:^|[;&|(\s])(?:source|\.)\s/;
+
+/** Commands that print the environment: after `source .env` they print it. */
+function printsEnvironment(words: string[]): boolean {
+  const [name, ...rest] = words;
+  if (name === 'printenv') return true;
+  if (name === 'env') return rest.every((w) => w.startsWith('-') || /^[A-Za-z_]\w*=/.test(w));
+  if (name === 'export' || name === 'declare' || name === 'typeset')
+    return rest.every((w) => /^-[a-zA-Z]*[px]?$/.test(w));
+  if (name === 'set') return rest.length === 0;
+  return false;
+}
+
+/** `source .env; env`: a jailed file loaded into the environment and the
+ *  environment printed in the same command. Loading alone (`source .env &&
+ *  npm run dev`) is everyday work and stays allowed. */
+function sourcedAndPrinted(command: string): FsOpVerdict | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  const sourced: string[] = [];
+  let printed = false;
+  walk(f, (node) => {
+    if (node.kind !== 'CallExpr') return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = ((node as any).Args ?? []).map((a: any) => resolveWordLiteral(a));
+    if (words.some((w: string | null) => w === null) || !words.length) return true;
+    if ((words[0] === 'source' || words[0] === '.') && words[1]) sourced.push(words[1]);
+    else if (printsEnvironment(words as string[])) printed = true;
+    return true;
+  });
+  if (!printed) return null;
+  for (const p of sourced) {
+    const hit = matchSensitivePath(p);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** A listing command whose output can name a jailed file: `find` without a
+ *  -name filter that rules jailed names out, `ls -a`/`ls -A`, `fd -H`.
+ *  `ls` without -a skips dotfiles; `find -type d` lists no files. */
+function listsJailedNames(words: (string | null)[]): boolean {
+  const head = unwrapCommandHead(words);
+  const name = baseWord(words[head]);
+  const rest = words.slice(head + 1);
+  if (name === 'ls') return rest.some((w) => w !== null && /^-[a-zA-Z]*[aA]/.test(w));
+  if (name === 'fd' || name === 'fdfind')
+    return rest.some(
+      (w) => w === '-H' || w === '--hidden' || (w !== null && /^-[a-zA-Z]*H/.test(w))
+    );
+  if (name !== 'find') return false;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '-type' && rest[i + 1] === 'd') return false;
+  }
+  const patterns: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (['-name', '-iname'].includes(rest[i] ?? '') && rest[i + 1] != null)
+      patterns.push(rest[i + 1] as string);
+  }
+  if (!patterns.length) return true;
+  const names = [...JAILED_GLOB_NAMES, 'id_rsa', 'id_ed25519', 'credentials'];
+  return patterns.some((p) => {
+    try {
+      const m = picomatch(p, { dot: true, nocase: true });
+      return names.some((n) => m(n));
+    } catch {
+      return true;
+    }
+  });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const callWords = (node: any): (string | null)[] =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (node?.Args ?? []).map((a: any) => resolveWordLiteral(a));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isListingStmt(stmt: any): boolean {
+  const cmd = stmt?.Cmd;
+  return cmd?.kind === 'CallExpr' && listsJailedNames(callWords(cmd));
+}
+
+/** A reader call (cat, sed, grep, ...) in `node`, optionally one that reads the
+ *  variable `name`. xargs counts through the command it runs. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasReader(node: any, name?: string): boolean {
+  let found = false;
+  walk(node, (n) => {
+    if (found || n.kind !== 'CallExpr') return !found;
+    const words = callWords(n);
+    const head = unwrapCommandHead(words);
+    if (!isReaderWord(words[head])) return true;
+    if (!name) {
+      found = true;
+      return false;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    walk(n, (m: any) => {
+      if (m.kind === 'ParamExp' && m.Param?.Value === name) found = true;
+      return !found;
+    });
+    return !found;
+  });
+  return found;
+}
+
+/** A listing in a command substitution: `$(find . -type f)`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasListingSubst(node: any): boolean {
+  let found = false;
+  walk(node, (n) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (n.kind === 'CmdSubst' && ((n as any).Stmts ?? []).some(isListingStmt)) found = true;
+    return !found;
+  });
+  return found;
+}
+
+/**
+ * Decision b1 of the jail-indirect-reads design: a reader fed file names that
+ * a listing produces at run time (`find . | xargs cat`, `ls -A | while read f;
+ * do cat "$f"; done`, `cat $(find . -type f)`). The names are not knowable
+ * before the command runs, and the listing can include a jailed file. Null
+ * when no such shape is present.
+ */
+export function analyzeUnknownCredentialReads(command: string): { reason: string } | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  let hit = false;
+  walk(f, (n) => {
+    if (hit) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (node.kind === 'BinaryCmd' && node.Y && isListingStmt(node.X)) {
+      const y = node.Y.Cmd;
+      if (y?.kind === 'CallExpr') {
+        const words = callWords(y);
+        if (baseWord(words[0]) === 'xargs' && hasReader(y)) hit = true;
+      } else if (y?.kind === 'WhileClause') {
+        const read = callWords(y.Cond?.[y.Cond.length - 1]?.Cmd);
+        const vars = read[0] === 'read' ? read.slice(1).filter((w) => w && !w.startsWith('-')) : [];
+        const names = vars.length ? (vars as string[]) : ['REPLY'];
+        if (names.some((v) => hasReader({ kind: 'Block', Stmts: y.Do }, v))) hit = true;
+      }
+    } else if (node.kind === 'CallExpr') {
+      const words = callWords(node);
+      const head = unwrapCommandHead(words);
+      if (isReaderWord(words[head]) && hasListingSubst(node)) hit = true;
+    } else if (node.kind === 'ForClause') {
+      const loop = node.Loop;
+      const v = loop?.Name?.Value;
+      if (
+        v &&
+        (loop.Items ?? []).some(hasListingSubst) &&
+        hasReader({ kind: 'Block', Stmts: node.Do }, v)
+      )
+        hit = true;
+    }
+    return !hit;
+  });
+  return hit
+    ? {
+        reason:
+          'Files are read by names a listing produces when the command runs, and the listing can include credential files',
+      }
+    : null;
+}
+
 /** The jailed names a glob in a directory is tested against. Credential file
  *  names (a review rule) are left out on purpose: `*.json` would match
  *  credentials.json in every project, so only a literal name reaches them. */
@@ -5037,7 +5250,9 @@ function structuralJailRead(command: string): FsOpVerdict | null {
   } catch {
     return null;
   }
-  let review: FsOpVerdict | null = null;
+  const sourcedHit = sourcedAndPrinted(command);
+  if (sourcedHit?.verdict === 'block') return sourcedHit;
+  let review: FsOpVerdict | null = sourcedHit;
   for (const a of accesses) {
     // A copy's source is judged by the jail's copy rules (a review, and a
     // rename inside the jail stays quiet), not as a read.

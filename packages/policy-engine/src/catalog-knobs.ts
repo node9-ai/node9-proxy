@@ -374,6 +374,7 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'commands.reverse-shell',
   'data.pipe-chain',
   'data.env-exfil',
+  'data.credential-files-unknown',
   'loading.unknown-registry',
   // The general action checks (node9Firewall#390): smart rules the map governs.
   'actions.money',

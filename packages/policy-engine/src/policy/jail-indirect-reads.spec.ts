@@ -68,3 +68,79 @@ describe('the exemptions and everyday commands stay allowed', () => {
     expect(await G(command)).not.toBe('block');
   });
 });
+
+describe('step 2: shapes the file-access walk learns', () => {
+  it.each([
+    ['set --', 'set -- .env; cat "$1"'],
+    ['set -- with two names', 'set -- a .env; cat "$2"'],
+    ['an array element', 'arr=(.env); cat "${arr[0]}"'],
+    ['an array expansion', 'arr=(a .env); cat "${arr[@]}"'],
+    ['a here-string into while read', 'while read f; do cat "$f"; done <<< .env'],
+    ['a heredoc into while read', 'while read -r f; do cat "$f"; done <<EOF\na\n.env\nEOF'],
+    ['echo piped into while read', 'echo .env | while read f; do cat "$f"; done'],
+    ['echo piped into xargs', 'echo .env | xargs cat'],
+    ['printf piped into xargs -I', "printf '.env\\n' | xargs -I{} cat {}"],
+    ['xargs with options', 'echo a .env | xargs -n 1 -r cat'],
+    ['diff', 'diff .env /dev/null'],
+    ['comm', 'comm .env .env.example'],
+    ['an ANSI-C quoted name', "cat $'\\x2eenv'"],
+    ['an ANSI-C quoted name in a loop', 'for f in $\'\\x2eenv\'; do cat "$f"; done'],
+    ['a sourced .env printed by env', 'source .env; env'],
+    ['a dot-sourced .env printed by printenv', '. ./.env && printenv'],
+  ])('blocks %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+
+  it.each([
+    // Loading .env to run the app is everyday work; only printing it is a read.
+    'source .env && npm run dev',
+    'set -a; . ./.env; set +a; node server.js',
+    'echo src/a.ts | xargs wc -l',
+    'set -- a b; echo "$1"',
+    'while read l; do echo "$l"; done <<< hello',
+    'diff a.txt b.txt',
+  ])('allows %s', async (command) => {
+    expect(await G(command)).not.toBe('block');
+  });
+});
+
+// Decision b1: names that come from a listing at run time cannot be known
+// before the command runs. A reader fed by a listing that can include a
+// jailed file is `data.credential-files-unknown`: logged at Standard, asked
+// at Strict. A listing that cannot reach a jailed name is not flagged.
+describe('step 3: names node9 cannot know', () => {
+  const at = (mode: string) => ({ ...config, settings: { mode } }) as unknown as PolicyConfig;
+  async function D(command: string, mode = 'standard') {
+    return evaluatePolicy(at(mode), 'Bash', { command }, { agent: 'claude' }, {});
+  }
+
+  it.each([
+    'find . | xargs cat',
+    'find . -type f -print0 | xargs -0 cat',
+    'ls -A | while read f; do cat "$f"; done',
+    'find . -name ".e*" | while read -r f; do sed -n 1p "$f"; done',
+    'cat $(find . -type f)',
+    'for f in $(find ~/.ssh -type f); do cat "$f"; done',
+    'fd -H . | xargs grep -l KEY',
+  ])('%s: logged at Standard, asked at Strict', async (command) => {
+    const standard = await D(command);
+    expect(standard.decision).toBe('allow');
+    expect(JSON.stringify(standard)).toContain('data.credential-files-unknown');
+    const strict = await D(command, 'strict');
+    expect(strict.decision).toBe('review');
+    expect(strict.checkId).toBe('data.credential-files-unknown');
+  });
+
+  it.each([
+    "find . -name '*.ts' | xargs grep TODO",
+    'find src -type f -name "*.json" | xargs cat',
+    'ls | while read f; do cat "$f"; done',
+    'find . -type d | xargs ls',
+    'git ls-files | xargs wc -l',
+    'find . | xargs echo',
+  ])('%s: not flagged', async (command) => {
+    const strict = await D(command, 'strict');
+    expect(strict.checkId ?? '').not.toBe('data.credential-files-unknown');
+    expect(JSON.stringify(await D(command))).not.toContain('data.credential-files-unknown');
+  });
+});

@@ -20,6 +20,7 @@ import {
   detectDangerousShellExec,
   analyzeShellCommand,
   analyzeFsOperation,
+  analyzeUnknownCredentialReads,
   analyzeSqlDestructive,
   analyzeChmod777,
   isRmCreatedInCommandCleanup,
@@ -730,6 +731,25 @@ async function evaluatePolicyCore(
       // `allow` rule cannot silence it.
       if (fsVerdict.verdict === 'block') return astVerdict;
       pendingAstReview = astVerdict;
+    }
+
+    // Names a listing produces at run time (jail-indirect-reads decision b1):
+    // Standard records it, Strict asks.
+    const unknownNamesAction = cv('data.credential-files-unknown');
+    const unknownNames =
+      fsVerdict || unknownNamesAction === 'off' ? null : analyzeUnknownCredentialReads(bashCommand);
+    if (unknownNames) {
+      const v = applyCheckValue(unknownNamesAction, {
+        decision: 'review',
+        blockedByLabel: 'project-jail (AST): review-read-unknown-names',
+        reason: unknownNames.reason,
+        tier: 2,
+        ruleName: 'review-read-unknown-names',
+        ruleDescription: unknownNames.reason,
+        checkId: 'data.credential-files-unknown',
+      });
+      if (v?.logged) noteLogged(v);
+      else if (v && !pendingAstReview) pendingAstReview = v;
     }
 
     // SQL-DDL via a real DB CLI — AST-aware so a grep/echo of "drop table" /

@@ -212,6 +212,11 @@ function wordValues(word: any, state: State): Word[] {
   // A null result means the part cannot be resolved; the caller keeps the
   // literal prefix gathered so far and marks the word dynamic.
   const paramValues = (node: any, quoted: boolean): Word[] | null => {
+    // `${arr[i]}`, `${arr[@]}`: any element the name holds.
+    if (node.Index && !node.Excl && !node.Length && !node.Slice && !node.Repl && !node.Exp) {
+      const held = state.vars.get(node.Param?.Value);
+      return held && held.length ? toWords(held, quoted) : null;
+    }
     if (
       node.Excl ||
       node.Length ||
@@ -290,6 +295,8 @@ export function collectShellFileAccesses(
   // with its arguments bound (node9Firewall#361, see shell/index.ts).
   const functions = new Map<string, any[]>();
   const seenCalls = new Set<string>();
+  // The literal text a pipeline stage receives on stdin (`echo NAMES | ...`).
+  const pipedStdin = new WeakMap<object, string>();
   let callWalks = MAX_CALL_WALKS;
   const initial: State = {
     cwd: [context.cwd ?? ''],
@@ -322,7 +329,19 @@ export function collectShellFileAccesses(
   function assignments(items: any[], state: State): void {
     for (const item of items ?? []) {
       // `export f` / `readonly f` carry no value and keep what f already holds.
-      if (!item.Name?.Value || !item.Value) continue;
+      if (!item.Name?.Value) continue;
+      if (!item.Value && item.Array) {
+        // `arr=(a b)`: the name holds every element (`${arr[i]}` reads one of them).
+        const elems = (item.Array.Elems ?? []).flatMap((e: any) => wordValues(e.Value, state));
+        state.vars.set(
+          item.Name.Value,
+          elems.length && !elems.some((v: Word) => v.dynamic)
+            ? elems.map((v: Word) => v.value)
+            : null
+        );
+        continue;
+      }
+      if (!item.Value) continue;
       const values = wordValues(item.Value, state);
       const known = values.some((v) => v.dynamic) ? null : values.map((v) => v.value);
       const previous = state.vars.get(item.Name.Value);
@@ -801,6 +820,8 @@ export function collectShellFileAccesses(
     const nested = clone(state);
     assignments(cmd.Assigns, nested);
     const nodes: any[] = cmd.Args ?? [];
+    if (nodes.length && resolveWordLiteral(nodes[0]) === 'set')
+      setPositionals(nodes.slice(1), state);
     for (const node of [...nodes, ...(cmd.Assigns ?? []).map((a: any) => a.Value)])
       substitutions(node, state, depth);
     if (!nodes.length) {
@@ -818,6 +839,103 @@ export function collectShellFileAccesses(
       fromWords(tokens, state, nested, depth);
       inlineCall(tokens, state, depth);
     }
+  }
+  /** `set -- a b` (or `set a b`) sets $1, $2, "$@" for the rest of the script. */
+  function setPositionals(nodes: any[], state: State): void {
+    const words = nodes.map((n) => resolveWordLiteral(n));
+    const end = words.indexOf('--');
+    let args: (string | null)[];
+    if (end >= 0) args = words.slice(end + 1);
+    else if (words.length && words[0] !== null && !/^[-+]/.test(words[0])) args = words;
+    else return;
+    for (const name of POSITIONAL) state.vars.delete(name);
+    args.slice(0, 9).forEach((v, i) => state.vars.set(String(i + 1), v === null ? null : [v]));
+    const all = args.every((v) => v !== null) && args.length ? unique(args as string[]) : null;
+    state.vars.set('@', all);
+    state.vars.set('*', all);
+    state.vars.set('#', [String(args.length)]);
+  }
+  /**
+   * `while read f; do ...; done <<< TEXT` (or a heredoc, or `echo TEXT |`):
+   * the names `read` sets hold the text's lines and words. Every name gets
+   * every word and line: wider than bash, never narrower.
+   */
+  function bindReadLoop(loop: any, text: string | null, state: State): void {
+    if (text === null) return;
+    const conds: any[] = loop.Cond ?? [];
+    const last = conds[conds.length - 1]?.Cmd;
+    if (!last || last.kind !== 'CallExpr') return;
+    const words = (last.Args ?? []).map((a: any) => resolveWordLiteral(a));
+    if (words[0] !== 'read' || words.some((w: string | null) => w === null)) return;
+    const names: string[] = [];
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i] as string;
+      if (/^-[dnNptua]$/.test(w)) {
+        if (w === '-a' && words[i + 1]) names.push(words[i + 1] as string);
+        i++;
+      } else if (!w.startsWith('-')) names.push(w);
+    }
+    if (!names.length) names.push('REPLY');
+    const lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const values = unique([...lines, ...lines.flatMap((l) => l.split(/\s+/))]).slice(
+      0,
+      MAX_ALTERNATIVES
+    );
+    for (const name of names) state.vars.set(name, values.length ? values : null);
+  }
+  /**
+   * `echo a b | xargs CMD ARGS`: the command xargs runs, as a script, when the
+   * piped text is literal. `-I R` substitutes each item; otherwise the items
+   * are appended. Null when the text or the xargs words are not literal.
+   */
+  function xargsPayload(stmt: any, text: string | null): string | null {
+    const cmd = stmt?.Cmd;
+    if (text === null || !cmd || cmd.kind !== 'CallExpr') return null;
+    const words = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
+    if (words.some((w: string | null) => w === null)) return null;
+    // unwrapCommandHead steps over xargs itself (a wrapper of its command), so
+    // xargs is found among the words before the command it runs.
+    const head = words
+      .slice(0, unwrapCommandHead(words) + 1)
+      .findIndex((w: string | null) => base(w) === 'xargs');
+    if (head < 0) return null;
+    let sep: string | null = null;
+    let replace: string | null = null;
+    let i = head + 1;
+    for (; i < words.length; i++) {
+      const w = words[i] as string;
+      if (w === '--') {
+        i++;
+        break;
+      }
+      if (!w.startsWith('-')) break;
+      if (w === '-0' || w === '--null') sep = '\0';
+      else if (w === '-I') replace = (words[++i] as string) ?? null;
+      else if (w.startsWith('-I')) replace = w.slice(2);
+      else if (w === '-i' || w === '--replace') replace = '{}';
+      else if (w.startsWith('-i')) replace = w.slice(2);
+      else if (w.startsWith('--replace=')) replace = w.slice('--replace='.length);
+      else if (w === '-d') sep = (words[++i] as string) ?? null;
+      else if (w.startsWith('-d')) sep = w.slice(2);
+      else if (w.startsWith('--delimiter=')) sep = w.slice('--delimiter='.length);
+      else if (/^-[nLPsEa]$/.test(w)) i++;
+    }
+    const run = (words.slice(i) as string[]).length ? (words.slice(i) as string[]) : ['echo'];
+    if (sep === '\\n') sep = '\n';
+    const items = (sep === null ? text.split(/\s+/) : text.split(sep))
+      .map((t) => (sep === null ? t : t.trim()))
+      .filter(Boolean)
+      .slice(0, MAX_ALTERNATIVES);
+    if (!items.length) return null;
+    const q = (w: string): string => `'${w.replace(/'/g, `'\\''`)}'`;
+    if (replace)
+      return items
+        .map((it) => run.map((w) => q(w.split(replace as string).join(it))).join(' '))
+        .join('\n');
+    return [...run, ...items].map(q).join(' ');
   }
   /**
    * A call of a function defined in this script: walk its body again with $1..
@@ -954,9 +1072,13 @@ export function collectShellFileAccesses(
             if (i > 0 && op === ops().OR) merge(state, seen);
             statement(part, state, depth + 1);
           } else {
+            const fed = i > 0 ? producedText(segments[i - 1].part) : null;
+            if (fed !== null) pipedStdin.set(part, fed);
             statement(part, clone(state), depth + 1);
             if (i > 0 && readsScriptFromStdin(part))
               nestedPayload(producedText(segments[i - 1].part), clone(state), depth);
+            // `echo NAMES | xargs CMD`: the names reach CMD as operands.
+            if (fed !== null) nestedPayload(xargsPayload(part, fed), clone(state), depth);
           }
           if (i > 0 && op !== ops().AND) pureAnd = false;
           merge(seen, state);
@@ -984,6 +1106,7 @@ export function collectShellFileAccesses(
       }
       case 'WhileClause': {
         const local = clone(state);
+        bindReadLoop(cmd, stdinText(stmt) ?? pipedStdin.get(stmt) ?? null, local);
         statements(cmd.Cond, local, depth + 1);
         statements(cmd.Do, local, depth + 1);
         merge(state, local);

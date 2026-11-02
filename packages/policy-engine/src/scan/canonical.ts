@@ -792,6 +792,10 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // direct walk found nothing: a loop variable, a glob aimed at a jailed name,
 // $PWD, find -name ... -exec. `for f in .env; do cat "$f"; done` is a
 // block-read-env finding. Histories scanned under v35 re-read.
+// Folded into v36 before it shipped (step 2 of the same design): `set --`,
+// arrays, `while read` fed by a here-string, a heredoc or a literal pipe,
+// `echo NAMES | xargs CMD`, `$'...'` strings, diff/cmp/comm/paste/join as
+// readers, and `source .env` followed by a print of the environment.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v36';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
@@ -852,7 +856,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v36';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'c41ab853f1cac334';
+export const CANONICAL_EXTRACTOR_HASH = 'd4fea1fb072a38b9';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

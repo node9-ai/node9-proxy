@@ -232,13 +232,18 @@ describe('jail reachability — a dynamic payload is NOT re-parsed', () => {
 // never a flag's operand. The cost is not paid, and the row is in `stays
 // silent` above.
 
+// Flipped 2026-11-02 (jail-indirect-reads design): literal names piped into
+// xargs reach its command as operands, so this is no longer a non-goal.
+describe('jail reachability — xargs over a literal pipe', () => {
+  it('echo KEY | xargs cat -> block', () => {
+    expect(v(`echo ${X} | xargs cat`)).toMatch(/^block:/);
+  });
+});
+
 describe('jail reachability — non-goals, pinned as failing', () => {
   // Out of scope for stage 2, by design 3.5. `it.fails` so that fixing one of
   // these flips a test rather than passing silently -- the fix should be a
   // deliberate act with its own row, not a side effect.
-  it.fails('xargs over stdin', () => {
-    expect(v(`echo ${X} | xargs cat`)).toMatch(/^block:/);
-  });
   it.fails('xargs -a', () => {
     expect(v(`xargs -a ${X} echo`)).toMatch(/^block:/);
   });
