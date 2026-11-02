@@ -16,7 +16,13 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { levelOf, type Level } from '@node9/policy-engine';
-import { ensureOwnDir } from '../utils/own-dir';
+import {
+  ensureOwnDir,
+  isSameOwnDir,
+  removeOldFlag,
+  SESSION_FLAG_SUFFIX,
+  type OwnDir,
+} from '../utils/own-dir';
 
 const ICON = '\u{1F6E1}\uFE0F';
 
@@ -74,31 +80,24 @@ export function claimSessionNotice(sessionId: string | undefined, home = os.home
   const dir = path.join(home, '.node9', 'notice-sessions');
   // The agent can reach ~/.node9 with mv and ln: a link here would point the
   // flag write and the clean-up below at a directory of its choosing.
-  if (!ensureOwnDir(dir)) return false;
+  const seen = ensureOwnDir(dir);
+  if (!seen) return false;
   try {
-    fs.closeSync(fs.openSync(path.join(dir, sessionId), 'wx'));
+    if (!isSameOwnDir(dir, seen)) return false;
+    fs.closeSync(fs.openSync(path.join(dir, sessionId + SESSION_FLAG_SUFFIX), 'wx'));
   } catch {
     return false;
   }
-  removeOldFlags(dir);
+  removeOldFlags(dir, seen);
   return true;
 }
 
-/** Removes old flag files only: regular files with a session-id name. Links,
- *  directories and any other name are left alone. */
-function removeOldFlags(dir: string): void {
+/** Removes old flag files only: regular files named `<id>.node9-flag`, and
+ *  only while the directory is still the one that was checked. */
+function removeOldFlags(dir: string, seen: OwnDir): void {
   const cutoff = Date.now() - FLAG_TTL_MS;
   try {
-    for (const name of fs.readdirSync(dir)) {
-      if (!SAFE_SESSION_ID.test(name)) continue;
-      const p = path.join(dir, name);
-      try {
-        const st = fs.lstatSync(p);
-        if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(p);
-      } catch {
-        /* another hook removed it, or it is unreadable: leave it */
-      }
-    }
+    for (const name of fs.readdirSync(dir)) removeOldFlag(dir, seen, name, cutoff);
   } catch {
     /* best effort */
   }

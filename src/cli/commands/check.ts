@@ -43,7 +43,12 @@ import {
 } from '../../utils/hook-payload';
 import { stripControlChars } from '../../utils/safe-text';
 import { atomicWriteSync } from '../../utils/atomic-write';
-import { ensureOwnDir } from '../../utils/own-dir';
+import {
+  ensureOwnDir,
+  isSameOwnDir,
+  removeOldFlag,
+  SESSION_FLAG_SUFFIX,
+} from '../../utils/own-dir';
 import {
   claimSessionNotice,
   sessionNoticeEnabled,
@@ -846,14 +851,16 @@ export function registerCheckCommand(program: Command): void {
           if (skillPinCfg.enabled && safeSessionId) {
             try {
               const sessionsDir = path.join(os.homedir(), '.node9', 'skill-sessions');
-              const flagPath = path.join(sessionsDir, `${safeSessionId}.json`);
+              const flagPath = path.join(sessionsDir, `${safeSessionId}${SESSION_FLAG_SUFFIX}`);
               // The memo is used only in a real directory of this user: a link
               // planted under ~/.node9 must not supply a "verified" flag, receive
               // writes or steer the clean-up. Without it the check runs every call.
               const memo = ensureOwnDir(sessionsDir);
               let flag: { state?: string; detail?: string } | null = null;
               try {
-                if (memo && fs.lstatSync(flagPath).isFile())
+                // One name only: a hard link or a moved file is not node9's flag.
+                const st = memo ? fs.lstatSync(flagPath) : null;
+                if (st && st.isFile() && st.nlink === 1)
                   flag = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
               } catch {
                 /* missing/unreadable — treat as fresh */
@@ -862,7 +869,7 @@ export function registerCheckCommand(program: Command): void {
               // Temp file + rename: a link planted at the flag path is replaced,
               // never written through.
               const writeFlag = (data: { state: string; detail?: string }) => {
-                if (!memo) return;
+                if (!memo || !isSameOwnDir(sessionsDir, memo)) return;
                 try {
                   atomicWriteSync(
                     flagPath,
@@ -965,20 +972,13 @@ export function registerCheckCommand(program: Command): void {
                 }
 
                 // Best-effort GC of session flags older than 7 days: only regular
-                // files with a flag's name, and only in the user's own directory.
+                // files named <id>.node9-flag, and only while the directory is
+                // still the one checked above (a swap mid-call stops it).
                 if (memo)
                   try {
                     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-                    for (const name of fs.readdirSync(sessionsDir)) {
-                      if (!/^[A-Za-z0-9_-]{1,128}\.json$/.test(name)) continue;
-                      const p = path.join(sessionsDir, name);
-                      try {
-                        const st = fs.lstatSync(p);
-                        if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(p);
-                      } catch {
-                        /* ignore */
-                      }
-                    }
+                    for (const name of fs.readdirSync(sessionsDir))
+                      removeOldFlag(sessionsDir, memo, name, cutoff);
                   } catch {
                     /* ignore */
                   }

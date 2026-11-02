@@ -202,7 +202,7 @@ describe('claimSessionNotice', () => {
   it('removes flags older than seven days when a new session claims one', () => {
     const home = fs.mkdtempSync(path.join(room, 'gc-'));
     expect(claimSessionNotice('old', home)).toBe(true);
-    const old = path.join(home, '.node9', 'notice-sessions', 'old');
+    const old = path.join(home, '.node9', 'notice-sessions', 'old.node9-flag');
     const eightDays = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
     fs.utimesSync(old, eightDays, eightDays);
     expect(claimSessionNotice('new', home)).toBe(true);
@@ -222,7 +222,7 @@ describe('claimSessionNotice', () => {
     fs.symlinkSync(victim, path.join(home, '.node9', 'notice-sessions'));
     expect(claimSessionNotice('s-link', home)).toBe(false);
     expect(fs.existsSync(oldFile)).toBe(true);
-    expect(fs.existsSync(path.join(victim, 's-link'))).toBe(false);
+    expect(fs.readdirSync(victim)).toEqual(['old-notes.txt']);
   });
 
   itUnix('clean-up removes only old flag files, never other entries', () => {
@@ -231,18 +231,22 @@ describe('claimSessionNotice', () => {
     const dir = path.join(home, '.node9', 'notice-sessions');
     const eightDays = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
     const notAFlag = path.join(dir, 'not a flag.txt');
+    const makefile = path.join(dir, 'Makefile');
     const subdir = path.join(dir, 'subdir');
     const outside = fs.mkdtempSync(path.join(room, 'outside-'));
     const outsideFile = path.join(outside, 'target');
     fs.writeFileSync(outsideFile, 'x');
-    const link = path.join(dir, 'linkflag');
+    const link = path.join(dir, 'linkflag.node9-flag');
     fs.writeFileSync(notAFlag, 'x');
+    fs.writeFileSync(makefile, 'x');
     fs.mkdirSync(subdir);
     fs.symlinkSync(outsideFile, link);
-    for (const p of [notAFlag, subdir, outsideFile]) fs.utimesSync(p, eightDays, eightDays);
+    for (const p of [notAFlag, makefile, subdir, outsideFile])
+      fs.utimesSync(p, eightDays, eightDays);
     fs.lutimesSync(link, eightDays, eightDays);
     expect(claimSessionNotice('second', home)).toBe(true);
     expect(fs.existsSync(notAFlag)).toBe(true);
+    expect(fs.existsSync(makefile)).toBe(true);
     expect(fs.existsSync(subdir)).toBe(true);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
     expect(fs.existsSync(outsideFile)).toBe(true);

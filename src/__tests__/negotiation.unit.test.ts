@@ -374,6 +374,19 @@ describe('the user line cannot be split or stretched by its inputs (fw#420)', ()
 
   // Review: a long run of dots in agent-reachable text made the trailing-dot
   // trim quadratic (seconds per block message). The line is built in time.
+  // Review: only a "Node9:" / "Blocked:" label is dropped from a rule's own
+  // sentence; a sentence with nothing left falls back to the default line.
+  it('a rule sentence keeps its own verb, and an empty one falls back', () => {
+    const verb = buildNegotiationMessage('x', false, undefined, undefined, {
+      ruleDescription: 'Node9 blocks deploys on Friday.',
+    });
+    expect(lines(verb)[0]).toBe(`${SHIELD} Node9 blocked: Node9 blocks deploys on Friday`);
+    const empty = buildNegotiationMessage('x', false, undefined, undefined, {
+      ruleDescription: 'Blocked: .',
+    });
+    expect(lines(empty)[0]).not.toMatch(/Node9 blocked: \.?$/);
+  });
+
   it('a long run of dots in the reason or the rule sentence stays fast', () => {
     const dots = 'x' + '.'.repeat(40_000) + 'y';
     const started = Date.now();

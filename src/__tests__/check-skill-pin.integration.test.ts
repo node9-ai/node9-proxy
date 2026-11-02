@@ -161,7 +161,7 @@ describe('skillPinning mode=warn (installed skill swap)', () => {
       ),
     ]);
     const flag = JSON.parse(
-      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'w1.json'), 'utf-8')
+      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'w1.node9-flag'), 'utf-8')
     );
     expect(flag.state).toBe('verified');
   });
@@ -173,7 +173,7 @@ describe('skillPinning mode=warn (installed skill swap)', () => {
     expect(r.status).toBe(0); // NOT 2 — warn mode
     expect(r.stdout.trim()).toBe(''); // no JSON block
     const flag = JSON.parse(
-      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'w2.json'), 'utf-8')
+      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'w2.node9-flag'), 'utf-8')
     );
     expect(flag.state).toBe('warned');
     expect(flag.detail).toMatch(/changed/i);
@@ -203,7 +203,7 @@ describe('skillPinning mode=block (strict)', () => {
     expect(out.decision).toBe('block');
     expect(out.reason).toMatch(/skill/i);
     const flag = JSON.parse(
-      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'b1.json'), 'utf-8')
+      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'b1.node9-flag'), 'utf-8')
     );
     expect(flag.state).toBe('quarantined');
   });
@@ -241,7 +241,7 @@ describe('default scope does NOT include project CLAUDE.md or .cursor/rules', ()
     const r = runCheck(payload('follow', tmpProject), { HOME: tmpHome }, tmpProject);
     expect(r.status).toBe(0);
     const flag = JSON.parse(
-      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'follow.json'), 'utf-8')
+      fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'follow.node9-flag'), 'utf-8')
     );
     expect(flag.state).toBe('verified'); // NOT 'warned' — project CLAUDE.md isn't in default scope
   });
@@ -340,14 +340,14 @@ describe('skill-sessions memo and planted links', () => {
     const r = runCheck(payload('lnk1', tmpProject), { HOME: tmpHome }, tmpProject);
     expect(r.status).toBe(0);
     expect(fs.readFileSync(old, 'utf-8')).toBe('keep me');
-    expect(fs.existsSync(path.join(outside, 'lnk1.json'))).toBe(false);
+    expect(fs.existsSync(path.join(outside, 'lnk1.node9-flag'))).toBe(false);
   });
 
   itUnix('a planted "verified" flag behind a link does not skip the check', () => {
     runCheck(payload('prime', tmpProject), { HOME: tmpHome }, tmpProject); // pin
     tamperInstalledSkill(tmpHome);
     fs.rmSync(sessionsDir(), { recursive: true, force: true });
-    fs.writeFileSync(path.join(outside, 'planted.json'), '{"state":"verified"}');
+    fs.writeFileSync(path.join(outside, 'planted.node9-flag'), '{"state":"verified"}');
     fs.symlinkSync(outside, sessionsDir());
     const r = runCheck(payload('planted', tmpProject), { HOME: tmpHome }, tmpProject);
     expect(r.status).toBe(2);
@@ -358,30 +358,46 @@ describe('skill-sessions memo and planted links', () => {
     fs.mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
     const target = path.join(outside, 'important.txt');
     fs.writeFileSync(target, 'keep me');
-    fs.symlinkSync(target, path.join(sessionsDir(), 'lnk2.json'));
+    fs.symlinkSync(target, path.join(sessionsDir(), 'lnk2.node9-flag'));
     const r = runCheck(payload('lnk2', tmpProject), { HOME: tmpHome }, tmpProject);
     expect(r.status).toBe(0);
     expect(fs.readFileSync(target, 'utf-8')).toBe('keep me');
-    const flagPath = path.join(sessionsDir(), 'lnk2.json');
+    const flagPath = path.join(sessionsDir(), 'lnk2.node9-flag');
     expect(fs.lstatSync(flagPath).isSymbolicLink()).toBe(false);
     expect(JSON.parse(fs.readFileSync(flagPath, 'utf-8')).state).toBe('verified');
   });
 
+  // Review: a hard link (or a moved file) is a regular file to lstat; a flag
+  // with a second name is not one node9 wrote for this session.
+  itUnix('a hard-linked "verified" flag does not skip the check', () => {
+    runCheck(payload('prime', tmpProject), { HOME: tmpHome }, tmpProject); // pin
+    tamperInstalledSkill(tmpHome);
+    const planted = path.join(outside, 'v.json');
+    fs.writeFileSync(planted, '{"state":"verified"}');
+    fs.linkSync(planted, path.join(sessionsDir(), 'hard.node9-flag'));
+    const r = runCheck(payload('hard', tmpProject), { HOME: tmpHome }, tmpProject);
+    expect(r.status).toBe(2);
+  });
+
   itUnix('clean-up removes only old session flags, never other entries', () => {
     fs.mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
-    const oldFlag = path.join(sessionsDir(), 'old-session.json');
+    const oldFlag = path.join(sessionsDir(), 'old-session.node9-flag');
     const notes = path.join(sessionsDir(), 'notes.txt');
+    const pkg = path.join(sessionsDir(), 'package.json');
     const target = path.join(outside, 'target.txt');
-    const linkFlag = path.join(sessionsDir(), 'linked.json');
+    const linkFlag = path.join(sessionsDir(), 'linked.node9-flag');
     fs.writeFileSync(oldFlag, '{"state":"verified"}');
     fs.writeFileSync(notes, 'not a flag');
+    fs.writeFileSync(pkg, '{}');
     fs.writeFileSync(target, 'keep me');
     fs.symlinkSync(target, linkFlag);
-    for (const p of [oldFlag, notes, target]) fs.utimesSync(p, THIRTY_DAYS_AGO, THIRTY_DAYS_AGO);
+    for (const p of [oldFlag, notes, pkg, target])
+      fs.utimesSync(p, THIRTY_DAYS_AGO, THIRTY_DAYS_AGO);
     fs.lutimesSync(linkFlag, THIRTY_DAYS_AGO, THIRTY_DAYS_AGO);
     expect(runCheck(payload('gc', tmpProject), { HOME: tmpHome }, tmpProject).status).toBe(0);
     expect(fs.existsSync(oldFlag)).toBe(false);
     expect(fs.existsSync(notes)).toBe(true);
+    expect(fs.existsSync(pkg)).toBe(true);
     expect(fs.lstatSync(linkFlag).isSymbolicLink()).toBe(true);
     expect(fs.readFileSync(target, 'utf-8')).toBe('keep me');
   });

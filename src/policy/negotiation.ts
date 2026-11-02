@@ -111,7 +111,12 @@ const COMMA_BLOCKED_BY = /^(.+?), blocked by (.+?)\.?$/i;
 function ruleWhat(description: string | undefined): string {
   if (!description) return '';
   // An egress rule sentence is the reason itself ("Blocked: <address> is ...").
-  const s = withoutLeadingVerdict(firstSentence(description));
+  // Only a "Node9:" or "Blocked:" label is dropped from a rule's own sentence,
+  // so "Node9 blocks X" keeps its verb; a sentence with nothing left falls back.
+  const s = firstSentence(description)
+    .replace(/^node9\s*:\s*/i, '')
+    .replace(/^blocked\s*:\s*/i, '');
+  if (!/[\p{L}\p{N}]/u.test(s)) return '';
   const by = s.match(IS_BLOCKED_BY) ?? s.match(COMMA_BLOCKED_BY);
   if (by) return userLinePart(`${by[1]} (${by[2]})`);
   const bare = s.match(IS_BLOCKED);
