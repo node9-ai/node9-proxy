@@ -103,11 +103,17 @@ describe('Issue 338 through the built hook', () => {
     '$(printf rm) -rf /important/data',
     '/bin/{rm,} -rf /tmp/sensitive',
     'IFS=,;CMD=r,m;$CMD -rf /data',
-    "$'\\162\\155' -rf /home/user/.ssh",
     'echo cm0gLXJmIC9kYXRh | base64 -d | bash',
   ])('requires approval for generated executable code: %s', (command) => {
     const result = check('mcp__ops__exec', { command });
     expect(result.body.hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+  // `$'\162\155'` is bash's ANSI-C quoting of `rm`; the shell reader decodes it
+  // since 2026-11-02 (jail-indirect-reads), so this is a literal `rm -rf` of
+  // ~/.ssh and blocks, where it used to be asked about as generated code.
+  it('blocks an ANSI-C spelled rm of ~/.ssh', () => {
+    const result = check('mcp__ops__exec', { command: "$'\\162\\155' -rf /home/user/.ssh" });
+    expect(result.body.hookSpecificOutput.permissionDecision).toBe('deny');
   });
   it('blocks a generated mnemonic and keeps it out of audit and response', () => {
     const phrase = mnemonicFixture();

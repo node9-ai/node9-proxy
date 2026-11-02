@@ -232,21 +232,28 @@ describe('jail reachability — a dynamic payload is NOT re-parsed', () => {
 // never a flag's operand. The cost is not paid, and the row is in `stays
 // silent` above.
 
+// Flipped 2026-11-02 (jail-indirect-reads design): literal names piped into
+// xargs reach its command as operands, so this is no longer a non-goal.
+describe('jail reachability — xargs over a literal pipe or a here-string', () => {
+  it('echo KEY | xargs cat -> block', () => {
+    expect(v(`echo ${X} | xargs cat`)).toMatch(/^block:/);
+  });
+  // A here-string is text, not a file, but xargs turns its words into the
+  // operands of cat: the names reach the reader (flipped 2026-11-02).
+  it('xargs -I{} cat {} <<< KEY -> block', () => {
+    expect(v(`xargs -I{} cat {} <<< ${X}`)).toMatch(/^block:/);
+  });
+});
+
 describe('jail reachability — non-goals, pinned as failing', () => {
   // Out of scope for stage 2, by design 3.5. `it.fails` so that fixing one of
   // these flips a test rather than passing silently -- the fix should be a
   // deliberate act with its own row, not a side effect.
-  it.fails('xargs over stdin', () => {
-    expect(v(`echo ${X} | xargs cat`)).toMatch(/^block:/);
-  });
   it.fails('xargs -a', () => {
     expect(v(`xargs -a ${X} echo`)).toMatch(/^block:/);
   });
   it.fails('cd then a relative read', () => {
     expect(v(`cd ${D} && cat id_rsa`)).toMatch(/^block:/);
-  });
-  it.fails('a here-string is a string, not a file', () => {
-    expect(v(`xargs -I{} cat {} <<< ${X}`)).toMatch(/^block:/);
   });
   // A reader named by ABSOLUTE PATH. Pre-existing and consistent with stage 1:
   // FS_OP_PRESCREEN_RE has no `/` separator, so `/bin/cat KEY` is allowed at

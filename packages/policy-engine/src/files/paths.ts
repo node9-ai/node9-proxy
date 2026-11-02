@@ -110,6 +110,8 @@ export interface FileAccess {
   upload?: true;
   /** A directory listing (`ls`, `tree`, find's start points): the entry names, not a file's content. */
   listing?: true;
+  /** The source of a copy, move or archive: the credential jail judges these with its copy rules. */
+  copy?: true;
   /** Unquoted shell pattern. Quoted metacharacters are escaped in this value. */
   glob?: string;
   /** The pattern is find's, not the shell's: `*` also selects dotfiles. */

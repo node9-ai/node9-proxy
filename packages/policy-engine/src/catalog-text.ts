@@ -229,6 +229,13 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     example: 'Copying ~/.npmrc into /tmp',
     advice: 'Fixed at Review for now.',
   },
+  'data.credential-files-unknown': {
+    plain:
+      'The agent reads files whose names a listing produces only when the command runs, so node9 cannot tell in advance whether a credential file is among them.',
+    example: 'find . | xargs cat',
+    advice:
+      'Standard records it; Strict asks. Set Review if your agents should not read files they find this way.',
+  },
   'data.pipe-chain': {
     plain: 'The agent reads a secret file and sends it over the network in the same command.',
     example: 'An SSH key file piped into curl',

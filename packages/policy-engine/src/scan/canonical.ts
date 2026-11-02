@@ -787,7 +787,25 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // root of the tree (`.`) or to `.git` is a bypass again; a `-C {}` filled in
 // at run time is dynamic; `git -C <dir> add .` is a finding that holds unless
 // the host finds <dir> is not a work-tree top (the scan keeps it).
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v35';
+// canonical-v36 (2026-11-02, jail-indirect-reads design): the credential jail
+// also checks the names the structural file-access walk resolves when the
+// direct walk found nothing: a loop variable, a glob aimed at a jailed name,
+// $PWD, find -name ... -exec. `for f in .env; do cat "$f"; done` is a
+// block-read-env finding. Histories scanned under v35 re-read.
+// Folded into v36 before it shipped (step 2 of the same design): `set --`,
+// arrays, `while read` fed by a here-string, a heredoc or a literal pipe,
+// `echo NAMES | xargs CMD`, `$'...'` strings, diff/cmp/comm/paste/join as
+// readers, and `source .env` followed by a print of the environment.
+// Folded in after the independent review: `source .env; echo $X`, export -p
+// and declare -px as prints, `. "$PWD/.env"`, `printf '%s\n' NAMES | xargs`,
+// a here-string into xargs, `for f; do` over "$@", a glob in a directory part
+// (`~/.ss?/id_rsa`), `[!...]` classes, and `find -name .env | xargs cat` as a
+// read; an `xargs -I` expansion is bounded (16 KB).
+// Second review: past the bound each name still reaches its command (no name
+// is dropped); `-o`, `-iname` and `-prune` in find; find piped through other
+// stages, braces, a subshell or `sudo xargs`; `declare -p NAME`; and `$?`,
+// `$1`, PATH or a loop variable after `source .env` is not a print.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v36';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
 // gained the Dropbox App Secret pattern and an Authorization-header reading of
@@ -847,7 +865,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v35';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '8726a60ddd4bad7b';
+export const CANONICAL_EXTRACTOR_HASH = '7334a8945bc6297b';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

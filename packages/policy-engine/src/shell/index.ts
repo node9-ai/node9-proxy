@@ -17,7 +17,9 @@ import { toPlainTree, walk } from './plain-tree';
 import { matchesPattern } from '../rules';
 import { isShellShapedTool, type InspectionInput } from './tool-input';
 import { foldHomoglyphs } from '../dlp/normalize';
-import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES } from '../files/paths';
+import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES, type FileAccess } from '../files/paths';
+import picomatch from 'picomatch';
+import { collectShellFileAccesses } from './file-access';
 import { inlineLanguageOf, judgeInlineCode, type InlineCodeCategory } from './inline-code';
 export {
   BASH_TOOL_NAMES,
@@ -1079,6 +1081,13 @@ export const FS_READ_TOOLS = new Set([
   'tac',
   'nl',
   'dd',
+  // Compare or merge files and print their lines (jail-indirect-reads,
+  // 2026-11-02): `diff .env /dev/null` printed every line of the file.
+  'diff',
+  'cmp',
+  'comm',
+  'paste',
+  'join',
   // — PowerShell, absent until 2026-09-22 —
   // Same membership test, "does it emit file contents": Get-Content/gc print
   // the file (cat), Select-String/sls print matching lines (grep), Format-Hex
@@ -3775,6 +3784,38 @@ export function resolveWordPrefix(w: any): { prefix: string; dynamic: boolean } 
  * gated on the jail walk, because the NORMALIZER shares this resolver and its
  * output is the text the regex rules and the historical scanner read.
  */
+/** The text bash makes of a `$'...'` string: `$'\x2eenv'` is `.env`. */
+export function decodeAnsiC(raw: string): string {
+  const simple: Record<string, string> = {
+    a: '\x07',
+    b: '\b',
+    e: '\x1b',
+    E: '\x1b',
+    f: '\f',
+    n: '\n',
+    r: '\r',
+    t: '\t',
+    v: '\v',
+    '\\': '\\',
+    "'": "'",
+    '"': '"',
+    '?': '?',
+  };
+  return raw.replace(
+    /\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)/g,
+    (all, esc: string) => {
+      const c = esc[0];
+      if (c === 'x' || c === 'u' || c === 'U') {
+        const code = parseInt(esc.slice(1), 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : all;
+      }
+      if (/[0-7]/.test(c)) return String.fromCharCode(parseInt(esc, 8) & 0xff);
+      if (c === 'c' && esc.length === 2) return String.fromCharCode(esc.charCodeAt(1) & 0x1f);
+      return simple[esc] ?? all;
+    }
+  );
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function resolvePart(p: any, inQuotes: boolean): string | null | undefined {
   const t = p.kind;
@@ -3783,7 +3824,7 @@ function resolvePart(p: any, inQuotes: boolean): string | null | undefined {
     if (!inQuotes) return raw.replace(/\\(.)/g, '$1');
     return assignmentTable ? raw.replace(/\\([$`"\\])/g, '$1') : raw;
   }
-  if (t === 'SglQuoted') return p.Value ?? '';
+  if (t === 'SglQuoted') return p.Dollar ? decodeAnsiC(p.Value ?? '') : (p.Value ?? '');
   if (t === 'ParamExp') return expandPlainParam(p);
   if (t === 'CmdSubst') return assignmentTable ? resolveTrivialSubst(p) : undefined;
   if (t === 'DblQuoted' && !inQuotes) {
@@ -4087,14 +4128,25 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // alike would share whichever verdict was computed first.
   const normalized = normalizeCommandForPolicy(command);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
-  if (!FS_OP_PRESCREEN_RE.test(normalized) && !FS_OP_PRESCREEN_RE.test(command)) return null;
+  if (
+    !FS_OP_PRESCREEN_RE.test(normalized) &&
+    !FS_OP_PRESCREEN_RE.test(command) &&
+    !SOURCES_FILE_RE.test(command)
+  )
+    return null;
   if (fsOpCache.has(command)) {
     const hit = fsOpCache.get(command) ?? null;
     fsOpCache.delete(command);
     fsOpCache.set(command, hit);
     return hit;
   }
-  const computed = analyzeFsOperationImpl(command);
+  // The walk above reads each reader's operands as written. A name that reaches
+  // the reader indirectly (a loop variable, a glob, $PWD, find -exec) is
+  // resolved by the structural file-access walk, so it is consulted when the
+  // direct reading found nothing (jail-indirect-reads design, 2026-11-02).
+  const computed =
+    analyzeFsOperationImpl(command) ??
+    (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null);
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
@@ -4970,6 +5022,482 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
       return { ruleName: sp.rule, verdict: sp.verdict ?? 'block', reason: sp.reason, path: p };
   }
   return null;
+}
+
+/** Shapes whose operands the direct walk does not resolve: a loop, a glob,
+ *  $PWD, find, xargs, `set --`, `source` / `.`. A command without one is left
+ *  to the direct walk alone, whose assignment table is exact (JAIL-14a: a
+ *  branch that did not run sets nothing), where the structural walk merges
+ *  every branch. */
+const INDIRECT_SHAPE_RE =
+  /\b(?:for|while|until|find|xargs|set|source)\b|\$\{?PWD\b|[*?[]|(?:^|[;&|(\s])\.\s/;
+
+/** `source FILE` / `. FILE`: no reader word, so the prescreen needs this. */
+const SOURCES_FILE_RE = /(?:^|[;&|(\s])(?:source|\.)\s/;
+
+/** Commands that print the environment: after `source .env` they print it. */
+function printsEnvironment(words: string[]): boolean {
+  const [name, ...rest] = words;
+  if (name === 'printenv') return true;
+  if (name === 'env') return rest.every((w) => w.startsWith('-') || /^[A-Za-z_]\w*=/.test(w));
+  if (name === 'export' || name === 'declare' || name === 'typeset')
+    return rest.every((w) => /^-[a-zA-Z]*[px]?$/.test(w));
+  if (name === 'set') return rest.length === 0;
+  return false;
+}
+
+/** `source .env; env`: a jailed file loaded into the environment and the
+ *  environment printed in the same command. Loading alone (`source .env &&
+ *  npm run dev`) is everyday work and stays allowed. */
+function sourcedAndPrinted(command: string): FsOpVerdict | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  const sourced: string[] = [];
+  let printed = false;
+  // Names the command itself sets (loop and read variables): echoing them
+  // prints nothing from the sourced file.
+  const local = new Set<string>();
+  walk(f, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.kind === 'ForClause' && n.Loop?.Name?.Value) local.add(n.Loop.Name.Value);
+    if (n.kind === 'CallExpr') {
+      const w = callWords(n);
+      if (w[0] === 'read') for (const v of w.slice(1)) if (v && !v.startsWith('-')) local.add(v);
+    }
+    return true;
+  });
+  walk(f, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.kind === 'DeclClause') {
+      // `export -p`, `declare -px`, a bare `export`: no names, only flags.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const args: any[] = n.Args ?? [];
+      const flags = args
+        .filter((a) => !a.Name?.Value)
+        .map((a) => resolveWordLiteral(a.Value) ?? '');
+      const flagsOnly = flags.length === args.length && flags.every((f) => /^-[a-zA-Z]*$/.test(f));
+      // `declare -p NAME` prints NAME's value too.
+      if (flagsOnly || flags.some((f) => /^-[a-zA-Z]*p/.test(f))) printed = true;
+      return true;
+    }
+    if (n.kind !== 'CallExpr') return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const args: any[] = n.Args ?? [];
+    const head = resolveWordLiteral(args[0]);
+    if ((head === 'source' || head === '.') && args[1]) {
+      const p = resolveWordLiteral(args[1]) ?? pathWithKnownDirs(args[1]);
+      if (p) sourced.push(p);
+      return true;
+    }
+    // `echo $KEY` after sourcing prints a value from the file.
+    if (
+      (head === 'echo' || head === 'printf') &&
+      args.slice(1).some((a) => hasEnvParam(a, local))
+    ) {
+      printed = true;
+      return true;
+    }
+    const words = args.map((a) => resolveWordLiteral(a));
+    if (words.some((w: string | null) => w === null) || !words.length) return true;
+    if (printsEnvironment(words as string[])) printed = true;
+    return true;
+  });
+  if (!printed) return null;
+  for (const p of sourced) {
+    const hit = matchSensitivePath(p);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Variables the shell sets itself: echoing them prints nothing from a file. */
+const SHELL_SET_VARS = new Set([
+  'PWD',
+  'OLDPWD',
+  'HOME',
+  'PATH',
+  'USER',
+  'SHELL',
+  'PPID',
+  'RANDOM',
+  'LINENO',
+  'SECONDS',
+  'IFS',
+]);
+
+/** An expansion of a plain variable a sourced file could have set: not `$?`,
+ *  `$1`, `$@`, a shell variable, or a name the command sets itself. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasEnvParam(word: any, local: ReadonlySet<string>): boolean {
+  let found = false;
+  walk(word, (n) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const name = n.kind === 'ParamExp' ? (n as any).Param?.Value : undefined;
+    if (
+      typeof name === 'string' &&
+      /^[A-Za-z_]\w*$/.test(name) &&
+      !SHELL_SET_VARS.has(name) &&
+      !local.has(name)
+    )
+      found = true;
+    return !found;
+  });
+  return found;
+}
+
+/** A word whose only variables are $PWD and $HOME, spelt out: `"$PWD/.env"`
+ *  is `./.env`. Null for any other variable or substitution. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function pathWithKnownDirs(word: any): string | null {
+  let out = '';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const visit = (parts: any[]): boolean => {
+    for (const p of parts ?? []) {
+      if (p.kind === 'DblQuoted') {
+        if (!visit(p.Parts)) return false;
+      } else if (p.kind === 'ParamExp') {
+        const name = p.Param?.Value;
+        if (p.Exp || p.Index || p.Slice || p.Repl || p.Length || p.Excl) return false;
+        if (name === 'PWD') out += '.';
+        else if (name === 'HOME') out += '~';
+        else return false;
+      } else {
+        const v = resolveWordLiteral({ Parts: [p] });
+        if (v === null) return false;
+        out += v;
+      }
+    }
+    return true;
+  };
+  return visit(word?.Parts) ? out : null;
+}
+
+/** find's -name / -iname patterns that restrict what it lists. A pattern
+ *  behind -not or ! excludes instead, so it restricts nothing. */
+function findNamePatterns(rest: (string | null)[]): Array<{ pattern: string; nocase: boolean }> {
+  const patterns: Array<{ pattern: string; nocase: boolean }> = [];
+  for (let i = 0; i < rest.length; i++) {
+    const negated = rest[i - 1] === '-not' || rest[i - 1] === '!';
+    // `-name .env -prune` keeps .env OUT of the listing.
+    const pruned = rest[i + 2] === '-prune';
+    if (['-name', '-iname'].includes(rest[i] ?? '') && rest[i + 1] != null && !negated && !pruned)
+      patterns.push({ pattern: rest[i + 1] as string, nocase: rest[i] === '-iname' });
+  }
+  return patterns;
+}
+
+/** `find . -name .env | xargs cat`: a find whose -name patterns all aim at
+ *  jailed names, feeding a reader, reads those files as surely as
+ *  `find -name .env -exec cat {} +` (which the jail blocks). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function findOfJailedNames(stmt: any): FsOpVerdict | null {
+  const cmd = stmt?.Cmd;
+  if (cmd?.kind !== 'CallExpr') return null;
+  const words = callWords(cmd);
+  const head = unwrapCommandHead(words);
+  if (baseWord(words[head]) !== 'find') return null;
+  // One pattern aimed at a jailed name is enough: `-o` adds names, it never
+  // takes .env away (only -not / -prune do, and those are skipped).
+  for (const { pattern, nocase } of findNamePatterns(words.slice(head + 1))) {
+    let m: (n: string) => boolean;
+    try {
+      m = picomatch(shellGlob(pattern), { dot: true, nocase });
+    } catch {
+      continue;
+    }
+    if (m('n9-any-name') || m('.n9-any-name')) continue;
+    const name = JAILED_GLOB_NAMES.find((n) => m(n));
+    const hit = name ? matchSensitivePath(name) : null;
+    if (hit) return hit;
+  }
+  return null;
+}
+
+const pipeOps = lazy(
+  () =>
+    new Set(
+      ['a | b', 'a |& b'].map((t) => {
+        const f = parseShared(t);
+        return typeof f === 'symbol' ? -1 : f.Stmts[0].Cmd.Op;
+      })
+    )
+);
+
+/** A pipeline stage that reads the names it is fed: `xargs READER` (also
+ *  behind a wrapper, `sudo xargs cat`) or a read loop with a reader, also
+ *  inside braces or a subshell. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function readsFedNames(stmt: any): boolean {
+  let reads = false;
+  walk(stmt, (n) => {
+    if (reads) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (
+      node.kind === 'CallExpr' &&
+      callWords(node).some((w) => baseWord(w) === 'xargs') &&
+      hasReader(node)
+    )
+      reads = true;
+    if (node.kind === 'WhileClause' && hasReader({ kind: 'Block', Stmts: node.Do })) reads = true;
+    return !reads;
+  });
+  return reads;
+}
+
+/** A find of jailed names earlier in a pipeline than a stage that reads the
+ *  names it is fed (`find . -name .env | sort | xargs cat`). */
+function findPipedToReader(command: string): FsOpVerdict | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  let hit: FsOpVerdict | null = null;
+  walk(f, (n) => {
+    if (hit) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (node.kind !== 'BinaryCmd' || !pipeOps().has(node.Op)) return true;
+    // A pipeline nests to the left: collect its stages in order.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stages: any[] = [];
+    let cur = node;
+    while (cur?.kind === 'BinaryCmd' && pipeOps().has(cur.Op)) {
+      stages.unshift(cur.Y);
+      const left = cur.X;
+      if (left?.Cmd?.kind === 'BinaryCmd' && pipeOps().has(left.Cmd.Op)) cur = left.Cmd;
+      else {
+        stages.unshift(left);
+        break;
+      }
+    }
+    for (let i = 0; i < stages.length - 1 && !hit; i++) {
+      const found = findOfJailedNames(stages[i]);
+      if (found && stages.slice(i + 1).some(readsFedNames)) hit = found;
+    }
+    return !hit;
+  });
+  return hit;
+}
+
+/** A listing command whose output can name a jailed file: `find` without a
+ *  -name filter that rules jailed names out, `ls -a`/`ls -A`, `fd -H`.
+ *  `ls` without -a skips dotfiles; `find -type d` lists no files. */
+function listsJailedNames(words: (string | null)[]): boolean {
+  const head = unwrapCommandHead(words);
+  const name = baseWord(words[head]);
+  const rest = words.slice(head + 1);
+  if (name === 'ls') return rest.some((w) => w !== null && /^-[a-zA-Z]*[aA]/.test(w));
+  if (name === 'fd' || name === 'fdfind')
+    return rest.some(
+      (w) => w === '-H' || w === '--hidden' || (w !== null && /^-[a-zA-Z]*H/.test(w))
+    );
+  if (name !== 'find') return false;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '-type' && rest[i + 1] === 'd') return false;
+  }
+  const patterns = findNamePatterns(rest);
+  if (!patterns.length) return true;
+  const names = [...JAILED_GLOB_NAMES, 'id_rsa', 'id_ed25519', 'credentials'];
+  return patterns.some(({ pattern }) => {
+    try {
+      const m = picomatch(shellGlob(pattern), { dot: true, nocase: true });
+      return names.some((n) => m(n));
+    } catch {
+      return true;
+    }
+  });
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const callWords = (node: any): (string | null)[] =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (node?.Args ?? []).map((a: any) => resolveWordLiteral(a));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isListingStmt(stmt: any): boolean {
+  const cmd = stmt?.Cmd;
+  return cmd?.kind === 'CallExpr' && listsJailedNames(callWords(cmd));
+}
+
+/** A reader call (cat, sed, grep, ...) in `node`, optionally one that reads the
+ *  variable `name`. xargs counts through the command it runs. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasReader(node: any, name?: string): boolean {
+  let found = false;
+  walk(node, (n) => {
+    if (found || n.kind !== 'CallExpr') return !found;
+    const words = callWords(n);
+    const head = unwrapCommandHead(words);
+    if (!isReaderWord(words[head])) return true;
+    if (!name) {
+      found = true;
+      return false;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    walk(n, (m: any) => {
+      if (m.kind === 'ParamExp' && m.Param?.Value === name) found = true;
+      return !found;
+    });
+    return !found;
+  });
+  return found;
+}
+
+/** A listing in a command substitution: `$(find . -type f)`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasListingSubst(node: any): boolean {
+  let found = false;
+  walk(node, (n) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (n.kind === 'CmdSubst' && ((n as any).Stmts ?? []).some(isListingStmt)) found = true;
+    return !found;
+  });
+  return found;
+}
+
+/**
+ * Decision b1 of the jail-indirect-reads design: a reader fed file names that
+ * a listing produces at run time (`find . | xargs cat`, `ls -A | while read f;
+ * do cat "$f"; done`, `cat $(find . -type f)`). The names are not knowable
+ * before the command runs, and the listing can include a jailed file. Null
+ * when no such shape is present.
+ */
+export function analyzeUnknownCredentialReads(command: string): { reason: string } | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  let hit = false;
+  walk(f, (n) => {
+    if (hit) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (node.kind === 'BinaryCmd' && node.Y && isListingStmt(node.X)) {
+      const y = node.Y.Cmd;
+      if (y?.kind === 'CallExpr') {
+        const words = callWords(y);
+        if (baseWord(words[0]) === 'xargs' && hasReader(y)) hit = true;
+      } else if (y?.kind === 'WhileClause') {
+        const read = callWords(y.Cond?.[y.Cond.length - 1]?.Cmd);
+        const vars = read[0] === 'read' ? read.slice(1).filter((w) => w && !w.startsWith('-')) : [];
+        const names = vars.length ? (vars as string[]) : ['REPLY'];
+        if (names.some((v) => hasReader({ kind: 'Block', Stmts: y.Do }, v))) hit = true;
+      }
+    } else if (node.kind === 'CallExpr') {
+      const words = callWords(node);
+      const head = unwrapCommandHead(words);
+      if (isReaderWord(words[head]) && hasListingSubst(node)) hit = true;
+    } else if (node.kind === 'ForClause') {
+      const loop = node.Loop;
+      const v = loop?.Name?.Value;
+      if (
+        v &&
+        (loop.Items ?? []).some(hasListingSubst) &&
+        hasReader({ kind: 'Block', Stmts: node.Do }, v)
+      )
+        hit = true;
+    }
+    return !hit;
+  });
+  return hit
+    ? {
+        reason:
+          'Files are read by names a listing produces when the command runs, and the listing can include credential files',
+      }
+    : null;
+}
+
+/** The jailed names a glob in a directory is tested against. Credential file
+ *  names (a review rule) are left out on purpose: `*.json` would match
+ *  credentials.json in every project, so only a literal name reaches them. */
+const JAILED_GLOB_NAMES = [
+  '.env',
+  '.env.x',
+  '.env.local',
+  '.env.production',
+  '.env.development.local',
+];
+/** Credential directories a glob segment can stand for (`~/.ss?/id_rsa`). */
+const JAILED_DIR_NAMES = ['.ssh', '.aws'];
+
+/** picomatch reads `[!a]` literally; the shell's negated class is `[^a]`. */
+const shellGlob = (p: string): string => p.replace(/\[!/g, '[^');
+const GLOB_META = /(?<!\\)[*?[]/;
+
+/** The jail verdict for a glob operand: anything inside a jailed directory
+ *  (`~/.ssh/id_*`, `~/.aws/*`), or a last segment that can select a jailed name
+ *  (`.e*`, `.en?`). Shell `*` does not select dotfiles; find's does (dotGlob). */
+function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null {
+  // A glob segment in the directory part that can be a credential directory
+  // is read as that directory: `~/.ss?/id_rsa` is `~/.ssh/id_rsa`.
+  const raw = glob.split('/');
+  const parts = raw.map((seg, i) => {
+    if (i === raw.length - 1 || !GLOB_META.test(seg)) return seg;
+    try {
+      // Shell rules: `*` and `**` do not select a dot directory, and a segment
+      // that selects any name is not aimed at a credential directory.
+      const m = picomatch(shellGlob(seg), { dot: false });
+      if (m('n9-any-name') || m('.n9-any-name')) return seg;
+      return JAILED_DIR_NAMES.find((d) => m(d)) ?? seg;
+    } catch {
+      return seg;
+    }
+  });
+  glob = parts.join('/');
+  const first = parts.findIndex((seg) => GLOB_META.test(seg));
+  if (first < 0) return matchSensitivePath(glob);
+  const prefix = parts.slice(0, first).join('/');
+  const inside = prefix ? matchSensitivePath(`${prefix}/x`) : null;
+  if (inside) return { ...inside, path: glob };
+  const last = parts[parts.length - 1];
+  if (!GLOB_META.test(last)) {
+    const hit = matchSensitivePath(last);
+    return hit ? { ...hit, path: glob } : null;
+  }
+  let selects: (name: string) => boolean;
+  try {
+    selects = picomatch(shellGlob(last), { dot: dotGlob });
+  } catch {
+    return null;
+  }
+  // A pattern that selects any name (`*`, find's `./**/*`) is not a read of a
+  // jailed file in particular: `cat *` and `find . -exec cat {} +` stay as
+  // they were (JAIL-11). Only a pattern aimed at the jailed name counts.
+  if (selects('n9-any-name') || selects('.n9-any-name')) return null;
+  for (const name of JAILED_GLOB_NAMES) {
+    if (!selects(name)) continue;
+    const hit = matchSensitivePath(name);
+    if (hit) return { ...hit, path: glob };
+  }
+  return null;
+}
+
+/** The jail applied to the reads the structural file-access walk resolves.
+ *  Listings (`ls`) and recursive directory reads (`grep -r x .`) are not a
+ *  read of a jailed file's content and are skipped. */
+function structuralJailRead(command: string): FsOpVerdict | null {
+  let accesses: FileAccess[];
+  try {
+    accesses = collectShellFileAccesses(command);
+  } catch {
+    return null;
+  }
+  const piped = findPipedToReader(command);
+  if (piped) return piped;
+  const sourcedHit = sourcedAndPrinted(command);
+  if (sourcedHit?.verdict === 'block') return sourcedHit;
+  let review: FsOpVerdict | null = sourcedHit;
+  for (const a of accesses) {
+    // A copy's source is judged by the jail's copy rules (a review, and a
+    // rename inside the jail stays quiet), not as a read.
+    if (a.operation !== 'read' || a.listing || a.recursive || a.copy) continue;
+    // A loop variable keeps an item's text, not its pattern (`for f in .e*`), so
+    // a path with glob characters is judged as the glob it was.
+    const glob = a.glob ?? (GLOB_META.test(a.path) ? a.path : undefined);
+    const hit = glob ? matchSensitiveGlob(glob, !!a.dotGlob) : matchSensitivePath(a.path);
+    if (hit?.verdict === 'block') return hit;
+    review ??= hit;
+  }
+  return review;
 }
 
 // Basenamed, because unwrapCommandHead basenames its head: without it

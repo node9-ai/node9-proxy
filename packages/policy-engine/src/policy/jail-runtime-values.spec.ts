@@ -66,6 +66,9 @@ describe('JAIL-15 — `$HOME` is judged like `~`, in every tier', () => {
     // the pattern slot still works on the resolved word
     [`grep -r TODO $HOME/.ssh`, 'block'],
     [`grep -n foo $HOME/.ssh/config`, 'block'],
+    // $PWD is the working directory: `$PWD/.env` is `./.env`
+    // (jail-indirect-reads design, 2026-11-02; was a documented gap here).
+    [`cat $PWD/.env`, 'block'],
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
 });
 
@@ -83,8 +86,6 @@ describe('JAIL-15 — what the expansion must NOT do', () => {
     [`cat \${HOME:-/tmp}/.ssh/id_rsa`, 'null'],
     [`cat \${HOME%/}/.ssh/id_rsa`, 'null'],
     [`cat \${#HOME}`, 'null'],
-    // any other variable is still dynamic (that is step 2, the assignment table)
-    [`cat $PWD/.env`, 'null'],
     [`cat $MYHOME/.ssh/id_rsa`, 'null'],
     // searching for the STRING is still a search
     [`grep -rn '$HOME/.ssh' docs/`, 'null'],
