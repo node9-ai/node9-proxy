@@ -17,7 +17,9 @@ import { toPlainTree, walk } from './plain-tree';
 import { matchesPattern } from '../rules';
 import { isShellShapedTool, type InspectionInput } from './tool-input';
 import { foldHomoglyphs } from '../dlp/normalize';
-import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES } from '../files/paths';
+import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES, type FileAccess } from '../files/paths';
+import picomatch from 'picomatch';
+import { collectShellFileAccesses } from './file-access';
 import { inlineLanguageOf, judgeInlineCode, type InlineCodeCategory } from './inline-code';
 export {
   BASH_TOOL_NAMES,
@@ -4094,7 +4096,13 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
     fsOpCache.set(command, hit);
     return hit;
   }
-  const computed = analyzeFsOperationImpl(command);
+  // The walk above reads each reader's operands as written. A name that reaches
+  // the reader indirectly (a loop variable, a glob, $PWD, find -exec) is
+  // resolved by the structural file-access walk, so it is consulted when the
+  // direct reading found nothing (jail-indirect-reads design, 2026-11-02).
+  const computed =
+    analyzeFsOperationImpl(command) ??
+    (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null);
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
@@ -4970,6 +4978,78 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
       return { ruleName: sp.rule, verdict: sp.verdict ?? 'block', reason: sp.reason, path: p };
   }
   return null;
+}
+
+/** Shapes whose operands the direct walk does not resolve: a loop, a glob,
+ *  $PWD, find, xargs, `set --`, `source` / `.`. A command without one is left
+ *  to the direct walk alone, whose assignment table is exact (JAIL-14a: a
+ *  branch that did not run sets nothing), where the structural walk merges
+ *  every branch. */
+const INDIRECT_SHAPE_RE =
+  /\b(?:for|while|until|find|xargs|set|source)\b|\$\{?PWD\b|[*?[]|(?:^|[;&|(\s])\.\s/;
+
+/** The jailed names a glob in a directory is tested against. Credential file
+ *  names (a review rule) are left out on purpose: `*.json` would match
+ *  credentials.json in every project, so only a literal name reaches them. */
+const JAILED_GLOB_NAMES = ['.env', '.env.local', '.env.production', '.env.development.local'];
+const GLOB_META = /(?<!\\)[*?[]/;
+
+/** The jail verdict for a glob operand: anything inside a jailed directory
+ *  (`~/.ssh/id_*`, `~/.aws/*`), or a last segment that can select a jailed name
+ *  (`.e*`, `.en?`). Shell `*` does not select dotfiles; find's does (dotGlob). */
+function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null {
+  const parts = glob.split('/');
+  const first = parts.findIndex((seg) => GLOB_META.test(seg));
+  if (first < 0) return matchSensitivePath(glob);
+  const prefix = parts.slice(0, first).join('/');
+  const inside = prefix ? matchSensitivePath(`${prefix}/x`) : null;
+  if (inside) return { ...inside, path: glob };
+  const last = parts[parts.length - 1];
+  if (!GLOB_META.test(last)) {
+    const hit = matchSensitivePath(last);
+    return hit ? { ...hit, path: glob } : null;
+  }
+  let selects: (name: string) => boolean;
+  try {
+    selects = picomatch(last, { dot: dotGlob });
+  } catch {
+    return null;
+  }
+  // A pattern that selects any name (`*`, find's `./**/*`) is not a read of a
+  // jailed file in particular: `cat *` and `find . -exec cat {} +` stay as
+  // they were (JAIL-11). Only a pattern aimed at the jailed name counts.
+  if (selects('n9-any-name') || selects('.n9-any-name')) return null;
+  for (const name of JAILED_GLOB_NAMES) {
+    if (!selects(name)) continue;
+    const hit = matchSensitivePath(name);
+    if (hit) return { ...hit, path: glob };
+  }
+  return null;
+}
+
+/** The jail applied to the reads the structural file-access walk resolves.
+ *  Listings (`ls`) and recursive directory reads (`grep -r x .`) are not a
+ *  read of a jailed file's content and are skipped. */
+function structuralJailRead(command: string): FsOpVerdict | null {
+  let accesses: FileAccess[];
+  try {
+    accesses = collectShellFileAccesses(command);
+  } catch {
+    return null;
+  }
+  let review: FsOpVerdict | null = null;
+  for (const a of accesses) {
+    // A copy's source is judged by the jail's copy rules (a review, and a
+    // rename inside the jail stays quiet), not as a read.
+    if (a.operation !== 'read' || a.listing || a.recursive || a.copy) continue;
+    // A loop variable keeps an item's text, not its pattern (`for f in .e*`), so
+    // a path with glob characters is judged as the glob it was.
+    const glob = a.glob ?? (GLOB_META.test(a.path) ? a.path : undefined);
+    const hit = glob ? matchSensitiveGlob(glob, !!a.dotGlob) : matchSensitivePath(a.path);
+    if (hit?.verdict === 'block') return hit;
+    review ??= hit;
+  }
+  return review;
 }
 
 // Basenamed, because unwrapCommandHead basenames its head: without it

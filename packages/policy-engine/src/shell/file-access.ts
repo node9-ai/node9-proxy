@@ -544,7 +544,7 @@ export function collectShellFileAccesses(
       for (const source of operands) {
         if (name === 'mv') add('remove', source, state, { recursive: true, followFinal: false });
         else if (name !== 'ln' && !linkOnly)
-          add('read', source, state, { recursive, followFinal: !preserveSourceLink });
+          add('read', source, state, { recursive, followFinal: !preserveSourceLink, copy: true });
         if (!noDirectory)
           add(
             'write',
@@ -623,11 +623,11 @@ export function collectShellFileAccesses(
       const operands = strings.filter((s) => s && !s.startsWith('-'));
       const remote = operands.slice(1).some((o) => /^[^/\s]+:/.test(o));
       for (const p of copySourcePaths(words))
-        add('read', locate(p), state, remote ? { upload: true } : {});
+        add('read', locate(p), state, remote ? { upload: true, copy: true } : { copy: true });
       return;
     }
     // Copy/archive source vocabulary already belongs to the credential jail.
-    for (const p of copySourcePaths(words)) add('read', locate(p), state);
+    for (const p of copySourcePaths(words)) add('read', locate(p), state, { copy: true });
   }
   /**
    * The files a download writes. `-O F` / `-o F` name it; a server-chosen or
