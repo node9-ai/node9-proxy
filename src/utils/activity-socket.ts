@@ -78,6 +78,13 @@ export function chooseActivitySocketPath(
   return null;
 }
 
+/** Makes sure the socket's directory exists and is private again (it may
+ *  have been removed while the daemon ran: systemd removes /run/user/<uid>
+ *  when the user's last session ends). */
+export function ensureActivitySocketDir(socketPath: string): boolean {
+  return privateDir(path.dirname(socketPath));
+}
+
 /** Windows: a pipe name another user cannot create first, because only the
  *  daemon.pid file (readable by this user alone) holds it. */
 export function windowsActivityPipeName(): string {

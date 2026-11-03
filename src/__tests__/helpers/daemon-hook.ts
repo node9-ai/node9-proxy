@@ -122,6 +122,9 @@ export async function startDaemonHook(opts: {
     // a private TMPDIR keeps any other temp file out too (fw#399).
     TMPDIR: fs.mkdtempSync(path.join(os.tmpdir(), 'n9h-')),
   };
+  // No XDG_RUNTIME_DIR: the test daemon's socket stays under its own HOME
+  // instead of the developer's /run/user directory.
+  delete env.XDG_RUNTIME_DIR;
   const daemon: ChildProcess = spawn(process.execPath, [CLI, 'daemon', 'start'], {
     env,
     stdio: 'pipe',

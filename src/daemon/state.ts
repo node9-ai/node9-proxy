@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import {
   chooseActivitySocketPath,
+  ensureActivitySocketDir,
   isOwnStaleSocket,
   windowsActivityPipeName,
 } from '../utils/activity-socket';
@@ -200,6 +201,13 @@ let ACTIVITY_SOCKET_PATH: string | null = null;
 /** The socket path this daemon bound (or will bind), for daemon.pid. */
 export function getActivitySocketPath(): string | null {
   return ACTIVITY_SOCKET_PATH;
+}
+
+// Called when a rebind had to move the socket (its directory was gone and
+// could not be made again), so daemon.pid can name the new path.
+const activitySocketPathListeners: Array<() => void> = [];
+export function onActivitySocketPathChange(listener: () => void): void {
+  activitySocketPathListeners.push(listener);
 }
 
 // ── Flight Recorder ring buffer — replayed to new SSE clients on connect ──────
@@ -654,8 +662,23 @@ function attemptRebind(reason: string): void {
 }
 
 function bindActivitySocket(): void {
+  if (!ACTIVITY_SOCKET_PATH) return;
+  // The directory may have been removed while the daemon ran: make it again,
+  // or move to the next private location and tell daemon.pid.
+  if (process.platform !== 'win32' && !ensureActivitySocketDir(ACTIVITY_SOCKET_PATH)) {
+    const moved = chooseActivitySocketPath(process.env, os.homedir());
+    if (!moved) {
+      logActivitySocket('the activity socket directory is gone and none can be made; using HTTP');
+      return;
+    }
+    ACTIVITY_SOCKET_PATH = moved;
+    for (const listener of activitySocketPathListeners) {
+      try {
+        listener();
+      } catch {}
+    }
+  }
   const socketPath = ACTIVITY_SOCKET_PATH;
-  if (!socketPath) return;
   // A stale socket of our own from a previous run is removed; anything else
   // at that path (another user's file, a link) is left alone.
   try {
