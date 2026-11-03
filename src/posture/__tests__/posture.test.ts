@@ -785,6 +785,40 @@ describe('renderPosture grouping', () => {
     expect(noHeadroom).not.toContain('pts of headroom');
   });
 
+  it('every row names its OWASP risk: open, covered and passed rows (node9Firewall#320)', () => {
+    const r = result([
+      {
+        category: 'Egress',
+        severity: 'high',
+        title: 'Egress is open',
+        detail: [],
+        owner: 'node9',
+        owasp: 'ASI02',
+      },
+      {
+        category: 'Secrets',
+        severity: 'high',
+        title: 'creds',
+        detail: ['~/.ssh/id_rsa'],
+        owasp: 'ASI03',
+        coverage: { state: 'covered', level: 'block', via: 'node9 DLP' },
+      },
+    ]);
+    r.passedCategories = ['Instruction files'];
+    const lines = renderPosture(r).split('\n');
+    const row = (needle: string) => lines.find((l) => l.includes(needle)) ?? '';
+    expect(row('Egress is open')).toMatch(/ASI02\S*\s*$/);
+    expect(row('node9 DLP is blocking')).toMatch(/ASI03\S*\s*$/);
+    expect(row('Instruction files')).toMatch(/no issues found.*ASI06/);
+  });
+
+  it('a finding with no OWASP tag renders no tag, and the detail lines never carry one', () => {
+    const out = renderPosture(
+      result([{ category: 'Egress', severity: 'high', title: 'e', detail: ['d1'], owner: 'node9' }])
+    );
+    expect(out).not.toMatch(/ASI\d\d/);
+  });
+
   it('ends with a tracked signup CTA and drops the stale app.node9.ai/posture link (Phase-1 capture)', () => {
     const out = renderPosture(
       result([{ category: 'Egress', severity: 'high', title: 'e', detail: [], owner: 'node9' }])
