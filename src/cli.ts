@@ -68,6 +68,7 @@ import { registerMcpPinCommand } from './cli/commands/mcp-pin';
 import { registerSyncCommand } from './cli/commands/sync';
 import { registerAgentsCommand } from './cli/commands/agents';
 import { registerScanCommand } from './cli/commands/scan';
+import { registerForecastCasesCommand } from './cli/commands/forecast-cases';
 import { registerPostureCommand } from './cli/commands/posture';
 import { registerScanRepoCommand } from './cli/commands/scan-repo';
 import { registerEgressCommand } from './cli/commands/egress';
@@ -927,6 +928,7 @@ registerAgentsCommand(program);
 
 // Retrospective scan
 registerScanCommand(program);
+registerForecastCasesCommand(program);
 
 // Security posture scorecard
 registerPostureCommand(program);
