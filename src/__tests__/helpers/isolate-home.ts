@@ -42,6 +42,11 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-test-home-'));
 // then see only what the command itself wrote. hook-startup.integration
 // removes it on purpose to test the launcher's cache.
 process.env.NODE_DISABLE_COMPILE_CACHE = '1';
+// A daemon a test starts would put its activity socket under the developer's
+// XDG_RUNTIME_DIR (/run/user/<uid>) and leave it there when the test kills
+// it. Without the variable the socket goes under the test's own HOME, which
+// the test removes. The location logic itself is tested with explicit env.
+delete process.env.XDG_RUNTIME_DIR;
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 delete process.env.XDG_CONFIG_HOME;
