@@ -54,6 +54,7 @@ describe('OWASP risk on every check', () => {
           'data.secrets-weak',
           'data.credential-files',
           'data.credential-files-other',
+          'data.credential-files-unknown',
           'data.pipe-chain',
           'data.pipe-chain-obfuscated',
           'data.env-exfil',

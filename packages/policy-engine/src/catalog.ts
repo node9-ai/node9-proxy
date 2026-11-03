@@ -410,6 +410,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
   {
     id: 'data.credential-files-unknown',
     group: 'data',
+    owasp: 'ASI03',
     title: 'Files read by names known only at run time',
     catches:
       'a reader fed names from a listing that can include credential files (find . | xargs cat)',
