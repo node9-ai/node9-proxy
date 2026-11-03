@@ -6,6 +6,11 @@ import { writeLocalSetting } from '../config/write';
 import net from 'net';
 import fs from 'fs';
 import path from 'path';
+import {
+  chooseActivitySocketPath,
+  isOwnStaleSocket,
+  windowsActivityPipeName,
+} from '../utils/activity-socket';
 import os from 'os';
 // `spawn` import removed — only consumer was openBrowser() (deleted).
 import { randomUUID } from 'crypto';
@@ -186,10 +191,16 @@ export const TRUST_DURATIONS: Record<string, number> = {
 // True when the daemon was launched automatically by the hook/smart-runner.
 export const autoStarted = process.env.NODE9_AUTO_STARTED === '1';
 
-const ACTIVITY_SOCKET_PATH =
-  process.platform === 'win32'
-    ? '\\\\.\\pipe\\node9-activity'
-    : path.join(os.tmpdir(), 'node9-activity.sock');
+// The flight-recorder socket: in a directory only this user can reach (a
+// random pipe name on Windows), chosen when the daemon starts and recorded in
+// daemon.pid for the hook (activity-socket-ownership design). Null: no usable
+// location, and the daemon runs without the socket (the hook uses HTTP).
+let ACTIVITY_SOCKET_PATH: string | null = null;
+
+/** The socket path this daemon bound (or will bind), for daemon.pid. */
+export function getActivitySocketPath(): string | null {
+  return ACTIVITY_SOCKET_PATH;
+}
 
 // ── Flight Recorder ring buffer — replayed to new SSE clients on connect ──────
 export const ACTIVITY_RING_SIZE = 100;
@@ -594,20 +605,29 @@ export const __activitySocketTestHooks = {
 
 // startActivitySocket is called by startDaemon() after the HTTP server is up.
 export function startActivitySocket(): void {
+  ACTIVITY_SOCKET_PATH =
+    process.platform === 'win32'
+      ? windowsActivityPipeName()
+      : chooseActivitySocketPath(process.env, os.homedir());
+  if (!ACTIVITY_SOCKET_PATH) {
+    logActivitySocket('no private location for the activity socket; the hook reports over HTTP');
+    return;
+  }
   bindActivitySocket();
 
   // Polling probe — checks every ACTIVITY_HEALTH_PROBE_MS whether the socket
   // file is still present. setInterval cannot self-trigger from its own
   // bind/unlink work the way fs.watch did, so no rebind loops.
   activityHealthInterval = setInterval(() => {
-    if (!fs.existsSync(ACTIVITY_SOCKET_PATH)) attemptRebind('health-probe');
+    if (ACTIVITY_SOCKET_PATH && !fs.existsSync(ACTIVITY_SOCKET_PATH)) attemptRebind('health-probe');
   }, ACTIVITY_HEALTH_PROBE_MS);
   activityHealthInterval.unref();
 
   process.on('exit', () => {
     if (activityHealthInterval) clearInterval(activityHealthInterval);
     try {
-      fs.unlinkSync(ACTIVITY_SOCKET_PATH);
+      if (ACTIVITY_SOCKET_PATH && isOwnStaleSocket(ACTIVITY_SOCKET_PATH))
+        fs.unlinkSync(ACTIVITY_SOCKET_PATH);
     } catch {}
   });
 }
@@ -634,9 +654,12 @@ function attemptRebind(reason: string): void {
 }
 
 function bindActivitySocket(): void {
-  // Clean up stale socket file from previous run / failed bind
+  const socketPath = ACTIVITY_SOCKET_PATH;
+  if (!socketPath) return;
+  // A stale socket of our own from a previous run is removed; anything else
+  // at that path (another user's file, a link) is left alone.
   try {
-    fs.unlinkSync(ACTIVITY_SOCKET_PATH);
+    if (isOwnStaleSocket(socketPath)) fs.unlinkSync(socketPath);
   } catch {}
 
   const ACTIVITY_MAX_BYTES = 1024 * 1024; // 1 MB guard against runaway senders
@@ -756,8 +779,14 @@ function bindActivitySocket(): void {
     logActivitySocket(`server error: ${err.message}`);
   });
 
-  unixServer.listen(ACTIVITY_SOCKET_PATH, () => {
-    logActivitySocket(`bound to ${ACTIVITY_SOCKET_PATH}`);
+  unixServer.listen(socketPath, () => {
+    // The directory is already private; the socket is 0600 as well.
+    if (process.platform !== 'win32') {
+      try {
+        fs.chmodSync(socketPath, 0o600);
+      } catch {}
+    }
+    logActivitySocket(`bound to ${socketPath}`);
   });
   activitySocketServer = unixServer;
 }

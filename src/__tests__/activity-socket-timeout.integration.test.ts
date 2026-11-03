@@ -35,10 +35,23 @@ describe.skipIf(process.platform === 'win32')('node9 check with a stuck activity
       path.join(home, '.node9', 'config.json'),
       JSON.stringify({ settings: { mode: 'standard' } })
     );
-    // Accepts every connection and never closes one.
+    // Accepts every connection and never closes one. It sits where a daemon
+    // would put it (a private run directory) and is named in daemon.pid, with
+    // a pid that is not running so the hook makes no HTTP call to a daemon.
+    const run = path.join(home, '.node9', 'run');
+    fs.mkdirSync(run, { mode: 0o700 });
+    const socketPath = path.join(run, 'activity.sock');
     server = net.createServer({ allowHalfOpen: true }, (c) => accepted.add(c));
-    await new Promise<void>((r) =>
-      server!.listen(path.join(tmp, 'node9-activity.sock'), () => r())
+    await new Promise<void>((r) => server!.listen(socketPath, () => r()));
+    fs.writeFileSync(
+      path.join(home, '.node9', 'daemon.pid'),
+      JSON.stringify({
+        pid: 2 ** 22 + 7,
+        port: 1,
+        internalToken: null,
+        activitySocket: socketPath,
+      }),
+      { mode: 0o600 }
     );
 
     const env: Record<string, string | undefined> = { ...process.env };

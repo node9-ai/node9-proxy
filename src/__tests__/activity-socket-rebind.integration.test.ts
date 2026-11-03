@@ -22,7 +22,13 @@ import http from 'http';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const DAEMON_PORT = 7391;
-const ACTIVITY_SOCKET_PATH = path.join(os.tmpdir(), 'node9-activity.sock');
+// The daemon picks a private socket path per HOME and records it in its
+// daemon.pid (activity-socket-ownership design); read once the daemon is up.
+let ACTIVITY_SOCKET_PATH = '';
+function socketFromPidFile(home: string): string {
+  const pid = JSON.parse(fs.readFileSync(path.join(home, '.node9', 'daemon.pid'), 'utf-8'));
+  return String(pid.activitySocket ?? '');
+}
 
 function makeTempHome(): string {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-rebind-test-'));
@@ -126,7 +132,7 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
   let portWasFree = false;
 
   beforeAll(async () => {
-    // The daemon binds a Windows named pipe (\\.\pipe\node9-activity), not a
+    // The daemon binds a Windows named pipe (\\.\pipe\node9-activity-<random>), not a
     // socket file under os.tmpdir(). The test's polling/unlink/connect helpers
     // all assume a filesystem socket, so they cannot exercise the rebind path
     // on Windows. The self-heal logic in src/daemon/state.ts is itself gated
@@ -150,6 +156,12 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
       throw new Error('Daemon did not start within 6s');
     }
     authToken = readAuthToken(tmpHome);
+    ACTIVITY_SOCKET_PATH = socketFromPidFile(tmpHome);
+    if (!ACTIVITY_SOCKET_PATH) {
+      daemonProc.kill();
+      throw new Error('daemon.pid names no activity socket');
+    }
+    expect(ACTIVITY_SOCKET_PATH.startsWith(os.tmpdir() + path.sep + 'node9-activity')).toBe(false);
 
     // Socket should be created on startup
     const bound = await waitForFile(ACTIVITY_SOCKET_PATH, 3000);

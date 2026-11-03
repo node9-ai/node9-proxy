@@ -68,6 +68,7 @@ import {
   broadcast,
   abandonPending,
   startActivitySocket,
+  getActivitySocketPath,
   type SseClient,
   taintStore,
   sessionTaintStore,
@@ -1757,6 +1758,8 @@ export function startDaemon(): void {
         version: CURRENT_BUILD.version,
         buildId: buildIdString(CURRENT_BUILD),
         startedAt,
+        // Where the hook sends activity lines (activity-socket-ownership).
+        activitySocket: getActivitySocketPath(),
       }),
       { mode: 0o600 }
     );
