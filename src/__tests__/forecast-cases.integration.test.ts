@@ -536,6 +536,21 @@ describe('forecast-cases (integration)', () => {
     }
   });
 
+  it('--policy refuses a HOME that already has a rules cache or credentials, and leaves them alone', () => {
+    const policyFile = path.join(home, 'policy.json');
+    fs.writeFileSync(policyFile, JSON.stringify({ workspaceId: 'ws-1', policies: [] }));
+    for (const name of ['rules-cache.json', 'credentials.json']) {
+      const file = path.join(home, '.node9', name);
+      fs.writeFileSync(file, '{"real":true}');
+      const { r, cases } = run(home, ['--policy', policyFile, casesFile]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain(`.node9/${name}`);
+      expect(cases).toEqual([]);
+      expect(fs.readFileSync(file, 'utf8')).toBe('{"real":true}');
+      fs.rmSync(file);
+    }
+  });
+
   it('--policy that is not a JSON object exits 2', () => {
     const policyFile = path.join(home, 'policy.json');
     fs.writeFileSync(policyFile, '[1,2]');

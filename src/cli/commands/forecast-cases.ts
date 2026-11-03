@@ -412,6 +412,11 @@ export interface RunOptions {
   write: (line: string) => void;
 }
 
+/** What makes a HOME a real machine's: `--policy` refuses to write there. */
+const POLICY_HOME_GUARDS = ['rules-cache.json', 'credentials.json'] as const;
+
+export class PolicyHomeTaken extends Error {}
+
 export async function runForecastCases(opts: RunOptions): Promise<Summary> {
   const env: TemplateEnv = {
     home: opts.home,
@@ -422,6 +427,17 @@ export async function runForecastCases(opts: RunOptions): Promise<Summary> {
   // server judges a workspace's cases in a throwaway HOME that carries the
   // workspace's policy the way a device's daemon would have written it.
   if (opts.policy) {
+    // A throwaway HOME only: on a real machine the write below would replace
+    // the workspace policy its hook enforces until the next sync.
+    const taken = POLICY_HOME_GUARDS.filter((f) =>
+      fs.existsSync(path.join(opts.home, '.node9', f))
+    );
+    if (taken.length > 0)
+      throw new PolicyHomeTaken(
+        `--policy needs a fresh HOME; ${opts.home} already has ${taken
+          .map((f) => `.node9/${f}`)
+          .join(' and ')}`
+      );
     writePolicyCache(opts.policy, opts.policy.etag);
     // A device that follows a workspace is keyed: the cloud config applies
     // verbatim and the local policy layers are inert. The loader reads the
@@ -534,16 +550,22 @@ export function registerForecastCasesCommand(program: Command): void {
           }
           policy = parsed;
         }
-        await runForecastCases({
-          casesPath,
-          profilesDir: opts.profiles ? path.resolve(opts.profiles) : undefined,
-          home: os.homedir(),
-          cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
-          policy,
-          onlinePackages: opts.onlinePackages === true,
-          at: opts.at,
-          write: (line) => process.stdout.write(line + '\n'),
-        });
+        try {
+          await runForecastCases({
+            casesPath,
+            profilesDir: opts.profiles ? path.resolve(opts.profiles) : undefined,
+            home: os.homedir(),
+            cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
+            policy,
+            onlinePackages: opts.onlinePackages === true,
+            at: opts.at,
+            write: (line) => process.stdout.write(line + '\n'),
+          });
+        } catch (err) {
+          if (!(err instanceof PolicyHomeTaken)) throw err;
+          console.error(`forecast-cases: ${err.message}`);
+          process.exitCode = 2;
+        }
       }
     );
 }
