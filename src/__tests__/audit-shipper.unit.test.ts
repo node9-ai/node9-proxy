@@ -12,6 +12,7 @@ import {
   readWatermark,
   shipLagBytes,
   buildBatchEndpoint,
+  _resetOwaspWireFields,
 } from '../daemon/audit-shipper';
 import { generateEventId, buildArgsPreview } from '../audit';
 
@@ -244,6 +245,53 @@ describe('buildWireRows', () => {
   });
 });
 
+describe('buildWireRows: OWASP report fields (node9Firewall#320)', () => {
+  it('carries the check id the local row names', () => {
+    const { rows } = buildWireRows(
+      Buffer.from(row({ checkId: 'data.credential-files', decision: 'deny' }) + row())
+    );
+    expect(rows[0].checkId).toBe('data.credential-files');
+    expect(rows[1].checkId).toBeUndefined();
+  });
+
+  it('drops a check id that is not a catalog id, so the strict server never sees it', () => {
+    for (const bad of ['', 'nonsense', 'Data.secrets', 'data.', 'x'.repeat(80), 42]) {
+      const { rows } = buildWireRows(Buffer.from(row({ checkId: bad })));
+      expect(rows[0].checkId, String(bad)).toBeUndefined();
+    }
+  });
+
+  it('a decoy hit ships as a flag and a kind, never its id, path, hash or view', () => {
+    const { rows } = buildWireRows(
+      Buffer.from(
+        row({
+          decision: 'deny',
+          checkedBy: 'dlp-canary-block',
+          checkId: 'data.canary',
+          canaryId: 'c-1',
+          canaryHash: 'a'.repeat(64),
+          canaryKind: 'ssh-key',
+          canaryPath: '/home/u/.ssh/id_rsa_backup',
+          canaryView: 'raw',
+          canaryRetired: true,
+        })
+      )
+    );
+    const r = rows[0] as unknown as Record<string, unknown>;
+    expect(r.canary).toBe(true);
+    expect(r.canaryKind).toBe('ssh-key');
+    for (const k of ['canaryId', 'canaryHash', 'canaryPath', 'canaryView', 'canaryRetired'])
+      expect(r[k], k).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain('id_rsa_backup');
+  });
+
+  it('an unknown canary kind ships the flag without a kind', () => {
+    const { rows } = buildWireRows(Buffer.from(row({ canaryId: 'c-2', canaryKind: 'gpg-key' })));
+    expect(rows[0].canary).toBe(true);
+    expect(rows[0].canaryKind).toBeUndefined();
+  });
+});
+
 describe('buildBatchEndpoint', () => {
   it('builds the batch URL from the raw intercept base', () => {
     expect(buildBatchEndpoint('https://api.node9.ai/api/v1/intercept')).toBe(
@@ -372,6 +420,81 @@ describe('shipOnce', () => {
     const ok = makeFetch();
     const retry = await shipOnce(deps(ok.impl));
     expect(retry).toEqual({ status: 'shipped', shipped: 2 });
+  });
+
+  // Release order (node9Firewall#320): a proxy that sends checkId/canary to a
+  // server that does not know them yet gets a 400 on the strict schema. The
+  // shipper resends the chunk once without them, advances, and stops sending
+  // them for the rest of the process, so it never wedges.
+  it('on a 400 resends the chunk without the OWASP fields, advances, and stops sending them', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(
+      auditLogPath,
+      row({ checkId: 'commands.rm', decision: 'deny' }) +
+        row({ checkId: 'data.canary', canaryId: 'c', canaryKind: 'env-file', decision: 'deny' })
+    );
+    const bodies: Array<Array<Record<string, unknown>>> = [];
+    const impl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const rows = (JSON.parse(String(init?.body)) as { rows: Array<Record<string, unknown>> })
+        .rows;
+      bodies.push(rows);
+      const rejects = rows.some((r) => 'checkId' in r || 'canary' in r || 'canaryKind' in r);
+      return { ok: !rejects, status: rejects ? 400 : 200 } as Response;
+    }) as typeof fetch;
+
+    const res = await shipOnce(deps(impl));
+    expect(res).toEqual({ status: 'shipped', shipped: 2 });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0][0].checkId).toBe('commands.rm');
+    for (const r of bodies[1]) {
+      expect('checkId' in r).toBe(false);
+      expect('canary' in r).toBe(false);
+      expect('canaryKind' in r).toBe(false);
+    }
+    expect(readWatermark(watermarkPath)?.offset).toBe(fs.statSync(auditLogPath).size);
+
+    // Later rows in the same process go out stripped on the first try.
+    fs.appendFileSync(auditLogPath, row({ checkId: 'commands.sudo' }));
+    await shipOnce(deps(impl));
+    expect(bodies).toHaveLength(3);
+    expect('checkId' in bodies[2][0]).toBe(false);
+    _resetOwaspWireFields();
+  });
+
+  it('a 400 on a chunk with no OWASP fields is a plain failure: no resend, no advance', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(auditLogPath, row());
+    let calls = 0;
+    const impl = (async () => {
+      calls++;
+      return { ok: false, status: 400 } as Response;
+    }) as typeof fetch;
+    const res = await shipOnce(deps(impl));
+    expect(res.status).toBe('error');
+    expect(calls).toBe(1);
+    expect(readWatermark(watermarkPath)).toBeNull();
+  });
+
+  it('a 500 is a plain failure even with OWASP fields: the fields stay on for the retry', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(auditLogPath, row({ checkId: 'commands.rm' }));
+    const seen: Array<Record<string, unknown>> = [];
+    let first = true;
+    const impl = (async (_url: unknown, init?: { body?: unknown }) => {
+      seen.push(
+        (JSON.parse(String(init?.body)) as { rows: Array<Record<string, unknown>> }).rows[0]
+      );
+      if (first) {
+        first = false;
+        return { ok: false, status: 500 } as Response;
+      }
+      return { ok: true, status: 200 } as Response;
+    }) as typeof fetch;
+    expect((await shipOnce(deps(impl))).status).toBe('error');
+    expect(seen).toHaveLength(1);
+    expect((await shipOnce(deps(impl))).status).toBe('shipped');
+    expect(seen[1].checkId).toBe('commands.rm');
+    _resetOwaspWireFields();
   });
 
   it('detects rotation (file signature change) and re-ships from the top', async () => {

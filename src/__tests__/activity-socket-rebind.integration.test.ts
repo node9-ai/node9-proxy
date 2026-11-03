@@ -21,8 +21,25 @@ import path from 'path';
 import http from 'http';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
-const DAEMON_PORT = 7391;
-const ACTIVITY_SOCKET_PATH = path.join(os.tmpdir(), 'node9-activity.sock');
+// A port of its own (NODE9_DAEMON_PORT, honoured under NODE9_TESTING=1), so
+// the test runs beside a developer's live daemon on 7391 instead of skipping.
+let DAEMON_PORT = 0;
+async function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = (srv.address() as net.AddressInfo).port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+// The daemon picks a private socket path per HOME and records it in its
+// daemon.pid (activity-socket-ownership design); read once the daemon is up.
+let ACTIVITY_SOCKET_PATH = '';
+function socketFromPidFile(home: string): string {
+  const pid = JSON.parse(fs.readFileSync(path.join(home, '.node9', 'daemon.pid'), 'utf-8'));
+  return String(pid.activitySocket ?? '');
+}
 
 function makeTempHome(): string {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-rebind-test-'));
@@ -36,7 +53,17 @@ function makeTempHome(): string {
 }
 
 function makeEnv(home: string): NodeJS.ProcessEnv {
-  return { ...process.env, HOME: home, USERPROFILE: home, NODE9_TESTING: '1' };
+  // No XDG_RUNTIME_DIR: the test daemon's socket stays under its own HOME and
+  // nothing is left in the developer's /run/user directory.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    NODE9_TESTING: '1',
+    NODE9_DAEMON_PORT: String(DAEMON_PORT),
+  };
+  delete env.XDG_RUNTIME_DIR;
+  return env;
 }
 
 function isPortFree(port: number): Promise<boolean> {
@@ -126,7 +153,7 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
   let portWasFree = false;
 
   beforeAll(async () => {
-    // The daemon binds a Windows named pipe (\\.\pipe\node9-activity), not a
+    // The daemon binds a Windows named pipe (\\.\pipe\node9-activity-<random>), not a
     // socket file under os.tmpdir(). The test's polling/unlink/connect helpers
     // all assume a filesystem socket, so they cannot exercise the rebind path
     // on Windows. The self-heal logic in src/daemon/state.ts is itself gated
@@ -135,6 +162,7 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     if (!fs.existsSync(CLI)) {
       throw new Error(`dist/cli.js not found. Run "npm run build" first. Expected: ${CLI}`);
     }
+    DAEMON_PORT = await freePort();
     portWasFree = await isPortFree(DAEMON_PORT);
     if (!portWasFree) return;
 
@@ -150,6 +178,12 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
       throw new Error('Daemon did not start within 6s');
     }
     authToken = readAuthToken(tmpHome);
+    ACTIVITY_SOCKET_PATH = socketFromPidFile(tmpHome);
+    if (!ACTIVITY_SOCKET_PATH) {
+      daemonProc.kill();
+      throw new Error('daemon.pid names no activity socket');
+    }
+    expect(ACTIVITY_SOCKET_PATH.startsWith(os.tmpdir() + path.sep + 'node9-activity')).toBe(false);
 
     // Socket should be created on startup
     const bound = await waitForFile(ACTIVITY_SOCKET_PATH, 3000);
@@ -214,6 +248,26 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     // Brief pause so the SSE GET is established before we send
     await new Promise((r) => setTimeout(r, 200));
     const sent = await sendOverSocket(payload);
+    expect(sent).toBe(true);
+    expect(await ssePromise).toBe(true);
+  }, 15_000);
+
+  // Review, 2026-11-03: systemd removes /run/user/<uid> when the user's last
+  // session ends, with the daemon still running. Removing the directory must
+  // not leave the flight recorder down: the rebind makes it again.
+  it('rebinds after the socket directory itself is removed', async ({ skip }) => {
+    if (process.platform === 'win32') skip();
+    if (!portWasFree) skip();
+    fs.rmSync(path.dirname(ACTIVITY_SOCKET_PATH), { recursive: true, force: true });
+    expect(await waitForFile(ACTIVITY_SOCKET_PATH, 6000)).toBe(true);
+    expect(fs.statSync(path.dirname(ACTIVITY_SOCKET_PATH)).mode & 0o077).toBe(0);
+    expect(socketFromPidFile(tmpHome)).toBe(ACTIVITY_SOCKET_PATH);
+    const id = `dir-rebind-${Date.now()}`;
+    const ssePromise = waitForActivityEvent(authToken, id, 4000);
+    await new Promise((r) => setTimeout(r, 200));
+    const sent = await sendOverSocket(
+      JSON.stringify({ id, ts: Date.now(), tool: 'Bash', args: {}, status: 'pending', agent: 'T' })
+    );
     expect(sent).toBe(true);
     expect(await ssePromise).toBe(true);
   }, 15_000);

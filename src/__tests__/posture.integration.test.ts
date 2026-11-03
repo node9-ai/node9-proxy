@@ -70,8 +70,11 @@ describe('node9 posture (integration)', () => {
     expect(Array.isArray(parsed.findings)).toBe(true);
     expect(typeof parsed.tier).toBe('string');
     // 8 Phase-0 checks + 5 governed-config dimensions (Report UI v2 · P3):
-    // Data, Approvals, Tool governance, Files, Cost.
-    expect(parsed.checksRun).toBe(13);
+    // Data, Approvals, Tool governance, Files, Cost; + 3 OWASP phase-1 checks
+    // (node9Firewall#320): Agent permissions, Outside content, Instruction files.
+    expect(parsed.checksRun).toBe(16);
+    // Every finding names its OWASP risk.
+    for (const f of parsed.findings) expect(f.owasp).toMatch(/^ASI(0[1-9]|10)$/);
     // Bare home is not wired → the headline's #1 action is install-aware (a cold
     // `npx node9-ai posture` reader has no `node9` on PATH), so it leads with the
     // install so the rest of the scorecard's `node9 …` fixes actually work.

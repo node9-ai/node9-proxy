@@ -7,6 +7,7 @@ import path from 'path';
 import os from 'os';
 import { type RiskMetadata } from '../context-sniper';
 import { forecastRun } from './forecast-context';
+import { isTrustedActivitySocket } from '../utils/activity-socket';
 import {
   CARD_PROTOCOL,
   legacyWaitFields,
@@ -15,10 +16,22 @@ import {
   type DecisionRecord,
 } from './decision-record';
 
-const ACTIVITY_SOCKET_PATH =
-  process.platform === 'win32'
-    ? '\\\\.\\pipe\\node9-activity'
-    : path.join(os.tmpdir(), 'node9-activity.sock');
+/**
+ * The activity socket the running daemon recorded in ~/.node9/daemon.pid
+ * (mode 0600), when it is one this user owns. Null: no daemon, a daemon from
+ * before 2.48.3 that records none, or a socket that fails the owner check; the
+ * caller then tells the daemon over HTTP. There is no fallback to the old
+ * shared /tmp path: that fallback would be the hole this closes.
+ */
+export function daemonActivitySocket(home = os.homedir()): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(home, '.node9', 'daemon.pid'), 'utf-8');
+    const p = (JSON.parse(raw) as Record<string, unknown>).activitySocket;
+    return typeof p === 'string' && isTrustedActivitySocket(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
 
 /** How long a hook waits for the daemon to take an activity line. A healthy
  *  local socket closes in a few milliseconds; the same bound as
@@ -45,6 +58,10 @@ export function notifyActivitySocket(
 ): Promise<boolean> {
   // A forecast run never opens the socket.
   if (forecastRun()) return Promise.resolve(false);
+  // `socketPath` is the tests' own listener; otherwise the daemon's socket,
+  // only if this user owns it.
+  const target = opts.socketPath ?? daemonActivitySocket();
+  if (!target) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
     let settled = false;
     let sock: net.Socket | null = null;
@@ -58,7 +75,7 @@ export function notifyActivitySocket(
     const timer = setTimeout(() => finish(false), opts.timeoutMs ?? ACTIVITY_SOCKET_TIMEOUT_MS);
     try {
       const payload = JSON.stringify(data);
-      sock = net.createConnection(opts.socketPath ?? ACTIVITY_SOCKET_PATH);
+      sock = net.createConnection(target);
       sock.on('connect', () => {
         sock!.on('close', () => finish(true));
         sock!.end(payload);

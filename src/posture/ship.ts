@@ -32,6 +32,8 @@ export function buildShipBody(result: PostureResult): {
     severity: string;
     title: string;
     coverage: string;
+    /** OWASP Agentic Top 10 risk id (ASI01..ASI10), when the category maps. */
+    owasp?: string;
     what?: string;
     why?: string;
     who?: string;
@@ -54,6 +56,8 @@ export function buildShipBody(result: PostureResult): {
       // Coverage state so the SaaS counts OPEN-only (matching the local score).
       // A non-sensitive enum — no values or paths. Default 'open' if unannotated.
       coverage: f.coverage?.state ?? 'open',
+      // The risk id only (ASI03), never a path or a value.
+      owasp: f.owasp,
       // Plain-language parity with the CLI report. Prose only, no paths.
       what: f.what,
       why: f.why,

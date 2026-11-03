@@ -68,6 +68,8 @@ import {
   broadcast,
   abandonPending,
   startActivitySocket,
+  getActivitySocketPath,
+  onActivitySocketPathChange,
   type SseClient,
   taintStore,
   sessionTaintStore,
@@ -1742,11 +1744,7 @@ export function startDaemon(): void {
     });
   }
 
-  server.listen(DAEMON_PORT, DAEMON_HOST, () => {
-    // NB: the orphan-adopt write above deliberately does NOT stamp version/
-    // buildId — the adopter is not the holder, and stamping the adopter's
-    // identity onto a foreign daemon's pidfile would lie about which code is
-    // serving (the same class of bug as the fabricated internalToken, G2).
+  const writeOwnPidFile = (): void =>
     atomicWriteSync(
       DAEMON_PID_FILE,
       JSON.stringify({
@@ -1757,9 +1755,24 @@ export function startDaemon(): void {
         version: CURRENT_BUILD.version,
         buildId: buildIdString(CURRENT_BUILD),
         startedAt,
+        // Where the hook sends activity lines (activity-socket-ownership).
+        activitySocket: getActivitySocketPath(),
       }),
       { mode: 0o600 }
     );
+  server.listen(DAEMON_PORT, DAEMON_HOST, () => {
+    // NB: the orphan-adopt write above deliberately does NOT stamp version/
+    // buildId — the adopter is not the holder, and stamping the adopter's
+    // identity onto a foreign daemon's pidfile would lie about which code is
+    // serving (the same class of bug as the fabricated internalToken, G2).
+    writeOwnPidFile();
+    // A socket that had to move on a rebind is named again (only once this
+    // daemon owns the pid file).
+    onActivitySocketPathChange(() => {
+      try {
+        writeOwnPidFile();
+      } catch {}
+    });
     console.error(chalk.green(`🛡️  Node9 Guard LIVE on 127.0.0.1:${DAEMON_PORT}`));
     // Record the SUCCESS, not just the failures. daemon-startup.log is append-only
     // and the auto-start path pipes this process's stderr into it, so without a

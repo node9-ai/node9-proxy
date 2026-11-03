@@ -10,19 +10,18 @@
 // two-repo contract and so was green while the pipeline was broken.
 //
 // The attribution is not lost: it stays on the local audit row and in
-// `node9 scan`. Putting it on the wire requires the BE schema to land and
-// deploy first. Cross-repo parity is enforced by wire-schema-parity.spec.ts.
+// `node9 scan`. Cross-repo parity is enforced by wire-schema-parity.spec.ts.
+//
+// node9Firewall#320 (OWASP report): the BE now declares two canary fields,
+// `canary` (a flag) and `canaryKind` (aws-profile, env-file, ssh-key), and
+// the shipper resends without them on a 400 from an older server. The five
+// fields that locate or identify the decoy (id, hash, path, view, retired)
+// still never leave the machine.
 import { describe, it, expect } from 'vitest';
 import { buildWireRows } from '../daemon/audit-shipper';
 
-const CANARY_KEYS = [
-  'canaryId',
-  'canaryHash',
-  'canaryKind',
-  'canaryPath',
-  'canaryView',
-  'canaryRetired',
-];
+/** Fields that identify or locate the decoy: never on the wire. */
+const CANARY_KEYS = ['canaryId', 'canaryHash', 'canaryPath', 'canaryView', 'canaryRetired'];
 
 const row = (extra: Record<string, unknown>) =>
   JSON.stringify({
@@ -55,10 +54,18 @@ describe('canary rows on the audit wire', () => {
     expect(w.eid).toBe('evt-0123456789ab');
   });
 
-  it('none of the six canary fields reaches the wire', () => {
+  it('none of the five identifying canary fields reaches the wire', () => {
     const { rows } = buildWireRows(Buffer.from(row(CANARY_META)));
     const w = rows[0] as unknown as Record<string, unknown>;
-    for (const k of CANARY_KEYS) expect(w, `${k} would 400 the whole batch`).not.toHaveProperty(k);
+    for (const k of CANARY_KEYS) expect(w, `${k} must not leave the machine`).not.toHaveProperty(k);
+  });
+
+  it('the decoy hit ships as a flag and its kind only', () => {
+    const { rows } = buildWireRows(Buffer.from(row(CANARY_META)));
+    const w = rows[0] as unknown as Record<string, unknown>;
+    expect(w.canary).toBe(true);
+    expect(w.canaryKind).toBe('aws-profile');
+    expect(JSON.stringify(w)).not.toContain('.aws/credentials');
   });
 
   it('and the decoy value could never reach it either', () => {
@@ -76,5 +83,11 @@ describe('canary rows on the audit wire', () => {
       const w = r as unknown as Record<string, unknown>;
       for (const k of CANARY_KEYS) expect(w).not.toHaveProperty(k);
     }
+    // Only the decoy row carries the flag.
+    expect(rows.map((r) => (r as unknown as Record<string, unknown>).canary)).toEqual([
+      undefined,
+      true,
+      undefined,
+    ]);
   });
 });

@@ -2,6 +2,7 @@
 // Doctor-style chalk rendering of a PostureResult — the shareable scorecard.
 
 import chalk from 'chalk';
+import { postureCategoryOwasp } from '@node9/policy-engine';
 import type { Finding, PostureResult, Severity } from './types';
 import { openHeadroom } from './score';
 
@@ -42,6 +43,12 @@ function label(category: string): string {
   return chalk.bold(category.padEnd(Math.max(LABEL_WIDTH, category.length + 1)));
 }
 
+/** The OWASP risk id at the end of a row (node9Firewall#320), dimmed; empty
+ *  when the row has none (a finding built outside runPosture). */
+function asiTag(id: string | undefined): string {
+  return id ? '  ' + chalk.dim(id) : '';
+}
+
 /** What a covered row is guarding, from the finding's own detail — data-first,
  *  first entry + a count (the P1 cap rule). 'this' when it has no specifics. */
 function guardedWhat(f: Finding): string {
@@ -60,7 +67,7 @@ function renderFinding(
   // In the AVAILABLE tier, lead with the score gain (+N) so the value of turning
   // the layer on is the first thing read.
   const wt = showWeight && f.scoreWeight ? chalk.cyan.bold(`+${f.scoreWeight} `) : '';
-  lines.push(`  ${ICON[f.severity]} ${label(displayLabel)}${wt}${f.title}`);
+  lines.push(`  ${ICON[f.severity]} ${label(displayLabel)}${wt}${f.title}${asiTag(f.owasp)}`);
   const indent = ' '.repeat(2 + 3 + LABEL_WIDTH);
   // Plain-language explanation first (what / why / who), wrapped so that
   // indent + text stays under ~80 columns.
@@ -115,7 +122,7 @@ export function renderPostureSection(result: PostureResult, category: string): s
     const via = f.coverage?.via ?? 'node9';
     const lbl = both ? `${category} (guarded)` : category;
     lines.push(
-      `  ${chalk.green('✅')} ${label(lbl)}${chalk.gray(`${via} is ${gated} ${guardedWhat(f)}`)}`
+      `  ${chalk.green('✅')} ${label(lbl)}${chalk.gray(`${via} is ${gated} ${guardedWhat(f)}`)}${asiTag(f.owasp)}`
     );
   }
   for (const f of open) {
@@ -197,7 +204,7 @@ export function renderPosture(result: PostureResult): string {
       const via = f.coverage?.via ?? 'node9';
       const lbl = collision.has(f.category) ? `${f.category} (guarded)` : f.category;
       lines.push(
-        `  ${chalk.green('✅')} ${label(lbl)}${chalk.gray(`${via} is ${gated} ${guardedWhat(f)}`)}`
+        `  ${chalk.green('✅')} ${label(lbl)}${chalk.gray(`${via} is ${gated} ${guardedWhat(f)}`)}${asiTag(f.owasp)}`
       );
     }
     lines.push('');
@@ -228,7 +235,9 @@ export function renderPosture(result: PostureResult): string {
   }
 
   for (const cat of result.passedCategories) {
-    lines.push(`  ${chalk.green('✅')} ${label(cat)}${chalk.gray('no issues found')}`);
+    lines.push(
+      `  ${chalk.green('✅')} ${label(cat)}${chalk.gray('no issues found')}${asiTag(postureCategoryOwasp(cat))}`
+    );
   }
   for (const cat of result.erroredCategories) {
     lines.push(`  ${chalk.gray('•')}  ${label(cat)}${chalk.gray('could not be checked')}`);

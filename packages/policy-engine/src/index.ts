@@ -169,6 +169,20 @@ export type {
   ResolvedCheck,
 } from './catalog';
 export { CHECK_TEXT, type CheckText } from './catalog-text';
+
+// OWASP Top 10 for Agentic Applications: the risk each check, posture
+// category and scan-repo rule falls under (node9Firewall#320 phase 1).
+export {
+  ASI,
+  ASI_IDS,
+  isAsiId,
+  packRowOwasp,
+  POSTURE_CATEGORY_OWASP,
+  postureCategoryOwasp,
+  scanRepoRuleOwasp,
+  SCAN_REPO_RULES_WITHOUT_RISK,
+} from './owasp';
+export type { AsiId } from './owasp';
 export {
   TUNING_FIELDS,
   tuningFromLegacyPolicy,

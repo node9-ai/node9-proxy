@@ -9,9 +9,11 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import {
+  ASI,
   CHECKS,
   CHECK_GROUPS,
   resolveAllChecks,
+  type AsiId,
   type CheckGroup,
   type ResolvedCheck,
   levelOf,
@@ -28,6 +30,8 @@ interface ChecksReport {
     ResolvedCheck & {
       group: CheckGroup;
       title: string;
+      /** The OWASP Agentic Top 10 risk the check guards against. */
+      owasp: AsiId;
       pack?: string;
       /** What a config file may set for this check today; empty = fixed. */
       configurable: readonly string[];
@@ -58,6 +62,7 @@ export function buildChecksReport(config: Config): ChecksReport {
       ...r,
       group: CHECKS[i].group,
       title: CHECKS[i].title,
+      owasp: CHECKS[i].owasp,
       ...(CHECKS[i].pack && { pack: CHECKS[i].pack }),
       configurable: configurableValues(CHECKS[i].id),
       ...(CHECKS[i].plain && { plain: CHECKS[i].plain }),
@@ -137,6 +142,7 @@ export function renderCheckDetail(report: ChecksReport, id: string): string | nu
   lines.push('');
   lines.push(`  ${chalk.gray('Value:')}    ${value} (${c.source})`);
   lines.push(`  ${chalk.gray('Settable:')} ${settable}`);
+  lines.push(`  ${chalk.gray('OWASP:')}    ${c.owasp} ${ASI[c.owasp]}`);
   if (c.advice) lines.push(`  ${chalk.gray('When to change:')} ${c.advice}`);
   lines.push('');
   return lines.join('\n');

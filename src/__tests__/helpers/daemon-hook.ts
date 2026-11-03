@@ -117,10 +117,14 @@ export async function startDaemonHook(opts: {
     NODE9_TESTING: '1',
     NODE9_NO_AUTO_DAEMON: '1',
     NODE9_DAEMON_PORT: String(port),
-    // The hook binds $TMPDIR/node9-activity.sock; a private directory keeps
-    // the developer's own daemon out of the test (fw#399).
+    // The activity socket lives under this HOME (or a per-HOME directory in
+    // XDG_RUNTIME_DIR), so the developer's own daemon stays out of the test;
+    // a private TMPDIR keeps any other temp file out too (fw#399).
     TMPDIR: fs.mkdtempSync(path.join(os.tmpdir(), 'n9h-')),
   };
+  // No XDG_RUNTIME_DIR: the test daemon's socket stays under its own HOME
+  // instead of the developer's /run/user directory.
+  delete env.XDG_RUNTIME_DIR;
   const daemon: ChildProcess = spawn(process.execPath, [CLI, 'daemon', 'start'], {
     env,
     stdio: 'pipe',

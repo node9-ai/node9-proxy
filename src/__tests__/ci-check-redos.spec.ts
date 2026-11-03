@@ -203,10 +203,16 @@ describe('L — the new finders give the old answers', () => {
 
 describe('L — no crafted input stalls a scan', () => {
   const BUDGET_MS = 2000;
+  // CPU time of this test process, not wall-clock time: on a loaded machine
+  // (another full suite running alongside) the wait for a CPU counted as scan
+  // time, and the 32,000-keys row failed at 2.3 to 5.6 s while its own work was
+  // about 0.3 s (design: ci-check-redos-timing-code-design.md, 2026-11-02).
+  // vitest runs each test file in its own process, so nothing else is counted.
   const timed = (f: () => unknown) => {
-    const t0 = performance.now();
+    const t0 = process.cpuUsage();
     f();
-    return performance.now() - t0;
+    const used = process.cpuUsage(t0);
+    return (used.user + used.system) / 1000;
   };
   const fill = (unit: string, bytes: number) => unit.repeat(Math.ceil(bytes / unit.length));
 
@@ -242,13 +248,39 @@ describe('L — no crafted input stalls a scan', () => {
       );
     });
 
+  const keyLines = (n: number, value: string) =>
+    Array.from({ length: n }, (_, i) => `k${i}: ${value}`).join('\n');
+
   it('a SKILL.md frontmatter and a workflow with 32,000 keys', () => {
-    const keys = Array.from({ length: 32_000 }, (_, i) => `k${i}: v`).join('\n');
+    const keys = keyLines(32_000, 'v');
     expect(
       timed(() => analyzeSkillGrants('.claude/skills/x/SKILL.md', `---\n${keys}\n---\n`))
     ).toBeLessThan(BUDGET_MS);
     expect(
       timed(() => analyzeWorkflow('.github/workflows/a.yml', `on: push\n${keys}\n`))
     ).toBeLessThan(BUDGET_MS);
+  });
+
+  // The duplicate-key check this row guards against was quadratic: 8 times the
+  // keys took about 64 times as long. Linear code takes about 8 times as long
+  // (measured 5 to 10, quiet and under load). Both sizes run under the same
+  // load, so the ratio does not depend on how busy the machine is. A fresh
+  // value per run keeps any cache out of the measurement.
+  it('the time for 32,000 keys grows linearly from 4,000 keys', () => {
+    const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[1];
+    const frontmatter = (n: number, run: number) => `---\n${keyLines(n, `v${run}`)}\n---\n`;
+    analyzeSkillGrants('.claude/skills/x/SKILL.md', frontmatter(1_000, -1)); // warm the parser
+    const small: number[] = [];
+    const large: number[] = [];
+    for (const run of [0, 1, 2]) {
+      small.push(
+        timed(() => analyzeSkillGrants('.claude/skills/x/SKILL.md', frontmatter(4_000, run)))
+      );
+      large.push(
+        timed(() => analyzeSkillGrants('.claude/skills/x/SKILL.md', frontmatter(32_000, run)))
+      );
+    }
+    // A floor of 1 ms keeps a near-zero small run from inflating the ratio.
+    expect(median(large) / Math.max(1, median(small))).toBeLessThan(24);
   });
 });

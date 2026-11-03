@@ -18,10 +18,19 @@ import path from 'path';
 import os from 'os';
 import { buildWireRows } from '../daemon/audit-shipper';
 
-const BE_SCHEMA = path.resolve(
-  os.homedir(),
-  'node9/node9Firewall/be/src/firewall/firewall.controller.ts'
-);
+// Where the BE lives. Not `os.homedir()`: the test setup (isolate-home.ts)
+// replaces HOME with an empty temp dir before this file loads, so a
+// HOME-relative path never exists and this test skipped on every run without
+// anyone noticing (found 2026-11-03, node9Firewall#320). In order: an explicit
+// override, the checkout beside this repository (~/node9/node9-proxy or a
+// worktree beside it), the real user home from the passwd entry.
+const REL = 'be/src/firewall/firewall.controller.ts';
+const BE_CANDIDATES = [
+  process.env.NODE9_BE_SCHEMA,
+  path.resolve(__dirname, '../../../node9Firewall', REL),
+  path.join(os.userInfo().homedir, 'node9/node9Firewall', REL),
+].filter((p): p is string => !!p);
+const BE_SCHEMA = BE_CANDIDATES.find((p) => fs.existsSync(p)) ?? BE_CANDIDATES[0];
 const beAvailable = fs.existsSync(BE_SCHEMA);
 
 /** The keys the BE's AuditBatchRowSchema declares, parsed from its source. */
@@ -29,12 +38,14 @@ function beAcceptedKeys(): { keys: Set<string>; strict: boolean } {
   const src = fs.readFileSync(BE_SCHEMA, 'utf-8');
   const start = src.indexOf('const AuditBatchRowSchema');
   expect(start, 'AuditBatchRowSchema not found in the BE controller').toBeGreaterThan(-1);
-  // The schema ends at its terminating `.strict();` (or `});`).
-  const endStrict = src.indexOf('.strict()', start);
-  const end = endStrict > -1 ? endStrict : src.indexOf('});', start);
-  const block = src.slice(start, end);
-  const keys = new Set([...block.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/gm)].map((m) => m[1]));
-  return { keys, strict: endStrict > -1 };
+  // The row schema runs up to the next top-level declaration. Not the first
+  // `.strict()`: a nested object (`exposure`) has its own, and cutting there
+  // hid every key declared after it (found when this test first ran for real).
+  const next = src.indexOf('\nconst ', start + 1);
+  const block = src.slice(start, next > -1 ? next : undefined);
+  // Top-level keys only: the row object's own properties sit at four spaces.
+  const keys = new Set([...block.matchAll(/^ {4}([A-Za-z_][A-Za-z0-9_]*)\s*:/gm)].map((m) => m[1]));
+  return { keys, strict: /\.strict\(\);\s*$/.test(block.trimEnd()) };
 }
 
 /** A row carrying every optional field the local audit writer can produce. */
@@ -63,6 +74,10 @@ const MAXIMAL_ROW = {
   taintSource: 'DLP:AWS Access Key ID',
   exposure: { kind: 'logged', destinations: 1 },
   exposureFromEid: 'evt-bbbbbbbbbbbb',
+  // OWASP report (node9Firewall#320): the check id and a decoy hit.
+  checkId: 'data.canary',
+  canaryId: 'c-1',
+  canaryKind: 'aws-profile',
 };
 
 describe('audit wire parity with the SaaS schema', () => {
