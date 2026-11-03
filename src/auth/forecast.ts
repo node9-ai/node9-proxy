@@ -77,6 +77,8 @@ export interface ForecastOptions {
   /** The call's own clock (a historical timestamp). Default: now. */
   at?: number;
   sessionTaintGated?: boolean;
+  /** Let the package check go online, as the hook does (ForecastRun). */
+  onlinePackages?: boolean;
 }
 
 /** Audit tag → the layer that produced it. Tags are matched by prefix after
@@ -151,6 +153,7 @@ export async function forecastDecision(
     config,
     unknown: new Set(),
     now: opts.at ?? Date.now(),
+    ...(opts.onlinePackages && { onlinePackages: true }),
   };
   const result = await runForecast(run, () =>
     _authorizeHeadlessCore(toolName, args, meta, {

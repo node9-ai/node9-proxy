@@ -1383,7 +1383,9 @@ export async function _authorizeHeadlessCore(
     pii: () => detectArgsPii(args),
     packageCheck: () =>
       packageCheck?.enabled && !isManual
-        ? runPackageCheck(toolName, args, packageCheck, options?.cwd, { offline: !!forecast })
+        ? runPackageCheck(toolName, args, packageCheck, options?.cwd, {
+            offline: !!forecast && forecast.onlinePackages !== true,
+          })
         : Promise.resolve(null),
   });
 

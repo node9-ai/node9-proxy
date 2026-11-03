@@ -16,6 +16,8 @@ import { SHIELDS } from '../../shields';
 import { forecastDecision, type ForecastVerdict } from '../../auth/forecast';
 import { ForecastSessionState } from '../../auth/forecast-state';
 import { toolRole } from '../../exposure/roles';
+import { shellFetch } from '../../exposure/shell-fetch';
+import { extractContentDestinations } from '@node9/policy-engine';
 import { configHashOf } from './scan-cache';
 import { scanArgs } from '../../dlp';
 import fs from 'fs';
@@ -141,16 +143,32 @@ export class HistoryJudge {
   }
 
   /** A tool that brings outside content returned something. */
-  noteToolResult(sessionId: string, toolName: string, timestamp: string, cwd?: string): void {
+  /**
+   * A tool result reached the session. A source read marks it exposed, as the
+   * PostToolUse hook does (log.ts): a source tool, or a shell command that
+   * fetches outside content (`gh issue view`). `read.output` is the result's
+   * text: the destinations it names are recorded as the hook records them.
+   */
+  noteToolResult(
+    sessionId: string,
+    toolName: string,
+    timestamp: string,
+    cwd?: string,
+    read: { input?: unknown; output?: string } = {}
+  ): void {
     const policy = this.configFor(cwd).policy.untrustedContent;
     if (!policy?.enabled) return;
-    if (!toolRole(toolName, policy).source) return;
+    const shell = shellFetch(toolName, read.input);
+    if (!toolRole(toolName, policy).source && !shell?.fetches) return;
     const mcp = /^mcp__([^_]+(?:_[^_]+)*)__/.exec(toolName);
-    this.session(sessionId).noteOutsideContent({
-      tool: toolName,
-      ...(mcp && { server: mcp[1] }),
-      at: clockOf(timestamp),
-    });
+    this.session(sessionId).noteOutsideContent(
+      {
+        tool: toolName,
+        ...(mcp && { server: mcp[1] }),
+        at: clockOf(timestamp),
+      },
+      read.output ? extractContentDestinations(read.output) : []
+    );
   }
 
   async judge(call: HistoricalCall, result: ScanResult, dedup: ScanDedup): Promise<JudgedCall> {

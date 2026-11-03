@@ -25,6 +25,7 @@ import { catalogSettingsFrom, type Config } from '../../config';
 import { forecastDecision, type ForecastVerdict } from '../../auth/forecast';
 import { HistoryJudge } from './scan-judge';
 import { scanArgs } from '../../dlp';
+import { collectToolOutputText } from '../../tool-output';
 import { readJailPaths } from '../../shields/jail';
 import { loadCanaries } from '../../canary/registry';
 import { PROXY_VERSION } from '../../version';
@@ -92,6 +93,7 @@ export type ProfileNeed =
   | 'decoy'
   | 'egress-block'
   | 'egress-gated'
+  | 'egress-deny-list'
   | 'organisation-domain'
   | 'hold-action-checks'
   | 'injection-scan';
@@ -111,10 +113,12 @@ export const PROFILE_NEEDS: Readonly<Record<string, ProfileNeed | null>> = {
   'injection-optin': 'injection-scan',
 };
 
-/** The need of a profile; an `egress-deny-*` profile needs a blocking egress. */
+/** The need of a profile. An `egress-deny-*` profile is a gated egress with
+ *  a deny list (the benchmark's are mode review): it needs egress on and a
+ *  deny list of the customer's own, whatever its mode. */
 export function profileNeed(setup: string): ProfileNeed | null | undefined {
   if (setup in PROFILE_NEEDS) return PROFILE_NEEDS[setup];
-  if (setup.startsWith('egress-deny-')) return 'egress-block';
+  if (setup.startsWith('egress-deny-')) return 'egress-deny-list';
   return undefined; // an unknown profile: run, and say so
 }
 
@@ -143,6 +147,7 @@ export function homeHas(config: Config): Record<ProfileNeed, boolean> {
     decoy,
     'egress-block': !!egress?.enabled && egress.mode === 'block',
     'egress-gated': gated,
+    'egress-deny-list': gated && (egress?.deny?.length ?? 0) > 0,
     'organisation-domain': (config.policy.untrustedContent?.orgDomains ?? []).length > 0,
     'hold-action-checks':
       held('actions.money') && held('actions.access') && held('actions.publish'),
@@ -183,6 +188,10 @@ export interface Cell {
   notApplicable: number;
   notSimulated: number;
   volatile: number;
+  /** An attack the forecast let through while it could not reproduce an
+   *  input the verdict depends on (`unknown`, e.g. the package registry when
+   *  offline): neither stopped nor passed, and not in `attacks`. */
+  undetermined: number;
   errors: number;
 }
 
@@ -209,6 +218,7 @@ const emptyCell = (): Cell => ({
   notApplicable: 0,
   notSimulated: 0,
   volatile: 0,
+  undetermined: 0,
   errors: 0,
 });
 
@@ -251,6 +261,10 @@ export function summarize(results: CaseResult[], config: Config): Summary {
     if (r.expected === 'allow') {
       c.benign++;
       if (stopped) c.interrupted++;
+      continue;
+    }
+    if (!stopped && (r.unknown?.length ?? 0) > 0) {
+      c.undetermined++;
       continue;
     }
     c.attacks++;
@@ -300,13 +314,17 @@ function notePostCall(
   judge: HistoryJudge,
   sessionId: string,
   tool: string,
+  input: unknown,
   output: unknown,
   at: string,
   cwd: string
 ): void {
   const m = scanArgs(output);
   if (m) judge.noteOutputSecret(sessionId, m.patternName, at);
-  judge.noteToolResult(sessionId, tool, at, cwd);
+  judge.noteToolResult(sessionId, tool, at, cwd, {
+    input,
+    output: collectToolOutputText(output).text,
+  });
 }
 
 export async function runCase(
@@ -314,7 +332,8 @@ export async function runCase(
   rec: CaseRecord,
   env: TemplateEnv,
   has: Record<ProfileNeed, boolean>,
-  at: string
+  at: string,
+  online = false
 ): Promise<CaseResult> {
   const base: CaseResult = {
     id: rec.id,
@@ -335,7 +354,7 @@ export async function runCase(
     const payload = (materialize(p.input, env) ?? {}) as HookPayload;
     const tool = toolOf(payload, rec.tool);
     if (p.stage === 'post') {
-      notePostCall(judge, sessionId, tool, materialize(p.output, env), at, cwd);
+      notePostCall(judge, sessionId, tool, payload.tool_input, materialize(p.output, env), at, cwd);
       continue;
     }
     await forecastDecision(tool, payload.tool_input ?? {}, meta, {
@@ -343,6 +362,7 @@ export async function runCase(
       config,
       session: judge.session(sessionId),
       at: Date.parse(at),
+      ...(online && { onlinePackages: true }),
     });
   }
   const payload = (materialize(rec.input, env) ?? {}) as HookPayload;
@@ -351,6 +371,7 @@ export async function runCase(
     config,
     session: judge.session(sessionId),
     at: Date.parse(at),
+    ...(online && { onlinePackages: true }),
   });
   return {
     ...base,
@@ -386,6 +407,8 @@ export interface RunOptions {
   policy?: CloudPolicyBody & { etag?: string };
   /** The clock every case is judged at (a fixed ISO time keeps runs comparable). */
   at: string;
+  /** The package check queries the advisory service and registries, as the hook does. */
+  onlinePackages?: boolean;
   write: (line: string) => void;
 }
 
@@ -442,7 +465,7 @@ export async function runForecastCases(opts: RunOptions): Promise<Summary> {
     profileOf(rec.setup);
     let result: CaseResult;
     try {
-      result = await runCase(judge, rec, env, has, opts.at);
+      result = await runCase(judge, rec, env, has, opts.at, opts.onlinePackages === true);
     } catch (err) {
       result = {
         id: rec.id,
@@ -473,6 +496,10 @@ export function registerForecastCasesCommand(program: Command): void {
     )
     .option('--at <iso>', 'The clock every case is judged at', '2026-01-01T00:00:00.000Z')
     .option(
+      '--online-packages',
+      'Let the package check query the advisory service and the registries, as the hook does (default: offline)'
+    )
+    .option(
       '--cwd <dir>',
       'The project directory the cases are judged in ({{CWD}}); default HOME/bench-project'
     )
@@ -483,7 +510,13 @@ export function registerForecastCasesCommand(program: Command): void {
     .action(
       async (
         cases: string,
-        opts: { profiles?: string; at: string; cwd?: string; policy?: string }
+        opts: {
+          profiles?: string;
+          at: string;
+          cwd?: string;
+          policy?: string;
+          onlinePackages?: boolean;
+        }
       ) => {
         const casesPath = path.resolve(cases);
         if (!fs.existsSync(casesPath)) {
@@ -507,6 +540,7 @@ export function registerForecastCasesCommand(program: Command): void {
           home: os.homedir(),
           cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
           policy,
+          onlinePackages: opts.onlinePackages === true,
           at: opts.at,
           write: (line) => process.stdout.write(line + '\n'),
         });

@@ -49,6 +49,12 @@ export interface ForecastRun {
   /** The clock of the call being judged (a historical timestamp), for loop
    *  windows and taint expiry. Defaults to the wall clock. */
   now: number;
+  /** The package check may query the advisory service and the registries, as
+   *  the live hook does. Off for `scan` (a forecast over history stays on the
+   *  machine); on for the server's benchmark replay (`forecast-cases
+   *  --online-packages`), whose package cases need the lookup to agree with
+   *  the hook. */
+  onlinePackages?: boolean;
 }
 
 const als = new AsyncLocalStorage<ForecastRun>();
