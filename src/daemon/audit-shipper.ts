@@ -24,6 +24,7 @@ import {
   truncateAuditPreview,
 } from '../audit/index.js';
 import { CHANNELS, type Channel, type DecidedBy } from '../auth/decision-record.js';
+import type { CanaryKind } from '../canary/registry.js';
 
 const DECIDED_BY_VALUES: ReadonlySet<string> = new Set<DecidedBy>([
   'person',
@@ -65,6 +66,39 @@ const FETCH_TIMEOUT_MS = 10_000;
 //   twice on the dashboard.
 const SKIP_CHECKED_BY = new Set(['ignored', 'exposure-source']);
 
+/** A catalog check id as the SaaS schema accepts it (`group.name`). */
+const CHECK_ID_RE =
+  /^(commands|data|network|files|behavior|loading|actions|packs)\.[a-z0-9][a-z0-9.-]*$/;
+const CANARY_KINDS: ReadonlySet<string> = new Set<CanaryKind>([
+  'aws-profile',
+  'env-file',
+  'ssh-key',
+]);
+
+/** The OWASP report fields: stripped and resent once if the server rejects them. */
+const OWASP_WIRE_FIELDS = ['checkId', 'canary', 'canaryKind'] as const;
+
+/** Set once a server answered 400 to these fields: it predates them, so the
+ *  rest of this process ships without them (the next daemon start tries again). */
+let serverRejectsOwaspFields = false;
+
+/** Test seam. */
+export function _resetOwaspWireFields(): void {
+  serverRejectsOwaspFields = false;
+}
+
+function withoutOwaspFields(rows: WireRow[]): WireRow[] {
+  return rows.map((r) => {
+    const out = { ...r } as Record<string, unknown>;
+    for (const k of OWASP_WIRE_FIELDS) delete out[k];
+    return out as unknown as WireRow;
+  });
+}
+
+function hasOwaspFields(rows: WireRow[]): boolean {
+  return rows.some((r) => OWASP_WIRE_FIELDS.some((k) => k in r));
+}
+
 /** fw#318 2b: the exposure counts as written, or null when malformed. */
 function exposureOf(v: unknown): WireRow['exposure'] | null {
   if (!v || typeof v !== 'object') return null;
@@ -101,14 +135,15 @@ export interface WireRow {
   sessionId?: string;
   dlpPattern?: string;
   dlpSample?: string;
-  // Canary attribution is deliberately NOT on the wire. The SaaS
-  // AuditBatchRowSchema is `.strict()`, so an unknown key makes the whole
-  // batch a 400; `shipOnce` treats that like a network error and returns
-  // before writeWatermark, which wedges shipping for that machine
-  // permanently — the rows before and after the canary row stop shipping
-  // too. The attribution lives in the local audit row and in `node9 scan`.
-  // Adding it to the wire requires the BE schema to land and deploy FIRST.
-  // See the parity test in src/__tests__/wire-schema-parity.spec.ts.
+  /** OWASP report (node9Firewall#320): the catalog check the row counts
+   *  against. A decoy hit ships as `canary` + `canaryKind` only; the decoy's
+   *  id, path, hash and view never leave the machine. The SaaS schema is
+   *  `.strict()`, so these three are stripped and resent once on a 400 from
+   *  an older server (see shipOnce) instead of wedging the shipper. Parity:
+   *  src/__tests__/wire-schema-parity.spec.ts. */
+  checkId?: string;
+  canary?: true;
+  canaryKind?: CanaryKind;
   /** Linkage to the BE-origin AuditLog row written at /intercept time —
    *  the BE enriches that row instead of inserting a duplicate. */
   cloudRequestId?: string;
@@ -248,6 +283,21 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       (CHANNELS as readonly string[]).includes(parsed.channel)
         ? { channel: parsed.channel as Channel }
         : {}),
+      // OWASP report: the check id, only when it is a catalog id the strict
+      // schema accepts; a decoy hit as flag and kind, nothing that locates it.
+      ...(typeof parsed.checkId === 'string' &&
+      parsed.checkId.length <= 64 &&
+      CHECK_ID_RE.test(parsed.checkId)
+        ? { checkId: parsed.checkId }
+        : {}),
+      ...(typeof parsed.canaryId === 'string' && parsed.canaryId
+        ? {
+            canary: true as const,
+            ...(typeof parsed.canaryKind === 'string' && CANARY_KINDS.has(parsed.canaryKind)
+              ? { canaryKind: parsed.canaryKind as CanaryKind }
+              : {}),
+          }
+        : {}),
     });
   }
   return { rows, consumed: lastNl + 1 };
@@ -341,23 +391,35 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
       // advancing the watermark — the whole chunk re-ships next tick and the
       // SaaS dedups what already landed.
       for (let i = 0; i < rows.length; i += MAX_BATCH) {
-        const batch = rows.slice(i, i + MAX_BATCH);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-        try {
-          const res = await fetchImpl(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${creds.apiKey}`,
-            },
-            body: JSON.stringify({ rows: batch }),
-            signal: controller.signal,
-          });
-          if (!res.ok) throw new Error(`audit/batch HTTP ${res.status}`);
-        } finally {
-          clearTimeout(timer);
+        const slice = rows.slice(i, i + MAX_BATCH);
+        let batch = serverRejectsOwaspFields ? withoutOwaspFields(slice) : slice;
+        const post = async (body: WireRow[]): Promise<Response> => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+          try {
+            return await fetchImpl(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${creds.apiKey}`,
+              },
+              body: JSON.stringify({ rows: body }),
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+        let res = await post(batch);
+        // A strict server that predates the OWASP fields answers 400 to the
+        // whole batch. Resend once without them; if that lands, the server is
+        // older, so stop sending them for this process (node9Firewall#320).
+        if (res.status === 400 && hasOwaspFields(batch)) {
+          batch = withoutOwaspFields(batch);
+          res = await post(batch);
+          if (res.ok) serverRejectsOwaspFields = true;
         }
+        if (!res.ok) throw new Error(`audit/batch HTTP ${res.status}`);
         shipped += batch.length;
       }
 
