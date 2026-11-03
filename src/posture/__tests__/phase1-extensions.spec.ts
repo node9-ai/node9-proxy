@@ -83,7 +83,7 @@ describe('Supply chain: plugins and the package check', () => {
     expect(f).toBeDefined();
     expect(f.severity).toBe('medium');
     expect(f.owner).toBe('node9');
-    expect(f.detail[0]).toMatch(/^~\/\.claude\/plugins\//);
+    expect(f.detail[0].replace(/\\/g, '/')).toMatch(/^~\/\.claude\/plugins\//);
     expect(f.fix).toContain('loading.skill-tamper');
   });
 
