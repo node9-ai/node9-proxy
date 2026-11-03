@@ -43,8 +43,8 @@ export interface SkillPinsFile {
 // Paths
 // ---------------------------------------------------------------------------
 
-function getPinsFilePath(): string {
-  return path.join(os.homedir(), '.node9', 'skill-pins.json');
+function getPinsFilePath(home: string = os.homedir()): string {
+  return path.join(home, '.node9', 'skill-pins.json');
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +144,8 @@ export type SkillPinsReadResult =
   | { ok: false; reason: 'missing' }
   | { ok: false; reason: 'corrupt'; detail: string };
 
-export function readSkillPinsSafe(): SkillPinsReadResult {
-  const filePath = getPinsFilePath();
+export function readSkillPinsSafe(home?: string): SkillPinsReadResult {
+  const filePath = getPinsFilePath(home);
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
     if (!raw.trim()) return { ok: false, reason: 'corrupt', detail: 'empty file' };

@@ -83,15 +83,6 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
 
     if (probe.kind === 'egress') {
       f.coverage = egressCoverage(env);
-      // The setting is there and the mode is what is missing: say so, instead
-      // of advising a command the user already ran (fw#408, #320 phase 1).
-      if (
-        f.coverage.state === 'open' &&
-        config.policy.egress.enabled &&
-        config.policy.egress.mode !== 'off' &&
-        isRecordOnly(mode)
-      )
-        f.fix = auditModeFix(mode, 'node9 egress is set');
       continue;
     }
 

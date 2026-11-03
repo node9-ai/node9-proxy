@@ -57,6 +57,13 @@ describe('checkAgentPermissions', () => {
     expect(JSON.stringify(f)).not.toContain('sk-test');
   });
 
+  it('the stricter and the editing-only modes are not findings', () => {
+    for (const mode of ['dontAsk', 'acceptEdits', 'plan']) {
+      write('.claude/settings.json', JSON.stringify({ permissions: { defaultMode: mode } }));
+      expect(checkAgentPermissions(ctx()), mode).toEqual([]);
+    }
+  });
+
   it('flags dangerouslySkipPermissions the same way', () => {
     write('.claude/settings.json', JSON.stringify({ dangerouslySkipPermissions: true }));
     const [f] = checkAgentPermissions(ctx());

@@ -717,12 +717,13 @@ function packRows(): CheckDef[] {
       if (!rule.name || SHIELD_RULES_FOLDED_INTO_PRODUCT[rule.name]) continue;
       const id = packRowId(shield.name, rule.name);
       if (!id) continue;
-      const owasp = packRowOwasp(id, shield.name);
-      if (!owasp) throw new Error(`pack row ${id} has no OWASP risk: add the shield to owasp.ts`);
       rows.push({
         id,
         group: 'commands',
-        owasp,
+        // A shield missing from the table falls back to tool misuse instead of
+        // throwing here: this module loads on every hook call, and a mapping
+        // omission must fail a test (owasp.spec.ts), never the gate.
+        owasp: packRowOwasp(id, shield.name) ?? 'ASI02',
         title: rule.name.replace(SHIELD_RULE_NAME, '$3').replace(/-/g, ' '),
         catches: rule.description ?? rule.reason ?? '',
         values: ALL,

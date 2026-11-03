@@ -6,6 +6,7 @@
 // that catch it carry.
 import { describe, it, expect } from 'vitest';
 import { CHECKS, CHECK_BY_ID } from './catalog';
+import { BUILTIN_SHIELDS } from './shields';
 import {
   ASI,
   ASI_IDS,
@@ -151,7 +152,11 @@ describe('pack rows', () => {
     );
   });
 
-  it('a shield the table does not know gets no risk, so the catalog refuses the row', () => {
+  it('every builtin shield is in the table, so no pack row falls back to the default', () => {
+    for (const name of Object.keys(BUILTIN_SHIELDS)) {
+      if (name === 'project-jail') continue; // not a pack (its rules are product checks)
+      expect(packRowOwasp(`packs.${name}.any`, name), name).toBeDefined();
+    }
     expect(packRowOwasp('packs.newshield.delete-everything', 'newshield')).toBeUndefined();
     expect(packRowOwasp('packs.stripe.anything-new', 'stripe')).toBe('ASI09');
   });

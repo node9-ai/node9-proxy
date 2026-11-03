@@ -13,6 +13,7 @@ import {
   shipLagBytes,
   buildBatchEndpoint,
   _resetOwaspWireFields,
+  OWASP_FIELDS_RETRY_MS,
 } from '../daemon/audit-shipper';
 import { generateEventId, buildArgsPreview } from '../audit';
 
@@ -458,6 +459,37 @@ describe('shipOnce', () => {
     await shipOnce(deps(impl));
     expect(bodies).toHaveLength(3);
     expect('checkId' in bodies[2][0]).toBe(false);
+    _resetOwaspWireFields();
+  });
+
+  it('tries the OWASP fields again after the retry window, so a long-running daemon picks up a deployed server', async () => {
+    _resetOwaspWireFields();
+    let clock = 1_000_000;
+    let serverKnowsFields = false;
+    const bodies: Array<Array<Record<string, unknown>>> = [];
+    const impl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const rows = (JSON.parse(String(init?.body)) as { rows: Array<Record<string, unknown>> })
+        .rows;
+      bodies.push(rows);
+      const rejects = !serverKnowsFields && rows.some((r) => 'checkId' in r);
+      return { ok: !rejects, status: rejects ? 400 : 200 } as Response;
+    }) as typeof fetch;
+    const at = () => ({ ...deps(impl), now: () => clock });
+
+    fs.writeFileSync(auditLogPath, row({ checkId: 'commands.rm' }));
+    await shipOnce(at()); // 400, then the stripped resend lands
+    expect(bodies).toHaveLength(2);
+
+    serverKnowsFields = true; // the server is deployed
+    clock += OWASP_FIELDS_RETRY_MS - 1;
+    fs.appendFileSync(auditLogPath, row({ checkId: 'commands.sudo' }));
+    await shipOnce(at()); // still inside the window: stripped
+    expect('checkId' in bodies[2][0]).toBe(false);
+
+    clock += 2;
+    fs.appendFileSync(auditLogPath, row({ checkId: 'commands.chmod' }));
+    await shipOnce(at()); // window over: sent with the field, accepted
+    expect(bodies[3][0].checkId).toBe('commands.chmod');
     _resetOwaspWireFields();
   });
 

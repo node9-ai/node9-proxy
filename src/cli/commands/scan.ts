@@ -1045,6 +1045,7 @@ async function processClaudeFile(
   const toolUseFilePaths = new Map<string, string>();
   // Maps tool_use id → tool name, so a tool result can feed the session state.
   const toolUseNames = new Map<string, string>();
+  const toolUseInputs = new Map<string, unknown>();
 
   // Metric: secrets before first useful edit
   let firstDlpTs: string | null = null;
@@ -1142,7 +1143,10 @@ async function processClaudeFile(
           if (isNode9SelfOutput(resultText)) continue;
           const resultTool = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : undefined;
           if (resultTool)
-            judge.noteToolResult(sessionId, resultTool, entry.timestamp ?? '', entry.cwd);
+            judge.noteToolResult(sessionId, resultTool, entry.timestamp ?? '', entry.cwd, {
+              input: block.tool_use_id ? toolUseInputs.get(block.tool_use_id) : undefined,
+              output: resultText,
+            });
           const decoysHere1 = recordCanaries(
             { text: resultText },
             'tool-result',
@@ -1227,6 +1231,7 @@ async function processClaudeFile(
         toolUseFilePaths.set(block.id, input.file_path);
       }
       if (block.id) toolUseNames.set(block.id, toolName);
+      if (block.id) toolUseInputs.set(block.id, input);
 
       sessionCalls.push({ toolName, input, timestamp: entry.timestamp ?? '' });
 

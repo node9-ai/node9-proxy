@@ -23,7 +23,8 @@ import {
   approveSessionExposure,
   checkTaint,
 } from '../../auth/daemon';
-import { extractContentDestinations, classifyShellExposure } from '@node9/policy-engine';
+import { extractContentDestinations } from '@node9/policy-engine';
+import { shellFetch } from '../../exposure/shell-fetch';
 import { recordExposureSource } from '../../exposure/source';
 import {
   toolRole,
@@ -176,19 +177,6 @@ function buildArgsField(rawInput: unknown): Record<string, unknown> {
   } catch {
     return hashed;
   }
-}
-
-/** The classification of a Bash call's command, or null for any other tool. */
-function shellFetch(
-  tool: string,
-  rawInput: unknown
-): ReturnType<typeof classifyShellExposure> | null {
-  if (tool !== 'Bash' && tool !== 'bash') return null;
-  const cmd =
-    rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput)
-      ? (rawInput as Record<string, unknown>).command
-      : undefined;
-  return typeof cmd === 'string' && cmd.length > 0 ? classifyShellExposure(cmd) : null;
 }
 
 export function registerLogCommand(program: Command): void {

@@ -36,6 +36,7 @@ vi.mock('../../agent-wiring', async () => {
 });
 
 import { pluginPinState, checkSupplyChain } from '../supply-chain';
+import { getRootKey } from '../../skill-pin';
 import { checkCoverage } from '../coverage';
 import { auditModeFix } from '../enforcement';
 import { buildShipBody } from '../ship';
@@ -68,6 +69,23 @@ function plugin(name: string): void {
 }
 
 describe('Supply chain: plugins and the package check', () => {
+  it('reads the pins from the same home as the plugin roots', () => {
+    plugin('alpha');
+    const root = pluginPinState(home).roots[0];
+    // A pin in this home, while the process HOME points elsewhere.
+    process.env.HOME = os.tmpdir();
+    fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.node9', 'skill-pins.json'),
+      JSON.stringify({
+        roots: {
+          [getRootKey(root)]: { rootPath: root, contentHash: 'h', exists: true, fileCount: 0 },
+        },
+      })
+    );
+    expect(pluginPinState(home).unpinned).toEqual([]);
+  });
+
   it('lists installed plugin roots and which have no pin', () => {
     plugin('alpha');
     plugin('beta');
@@ -81,7 +99,7 @@ describe('Supply chain: plugins and the package check', () => {
     checks = { 'loading.skill-tamper': 'off' };
     const f = checkSupplyChain(ctx()).find((x) => x.title.includes('unverified'))!;
     expect(f).toBeDefined();
-    expect(f.severity).toBe('medium');
+    expect(f.severity).toBe('advisory');
     expect(f.owner).toBe('node9');
     expect(f.detail[0].replace(/\\/g, '/')).toMatch(/^~\/\.claude\/plugins\//);
     expect(f.fix).toContain('loading.skill-tamper');
@@ -92,6 +110,7 @@ describe('Supply chain: plugins and the package check', () => {
     checks = { 'loading.skill-tamper': 'block' };
     const f = checkSupplyChain(ctx()).find((x) => x.title.includes('no pin yet'))!;
     expect(f).toBeDefined();
+    expect(f.severity).toBe('advisory');
     expect(f.fix).toContain('node9 skill pin list');
   });
 
@@ -129,9 +148,9 @@ describe('Coverage: the daemon after a reboot', () => {
 
 describe('the audit-mode fix text', () => {
   it('names the level and the setting, with no path', () => {
-    const text = auditModeFix('observe', 'node9 egress is set');
+    const text = auditModeFix('observe', 'node9 already stops this');
     expect(text).toContain('audit mode');
-    expect(text).toContain('node9 egress is set');
+    expect(text).toContain('node9 already stops this');
     expect(text).toContain('set mode to `standard`');
     expect(text).not.toMatch(/\/home\//);
   });
