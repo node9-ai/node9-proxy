@@ -13,13 +13,13 @@
 // Config inspection only: nothing runs, and detail lines carry setting names
 // and tool patterns, never a secret.
 
-import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { analyzeAgentConfig } from '../ci-check/agent-config';
 import { analyzeCodexConfig } from '../ci-check/codex';
 import type { CiFinding } from '../ci-check/types';
 import type { CheckContext, Finding, Severity } from './types';
+import { readSmallFile } from '../utils/read-small-file';
 
 export const CATEGORY = 'Agent permissions';
 
@@ -28,14 +28,9 @@ const CLAUDE_NO_PROMPT_MODES = new Set(['bypassPermissions', 'dontAsk']);
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
+// One open, checked on its descriptor (CodeQL js/file-system-race).
 function readSmall(file: string): string | null {
-  try {
-    const st = fs.statSync(file);
-    if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
-    return fs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  return readSmallFile(file, MAX_FILE_BYTES);
 }
 
 function base(agent: string, severity: Severity, title: string): Finding {

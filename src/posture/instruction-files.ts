@@ -20,6 +20,7 @@ import { analyzeInstructionFile } from '../ci-check/instructions';
 import type { CiFinding } from '../ci-check/types';
 import { getConfig, catalogSettingsFrom } from '../config';
 import type { CheckContext, Finding } from './types';
+import { readSmallFile } from '../utils/read-small-file';
 
 export const CATEGORY = 'Instruction files';
 
@@ -75,14 +76,9 @@ export function instructionFiles(home: string): string[] {
   return out;
 }
 
+// One open, checked on its descriptor (CodeQL js/file-system-race).
 function readSmall(file: string): string | null {
-  try {
-    const st = fs.statSync(file);
-    if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
-    return fs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  return readSmallFile(file, MAX_FILE_BYTES);
 }
 
 function display(file: string, home: string): string {
