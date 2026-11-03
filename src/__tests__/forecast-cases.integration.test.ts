@@ -315,6 +315,92 @@ describe('forecast-cases (integration)', () => {
     expect(byId.get('c.hold')?.decision).toBe('review');
   });
 
+  it('--cwd judges the cases in the given project directory', () => {
+    const project = path.join(home, 'elsewhere', 'project');
+    fs.mkdirSync(project, { recursive: true });
+    const add = spawnSync(process.execPath, [CLI, 'jail', 'add', path.join(project, 'notes.txt')], {
+      encoding: 'utf-8',
+      cwd: home,
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        NODE9_TESTING: '1',
+        NODE9_NO_AUTO_DAEMON: '1',
+      },
+    });
+    expect(add.status, add.stderr).toBe(0);
+    const file = path.join(home, 'cwd-cases.jsonl');
+    const cwdCase = {
+      id: 'c.cwd',
+      owasp: 'ASI03',
+      section: 'headline',
+      setup: 'clean',
+      stage: 'pre',
+      expected: 'block',
+      tool: 'Read',
+      input: payload('Read', { file_path: '{{CWD}}/notes.txt' }),
+    };
+    fs.writeFileSync(file, JSON.stringify(cwdCase) + '\n');
+    // The jailed file is under the project: blocked only when {{CWD}} is that project.
+    expect(run(home, ['--cwd', project, file]).byId.get('c.cwd')?.decision).toBe('block');
+    expect(run(home, [file]).byId.get('c.cwd')?.decision).toBe('allow');
+  });
+
+  it('--policy writes the workspace policy as the rules cache and judges under it', () => {
+    const notes = path.join(home, 'notes.txt');
+    const policyFile = path.join(home, 'policy.json');
+    fs.writeFileSync(
+      policyFile,
+      JSON.stringify({
+        workspaceId: 'ws-1',
+        etag: '"e1"',
+        policies: [],
+        shields: [],
+        managedConfig: { mode: 'strict', jailPaths: [{ path: notes, verdict: 'block' }] },
+      })
+    );
+    const file = path.join(home, 'policy-cases.jsonl');
+    const orgJail = {
+      id: 'c.orgjail',
+      owasp: 'ASI03',
+      section: 'headline',
+      setup: 'org-jail',
+      stage: 'pre',
+      expected: 'block',
+      tool: 'Read',
+      input: payload('Read', { file_path: '{{HOME}}/notes.txt' }),
+    };
+    fs.writeFileSync(
+      file,
+      [orgJail, CASES.find((c) => c.id === 'c.jail')!].map((c) => JSON.stringify(c)).join('\n') +
+        '\n'
+    );
+    const { byId, summary } = run(home, ['--policy', policyFile, file]);
+    expect(summary!.mode).toBe('strict');
+    expect(summary!.policySource).toBe('workspace');
+    // The org mandate reaches the forecast; the user jail is still the user's to declare.
+    expect(byId.get('c.orgjail')).toMatchObject({ decision: 'block', enforced: true });
+    expect(byId.get('c.jail')?.notApplicable).toBe('user-jail-path');
+    const cache = JSON.parse(
+      fs.readFileSync(path.join(home, '.node9', 'rules-cache.json'), 'utf8')
+    );
+    expect(cache).toMatchObject({
+      workspaceId: 'ws-1',
+      etag: '"e1"',
+      managedConfig: { mode: 'strict' },
+    });
+    expect(cache.managedConfig.jailPaths).toEqual([{ path: notes, verdict: 'block' }]);
+  });
+
+  it('--policy that is not a JSON object exits 2', () => {
+    const policyFile = path.join(home, 'policy.json');
+    fs.writeFileSync(policyFile, '[1,2]');
+    const { r } = run(home, ['--policy', policyFile, casesFile]);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--policy is not a JSON object');
+  });
+
   it('never prints a joined credential value and writes nothing under HOME', () => {
     const before = walk(home);
     const { r } = run(home, [casesFile]);

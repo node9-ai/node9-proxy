@@ -28,6 +28,7 @@ import { scanArgs } from '../../dlp';
 import { readJailPaths } from '../../shields/jail';
 import { loadCanaries } from '../../canary/registry';
 import { PROXY_VERSION } from '../../version';
+import { writePolicyCache, type CloudPolicyBody } from '../../daemon/sync';
 
 // ── Template ─────────────────────────────────────────────────────────────────
 // The benchmark keeps credential-shaped values as parts ({"$join": [...]})
@@ -379,14 +380,32 @@ export interface RunOptions {
   casesPath: string;
   profilesDir?: string;
   home: string;
+  /** The project directory cases are judged in ({{CWD}}); default HOME/bench-project. */
+  cwd?: string;
+  /** A cloud policy sync response body: written as this HOME's rules cache before judging. */
+  policy?: CloudPolicyBody & { etag?: string };
   /** The clock every case is judged at (a fixed ISO time keeps runs comparable). */
   at: string;
   write: (line: string) => void;
 }
 
 export async function runForecastCases(opts: RunOptions): Promise<Summary> {
-  const env: TemplateEnv = { home: opts.home, cwd: path.join(opts.home, 'bench-project') };
+  const env: TemplateEnv = {
+    home: opts.home,
+    cwd: opts.cwd ?? path.join(opts.home, 'bench-project'),
+  };
   fs.mkdirSync(env.cwd, { recursive: true });
+  // The one write under HOME this command makes, and only when asked: the
+  // server judges a workspace's cases in a throwaway HOME that carries the
+  // workspace's policy the way a device's daemon would have written it.
+  if (opts.policy) {
+    writePolicyCache(opts.policy, opts.policy.etag);
+    // A device that follows a workspace is keyed: the cloud config applies
+    // verbatim and the local policy layers are inert. The loader reads the
+    // key from the environment, so a placeholder makes this process judge as
+    // such a device would. Nothing here calls the cloud (forecast context).
+    if (!process.env.NODE9_API_KEY) process.env.NODE9_API_KEY = 'forecast-cases';
+  }
   const judge = new HistoryJudge();
   const config = judge.configFor(env.cwd);
   const has = homeHas(config);
@@ -453,19 +472,54 @@ export function registerForecastCasesCommand(program: Command): void {
       'The benchmark profiles directory: its fixture files are created under HOME'
     )
     .option('--at <iso>', 'The clock every case is judged at', '2026-01-01T00:00:00.000Z')
-    .action(async (cases: string, opts: { profiles?: string; at: string }) => {
-      const casesPath = path.resolve(cases);
-      if (!fs.existsSync(casesPath)) {
-        console.error(`forecast-cases: no such file: ${casesPath}`);
-        process.exitCode = 2;
-        return;
+    .option(
+      '--cwd <dir>',
+      'The project directory the cases are judged in ({{CWD}}); default HOME/bench-project'
+    )
+    .option(
+      '--policy <file>',
+      "A cloud policy sync response body (JSON), written as this HOME's rules cache first"
+    )
+    .action(
+      async (
+        cases: string,
+        opts: { profiles?: string; at: string; cwd?: string; policy?: string }
+      ) => {
+        const casesPath = path.resolve(cases);
+        if (!fs.existsSync(casesPath)) {
+          console.error(`forecast-cases: no such file: ${casesPath}`);
+          process.exitCode = 2;
+          return;
+        }
+        let policy: CloudPolicyBody | undefined;
+        if (opts.policy) {
+          const parsed = readPolicyBody(path.resolve(opts.policy));
+          if (!parsed) {
+            console.error(`forecast-cases: --policy is not a JSON object: ${opts.policy}`);
+            process.exitCode = 2;
+            return;
+          }
+          policy = parsed;
+        }
+        await runForecastCases({
+          casesPath,
+          profilesDir: opts.profiles ? path.resolve(opts.profiles) : undefined,
+          home: os.homedir(),
+          cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
+          policy,
+          at: opts.at,
+          write: (line) => process.stdout.write(line + '\n'),
+        });
       }
-      await runForecastCases({
-        casesPath,
-        profilesDir: opts.profiles ? path.resolve(opts.profiles) : undefined,
-        home: os.homedir(),
-        at: opts.at,
-        write: (line) => process.stdout.write(line + '\n'),
-      });
-    });
+    );
+}
+
+function readPolicyBody(file: string): (CloudPolicyBody & { etag?: string }) | undefined {
+  try {
+    const v: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    return v as CloudPolicyBody & { etag?: string };
+  } catch {
+    return undefined;
+  }
 }

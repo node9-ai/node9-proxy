@@ -150,10 +150,12 @@ function pluginsAndPackages(ctx: CheckContext, home: string): Finding[] {
   const settings = catalogSettingsFrom(config.settings, config.policy);
   const { roots, unpinned } = pluginPinState(home);
   const tamper = checkValue(settings, 'loading.skill-tamper');
+  // Advisory, not medium: the check is off by default, so every machine with
+  // a plugin would otherwise open a medium finding on install (fw#320 review).
   if (roots.length > 0 && tamper === 'off') {
     findings.push({
       category: 'Supply chain',
-      severity: 'medium',
+      severity: 'advisory',
       title: `${roots.length} installed plugin${roots.length === 1 ? '' : 's'} load${roots.length === 1 ? 's' : ''} unverified`,
       what: 'Plugins and skills the agent loads are code that runs with its rights, and no content hash is kept for them.',
       why: 'The check loading.skill-tamper is off, so node9 does not pin them.',
@@ -165,7 +167,7 @@ function pluginsAndPackages(ctx: CheckContext, home: string): Finding[] {
   } else if (unpinned.length > 0) {
     findings.push({
       category: 'Supply chain',
-      severity: 'medium',
+      severity: 'advisory',
       title: `${unpinned.length} of ${roots.length} installed plugin${roots.length === 1 ? '' : 's'} ${unpinned.length === 1 ? 'has' : 'have'} no pin yet`,
       what: 'A plugin the agent can load has no recorded content hash yet.',
       why: 'node9 pins a plugin the first time it loads; these have not loaded since pinning was turned on.',

@@ -223,7 +223,7 @@ export interface ManagedConfigCache {
  */
 type FetchResult = { kind: 'fresh'; body: CloudPolicyBody; etag?: string } | { kind: 'unchanged' };
 
-interface CloudPolicyBody {
+export interface CloudPolicyBody {
   policies?: unknown[];
   rules?: unknown[]; // legacy field name from older /api/v1/policy responses
   panicMode?: boolean;
@@ -968,6 +968,31 @@ function writeCache(cache: RulesCache): void {
 /** Exported for the atomic-write regression test. */
 export const __writeCacheForTest = writeCache;
 
+/**
+ * The cache record for a sync response body. One mapping for the daemon's
+ * two sync paths and for `node9 forecast-cases --policy`, so a simulation the
+ * server runs over a workspace's policy reads it exactly as a device would.
+ */
+export function cacheFromSyncBody(body: CloudPolicyBody, etag?: string): RulesCache {
+  return {
+    fetchedAt: new Date().toISOString(),
+    rules: extractRules(body),
+    etag,
+    panicMode: body.panicMode,
+    shadowMode: body.shadowMode,
+    syncIntervalHours: body.syncIntervalHours,
+    workspaceId: body.workspaceId,
+    shields: extractShields(body),
+    managedConfig: extractManagedConfig(body),
+    config: extractWorkspaceConfig(body),
+  };
+}
+
+/** Write `~/.node9/rules-cache.json` under this HOME from a sync response body. */
+export function writePolicyCache(body: CloudPolicyBody, etag?: string): void {
+  writeCache(cacheFromSyncBody(body, etag));
+}
+
 async function syncOnce(): Promise<void> {
   const creds = readCredentials();
   if (!creds) return; // No API key configured — silent no-op
@@ -978,19 +1003,7 @@ async function syncOnce(): Promise<void> {
       // 304 — keep existing cache as-is. Server confirmed nothing changed.
       recordSyncHealth({ ok: true });
     } else {
-      const cache: RulesCache = {
-        fetchedAt: new Date().toISOString(),
-        rules: extractRules(result.body),
-        etag: result.etag,
-        panicMode: result.body.panicMode,
-        shadowMode: result.body.shadowMode,
-        syncIntervalHours: result.body.syncIntervalHours,
-        workspaceId: result.body.workspaceId,
-        shields: extractShields(result.body),
-        managedConfig: extractManagedConfig(result.body),
-        config: extractWorkspaceConfig(result.body),
-      };
-      writeCache(cache);
+      writeCache(cacheFromSyncBody(result.body, result.etag));
       recordSyncHealth({ ok: true, changed: true });
     }
   } catch (err) {
@@ -1354,18 +1367,7 @@ export async function runCloudSync(): Promise<
         ? { ok: true, rules: status.rules, fetchedAt: status.fetchedAt, unchanged: true }
         : { ok: true, rules: 0, fetchedAt: new Date().toISOString(), unchanged: true };
     }
-    const cache: RulesCache = {
-      fetchedAt: new Date().toISOString(),
-      rules: extractRules(result.body),
-      etag: result.etag,
-      panicMode: result.body.panicMode,
-      shadowMode: result.body.shadowMode,
-      syncIntervalHours: result.body.syncIntervalHours,
-      workspaceId: result.body.workspaceId,
-      shields: extractShields(result.body),
-      managedConfig: extractManagedConfig(result.body),
-      config: extractWorkspaceConfig(result.body),
-    };
+    const cache = cacheFromSyncBody(result.body, result.etag);
     writeCache(cache);
     recordSyncHealth({ ok: true, changed: true });
     return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt };

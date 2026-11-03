@@ -99,7 +99,7 @@ describe('Supply chain: plugins and the package check', () => {
     checks = { 'loading.skill-tamper': 'off' };
     const f = checkSupplyChain(ctx()).find((x) => x.title.includes('unverified'))!;
     expect(f).toBeDefined();
-    expect(f.severity).toBe('medium');
+    expect(f.severity).toBe('advisory');
     expect(f.owner).toBe('node9');
     expect(f.detail[0].replace(/\\/g, '/')).toMatch(/^~\/\.claude\/plugins\//);
     expect(f.fix).toContain('loading.skill-tamper');
@@ -110,6 +110,7 @@ describe('Supply chain: plugins and the package check', () => {
     checks = { 'loading.skill-tamper': 'block' };
     const f = checkSupplyChain(ctx()).find((x) => x.title.includes('no pin yet'))!;
     expect(f).toBeDefined();
+    expect(f.severity).toBe('advisory');
     expect(f.fix).toContain('node9 skill pin list');
   });
 
