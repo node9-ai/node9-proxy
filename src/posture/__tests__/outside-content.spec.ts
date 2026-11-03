@@ -94,6 +94,18 @@ describe('checkOutsideContent', () => {
     expect(f.fix).toContain('node9 egress watch');
   });
 
+  it('one server wired into two agents counts once and names both agents', () => {
+    claudeMcp({ gmail: { command: 'node', args: ['gmail.js'] } });
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.codex', 'config.toml'),
+      '[mcp_servers.gmail]\ncommand = "node"\nargs = ["gmail.js"]\n'
+    );
+    const [f] = checkOutsideContent(ctx());
+    expect(f.title).toMatch(/^1 MCP server brings outside content in/);
+    expect(f.detail[0]).toMatch(/^gmail \(Claude Code, Codex, by name\)$/);
+  });
+
   it('flags a source server when egress is gated but the hold is off', () => {
     claudeMcp({ gmail: { command: 'node', args: ['gmail.js'] } });
     egress = { enabled: true, mode: 'block' };

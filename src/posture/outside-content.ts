@@ -58,6 +58,16 @@ export function checkOutsideContent(ctx: CheckContext): Finding[] {
   >;
   const sources = outsideSources(home, roles);
   if (sources.length === 0) return [];
+  // One server wired into two agents is one server: group by name.
+  const byServer = new Map<string, { agents: string[]; how: OutsideSource['how'] }>();
+  for (const src of sources) {
+    const e = byServer.get(src.server);
+    if (e) {
+      if (!e.agents.includes(src.agent)) e.agents.push(src.agent);
+      if (src.how === 'role') e.how = 'role';
+    } else byServer.set(src.server, { agents: [src.agent], how: src.how });
+  }
+  const servers = byServer.size;
 
   const egress = config.policy.egress;
   const egressGated = !!egress?.enabled && (egress.mode === 'block' || egress.mode === 'review');
@@ -77,11 +87,16 @@ export function checkOutsideContent(ctx: CheckContext): Finding[] {
     {
       category: CATEGORY,
       severity: 'high',
-      title: `${sources.length} MCP server${sources.length === 1 ? '' : 's'} bring${sources.length === 1 ? 's' : ''} outside content in, and the way out is open`,
+      title: `${servers} MCP server${servers === 1 ? '' : 's'} bring${servers === 1 ? 's' : ''} outside content in, and the way out is open`,
       what: 'An agent here reads pages, issues or messages written by others, and what it does next is not held.',
       why: gaps.join('; ') + '.',
       who: 'One poisoned page or issue is enough: the agent reads it, then sends or deletes as it says.',
-      detail: [...sources.slice(0, 8).map((s) => `${s.server} (${s.agent}, by ${s.how})`), ...gaps],
+      detail: [
+        ...[...byServer]
+          .slice(0, 8)
+          .map(([name, e]) => `${name} (${e.agents.join(', ')}, by ${e.how})`),
+        ...gaps,
+      ],
       owner: 'node9',
       fix: 'Run `node9 egress watch` (or `node9 egress lock`), keep behavior.untrusted-content on, and mark each server\'s reading tools as "Brings outside content" on the Apps page so the hold applies to them.',
     },

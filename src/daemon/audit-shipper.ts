@@ -78,13 +78,17 @@ const CANARY_KINDS: ReadonlySet<string> = new Set<CanaryKind>([
 /** The OWASP report fields: stripped and resent once if the server rejects them. */
 const OWASP_WIRE_FIELDS = ['checkId', 'canary', 'canaryKind'] as const;
 
-/** Set once a server answered 400 to these fields: it predates them, so the
- *  rest of this process ships without them (the next daemon start tries again). */
-let serverRejectsOwaspFields = false;
+/** When a server last answered 400 to these fields and took the batch
+ *  without them: it predates them. The shipper leaves them out for
+ *  OWASP_FIELDS_RETRY_MS, then tries again, so a daemon that keeps running
+ *  past the server deploy starts sending them within the hour instead of
+ *  at its next restart. */
+let owaspFieldsRejectedAt: number | null = null;
+export const OWASP_FIELDS_RETRY_MS = 60 * 60 * 1000;
 
 /** Test seam. */
 export function _resetOwaspWireFields(): void {
-  serverRejectsOwaspFields = false;
+  owaspFieldsRejectedAt = null;
 }
 
 function withoutOwaspFields(rows: WireRow[]): WireRow[] {
@@ -330,6 +334,8 @@ export interface ShipDeps {
   /** Injected for tests; production reads the merged config. */
   cloudEnabled?: boolean;
   creds?: { apiKey: string; apiUrl: string } | null;
+  /** Injected for tests: the clock the OWASP-field retry window reads. */
+  now?: () => number;
 }
 
 export interface ShipResult {
@@ -342,6 +348,7 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
   const auditLogPath = deps.auditLogPath ?? LOCAL_AUDIT_LOG;
   const watermarkPath = deps.watermarkPath ?? AUDIT_SHIP_WATERMARK;
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const now = deps.now ?? Date.now;
 
   let cloudEnabled = deps.cloudEnabled;
   if (cloudEnabled === undefined) {
@@ -392,7 +399,9 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
       // SaaS dedups what already landed.
       for (let i = 0; i < rows.length; i += MAX_BATCH) {
         const slice = rows.slice(i, i + MAX_BATCH);
-        let batch = serverRejectsOwaspFields ? withoutOwaspFields(slice) : slice;
+        const stripFields =
+          owaspFieldsRejectedAt !== null && now() - owaspFieldsRejectedAt < OWASP_FIELDS_RETRY_MS;
+        let batch = stripFields ? withoutOwaspFields(slice) : slice;
         const post = async (body: WireRow[]): Promise<Response> => {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -413,11 +422,11 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
         let res = await post(batch);
         // A strict server that predates the OWASP fields answers 400 to the
         // whole batch. Resend once without them; if that lands, the server is
-        // older, so stop sending them for this process (node9Firewall#320).
+        // older, so leave them out for the retry window (node9Firewall#320).
         if (res.status === 400 && hasOwaspFields(batch)) {
           batch = withoutOwaspFields(batch);
           res = await post(batch);
-          if (res.ok) serverRejectsOwaspFields = true;
+          if (res.ok) owaspFieldsRejectedAt = now();
         }
         if (!res.ok) throw new Error(`audit/batch HTTP ${res.status}`);
         shipped += batch.length;

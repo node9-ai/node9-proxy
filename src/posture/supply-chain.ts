@@ -138,7 +138,8 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
 /** Installed plugin roots and which of them have a pin. Exported for tests. */
 export function pluginPinState(home: string): { roots: string[]; unpinned: string[] } {
   const roots = defaultSkillRoots(undefined, home);
-  const pins = readSkillPinsSafe();
+  // The pins of the same home the roots came from.
+  const pins = readSkillPinsSafe(home);
   const pinned = pins.ok ? pins.pins.roots : {};
   return { roots, unpinned: roots.filter((r) => !pinned[getRootKey(r)]) };
 }

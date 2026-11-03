@@ -23,8 +23,10 @@ import { readSmallFile } from '../utils/read-small-file';
 
 export const CATEGORY = 'Agent permissions';
 
-/** Claude Code permission modes that skip the agent's own prompt. */
-const CLAUDE_NO_PROMPT_MODES = new Set(['bypassPermissions', 'dontAsk']);
+/** Claude Code permission modes that skip the agent's own prompt. Not
+ *  `dontAsk`: it denies every tool that is not pre-approved, the stricter
+ *  side, and not `acceptEdits` or `plan`, which still ask before commands. */
+const CLAUDE_NO_PROMPT_MODES = new Set(['bypassPermissions']);
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 

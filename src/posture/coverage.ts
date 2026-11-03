@@ -34,7 +34,8 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
   }
 
   // Wired — but enforcing, or only observing?
-  const mode = getConfig(ctx.cwd).settings.mode;
+  const config = getConfig(ctx.cwd);
+  const mode = config.settings.mode;
   if (isRecordOnly(mode)) {
     // One name for the level in every report (fw#421): the config may still
     // say `observe`, the user reads `audit`, as `status` prints it.
@@ -54,7 +55,6 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
 
   // Self-protection (OWASP ASI10): a guard that does not come back after a
   // reboot leaves the next sessions ungoverned until someone notices.
-  const config = getConfig(ctx.cwd);
   if (config.settings.autoStartDaemon !== false) {
     const state = autostartState();
     if (state === 'disabled' || state === 'absent') {
