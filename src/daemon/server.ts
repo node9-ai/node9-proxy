@@ -56,6 +56,8 @@ import {
   hasInteractiveClient,
   daemonRejectionHandlerRegistered,
   markRejectionHandlerRegistered,
+  daemonSignalHandlersRegistered,
+  markSignalHandlersRegistered,
   atomicWriteSync,
   redactArgs,
   appendAuditLog,
@@ -1744,6 +1746,18 @@ export function startDaemon(): void {
     });
   }
 
+  // SIGTERM (`node9 daemon stop`, systemd, launchd), SIGINT (Ctrl-C on a
+  // foreground daemon) and SIGHUP (its terminal closed) used to end the
+  // process without the 'exit' event, so the activity socket and its per-HOME
+  // directory stayed behind. They now leave through process.exit(), which
+  // runs the 'exit' clean-up once.
+  if (!daemonSignalHandlersRegistered) {
+    markSignalHandlersRegistered();
+    process.once('SIGTERM', () => process.exit(0));
+    process.once('SIGINT', () => process.exit(130));
+    process.once('SIGHUP', () => process.exit(129));
+  }
+
   const writeOwnPidFile = (): void =>
     atomicWriteSync(
       DAEMON_PID_FILE,
@@ -1765,6 +1779,11 @@ export function startDaemon(): void {
     // buildId — the adopter is not the holder, and stamping the adopter's
     // identity onto a foreign daemon's pidfile would lie about which code is
     // serving (the same class of bug as the fabricated internalToken, G2).
+    //
+    // The activity socket starts only now, once this process owns the port.
+    // Started earlier, a daemon that then yields or takes over replaced the
+    // live daemon's socket at the same per-HOME path, and its exit removed it.
+    startActivitySocket();
     writeOwnPidFile();
     // A socket that had to move on a rebind is named again (only once this
     // daemon owns the pid file).
@@ -1787,5 +1806,4 @@ export function startDaemon(): void {
   if (watchMode) {
     console.error(chalk.cyan('🛰️  Flight Recorder active — daemon will not idle-timeout'));
   }
-  startActivitySocket();
 }

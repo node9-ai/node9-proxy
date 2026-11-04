@@ -10,6 +10,7 @@ import {
   chooseActivitySocketPath,
   ensureActivitySocketDir,
   isOwnStaleSocket,
+  removeOwnSocketDir,
   windowsActivityPipeName,
 } from '../utils/activity-socket';
 import os from 'os';
@@ -179,6 +180,10 @@ export function getDaemonServer(): http.Server | null {
 export let daemonRejectionHandlerRegistered = false;
 export function markRejectionHandlerRegistered(): void {
   daemonRejectionHandlerRegistered = true;
+}
+export let daemonSignalHandlersRegistered = false;
+export function markSignalHandlersRegistered(): void {
+  daemonSignalHandlersRegistered = true;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -573,6 +578,9 @@ export const ACTIVITY_REBIND_WINDOW_MS = 60_000;
 const ACTIVITY_HEALTH_PROBE_MS = 2_000;
 
 let activitySocketServer: net.Server | null = null;
+// The socket file this daemon bound, so shutdown removes that file and never
+// one another daemon has since bound at the same path.
+let activitySocketIdentity: { dev: number; ino: number } | null = null;
 let activityHealthInterval: NodeJS.Timeout | null = null;
 let activityRebindAttempts: number[] = [];
 let activityCircuitTripped = false;
@@ -631,13 +639,29 @@ export function startActivitySocket(): void {
   }, ACTIVITY_HEALTH_PROBE_MS);
   activityHealthInterval.unref();
 
-  process.on('exit', () => {
-    if (activityHealthInterval) clearInterval(activityHealthInterval);
-    try {
-      if (ACTIVITY_SOCKET_PATH && isOwnStaleSocket(ACTIVITY_SOCKET_PATH))
-        fs.unlinkSync(ACTIVITY_SOCKET_PATH);
-    } catch {}
-  });
+  // Every way out runs this: a normal exit, and SIGTERM/SIGINT, which
+  // startDaemon() turns into process.exit().
+  process.on('exit', stopActivitySocket);
+}
+
+/** Removes the socket this daemon bound, then its per-HOME directory if that
+ *  is now empty. Runs once, on the way out. The server is not closed: the
+ *  process ends anyway, and Node's close() unlinks whatever file is at the
+ *  path, even a socket another daemon bound there since. */
+export function stopActivitySocket(): void {
+  if (activityHealthInterval) clearInterval(activityHealthInterval);
+  activityHealthInterval = null;
+  const socketPath = ACTIVITY_SOCKET_PATH;
+  const bound = activitySocketIdentity;
+  ACTIVITY_SOCKET_PATH = null;
+  activitySocketIdentity = null;
+  if (!socketPath || !bound || process.platform === 'win32') return;
+  try {
+    const st = fs.lstatSync(socketPath);
+    if (isOwnStaleSocket(socketPath) && st.dev === bound.dev && st.ino === bound.ino)
+      fs.unlinkSync(socketPath);
+  } catch {}
+  removeOwnSocketDir(socketPath, process.env, os.homedir());
 }
 
 function attemptRebind(reason: string): void {
@@ -807,6 +831,8 @@ function bindActivitySocket(): void {
     if (process.platform !== 'win32') {
       try {
         fs.chmodSync(socketPath, 0o600);
+        const st = fs.lstatSync(socketPath);
+        activitySocketIdentity = { dev: st.dev, ino: st.ino };
       } catch {}
     }
     logActivitySocket(`bound to ${socketPath}`);
