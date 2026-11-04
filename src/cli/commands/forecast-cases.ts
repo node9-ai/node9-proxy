@@ -263,7 +263,12 @@ export function summarize(results: CaseResult[], config: Config): Summary {
       if (stopped) c.interrupted++;
       continue;
     }
-    if (!stopped && (r.unknown?.length ?? 0) > 0) {
+    // An input the forecast could not reproduce leaves the outcome open only
+    // when it could have changed it. A stop the level does not enforce
+    // (observe) is known: the call goes through and is recorded.
+    const notEnforcedStop =
+      r.enforced === false && (r.decision === 'review' || r.decision === 'block');
+    if (!stopped && !notEnforcedStop && (r.unknown?.length ?? 0) > 0) {
       c.undetermined++;
       continue;
     }

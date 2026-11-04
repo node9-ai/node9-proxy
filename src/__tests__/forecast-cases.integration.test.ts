@@ -611,6 +611,39 @@ describe('forecast-cases helpers', () => {
     expect(profileNeed('something-new')).toBeUndefined();
   });
 
+  it('summarize: an unreproduced input leaves an attack undetermined, unless the level did not enforce its stop', () => {
+    const base = { setup: 'clean', section: 'headline' as const, owasp: 'ASI04' as const };
+    const results: CaseResult[] = [
+      // Allowed with the registry unknown: the lookup could have stopped it.
+      {
+        id: 'u1',
+        expected: 'block',
+        decision: 'allow',
+        enforced: true,
+        unknown: ['package-registry'],
+        ...base,
+      },
+      // Observe: the gate would block, the level records only. Known outcome.
+      {
+        id: 'u2',
+        expected: 'block',
+        decision: 'block',
+        enforced: false,
+        notEnforcedBecause: 'settings.mode=observe',
+        checkId: 'loading.malicious-package',
+        unknown: ['package-registry'],
+        ...base,
+      },
+    ];
+    const s = summarize(results, DEFAULT_CONFIG);
+    expect(s.byRisk.ASI04.headline).toMatchObject({
+      undetermined: 1,
+      attacks: 1,
+      loggedOnly: 1,
+      stopped: 0,
+    });
+  });
+
   it('summarize counts attacks, benign, logged-only and attributes passed attacks to their check', () => {
     const base = { setup: 'clean', section: 'headline' as const };
     const results: CaseResult[] = [
