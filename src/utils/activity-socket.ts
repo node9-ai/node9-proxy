@@ -133,7 +133,7 @@ export function isOwnStaleSocket(socketPath: string): boolean {
  * many daemons with throwaway HOMEs does not leave one directory per HOME in
  * /run/user/<uid> (a tmpfs). Only the per-HOME directory under
  * XDG_RUNTIME_DIR for this HOME, never ~/.node9/run or another HOME's; only
- * when it is a real directory of this user (not a link) and empty. True when
+ * when it is a private directory of this user (not a link) and empty. True when
  * it was removed.
  */
 export function removeOwnSocketDir(
@@ -145,11 +145,8 @@ export function removeOwnSocketDir(
   if (platform === 'win32') return false;
   const dir = path.dirname(socketPath);
   if (dir !== perHomeRuntimeDir(env, home)) return false;
+  if (!isPrivateDir(dir)) return false;
   try {
-    const st = fs.lstatSync(dir);
-    if (st.isSymbolicLink() || !st.isDirectory()) return false;
-    const uid = currentUid();
-    if (uid !== undefined && st.uid !== uid) return false;
     if (fs.readdirSync(dir).length > 0) return false;
     // rmdir refuses a directory that gained an entry since the check.
     fs.rmdirSync(dir);

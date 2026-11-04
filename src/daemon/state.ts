@@ -578,6 +578,9 @@ export const ACTIVITY_REBIND_WINDOW_MS = 60_000;
 const ACTIVITY_HEALTH_PROBE_MS = 2_000;
 
 let activitySocketServer: net.Server | null = null;
+// The socket file this daemon bound, so shutdown removes that file and never
+// one another daemon has since bound at the same path.
+let activitySocketIdentity: { dev: number; ino: number } | null = null;
 let activityHealthInterval: NodeJS.Timeout | null = null;
 let activityRebindAttempts: number[] = [];
 let activityCircuitTripped = false;
@@ -641,22 +644,22 @@ export function startActivitySocket(): void {
   process.on('exit', stopActivitySocket);
 }
 
-/** Closes the activity server, removes its socket if it is ours, then its
- *  per-HOME directory if that is now empty. Runs once. */
+/** Removes the socket this daemon bound, then its per-HOME directory if that
+ *  is now empty. Runs once, on the way out. The server is not closed: the
+ *  process ends anyway, and Node's close() unlinks whatever file is at the
+ *  path, even a socket another daemon bound there since. */
 export function stopActivitySocket(): void {
   if (activityHealthInterval) clearInterval(activityHealthInterval);
   activityHealthInterval = null;
-  if (activitySocketServer) {
-    try {
-      activitySocketServer.close();
-    } catch {}
-    activitySocketServer = null;
-  }
   const socketPath = ACTIVITY_SOCKET_PATH;
+  const bound = activitySocketIdentity;
   ACTIVITY_SOCKET_PATH = null;
-  if (!socketPath || process.platform === 'win32') return;
+  activitySocketIdentity = null;
+  if (!socketPath || !bound || process.platform === 'win32') return;
   try {
-    if (isOwnStaleSocket(socketPath)) fs.unlinkSync(socketPath);
+    const st = fs.lstatSync(socketPath);
+    if (isOwnStaleSocket(socketPath) && st.dev === bound.dev && st.ino === bound.ino)
+      fs.unlinkSync(socketPath);
   } catch {}
   removeOwnSocketDir(socketPath, process.env, os.homedir());
 }
@@ -828,6 +831,8 @@ function bindActivitySocket(): void {
     if (process.platform !== 'win32') {
       try {
         fs.chmodSync(socketPath, 0o600);
+        const st = fs.lstatSync(socketPath);
+        activitySocketIdentity = { dev: st.dev, ino: st.ino };
       } catch {}
     }
     logActivitySocket(`bound to ${socketPath}`);

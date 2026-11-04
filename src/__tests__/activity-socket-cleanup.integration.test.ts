@@ -79,18 +79,25 @@ interface Running {
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
 
-/** Starts a daemon and waits until its daemon.pid names a bound socket. */
-async function startDaemon(sb: Sandbox): Promise<Running> {
-  const child = spawn(process.execPath, [CLI, 'daemon', 'start'], {
-    env: sb.env,
-    stdio: 'ignore',
-  });
+function spawnDaemon(
+  sb: Sandbox,
+  build?: string
+): { child: ChildProcess; exited: Running['exited'] } {
+  const env = { ...sb.env };
+  if (build) env.NODE9_BUILD_ID_OVERRIDE = build;
+  const child = spawn(process.execPath, [CLI, 'daemon', 'start'], { env, stdio: 'ignore' });
   children.push(child);
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((r) =>
     child.once('exit', (code, signal) => r({ code, signal }))
   );
+  return { child, exited };
+}
+
+/** Starts a daemon and waits until its daemon.pid names a bound socket. */
+async function startDaemon(sb: Sandbox, build?: string): Promise<Running> {
+  const { child, exited } = spawnDaemon(sb, build);
   const pidFile = path.join(sb.home, '.node9', 'daemon.pid');
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
       const data = JSON.parse(fs.readFileSync(pidFile, 'utf-8')) as Record<string, unknown>;
@@ -100,13 +107,42 @@ async function startDaemon(sb: Sandbox): Promise<Running> {
     } catch {}
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error('daemon did not bind its activity socket within 8s');
+  throw new Error('daemon did not bind its activity socket within 15s');
 }
+
+function canConnect(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const c = net.createConnection(socketPath);
+    c.on('connect', () => {
+      c.end();
+      resolve(true);
+    });
+    c.on('error', () => resolve(false));
+  });
+}
+
+/** Rebinds logged by any daemon of this HOME: each one means a socket went
+ *  missing under a running daemon. */
+function rebinds(sb: Sandbox): number {
+  try {
+    return fs
+      .readFileSync(path.join(sb.home, '.node9', 'hook-debug.log'), 'utf-8')
+      .split('\n')
+      .filter((l) => l.includes('[activity-socket] rebinding')).length;
+  } catch {
+    return 0;
+  }
+}
+
+// One health-probe interval (2 s) and some margin: a socket removed under a
+// running daemon shows up as a rebind within this time.
+const PROBE_WAIT_MS = 2600;
 
 describe('activity socket clean-up on shutdown', () => {
   for (const [signal, code] of [
     ['SIGTERM', 0],
     ['SIGINT', 130],
+    ['SIGHUP', 129],
   ] as const) {
     posix(
       `${signal}: the socket and its per-HOME directory are gone, exit ${code}`,
@@ -121,7 +157,7 @@ describe('activity socket clean-up on shutdown', () => {
         expect(fs.existsSync(dir)).toBe(false);
         expect(fs.readdirSync(sb.xdg)).toEqual([]);
       },
-      20_000
+      40_000
     );
   }
 
@@ -132,11 +168,18 @@ describe('activity socket clean-up on shutdown', () => {
       const d = await startDaemon(sb);
       // startDaemon() checked that this HOME's daemon.pid names the child we
       // spawned, so the stop below signals only that child.
-      spawnSync(process.execPath, [CLI, 'daemon', 'stop'], { env: sb.env, timeout: 5000 });
+      // A CLI start can take seconds on a loaded runner: a short timeout
+      // killed the stop before it signalled anything.
+      const stop = spawnSync(process.execPath, [CLI, 'daemon', 'stop'], {
+        env: sb.env,
+        timeout: 20_000,
+      });
+      expect(stop.error).toBeUndefined();
+      expect(stop.status).toBe(0);
       expect(await d.exited).toEqual({ code: 0, signal: null });
       expect(fs.readdirSync(sb.xdg)).toEqual([]);
     },
-    20_000
+    40_000
   );
 
   posix(
@@ -151,7 +194,7 @@ describe('activity socket clean-up on shutdown', () => {
       expect(fs.existsSync(d.socketPath)).toBe(false);
       expect(fs.readFileSync(other, 'utf-8')).toBe('x');
     },
-    20_000
+    40_000
   );
 
   posix(
@@ -178,7 +221,7 @@ describe('activity socket clean-up on shutdown', () => {
       expect(fs.existsSync(d.socketPath)).toBe(false);
       expect(fs.existsSync(path.dirname(d.socketPath))).toBe(true);
     },
-    30_000
+    60_000
   );
 
   posix(
@@ -192,19 +235,53 @@ describe('activity socket clean-up on shutdown', () => {
 
       const d = await startDaemon(sb);
       expect(d.socketPath).toBe(first.socketPath);
-      const connected = await new Promise<boolean>((resolve) => {
-        const c = net.createConnection(d.socketPath);
-        c.on('connect', () => {
-          c.end();
-          resolve(true);
-        });
-        c.on('error', () => resolve(false));
-      });
-      expect(connected).toBe(true);
+      expect(await canConnect(d.socketPath)).toBe(true);
       d.child.kill('SIGTERM');
       expect((await d.exited).code).toBe(0);
       expect(fs.readdirSync(sb.xdg)).toEqual([]);
     },
-    30_000
+    60_000
+  );
+
+  // Two daemons with one HOME share one socket path. Neither the one that
+  // yields nor the one that is replaced may remove the other's socket (review
+  // of the first clean-up commit: both did, until a rebind 2 s later).
+  posix(
+    'a second start that yields leaves the running daemon its socket',
+    async () => {
+      const sb = await sandbox();
+      const a = await startDaemon(sb, '1.0.0+1000');
+      const inode = fs.lstatSync(a.socketPath).ino;
+      const b = spawnDaemon(sb, '1.0.0+1000');
+      expect(await b.exited).toEqual({ code: 0, signal: null });
+      await new Promise((r) => setTimeout(r, PROBE_WAIT_MS));
+      expect(rebinds(sb)).toBe(0);
+      expect(fs.lstatSync(a.socketPath).ino).toBe(inode);
+      expect(await canConnect(a.socketPath)).toBe(true);
+      a.child.kill('SIGTERM');
+      expect((await a.exited).code).toBe(0);
+      expect(fs.readdirSync(sb.xdg)).toEqual([]);
+    },
+    60_000
+  );
+
+  posix(
+    'a takeover by a newer build leaves the new daemon its socket',
+    async () => {
+      const sb = await sandbox();
+      const a = await startDaemon(sb, '1.0.0+1000');
+      const b = await startDaemon(sb, '1.0.0+2000');
+      expect(await a.exited).toEqual({ code: 0, signal: null });
+      expect(b.socketPath).toBe(a.socketPath);
+      const inode = fs.lstatSync(b.socketPath).ino;
+      await new Promise((r) => setTimeout(r, PROBE_WAIT_MS));
+      expect(rebinds(sb)).toBe(0);
+      expect(fs.lstatSync(b.socketPath).ino).toBe(inode);
+      expect(await canConnect(b.socketPath)).toBe(true);
+      b.child.kill('SIGTERM');
+      expect((await b.exited).code).toBe(0);
+      expect(fs.readdirSync(sb.xdg)).toEqual([]);
+    },
+    60_000
   );
 });
