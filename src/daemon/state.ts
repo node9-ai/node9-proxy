@@ -10,6 +10,7 @@ import {
   chooseActivitySocketPath,
   ensureActivitySocketDir,
   isOwnStaleSocket,
+  removeOwnSocketDir,
   windowsActivityPipeName,
 } from '../utils/activity-socket';
 import os from 'os';
@@ -179,6 +180,10 @@ export function getDaemonServer(): http.Server | null {
 export let daemonRejectionHandlerRegistered = false;
 export function markRejectionHandlerRegistered(): void {
   daemonRejectionHandlerRegistered = true;
+}
+export let daemonSignalHandlersRegistered = false;
+export function markSignalHandlersRegistered(): void {
+  daemonSignalHandlersRegistered = true;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -631,13 +636,29 @@ export function startActivitySocket(): void {
   }, ACTIVITY_HEALTH_PROBE_MS);
   activityHealthInterval.unref();
 
-  process.on('exit', () => {
-    if (activityHealthInterval) clearInterval(activityHealthInterval);
+  // Every way out runs this: a normal exit, and SIGTERM/SIGINT, which
+  // startDaemon() turns into process.exit().
+  process.on('exit', stopActivitySocket);
+}
+
+/** Closes the activity server, removes its socket if it is ours, then its
+ *  per-HOME directory if that is now empty. Runs once. */
+export function stopActivitySocket(): void {
+  if (activityHealthInterval) clearInterval(activityHealthInterval);
+  activityHealthInterval = null;
+  if (activitySocketServer) {
     try {
-      if (ACTIVITY_SOCKET_PATH && isOwnStaleSocket(ACTIVITY_SOCKET_PATH))
-        fs.unlinkSync(ACTIVITY_SOCKET_PATH);
+      activitySocketServer.close();
     } catch {}
-  });
+    activitySocketServer = null;
+  }
+  const socketPath = ACTIVITY_SOCKET_PATH;
+  ACTIVITY_SOCKET_PATH = null;
+  if (!socketPath || process.platform === 'win32') return;
+  try {
+    if (isOwnStaleSocket(socketPath)) fs.unlinkSync(socketPath);
+  } catch {}
+  removeOwnSocketDir(socketPath, process.env, os.homedir());
 }
 
 function attemptRebind(reason: string): void {

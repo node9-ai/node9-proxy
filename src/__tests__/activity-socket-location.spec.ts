@@ -10,6 +10,7 @@ import path from 'path';
 import {
   chooseActivitySocketPath,
   isTrustedActivitySocket,
+  removeOwnSocketDir,
   windowsActivityPipeName,
 } from '../utils/activity-socket';
 
@@ -148,5 +149,62 @@ describe('isTrustedActivitySocket', () => {
     if (process.platform !== 'win32') return;
     expect(isTrustedActivitySocket(windowsActivityPipeName())).toBe(true);
     expect(isTrustedActivitySocket('\\\\.\\pipe\\node9-activity')).toBe(false);
+  });
+});
+
+// A harness that starts many daemons with throwaway HOMEs left one directory
+// per HOME in /run/user/<uid> (a tmpfs) because nothing removed them. The
+// daemon now removes its own one on shutdown, and nothing else.
+describe('removeOwnSocketDir', () => {
+  const setup = () => {
+    const home = room();
+    const xdg = room();
+    fs.chmodSync(xdg, 0o700);
+    const env = { XDG_RUNTIME_DIR: xdg };
+    const socketPath = chooseActivitySocketPath(env, home, process.platform)!;
+    return { home, xdg, env, socketPath, dir: path.dirname(socketPath) };
+  };
+
+  posix('removes the empty per-HOME directory under XDG_RUNTIME_DIR', () => {
+    const { home, env, socketPath, dir } = setup();
+    expect(removeOwnSocketDir(socketPath, env, home, process.platform)).toBe(true);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  posix('leaves a directory that is not empty', () => {
+    const { home, env, socketPath, dir } = setup();
+    fs.writeFileSync(path.join(dir, 'other'), 'x');
+    expect(removeOwnSocketDir(socketPath, env, home, process.platform)).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'other'))).toBe(true);
+  });
+
+  posix('leaves a link in place of the directory, and what it points at', () => {
+    const { home, env, socketPath, dir } = setup();
+    fs.rmdirSync(dir);
+    const target = room();
+    fs.symlinkSync(target, dir);
+    expect(removeOwnSocketDir(socketPath, env, home, process.platform)).toBe(false);
+    expect(fs.lstatSync(dir).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(target)).toBe(true);
+  });
+
+  posix("never removes another HOME's directory", () => {
+    const { env, socketPath, dir } = setup();
+    expect(removeOwnSocketDir(socketPath, env, room(), process.platform)).toBe(false);
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  posix('never removes ~/.node9/run', () => {
+    const home = room();
+    const socketPath = chooseActivitySocketPath({}, home, process.platform)!;
+    expect(path.dirname(socketPath)).toBe(path.join(home, '.node9', 'run'));
+    expect(removeOwnSocketDir(socketPath, {}, home, process.platform)).toBe(false);
+    expect(fs.existsSync(path.dirname(socketPath))).toBe(true);
+  });
+
+  it('does nothing on Windows', () => {
+    expect(
+      removeOwnSocketDir(windowsActivityPipeName(), { XDG_RUNTIME_DIR: '/x' }, '/h', 'win32')
+    ).toBe(false);
   });
 });

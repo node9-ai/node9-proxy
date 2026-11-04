@@ -56,6 +56,8 @@ import {
   hasInteractiveClient,
   daemonRejectionHandlerRegistered,
   markRejectionHandlerRegistered,
+  daemonSignalHandlersRegistered,
+  markSignalHandlersRegistered,
   atomicWriteSync,
   redactArgs,
   appendAuditLog,
@@ -1742,6 +1744,16 @@ export function startDaemon(): void {
       const stack = reason instanceof Error ? reason.stack : String(reason);
       console.error(chalk.red('[node9 daemon] unhandled rejection — keeping daemon alive:'), stack);
     });
+  }
+
+  // SIGTERM (`node9 daemon stop`, systemd, launchd) and SIGINT (Ctrl-C on a
+  // foreground daemon) used to end the process without the 'exit' event, so
+  // the activity socket and its per-HOME directory stayed behind. They now
+  // leave through process.exit(), which runs the 'exit' clean-up once.
+  if (!daemonSignalHandlersRegistered) {
+    markSignalHandlersRegistered();
+    process.once('SIGTERM', () => process.exit(0));
+    process.once('SIGINT', () => process.exit(130));
   }
 
   const writeOwnPidFile = (): void =>

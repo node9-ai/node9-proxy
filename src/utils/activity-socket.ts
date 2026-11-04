@@ -49,6 +49,16 @@ function privateDir(dir: string): boolean {
   return isPrivateDir(dir);
 }
 
+/** `$XDG_RUNTIME_DIR/node9-<home hash>`, or null without an absolute
+ *  XDG_RUNTIME_DIR. One directory per HOME: a daemon started with another
+ *  HOME (a test, an isolated scan) must not share, or remove, the real
+ *  daemon's socket. */
+function perHomeRuntimeDir(env: NodeJS.ProcessEnv, home: string): string | null {
+  const xdg = env.XDG_RUNTIME_DIR;
+  if (!xdg || !path.isAbsolute(xdg)) return null;
+  return path.join(xdg, `node9-${createHash('sha256').update(home).digest('hex').slice(0, 12)}`);
+}
+
 /**
  * The socket path for this user, POSIX only: `$XDG_RUNTIME_DIR/node9-<home hash>` when
  * XDG_RUNTIME_DIR is a private directory of this user (systemd's
@@ -62,13 +72,8 @@ export function chooseActivitySocketPath(
   platform: NodeJS.Platform = process.platform
 ): string | null {
   const candidates: string[] = [];
-  const xdg = env.XDG_RUNTIME_DIR;
-  // One directory per HOME: a daemon started with another HOME (a test, an
-  // isolated scan) must not share, or remove, the real daemon's socket.
-  if (xdg && path.isAbsolute(xdg) && isPrivateDir(xdg))
-    candidates.push(
-      path.join(xdg, `node9-${createHash('sha256').update(home).digest('hex').slice(0, 12)}`)
-    );
+  const xdgDir = perHomeRuntimeDir(env, home);
+  if (xdgDir && isPrivateDir(path.dirname(xdgDir))) candidates.push(xdgDir);
   candidates.push(path.join(home, '.node9', 'run'));
   for (const dir of candidates) {
     const socketPath = path.join(dir, SOCKET_NAME);
@@ -118,6 +123,37 @@ export function isOwnStaleSocket(socketPath: string): boolean {
     const st = fs.lstatSync(socketPath);
     const uid = currentUid();
     return st.isSocket() && (uid === undefined || st.uid === uid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Removes the socket's directory when the daemon stops, so a run that starts
+ * many daemons with throwaway HOMEs does not leave one directory per HOME in
+ * /run/user/<uid> (a tmpfs). Only the per-HOME directory under
+ * XDG_RUNTIME_DIR for this HOME, never ~/.node9/run or another HOME's; only
+ * when it is a real directory of this user (not a link) and empty. True when
+ * it was removed.
+ */
+export function removeOwnSocketDir(
+  socketPath: string,
+  env: NodeJS.ProcessEnv,
+  home: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (platform === 'win32') return false;
+  const dir = path.dirname(socketPath);
+  if (dir !== perHomeRuntimeDir(env, home)) return false;
+  try {
+    const st = fs.lstatSync(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return false;
+    const uid = currentUid();
+    if (uid !== undefined && st.uid !== uid) return false;
+    if (fs.readdirSync(dir).length > 0) return false;
+    // rmdir refuses a directory that gained an entry since the check.
+    fs.rmdirSync(dir);
+    return true;
   } catch {
     return false;
   }
