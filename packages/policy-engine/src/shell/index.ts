@@ -813,13 +813,18 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
     // The byte ranges of function bodies: in the top-level pass (callDepth 0)
     // a word inside one is not judged here, since its `$1` is unbound there;
     // walkWithCalls judges the body at every call with the arguments bound.
+    // Only a function called by its literal name is judged at its call;
+    // one run through `trap`, a variable or a dynamic dispatch is judged
+    // where it stands (code review).
+    const calledByName = literallyCalledFunctions(f);
     const bodies: Array<[number, number]> = [];
     const inBody = (pos: number): boolean => bodies.some(([a, b]) => pos >= a && pos < b);
     walkWithCalls(f, (node: unknown) => {
       if (!node || result === 'block') return false; // short-circuit once blocked
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
-      if (n.kind === 'FuncDecl' && n.Body && callDepth === 0) bodies.push([n.Body.pos, n.Body.end]);
+      if (n.kind === 'FuncDecl' && n.Body && callDepth === 0 && calledByName.has(n.Name?.Value))
+        bodies.push([n.Body.pos, n.Body.end]);
       if (n.kind === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
         const call = n.Y.Cmd;
         if (call && call.kind === 'CallExpr') {
@@ -968,6 +973,24 @@ function assignedNames(f: any): Set<string> {
   return names;
 }
 
+/** The names of the script's functions that some command calls by its
+ *  literal name (`main "$@"`), so walkWithCalls judges their bodies there. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function literallyCalledFunctions(f: any): Set<string> {
+  const declared = new Set<string>();
+  const called = new Set<string>();
+  walk(f, (node: any) => {
+    if (!node) return false;
+    if (node.kind === 'FuncDecl' && node.Name?.Value) declared.add(node.Name.Value);
+    if (node.kind === 'CallExpr') {
+      const head = resolveWordLiteral(node.Args?.[0]);
+      if (head) called.add(head);
+    }
+    return true;
+  });
+  return new Set([...declared].filter((name) => called.has(name)));
+}
+
 /** A program name a script may plainly give a variable: one word, no
  *  separator a later IFS could split, no quote or expansion syntax. */
 const PLAIN_PROGRAM_NAME = /^[A-Za-z_][\w.+-]*$/;
@@ -1038,6 +1061,19 @@ function plainlyNamedPrograms(f: any): Set<string> {
     return true;
   });
   if (ifsTouched) return new Set();
+  // Code review: only a function the script declares, or a boolean builtin,
+  // is safe to call through a variable. A program name (`cmd=rm; $cmd -rf`)
+  // is not resolved by the other rules, so a variable naming one stays opaque.
+  const functions = new Set<string>();
+  walk(f, (node: any) => {
+    if (node && node.kind === 'FuncDecl' && node.Name?.Value) functions.add(node.Name.Value);
+    return true;
+  });
+  const callable = (v: string): boolean =>
+    functions.has(v) || v === 'FUNCNAME' || v === 'true' || v === 'false' || v === ':';
+  for (const [name, vals] of values) {
+    if (vals && ![...vals].every(callable)) values.set(name, null);
+  }
   const known = new Set<string>();
   // Exactly one distinct value: `cmd=ls; cmd=rm; $cmd` depends on which
   // assignment ran last, so the script did not plainly name the program.

@@ -359,10 +359,8 @@ class GitWalk {
     }
     if (headWord === 'perl') {
       const code = words.slice(head + 1).find((w) => w !== null && /\brename\b/.test(w));
-      if (code && /rename\s*\(?\s*q[qw]?\s*[(\[{<'"]([^)\]}>'"]+)/.test(code)) {
-        const from = RegExp.$1;
-        if (isLiveHookFile(from)) this.found(hooksBypassed(shownOf(words)));
-      }
+      const m = code ? /rename\s*\(?\s*q[qw]?\s*[(\[{<'"]([^)\]}>'"]+)/.exec(code) : null;
+      if (m && isLiveHookFile(m[1])) this.found(hooksBypassed(shownOf(words)));
       return;
     }
     // A string-wrapped command: `sh -c "git …"`, `eval "git …"`, also behind

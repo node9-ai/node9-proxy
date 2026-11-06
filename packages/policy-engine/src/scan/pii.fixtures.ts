@@ -390,6 +390,16 @@ export const COMPOSITE: { id: string; build: () => string; expectCard: boolean; 
       expectCard: false,
       proves: 'one dot with digits on both sides and no other separator is a decimal number',
     },
+    // The trade-off of interior-dot-float, pinned (code review): a card
+    // written with exactly one dot has the same shape as that float and is
+    // not detected. No card network prints one; the three-dot spelling is
+    // still caught (sep-dot).
+    {
+      id: 'one-dot-card-is-a-number',
+      build: () => [V1[0], '.', V1[1], V1[2], V1[3]].join(''),
+      expectCard: false,
+      proves: 'accepted gap: one dot between digit runs reads as a decimal number',
+    },
     {
       id: 'interior-dot-then-grouped',
       build: () => [V1[0], '.', V1[1], ' ', V1[2], ' ', V1[3]].join(''),
@@ -475,7 +485,7 @@ export const ROW_COUNTS = {
   INVALID_16: 5,
   INVALID_15: 1,
   NON_CARD_16: 5,
-  COMPOSITE: 44,
+  COMPOSITE: 45,
   VALID_OTHER_NETWORKS: 6,
   NOT_A_NETWORK: 3,
 } as const;
