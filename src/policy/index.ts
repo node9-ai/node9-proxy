@@ -664,7 +664,9 @@ async function deriveExplainTrace(toolName: string, args: unknown): Promise<Expl
     // level asks when the code does something dangerous or cannot be read.
     const everyInline = reviewsEveryInline(config.settings.mode);
     const strictInline = everyInline && detectInlineExec(shellCommand);
-    const inline = everyInline ? null : inlineExecReview(shellCommand);
+    // The jail paths ride along as the gate passes them (node9Firewall#391),
+    // so explain and the hook read a jailed string in inline code the same way.
+    const inline = everyInline ? null : inlineExecReview(shellCommand, config.policy.jailPaths);
     // The check's value in force, as the engine reads it: `off` skips the
     // check, `log` records the finding and lets the call through (Soft).
     const inlineValue = checkValue(

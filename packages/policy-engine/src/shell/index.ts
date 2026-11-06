@@ -2720,6 +2720,41 @@ function isProtectedCodePath(p: string): boolean {
   );
 }
 
+/**
+ * A string literal that names a user- or org-jailed directory, or a file
+ * under it (node9Firewall#391). The same reading as the jail's shell rule
+ * after node9Firewall#392: a jail given absolute outside any home directory
+ * (`/usr`) is met only by an absolute path (`"/usr/share/x"`, never `"usr"`
+ * or `"src/usr/x"`); a home jail (`~/.gmail-mcp`, `/home/u/.gmail-mcp`) is
+ * met by either spelling of the same directory.
+ */
+function isJailedCodePath(literal: string, jailPaths: readonly string[]): boolean {
+  const value = literal.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!value) return false;
+  for (const raw of jailPaths) {
+    const jail = raw.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!jail) continue;
+    const home = homeTail(jail);
+    if (home === null) {
+      // Absolute outside home: exact directory or a path under it.
+      if (value === jail || value.startsWith(jail + '/')) return true;
+      continue;
+    }
+    if (!home) continue; // a bare `~` or `/home/u` jails nothing (over-broad)
+    const tail = homeTail(value);
+    if (tail !== null && (tail === home || tail.startsWith(home + '/'))) return true;
+  }
+  return false;
+}
+
+/** The part of a home path after `~/`, `$HOME/`, `/home/<u>/`, `/Users/<u>/`
+ *  or `/root/`; null when the path is not under a home directory. */
+function homeTail(p: string): string | null {
+  const m = /^(?:~|\$\{?HOME\}?|\/home\/[^/]+|\/Users\/[^/]+|\/root)(?:\/(.*))?$/.exec(p);
+  if (!m) return null;
+  return m[1] ?? '';
+}
+
 /** What the approval prompt says about an inline-code review. */
 export function inlineExecDescription(r: InlineExecReview | null | undefined): string {
   const lead = r
@@ -2740,7 +2775,14 @@ export function inlineExecReason(r: InlineExecReview): string {
  * first dangerous finding, or the first unreadable one when none is dangerous.
  * A command with no inline code returns null.
  */
-export function inlineExecReview(command: string): InlineExecReview | null {
+export function inlineExecReview(
+  command: string,
+  jailPaths: readonly string[] = []
+): InlineExecReview | null {
+  const isProtected =
+    jailPaths.length === 0
+      ? isProtectedCodePath
+      : (p: string) => isProtectedCodePath(p) || isJailedCodePath(p, jailPaths);
   const calls = inlineExecCalls(command);
   if (calls === PARSE_FAIL) {
     return INLINE_EXEC_FALLBACK.test(command)
@@ -2770,7 +2812,7 @@ export function inlineExecReview(command: string): InlineExecReview | null {
           what: `is ${call.interp} code, which node9 does not read`,
         };
       } else {
-        const judged = judgeInlineCode(language, code, isProtectedCodePath);
+        const judged = judgeInlineCode(language, code, isProtected);
         if (judged) finding = { ...judged, interp: call.interp };
       }
       if (finding?.outcome === 'dangerous') return finding;

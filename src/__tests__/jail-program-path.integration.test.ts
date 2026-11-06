@@ -110,6 +110,34 @@ describe('a jail of the system directories (fw#385)', () => {
     expect(check('bash /etc/profile.d/x.sh')).toBe('deny');
   });
 
+  // node9Firewall#392: a project path or prose that only CONTAINS a jailed
+  // segment is not the jailed directory.
+  itUnix('allows a relative path and prose that merely contain a jailed segment', () => {
+    expect(check('ls ./bin')).toBe('allow');
+    expect(check('cat src/bin/run.sh')).toBe('allow');
+    expect(check('cat project/etc/config.yml')).toBe('allow');
+    expect(check('echo the bin folder is empty')).toBe('allow');
+    // A script with no path in it at all (benign-scripts, fw#385).
+    expect(check('#!/usr/bin/env bash\nmain() { local f=$1; echo "$f"; }\nmain x\n')).toBe('allow');
+  });
+
+  // node9Firewall#391: the jailed directory as a string in a Python script,
+  // joined to a file later. Before the fix the inline-code judge knew only the
+  // credential jail; the user jail reached the engine as regex rules whose
+  // boundary class a quote is not part of.
+  itUnix('reviews inline code that names a jailed directory in a string (#391)', () => {
+    const script =
+      'python3 - <<\'PYEOF\'\nimport os\ncurrent = "/usr"\npath = os.path.join(current, "./share/x")\nprint(open(path).read())\nPYEOF';
+    const v = decide(script);
+    expect(v.decision).toBe('ask');
+    expect(v.reason).toMatch(/reads a protected file/);
+  });
+
+  itUnix('still blocks a quoted or assigned absolute path (#392)', () => {
+    expect(check('cat "/usr/share/dict/words"')).toBe('deny');
+    expect(check('f=/etc/os-release; cat "$f"')).toBe('deny');
+  });
+
   // node9Firewall#414: a Python script on stdin is not shell text (fw#407),
   // but a path in it is a file the program opens, so the jail still meets it.
   // explain must say the same as the hook. The issue's own script: before the
