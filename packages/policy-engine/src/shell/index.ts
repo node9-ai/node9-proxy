@@ -2388,6 +2388,11 @@ let _listOps: Set<number> | null = null;
 export function isListOp(op: number): boolean {
   return listOps().has(op);
 }
+/** A BinaryCmd operator that is a pipe (`|`, `|&`). Exported for the git
+ *  walk, which reads a producer feeding `git add` (node9Firewall#385). */
+export function isPipeOp(op: number): boolean {
+  return pipeOps().has(op);
+}
 function listOps(): Set<number> {
   if (_listOps) return _listOps;
   _listOps = new Set<number>(
@@ -3575,6 +3580,16 @@ function recordTopLevelStmt(stmt: any): boolean {
   return (stmt.Cmd.Args || []).length === 0 && (stmt.Cmd.Assigns || []).length > 0;
 }
 
+/** A recorded array literal: this mark, then the elements joined by ARRAY_SEP. */
+const ARRAY_MARK = '\u0001array\u0001';
+const ARRAY_SEP = '\u0001';
+/** The elements of a recorded array value, or null for a scalar / unknown. */
+export function arrayElements(value: string | null | undefined): string[] | null {
+  if (typeof value !== 'string' || !value.startsWith(ARRAY_MARK)) return null;
+  const body = value.slice(ARRAY_MARK.length);
+  return body === '' ? [] : body.split(ARRAY_SEP);
+}
+
 /** Record the assignments a CallExpr or DeclClause carries. PREFIX assignments
  *  (`HOME=/tmp/x cat $HOME/...`, Args present) are ignored on purpose: bash
  *  expands that command's own words with the OLD value, so the read is real and
@@ -3595,7 +3610,23 @@ function recordAssignments(n: any, at: number): void {
   } else return;
   for (const a of assigns) {
     const name: string | undefined = a?.Name?.Value;
-    if (!name || !a.Value || a.Append) continue; // `export K` and `K+=x` are not followed
+    if (!name) continue;
+    // node9Firewall#385 (c): an array of literals is recorded as its elements
+    // joined by a separator no shell word carries, so `"${a[@]}"` expands to
+    // them one by one (see arrayElements) and `${a[i]}` to one of them.
+    if (a.Array) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const elems = ((a.Array.Elems || []) as any[]).map((e) =>
+        e?.Index ? null : resolveWordLiteral(e?.Value)
+      );
+      const literal = elems.every((v): v is string => v !== null);
+      assignmentTable.set(name, {
+        value: literal && !a.Append ? ARRAY_MARK + elems.join(ARRAY_SEP) : null,
+        at,
+      });
+      continue;
+    }
+    if (!a.Value || a.Append) continue; // `export K` and `K+=x` are not followed (JAIL-14a)
     // Resolved with the table so far, so `S=$HOME/.ssh; D=$S/id_rsa` is transitive.
     assignmentTable.set(name, { value: resolveWordLiteral(a.Value), at });
   }
@@ -3628,7 +3659,40 @@ function resolveTrivialSubst(part: any): string | undefined {
   const st = stmts[0];
   if ((st.Redirs || []).length > 0 || st.Negated || st.Background) return undefined;
   const cmd = st.Cmd;
-  if (!cmd || cmd.kind !== 'CallExpr') return undefined;
+  if (!cmd) return undefined;
+  // node9Firewall#385 (c): `$(printf '%s' X | base64 -d)` and `$(printf '%s'
+  // X | rev)` with a literal X are X decoded or reversed: the value is known
+  // at parse time, so it is resolved and judged as the word it is.
+  if (cmd.kind === 'BinaryCmd' && pipeOps().has(cmd.Op)) {
+    const left = cmd.X?.Cmd;
+    const right = cmd.Y?.Cmd;
+    if (!left || !right || left.kind !== 'CallExpr' || right.kind !== 'CallExpr') return undefined;
+    if ((cmd.X.Redirs || []).length > 0 || (cmd.Y.Redirs || []).length > 0) return undefined;
+    const input = trivialCallOutput(left);
+    if (input === undefined) return undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const filter = ((right.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+    if (filter.some((w) => w === null)) return undefined;
+    const f = baseWord(filter[0] as string);
+    const flags = filter.slice(1) as string[];
+    if (f === 'base64' && flags.length === 1 && /^(-d|-D|--decode)$/.test(flags[0])) {
+      try {
+        const out = Buffer.from(input, 'base64').toString('utf8');
+        return /^[\x20-\x7e]*$/.test(out) ? out : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    if (f === 'rev' && flags.length === 0) return [...input].reverse().join('');
+    return undefined;
+  }
+  if (cmd.kind !== 'CallExpr') return undefined;
+  return trivialCallOutput(cmd);
+}
+
+/** What a lone `echo` or `printf` call writes, when every word is literal. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function trivialCallOutput(cmd: any): string | undefined {
   if ((cmd.Assigns || []).length > 0) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
@@ -3641,16 +3705,27 @@ function resolveTrivialSubst(part: any): string | undefined {
     return rest.slice(i).join(' ');
   }
   if (head === 'printf') {
+    // A format of nothing but octal and hex escapes (`'\\143\\157'`,
+    // `'\\x2d\\x2d'`) is a literal written as bytes.
+    if (rest.length === 1 && /^(?:\\(?:[0-7]{1,3}|x[0-9A-Fa-f]{1,2}))+$/.test(rest[0])) {
+      return rest[0].replace(/\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3}))/g, (_, hex, oct) =>
+        String.fromCharCode(hex ? parseInt(hex, 16) : parseInt(oct, 8))
+      );
+    }
     if (rest.length !== 2) return undefined;
-    if (!/^%s(\\n)?$/.test(rest[0])) return undefined;
-    return rest[1];
+    // `%s`, or a literal prefix and suffix around one `%s` (`':!%s'`,
+    // `'refs/heads/%s'`): the result is the literal with the argument put
+    // in. A second conversion or a width is a computation.
+    const m = /^([^%]*)%s([^%]*?)(\\n)?$/.exec(rest[0]);
+    if (!m) return undefined;
+    return m[1] + rest[1] + m[2];
   }
   return undefined;
 }
 
 /** The recorded value for a plain expansion of `name`, or undefined when the
  *  table has nothing to say (which lets the HOME default speak). */
-function recordedExpansion(name: string | undefined): string | null | undefined {
+export function recordedExpansion(name: string | undefined): string | null | undefined {
   if (!assignmentTable || !name) return undefined;
   const rec = assignmentTable.get(name);
   if (rec === undefined || rec.at >= currentStmtOffset) return undefined;
@@ -3661,6 +3736,15 @@ function isPlainParam(p: any): boolean {
   if (p.kind !== 'ParamExp') return false;
   // Any modifier means the value is computed, not the variable itself.
   return !(p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp);
+}
+/** `${a[2]}`, `${a[@]}`, `${a[*]}`: an indexed expansion with no other modifier. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function indexedParam(p: any): { name: string; index: string } | null {
+  if (p.kind !== 'ParamExp' || !p.Index) return null;
+  if (p.Excl || p.Length || p.Width || p.Slice || p.Repl || p.Exp) return null;
+  const index = resolveWordLiteral(p.Index);
+  const name: string | undefined = p.Param?.Value;
+  return name && index !== null ? { name, index } : null;
 }
 /**
  * What a plain ParamExp contributes: the recorded assignment if the table has
@@ -3678,9 +3762,19 @@ function expandPlainParam(p: any): string | null | undefined {
   // `HOME=/tmp/fake; cat $HOME/.ssh/id_rsa` judged `~/.ssh/id_rsa`). Outside a
   // walk a ParamExp stays dynamic, exactly as before stage 6.
   if (!assignmentTable) return undefined;
+  const indexed = indexedParam(p);
+  if (indexed) {
+    const elems = arrayElements(recordedExpansion(indexed.name));
+    if (elems === null) return undefined;
+    if (indexed.index === '@' || indexed.index === '*') return elems.join(' ');
+    return /^\d+$/.test(indexed.index) ? (elems[Number(indexed.index)] ?? null) : null;
+  }
   if (!isPlainParam(p)) return undefined;
   const recorded = recordedExpansion(p.Param?.Value);
-  if (recorded !== undefined) return recorded;
+  if (recorded !== undefined) {
+    const elems = arrayElements(recorded);
+    return elems === null ? recorded : (elems[0] ?? '');
+  }
   return HOME_VARIABLES.has(p.Param?.Value) ? '~' : undefined;
 }
 

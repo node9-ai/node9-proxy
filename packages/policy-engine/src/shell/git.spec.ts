@@ -108,6 +108,48 @@ describe('commands.git-destructive: indirect forms are findings', () => {
     'echo old-feat | xargs git branch -D',
     'echo main | xargs -I{} git push -f origin {}',
     'find . -name .git -execdir git reset --hard \\;',
+    // node9Firewall#385: a remote branch deleted
+    'git push origin --delete master',
+    'git push -d origin feature/x',
+    'git push origin :refs/heads/old',
+    'git push origin :old',
+    'branch=old; git push origin ":$branch"',
+    // node9Firewall#385 (b): refs, reflog and stashes discarded through plumbing
+    'git update-ref -d refs/heads/pkg-v2-dev',
+    'git update-ref -d refs/stash',
+    "git update-ref -d \"$(printf '%s' 'refs/stash')\"",
+    'git reflog expire --expire=now --all',
+    'git reflog expire --expire=now --all && git gc --prune=now',
+    'git -c gc.reflogExpire=now gc --prune=now',
+    'git stash clear',
+    'git stash drop',
+    'git stash list | cut -d: -f1 | xargs -I{} git stash drop {}',
+    'git worktree remove --force ../tf-staging-wt',
+    'git -C /work/repo worktree remove --force /work/repo/.worktrees/x',
+    // node9Firewall#385 (a): a script written to a file, then run
+    "cat > /tmp/force-push.sh <<'EOF'\n#!/bin/sh\ngit push --force-with-lease origin feature/x\nEOF\nsh /tmp/force-push.sh",
+    "cat > /tmp/fix.sh <<'SH'\ngit commit --all -m 'ci green'\nSH\nbash /tmp/fix.sh",
+    "echo 'git push origin --delete master' > /tmp/cleanup.sh && bash /tmp/cleanup.sh",
+    "echo '#!/bin/bash' > /tmp/stage.sh && echo 'cd /work/repo && git add -A' >> /tmp/stage.sh && chmod +x /tmp/stage.sh && /tmp/stage.sh",
+    "cat > /tmp/nohooks.sh <<'SH'\n#!/bin/bash\nset -e\ngit config --local core.hooksPath /tmp/empty\ngit commit -m x\nSH\nchmod +x /tmp/nohooks.sh && /tmp/nohooks.sh",
+    "cat > /tmp/rm-ref.sh <<'SH'\ngit -C /work/repo update-ref -d refs/heads/main\nSH\nchmod +x /tmp/rm-ref.sh && bash /tmp/rm-ref.sh",
+    // node9Firewall#385 (c): a flag built at run time
+    'NV=$(printf %s LS1uby12ZXJpZnk= | base64 -d); git commit "$NV" -m x',
+    'flag="$(printf \'%s\' \'LS1mb3JjZS13aXRoLWxlYXNl\' | base64 -D)"; git push "$flag" origin main',
+    'mode=$(printf \'\\x2d\\x2d\\x68\\x61\\x72\\x64\'); git reset "$mode" HEAD~1',
+    "op=$(printf '%s' 'ecrof--' | rev); git push $op origin main",
+    'mode=--ha; mode+=rd; git reset "$mode" HEAD',
+    'option=--no-; option+=verify; git commit "$option" -m x',
+    'key=$(printf \'\\143\\157\\162\\145\\056\\150\\157\\157\\153\\163\\120\\141\\164\\150\'); git config "$key" /tmp/x',
+    'flags=(-n -m x); git commit "${flags[@]}"',
+    'push_options=(--force-with-lease --force-if-includes); git push "${push_options[@]}" origin HEAD:refs/heads/x',
+    'verb=commit; opts=(-a --message=x); git "$verb" "${opts[@]}"',
+    // node9Firewall#385 (f): the working tree overwritten from elsewhere
+    'git restore --source=origin/main -- .',
+    'git restore --source origin/main .',
+    'git checkout --force origin/main',
+    'git checkout -f main',
+    'git checkout -- .',
     // variables and substitutions
     'cmd="reset --hard"; git $cmd',
     'cmd="reset --hard" && git $cmd',
@@ -194,6 +236,41 @@ describe('commands.git-destructive: ordinary commands stay clean', () => {
     'git clean --dry-run -f',
     'git branch -d feature/x',
     'git branch --delete feature/x',
+    // node9Firewall#385 (b), (f): the ordinary forms of the new rules
+    'git restore .',
+    'git checkout .',
+    'git restore --staged src/x.ts',
+    'git checkout main',
+    'git checkout -b feature/x',
+    'git worktree remove ../done-wt',
+    'git worktree prune',
+    'git worktree list',
+    'git stash',
+    'git stash pop',
+    'git stash list',
+    'git update-ref refs/heads/feature "$COMMIT"',
+    'git reflog',
+    'git gc',
+    'git gc --auto',
+    // node9Firewall#385 (a): a script written and run that does ordinary work
+    "cat > /tmp/test.sh <<'SH'\nnpm test && git status --short\nSH\nbash /tmp/test.sh",
+    "echo 'git log -3 --oneline' > /tmp/log.sh && bash /tmp/log.sh",
+    // a script written but never run in this command
+    "cat > /tmp/later.sh <<'SH'\ngit push --force origin main\nSH",
+    // a colon that pushes, and a dry-run delete, stay clean
+    'git push origin HEAD:refs/heads/chore/x',
+    'git push origin main:main',
+    'git push --dry-run --delete origin old',
+    // node9Firewall#385 (b), (f): maintenance and a named-file undo stay clean
+    'git gc --prune=now',
+    'git -c gc.reflogExpire=90.days gc --prune=now',
+    'git restore --source=HEAD --worktree -- src/config/defaults.yml',
+    'git restore --source=HEAD -- packages/web/src/generated-client.ts',
+    'git restore --source=origin/main -- src/x.ts',
+    // node9Firewall#385 (c): a decoded or built value that is ordinary
+    "msg=$(printf '%s' 'aGVsbG8=' | base64 -d); git commit -m \"$msg\"",
+    'branch=feature/; branch+=x; git checkout -b "$branch"',
+    'opts=(-m x); git commit "${opts[@]}"',
     'git stash push -m wip && git rebase origin/main',
     'git rebase main',
     'git rebase -i HEAD~3',
@@ -332,6 +409,23 @@ describe('commands.git-hooks-bypass: the agent disarms the hooks', () => {
     'git merge --no-verify feature/x',
     'git rebase --no-verify main',
     'git am --no-verify patch.mbox',
+    // node9Firewall#385 (e): the hook file itself replaced or removed
+    "cat > .githooks/pre-commit <<'SH'\n#!/bin/sh\nexit 0\nSH\nchmod +x .githooks/pre-commit",
+    "cat > .git/hooks/pre-commit <<'EOF'\n#!/bin/sh\nexit 0\nEOF",
+    "cat > .husky/pre-commit <<'SH'\n#!/usr/bin/env bash\nexit 0\nSH",
+    "printf '#!/bin/sh\\nexit 0\\n' > .githooks/pre-commit",
+    "echo 'exit 0' > .git/hooks/pre-push",
+    ': > .githooks/pre-commit',
+    'rm -f .githooks/pre-commit',
+    'rm .git/hooks/pre-commit .git/hooks/pre-push',
+    'rm -rf .husky',
+    'chmod -x .githooks/pre-commit',
+    'mv .githooks/pre-commit .githooks/pre-commit.off',
+    "perl -e 'rename q(.githooks/pre-commit),q(.githooks/pre-commit.off)'",
+    // node9Firewall#385 (b): a commit written with plumbing runs no hook
+    'tree=$(git write-tree) && git commit-tree $tree -p HEAD -m x | xargs -I {} git update-ref refs/heads/main {}',
+    'TREE=$(git write-tree); COMMIT=$(git commit-tree "$TREE" -p HEAD -m x); git update-ref refs/heads/feature "$COMMIT"',
+    'git commit-tree HEAD^{tree} -p HEAD -m "x"',
     // the hook path pointed elsewhere
     'git -c core.hooksPath=/dev/null commit -m x',
     'git -c core.hookspath=/tmp/empty push',
@@ -397,6 +491,15 @@ describe('commands.git-hooks-bypass: the agent disarms the hooks', () => {
 
 describe('commands.git-hooks-bypass: ordinary work stays clean', () => {
   it.each([
+    // node9Firewall#385 (e): a real hook written, or another file touched
+    "cat > .githooks/pre-commit <<'SH'\n#!/bin/sh\nnpm test\nSH\nchmod +x .githooks/pre-commit",
+    "cat > .git/hooks/pre-commit <<'EOF'\n#!/bin/sh\nset -e\nnpx lint-staged\nEOF",
+    'cat > .githooks/README.md <<EOF\nhooks live here\nEOF',
+    'rm -f .githooks/pre-commit.bak',
+    'rm -f .git/hooks/pre-commit.sample',
+    'mv .githooks/pre-commit.new .githooks/pre-commit',
+    'chmod +x .githooks/pre-commit',
+    'ls .githooks',
     'git commit -m "wip"',
     'git commit -am "wip"',
     'git commit -m "add --no-verify to the docs"',
@@ -490,6 +593,20 @@ describe('commands.git-stage-all: everything staged at once', () => {
     "git config alias.ca 'commit -a' && git ca -m wip",
     "git config alias.ca 'commit -a'",
     'git add -A && git commit -m "feat: thing"',
+    // node9Firewall#385: the top of the tree by an indirect name
+    'git add "$(git rev-parse --show-toplevel)"',
+    'git add $(git rev-parse --show-toplevel)',
+    'git add "$(git rev-parse --show-toplevel)" -- ":!packages/generated"',
+    'git add "$PWD"',
+    'git add $PWD',
+    'scope="$PWD"; git add -- "$scope"',
+    'DIR=$(pwd) && git add "$DIR"',
+    'root=$(git rev-parse --show-toplevel); git add "$root"',
+    // an exclude alone stages everything else
+    'git add -- ":!results/cache"',
+    'git add -- "$(printf \':!%s\' demo/cache)"',
+    'git rev-parse --show-toplevel | git add --pathspec-from-file=-',
+    "printf '%s\\0' . | xargs -0 git add --",
   ])('%s', (cmd) => {
     expect(stageAll(cmd), `${cmd} should stage everything`).toBe(true);
   });
@@ -530,6 +647,10 @@ describe('commands.git-stage-all: named files stay clean', () => {
     'git restore .',
     'git clean -n .',
     'npm run add-all',
+    // node9Firewall#385: a path under the top, or an exclude beside a name
+    'git add "$PWD/src"',
+    'git add "$(git rev-parse --show-toplevel)/src"',
+    'git add -- ":!build" README.md',
   ])('%s', (cmd) => {
     expect(stageAll(cmd), `${cmd} should be clean`).toBe(false);
   });

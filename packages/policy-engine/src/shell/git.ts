@@ -29,6 +29,9 @@ import {
   parseShared,
   resolveWordLiteral,
   resolveWordPrefix,
+  isPipeOp,
+  arrayElements,
+  recordedExpansion,
   unwrapCommandHead,
   walkCommandScope,
 } from './index';
@@ -192,7 +195,22 @@ const MAX_LOOP_ITEMS = 64;
 class GitWalk {
   /** Aliases defined earlier in this command: name -> value (null = dynamic). */
   private aliases = new Map<string, string | null>();
+  /** node9Firewall#385: variables assigned a tree-top word (`scope="$PWD"`,
+   *  `root=$(git rev-parse --show-toplevel)`, `DIR=$(pwd)`), so the
+   *  variable reads as the top where it is used. */
+  private treeTopVars = new Set<string>();
+  /** node9Firewall#385 (c): a string a script builds with `+=` from
+   *  literals (`mode=--ha; mode+=rd`). The jail's table does not follow an
+   *  append (JAIL-14a); the git rules read the built word, since a flag
+   *  spelled in two halves is still that flag. name -> value, null once a
+   *  half is unknown. */
+  private appended = new Map<string, string | null>();
   private payloads = new Set<string>();
+  /** node9Firewall#385 (a): the text this command writes to each path
+   *  (`cat > /tmp/x.sh <<'SH' ... SH`, `echo '...' > f`, `>>` appends), so
+   *  a later statement that runs the path (`bash f`, `sh f`, `./f`) is
+   *  judged on what it runs. null once a write to the path is unknown. */
+  private written = new Map<string, string | null>();
   /** `for NAME in a b c`: the literal items, or null when one is dynamic. */
   private loopVars = new Map<string, string[] | null>();
 
@@ -222,6 +240,29 @@ class GitWalk {
     // `bash <<'EOF' … EOF`. The redirect lives on the Stmt.
     if (type === 'Stmt') {
       this.visitHeredocShell(n, depth);
+      this.visitPipeline(n, depth);
+      this.visitHookWrite(n);
+      this.recordScriptWrite(n);
+      this.visitWrittenScript(n, depth);
+      return true;
+    }
+    if (type === 'Assign' && n.Name?.Value && n.Value) {
+      const name: string = n.Name.Value;
+      if (n.Append) {
+        const prev = this.appended.has(name)
+          ? this.appended.get(name)
+          : resolveWordLiteral(n.Value) === null
+            ? null
+            : undefined;
+        const base = prev === undefined ? recordedExpansion(name) : prev;
+        const piece = resolveWordLiteral(n.Value);
+        this.appended.set(name, typeof base === 'string' && piece !== null ? base + piece : null);
+        this.treeTopVars.delete(name);
+        return true;
+      }
+      this.appended.delete(name);
+      if (treeTopWord(n.Value, this.treeTopVars)) this.treeTopVars.add(name);
+      else this.treeTopVars.delete(name);
       return true;
     }
     // `for c in status "reset --hard"; do git $c; done`: the variable takes
@@ -259,13 +300,17 @@ class GitWalk {
       const param = plainParamName(rawArgs[loopArg]) as { name: string; quoted: boolean };
       for (const item of this.loopVars.get(param.name) as string[]) {
         const words = rawArgs.flatMap((a, i) =>
-          i === loopArg ? (param.quoted ? [item] : splitFields(item)) : resolveGitWords(a)
+          i === loopArg
+            ? param.quoted
+              ? [item]
+              : splitFields(item)
+            : resolveGitWords(a, this.treeTopVars, this.appended)
         );
         this.visitWords(words, new Map(prefixEnv), depth, false);
       }
       return true;
     }
-    const words = rawArgs.flatMap((a) => resolveGitWords(a));
+    const words = rawArgs.flatMap((a) => resolveGitWords(a, this.treeTopVars, this.appended));
     this.visitWords(words, prefixEnv, depth, false);
     return true;
   }
@@ -300,6 +345,26 @@ class GitWalk {
       if (f) this.found(f);
       return;
     }
+    // node9Firewall#385 (e): the hook file removed, moved away, or renamed.
+    if (headWord === 'rm' || headWord === 'unlink') {
+      if (words.slice(head + 1).some((w) => w !== null && isLiveHookFile(w)))
+        this.found(hooksBypassed(shownOf(words)));
+      return;
+    }
+    if (headWord === 'mv') {
+      const operands = words.slice(head + 1).filter((w) => w === null || !w.startsWith('-'));
+      const src = operands[0];
+      if (typeof src === 'string' && isLiveHookFile(src)) this.found(hooksBypassed(shownOf(words)));
+      return;
+    }
+    if (headWord === 'perl') {
+      const code = words.slice(head + 1).find((w) => w !== null && /\brename\b/.test(w));
+      if (code && /rename\s*\(?\s*q[qw]?\s*[(\[{<'"]([^)\]}>'"]+)/.test(code)) {
+        const from = RegExp.$1;
+        if (isLiveHookFile(from)) this.found(hooksBypassed(shownOf(words)));
+      }
+      return;
+    }
     // A string-wrapped command: `sh -c "git …"`, `eval "git …"`, also behind
     // a wrapper (`sudo sh -c …`). Re-parsed once per distinct payload.
     if (depth < MAX_PAYLOAD_DEPTH) {
@@ -312,6 +377,142 @@ class GitWalk {
     if (this.payloads.has(payload)) return;
     this.payloads.add(payload);
     this.run(payload, depth + 1);
+  }
+
+  /**
+   * node9Firewall#385: a pipeline whose last stage reads its pathspec from
+   * stdin (`git add --pathspec-from-file=-`) or runs git over the names it
+   * is fed (`xargs -0 git add --`), with a producer that is one literal
+   * (`git rev-parse --show-toplevel`, `printf '%s\0' .`): the literal is
+   * the operand, and the call is judged with it.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private visitPipeline(stmt: any, depth: number): void {
+    const cmd = stmt.Cmd;
+    if (!cmd || cmd.kind !== 'BinaryCmd' || !isPipeOp(cmd.Op)) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stages: any[] = [];
+    let cur = cmd;
+    while (cur?.kind === 'BinaryCmd' && isPipeOp(cur.Op)) {
+      stages.unshift(cur.Y);
+      const left = cur.X;
+      if (left?.Cmd?.kind === 'BinaryCmd' && isPipeOp(left.Cmd.Op)) cur = left.Cmd;
+      else {
+        stages.unshift(left);
+        break;
+      }
+    }
+    if (stages.length < 2) return;
+    const producer = stages[stages.length - 2]?.Cmd;
+    const consumer = stages[stages.length - 1]?.Cmd;
+    if (!producer || !consumer || producer.kind !== 'CallExpr' || consumer.kind !== 'CallExpr')
+      return;
+    const fed = producedLiteral(producer);
+    if (fed === null) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = ((consumer.Args || []) as any[]).flatMap((a) =>
+      resolveGitWords(a, this.treeTopVars, this.appended)
+    );
+    const head = unwrapCommandHead(words);
+    const viaXargs = words.slice(0, head).some((w) => baseWord(w) === 'xargs');
+    const fromFile = words.findIndex(
+      (w) => w === '--pathspec-from-file=-' || w === '--pathspec-from-file'
+    );
+    if (!viaXargs && fromFile < 0) return;
+    let fedWords: (string | null)[];
+    if (fromFile >= 0) {
+      fedWords = words.filter(
+        (w, k) => !(k === fromFile || (w === '-' && words[k - 1] === '--pathspec-from-file'))
+      );
+      fedWords.push(fed);
+    } else fedWords = [...words, fed];
+    this.visitWords(fedWords, new Map(), depth, false);
+  }
+
+  /**
+   * node9Firewall#385 (e): a hook file written with a body that checks
+   * nothing (`cat > .githooks/pre-commit <<'SH' exit 0 SH`, `echo 'exit 0'
+   * > .git/hooks/pre-push`, `: > .githooks/pre-commit`). A real body (a
+   * test, a linter) is ordinary work on the hooks.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private visitHookWrite(stmt: any): void {
+    const cmd = stmt.Cmd;
+    if (!cmd || cmd.kind !== 'CallExpr') return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const redirs: any[] = stmt.Redirs || [];
+    const target = redirs.find((r) => r?.Word && !r.Hdoc && (r.N == null || r.N.Value === '1'));
+    if (!target) return;
+    const path = resolveWordLiteral(target.Word);
+    if (path === null || !isLiveHookFile(path)) return;
+    // The body: a heredoc on stdin, or what echo/printf writes, or nothing.
+    const hdoc = redirs.find((r) => r?.Hdoc);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = ((cmd.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+    const head = baseWord(words[0]);
+    let body: string | null = null;
+    if (hdoc) body = resolveWordLiteral(hdoc.Hdoc);
+    else if (head === ':' || head === 'true' || words.length === 0) body = '';
+    else if (head === 'echo' || head === 'printf') {
+      const rest = words.slice(1);
+      body = rest.some((w) => w === null)
+        ? null
+        : rest.filter((w) => !/^-[neE]+$/.test(w as string)).join(' ');
+      if (body !== null) body = body.replace(/\\n/g, '\n');
+    }
+    if (body !== null && hookBodyIsEmpty(body)) this.found(hooksBypassed(shownOf(words)));
+  }
+
+  /** A statement that writes a literal text to a path, by redirect. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private recordScriptWrite(stmt: any): void {
+    const cmd = stmt.Cmd;
+    if (!cmd || cmd.kind !== 'CallExpr') return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const redirs: any[] = stmt.Redirs || [];
+    const target = redirs.find((r) => r?.Word && !r.Hdoc && (r.N == null || r.N.Value === '1'));
+    if (!target) return;
+    const path = resolveWordLiteral(target.Word);
+    if (path === null) return;
+    const append = /^>>/.test(target.Op?.toString() ?? '') || redirOpIsAppend(target);
+    const hdoc = redirs.find((r) => r?.Hdoc);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = ((cmd.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+    const head = baseWord(words[0]);
+    let text: string | null = null;
+    if (hdoc && (head === 'cat' || head === 'tee')) text = resolveWordLiteral(hdoc.Hdoc);
+    else if (head === 'echo' || head === 'printf') {
+      const rest = words.slice(1);
+      text = rest.some((w) => w === null)
+        ? null
+        : rest.filter((w) => !/^-[neE]+$/.test(w as string)).join(' ');
+      if (text !== null && head === 'printf') text = text.replace(/\\n/g, '\n');
+    } else return;
+    const prev = this.written.get(path);
+    if (text === null || (append && prev === null)) this.written.set(path, null);
+    else this.written.set(path, append && typeof prev === 'string' ? `${prev}\n${text}` : text);
+  }
+
+  /** A statement that runs a path this command wrote: the text is the script. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private visitWrittenScript(stmt: any, depth: number): void {
+    const cmd = stmt.Cmd;
+    if (!cmd || cmd.kind !== 'CallExpr' || this.written.size === 0 || depth >= MAX_PAYLOAD_DEPTH)
+      return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const words = ((cmd.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+    const head = unwrapCommandHead(words);
+    const name = baseWord(words[head]);
+    let ran: string | null = null;
+    if (PAYLOAD_SHELLS.has(name) && name !== 'eval') {
+      const operand = words.slice(head + 1).find((w) => w === null || !w.startsWith('-'));
+      if (typeof operand === 'string') ran = operand;
+    } else if (typeof words[head] === 'string' && this.written.has(words[head] as string)) {
+      ran = words[head] as string;
+    }
+    if (ran === null) return;
+    const text = this.written.get(ran);
+    if (typeof text === 'string') this.runPayload(text, depth);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -592,8 +793,95 @@ function dynamicOptionWord(word: any): string | null {
   return null;
 }
 
+/**
+ * node9Firewall#385: a word that names the top of the work tree without
+ * writing `.`: `$(git rev-parse --show-toplevel)`, `$(pwd)`, `$PWD`, alone
+ * or as the whole of a quoted word. Read as the pathspec `:/` (the top), so
+ * `git add "$(git rev-parse --show-toplevel)"` is `git add :/`. A path UNDER
+ * it (`"$PWD/src"`) keeps its dynamic reading: it names a directory.
+ */
+const NO_VARS: ReadonlySet<string> = new Set();
+const NO_APPENDS: ReadonlyMap<string, string | null> = new Map();
+
+/** A word that is exactly `"${a[@]}"` / `${a[*]}` of a recorded literal
+ *  array: its elements as words. Null for anything else. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function resolveGitWords(word: any): (string | null)[] {
+function arrayExpansionWords(word: any): string[] | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let parts: any[] = word?.Parts || [];
+  if (parts.length === 1 && parts[0].kind === 'DblQuoted') parts = parts[0].Parts || [];
+  if (parts.length !== 1 || parts[0].kind !== 'ParamExp' || !parts[0].Index) return null;
+  const index = resolveWordLiteral(parts[0].Index);
+  if (index !== '@' && index !== '*') return null;
+  const elems = arrayElements(recordedExpansion(parts[0].Param?.Value));
+  return elems;
+}
+
+/** The one literal a producer stage writes: `printf '%s\0' X`, `echo X`,
+ *  `git rev-parse --show-toplevel` (the top), null otherwise. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function producedLiteral(call: any): string | null {
+  if ((call.Assigns || []).length > 0) return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const words = ((call.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+  if (words.length === 0 || words.some((w) => w === null)) return null;
+  const head = baseWord(words[0] as string);
+  const rest = words.slice(1) as string[];
+  if (
+    head === 'git' &&
+    rest[0] === 'rev-parse' &&
+    rest[1] === '--show-toplevel' &&
+    rest.length === 2
+  )
+    return ':/';
+  if (head === 'echo') {
+    let i = 0;
+    while (i < rest.length && /^-[neE]+$/.test(rest[i])) i++;
+    return rest.length - i === 1 ? rest[i] : null;
+  }
+  if (head === 'printf' && rest.length === 2 && /^%s(\\[0n])?$/.test(rest[0])) return rest[1];
+  return null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function treeTopWord(word: any, treeTopVars: ReadonlySet<string> = NO_VARS): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let parts: any[] = word?.Parts || [];
+  if (parts.length === 1 && parts[0].kind === 'DblQuoted') parts = parts[0].Parts || [];
+  if (parts.length !== 1) return false;
+  const p = parts[0];
+  if (p.kind === 'ParamExp') {
+    const name = plainParamName(word)?.name;
+    return name === 'PWD' || (name !== undefined && treeTopVars.has(name));
+  }
+  if (p.kind !== 'CmdSubst') return false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stmts: any[] = p.Stmts || [];
+  if (stmts.length !== 1 || !stmts[0].Cmd || stmts[0].Cmd.kind !== 'CallExpr') return false;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const words = ((stmts[0].Cmd.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+  if (words.some((w) => w === null)) return false;
+  const head = baseWord(words[0] as string);
+  if (head === 'pwd') return words.length === 1 || words[1] === '-P' || words[1] === '-L';
+  return head === 'git' && words[1] === 'rev-parse' && words[2] === '--show-toplevel';
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveGitWords(
+  word: any,
+  treeTopVars: ReadonlySet<string> = NO_VARS,
+  appended: ReadonlyMap<string, string | null> = NO_APPENDS
+): (string | null)[] {
+  if (treeTopWord(word, treeTopVars)) return [':/'];
+  const plain = plainParamName(word);
+  if (plain && appended.has(plain.name)) {
+    const v = appended.get(plain.name);
+    if (v === null || v === undefined) return [null];
+    return plain.quoted ? [v] : splitFields(v);
+  }
+  // node9Firewall#385 (c): `"${opts[@]}"` is one word per element.
+  const elems = arrayExpansionWords(word);
+  if (elems !== null) return elems;
   const value = resolveWordLiteral(word);
   if (value === null) {
     if (isPositionalParam(word)) return boundPositionals() ?? [POSITIONAL];
@@ -800,6 +1088,12 @@ function classify(inv: GitInvocation): GitFinding[] {
         o.flags.has('--mirror') ||
         o.operands.some((r) => r.startsWith('+'));
       if (forced) found(FORCE_PUSH);
+      // node9Firewall#385: a remote branch deleted (`--delete`, `-d`, or the
+      // `:branch` refspec with nothing before the colon) loses it for
+      // everyone who had not fetched it. `HEAD:refs/heads/x` pushes.
+      const deletes =
+        o.flags.has('-d') || o.flags.has('--delete') || o.operands.some((r) => /^:[^:]/.test(r));
+      if (deletes) found(DESTRUCTIVE);
       break;
     }
     case 'reset': {
@@ -837,11 +1131,87 @@ function classify(inv: GitInvocation): GitFinding[] {
       if (o.flags.has('-d') || o.flags.has('--delete')) found(DESTRUCTIVE);
       break;
     }
+    // node9Firewall#385: history and work discarded through plumbing. A ref
+    // deleted by hand, a stash dropped, the reflog expired or pruned: the
+    // commits behind them are gone the way `branch -D` loses them.
+    case 'update-ref': {
+      const o = parseOptions(inv.args, 'm', new Set());
+      if (o.flags.has('-d') && (o.dynamic || o.operands.some(isHistoryRef))) found(DESTRUCTIVE);
+      break;
+    }
+    case 'reflog': {
+      const o = parseOptions(inv.args, '', new Set());
+      if (o.operands[0] === 'expire' || o.operands[0] === 'delete') found(DESTRUCTIVE);
+      break;
+    }
+    case 'gc': {
+      // `gc --prune=now` alone is maintenance; with the reflog expired first
+      // (`reflog expire --expire=now`, or `-c gc.reflogExpire=now`) the
+      // commits behind every ref are gone for good.
+      if (inv.config.get('gc.reflogexpire') === 'now') found(DESTRUCTIVE);
+      break;
+    }
+    case 'stash': {
+      const o = parseOptions(inv.args, '', new Set());
+      if (o.operands[0] === 'clear' || o.operands[0] === 'drop') found(DESTRUCTIVE);
+      break;
+    }
+    case 'worktree': {
+      const o = parseOptions(inv.args, '', new Set());
+      if (o.operands[0] === 'remove' && (o.flags.has('-f') || o.flags.has('--force')))
+        found(DESTRUCTIVE);
+      break;
+    }
+    // The working tree overwritten: `restore` from another ref, a forced
+    // checkout, or `checkout -- .` (every local change dropped). A bare
+    // `restore .` or `checkout .` stays an ordinary undo, as pinned.
+    case 'restore': {
+      const o = parseOptions(inv.args, 's', RESTORE_LONG_VALUE);
+      // From another ref onto the whole tree: every local change goes.
+      // `restore --source=HEAD -- file` and `restore .` are ordinary undos.
+      const src = restoreSource(inv.args);
+      const whole = o.dynamic || o.operands.some(wholeTree);
+      if (src !== null && src !== 'HEAD' && whole) found(DESTRUCTIVE);
+      break;
+    }
+    case 'checkout': {
+      const o = parseOptions(inv.args, 'bB', CHECKOUT_LONG_VALUE);
+      const forced = o.flags.has('-f') || o.flags.has('--force');
+      const dropAll = inv.args.includes('--') && o.operands.some(wholeTree);
+      if (forced || dropAll) found(DESTRUCTIVE);
+      break;
+    }
     default:
       break;
   }
   return out;
 }
+
+/** `:!x`, `:^x`, `:(exclude)x`, `:(exclude,glob)x`: a pathspec that only
+ *  takes away. `:(glob)x`, `:(top)` and `:/` name something to add. */
+function isExcludePathspec(operand: string): boolean {
+  return /^:[!^]/.test(operand) || /^:\([^)]*\bexclude\b[^)]*\)/.test(operand);
+}
+
+/** The value of `--source=<ref>` / `--source <ref>` / `-s <ref>` on restore. */
+function restoreSource(args: (string | null)[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i];
+    if (w === null) continue;
+    if (w.startsWith('--source=')) return w.slice('--source='.length);
+    if (w === '--source' || w === '-s') return args[i + 1] ?? null;
+    if (/^-s./.test(w)) return w.slice(2);
+  }
+  return null;
+}
+
+/** A ref whose deletion loses commits: a branch or the stash. */
+function isHistoryRef(ref: string): boolean {
+  return /^refs\/(heads|stash)(\/|$)/.test(ref);
+}
+
+const RESTORE_LONG_VALUE = new Set(['--source', '--pathspec-from-file']);
+const CHECKOUT_LONG_VALUE = new Set(['--pathspec-from-file', '--orphan', '--conflict']);
 
 // ── Part 2: the hooks bypassed ───────────────────────────────────────────────
 //
@@ -954,6 +1324,9 @@ function hooksBypass(inv: GitInvocation): boolean {
     const o = parseOptions(inv.args, 'mFCcut', COMMIT_LONG_VALUE);
     return o.flags.has('-n') || o.flags.has('--no-verify');
   }
+  // node9Firewall#385: a commit object written with the plumbing runs no
+  // pre-commit or commit-msg hook at all.
+  if (sub === 'commit-tree') return true;
   if (sub !== undefined && NO_VERIFY_SUBS.has(sub)) {
     return inv.args.some((a) => a === '--no-verify');
   }
@@ -1013,9 +1386,34 @@ function configWritesHooksPath(args: (string | null)[]): boolean {
   return write;
 }
 
-/** A path under a hook directory, read off the word as written. */
+/** A path under a hook directory, read off the word as written: git's own
+ *  `.git/hooks`, husky's `.husky`, and the `.githooks` directory projects
+ *  point `core.hooksPath` at (node9Firewall#385). */
 export function isHookPath(word: string): boolean {
-  return /(^|[\\/])(\.git[\\/]hooks|\.husky)([\\/]|$)/.test(word);
+  return /(^|[\\/])(\.git[\\/]hooks|\.husky|\.githooks)([\\/]|$)/.test(word);
+}
+
+/** The file of a live hook: a hook directory itself (`rm -rf .husky`), or a
+ *  bare hook name inside one (`pre-commit`, `.husky/_/pre-push`). A copy
+ *  beside it (`pre-commit.bak`, `.sample`, `.new`) is not a hook git runs. */
+export function isLiveHookFile(word: string): boolean {
+  if (!isHookPath(word)) return false;
+  const m = /(^|[\\/])(\.git[\\/]hooks|\.husky|\.githooks)(?:[\\/](.*))?$/.exec(word);
+  if (!m) return false;
+  const rest = m[3] ?? '';
+  if (rest === '' || rest === '_') return true; // the directory itself
+  const leaf = rest.replace(/^_[\\/]/, '');
+  return /^[a-z-]+$/.test(leaf);
+}
+
+/** A hook body that checks nothing: empty, or only a shebang, blank lines,
+ *  comments, `set` lines, `exit 0`, `true` or `:`. */
+export function hookBodyIsEmpty(text: string): boolean {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('#'));
+  return lines.every((l) => /^(exit(\s+0)?|true|:|set\s+-[a-zA-Z]+|set\s+-o\s+\w+)$/.test(l));
 }
 
 /** chmod's options; anything else in the first slot is the mode. */
@@ -1028,6 +1426,29 @@ function modeRemovesExecute(mode: string): boolean {
     return [...bits].every((d) => (Number(d) & 1) === 0);
   }
   return mode.split(',').some((part) => /^[ugoa]*-[rwst]*x/.test(part));
+}
+
+/** Whether a redirect is an append (`>>`), read off the parser's operator. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function redirOpIsAppend(redir: any): boolean {
+  return redir?.Op === appendOp();
+}
+let _appendOp: number | null = null;
+function appendOp(): number {
+  if (_appendOp !== null) return _appendOp;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const f: any = parseShared('echo x >> y');
+    _appendOp = typeof f === 'symbol' ? -1 : (f.Stmts[0].Redirs[0].Op as number);
+  } catch {
+    _appendOp = -1;
+  }
+  return _appendOp;
+}
+
+/** The hooks-bypass finding for a command that disarms a hook file. */
+function hooksBypassed(shown: string): GitFinding {
+  return { ...HOOKS_BYPASS, shown, reason: `${HOOKS_BYPASS.reason}: ${shown}` };
 }
 
 function chmodDisarmsHook(args: (string | null)[], shown: string): GitFinding | null {
@@ -1107,6 +1528,9 @@ function stagesEverything(inv: GitInvocation): { ifWorkTreeTop?: string } | null
   const sub = inv.sub?.toLowerCase();
   const prefix = chdirPrefix(inv);
   const judge = (operands: string[]): { ifWorkTreeTop?: string } | null => {
+    // node9Firewall#385: a pathspec made only of excludes (`:!cache`) names
+    // nothing to add and stages everything else, as a bare `.` would.
+    if (operands.length > 0 && operands.every(isExcludePathspec)) return {};
     let conditional = false;
     for (const operand of operands) {
       if (!wholeTree(operand)) continue;
