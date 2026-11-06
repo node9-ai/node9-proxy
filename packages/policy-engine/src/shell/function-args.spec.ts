@@ -2,6 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { analyzeFsOperation, extractShellDestinations, extractShellDestTokens } from './index';
 import { collectFileAccesses, evaluateProtectedFileAccess } from '../files/protected-access';
 
+// CPU time of this test process, in ms. The speed rows below compare against
+// it, not against wall-clock time: on a loaded machine (another full suite
+// running alongside) the wait for a CPU counted as the code's own time and the
+// rows failed while the code was fast (2026-11-06).
+const cpuNow = (): number => {
+  const u = process.cpuUsage();
+  return (u.user + u.system) / 1000;
+};
+
 // Values passed through shell function arguments (node9Firewall#361), through
 // each consumer: the file policy's collector, the network destination
 // extractors and the credential jail. Commands are submitted as text, never
@@ -74,11 +83,11 @@ describe('file policy: arguments bound at the call', () => {
 
   it('many distinct calls finish quickly', () => {
     const calls = Array.from({ length: 500 }, (_, i) => `f ./dir${i}/file`).join('\n');
-    const start = performance.now();
+    const start = cpuNow();
     files(`f() { rm -f "$1"; }\n${calls}`);
     // A guard against explosive growth, not a benchmark: 3 s under a loaded
     // full-suite run (fw#411); an exponential walk is minutes.
-    expect(performance.now() - start).toBeLessThan(8000);
+    expect(cpuNow() - start).toBeLessThan(8000);
   });
 });
 
@@ -130,9 +139,9 @@ describe('credential jail: arguments bound at the call', () => {
     const command = Array.from({ length: 16 }, (_, i) => `sh -c '${payload}; echo ${i}'`).join(
       '\n'
     );
-    const start = performance.now();
+    const start = cpuNow();
     analyzeFsOperation(command);
-    expect(performance.now() - start).toBeLessThan(10_000);
+    expect(cpuNow() - start).toBeLessThan(10_000);
   });
 
   it('an ordinary file through the same function stays allowed', () => {

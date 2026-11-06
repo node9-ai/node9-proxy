@@ -7,6 +7,15 @@ import { collectFileAccesses } from './protected-access';
 import { evaluateGitHooksFileAccess, hookTextRunsNothing } from './git-hooks';
 import type { CatalogSettings } from '../catalog';
 
+// CPU time of this test process, in ms. The speed rows below compare against
+// it, not against wall-clock time: on a loaded machine (another full suite
+// running alongside) the wait for a CPU counted as the code's own time and the
+// rows failed while the code was fast (2026-11-06).
+const cpuNow = (): number => {
+  const u = process.cpuUsage();
+  return (u.user + u.system) / 1000;
+};
+
 const ctx = { cwd: '/home/u/repo', homeDirs: ['/home/u'] };
 const settings = (mode = 'standard'): CatalogSettings => ({ mode });
 
@@ -45,9 +54,9 @@ describe('hookTextRunsNothing', () => {
   // CodeQL js/polynomial-redos: a long line of spaces that ends in a word.
   it('a long run of spaces is judged in linear time', () => {
     const line = ' '.repeat(50_000) + 'x';
-    const start = performance.now();
+    const start = cpuNow();
     expect(hookTextRunsNothing(line)).toBe(false);
-    expect(performance.now() - start).toBeLessThan(200);
+    expect(cpuNow() - start).toBeLessThan(200);
   });
 });
 

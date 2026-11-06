@@ -8,11 +8,20 @@ import { scanTree } from '../ci-check';
 import { analyzeWorkflow } from '../ci-check/workflows';
 import type { RepoTree } from '../ci-check/types';
 
+// CPU time of this test process, in ms. The speed rows below compare against
+// it, not against wall-clock time: on a loaded machine (another full suite
+// running alongside) the wait for a CPU counted as the code's own time and the
+// rows failed while the code was fast (2026-11-06).
+const cpuNow = (): number => {
+  const u = process.cpuUsage();
+  return (u.user + u.system) / 1000;
+};
+
 const BUDGET_MS = 2_000;
 const timed = (fn: () => unknown): number => {
-  const t = performance.now();
+  const t = cpuNow();
   fn();
-  return performance.now() - t;
+  return cpuNow() - t;
 };
 const tree = (content: string): RepoTree => ({
   source: 'owner/repo',
