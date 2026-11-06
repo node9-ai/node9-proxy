@@ -75,3 +75,24 @@ describe('activity socket — the probe stops when the breaker trips', () => {
     expect(h.isProbeRunning()).toBe(false);
   });
 });
+
+// Code review of 2026-11-06 (lows 1 and 2): a pid of 0 or -1 in daemon.pid
+// read as "another live daemon" (process.kill(0|-1, 0) does not throw), and a
+// daemon that yielded to another stopped probing for good, so it never took
+// the socket back after the other one exited.
+describe('activity socket — yielding to another daemon', () => {
+  beforeEach(() => {
+    h.resetCircuitBreaker();
+  });
+
+  it('a pid outside the valid range is never another live daemon', () => {
+    for (const pid of [0, -1, 2 ** 22 + 1, 1.5]) expect(h.isLiveOtherDaemonPid(pid)).toBe(false);
+    expect(h.isLiveOtherDaemonPid(process.pid)).toBe(false);
+  });
+
+  it('yielding keeps the probe running, so the socket comes back later', () => {
+    h.startProbeForTest();
+    h.yieldForTest();
+    expect(h.isProbeRunning()).toBe(true);
+  });
+});

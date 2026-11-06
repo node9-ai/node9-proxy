@@ -616,6 +616,8 @@ export const __activitySocketTestHooks = {
   startProbeForTest: () => startHealthProbe(),
   isProbeRunning: () => activityHealthInterval !== null,
   attemptRebindForTest: (reason: string) => attemptRebind(reason),
+  isLiveOtherDaemonPid: (pid: unknown) => isLiveOtherDaemonPid(pid),
+  yieldForTest: () => yieldToOtherDaemon(),
   resetCircuitBreaker: () => {
     activityRebindAttempts = [];
     activityCircuitTripped = false;
@@ -655,17 +657,42 @@ function stopHealthProbe(): void {
   activityHealthInterval = null;
 }
 
+/** A pid that names a live process other than this one. The same range check
+ *  as server.ts: process.kill(0 | -1, 0) does not throw, so 0 and -1 would
+ *  read as alive. */
+function isLiveOtherDaemonPid(pid: unknown): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || pid > 4_194_304)
+    return false;
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** True when daemon.pid names another daemon that is alive: this one is being
  *  replaced (a restart or a takeover) and must not take the socket back. */
 function anotherDaemonOwnsPidFile(): boolean {
   try {
     const raw = fs.readFileSync(path.join(homeDir, '.node9', 'daemon.pid'), 'utf-8');
-    const pid = (JSON.parse(raw) as { pid?: unknown }).pid;
-    if (typeof pid !== 'number' || pid === process.pid) return false;
-    process.kill(pid, 0);
-    return true;
+    return isLiveOtherDaemonPid((JSON.parse(raw) as { pid?: unknown }).pid);
   } catch {
     return false;
+  }
+}
+
+// Logged once per yield, so a long handover does not fill hook-debug.log.
+let activityYieldLogged = false;
+
+/** Another live daemon owns daemon.pid: leave the socket alone this tick, but
+ *  keep probing, so the socket comes back once that daemon is gone (code
+ *  review of 2026-11-06: stopping here left no socket for good). */
+function yieldToOtherDaemon(): void {
+  if (!activityYieldLogged) {
+    logActivitySocket('another daemon owns daemon.pid; this one leaves the socket to it');
+    activityYieldLogged = true;
   }
 }
 
@@ -690,10 +717,10 @@ function probeActivitySocket(): void {
   const bound = activitySocketIdentity;
   if (!bound || (st.dev === bound.dev && st.ino === bound.ino)) return;
   if (anotherDaemonOwnsPidFile()) {
-    logActivitySocket('another daemon owns daemon.pid; this one stops watching the socket');
-    stopHealthProbe();
+    yieldToOtherDaemon();
     return;
   }
+  activityYieldLogged = false;
   attemptRebind('socket-replaced');
 }
 
