@@ -57,3 +57,21 @@ describe('activity socket — circuit breaker', () => {
     expect(h.shouldRebind(t0 + ACTIVITY_REBIND_WINDOW_MS * 10)).toBe(false);
   });
 });
+
+// Review of 2026-11-06 (low 3): once the breaker had tripped, the 2 s probe kept
+// running and logged "circuit breaker tripped" on every tick (about 43,000
+// lines a day). The trip now stops the probe.
+describe('activity socket — the probe stops when the breaker trips', () => {
+  beforeEach(() => {
+    h.resetCircuitBreaker();
+  });
+
+  it('a tripped rebind stops the health probe', () => {
+    h.startProbeForTest();
+    expect(h.isProbeRunning()).toBe(true);
+    const t0 = Date.now();
+    for (let i = 0; i <= ACTIVITY_REBIND_MAX_ATTEMPTS; i++) h.shouldRebind(t0 + i);
+    h.attemptRebindForTest('test');
+    expect(h.isProbeRunning()).toBe(false);
+  });
+});

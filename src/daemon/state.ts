@@ -613,6 +613,9 @@ function shouldRebind(now: number = Date.now()): boolean {
 export const __activitySocketTestHooks = {
   shouldRebind,
   isCircuitTripped: () => activityCircuitTripped,
+  startProbeForTest: () => startHealthProbe(),
+  isProbeRunning: () => activityHealthInterval !== null,
+  attemptRebindForTest: (reason: string) => attemptRebind(reason),
   resetCircuitBreaker: () => {
     activityRebindAttempts = [];
     activityCircuitTripped = false;
@@ -631,17 +634,67 @@ export function startActivitySocket(): void {
   }
   bindActivitySocket();
 
-  // Polling probe — checks every ACTIVITY_HEALTH_PROBE_MS whether the socket
-  // file is still present. setInterval cannot self-trigger from its own
-  // bind/unlink work the way fs.watch did, so no rebind loops.
-  activityHealthInterval = setInterval(() => {
-    if (ACTIVITY_SOCKET_PATH && !fs.existsSync(ACTIVITY_SOCKET_PATH)) attemptRebind('health-probe');
-  }, ACTIVITY_HEALTH_PROBE_MS);
-  activityHealthInterval.unref();
+  startHealthProbe();
 
   // Every way out runs this: a normal exit, and SIGTERM/SIGINT, which
   // startDaemon() turns into process.exit().
   process.on('exit', stopActivitySocket);
+}
+
+// Polling probe, every ACTIVITY_HEALTH_PROBE_MS. setInterval cannot
+// self-trigger from its own bind/unlink work the way fs.watch did, so no
+// rebind loops.
+function startHealthProbe(): void {
+  if (activityHealthInterval) clearInterval(activityHealthInterval);
+  activityHealthInterval = setInterval(probeActivitySocket, ACTIVITY_HEALTH_PROBE_MS);
+  activityHealthInterval.unref();
+}
+
+function stopHealthProbe(): void {
+  if (activityHealthInterval) clearInterval(activityHealthInterval);
+  activityHealthInterval = null;
+}
+
+/** True when daemon.pid names another daemon that is alive: this one is being
+ *  replaced (a restart or a takeover) and must not take the socket back. */
+function anotherDaemonOwnsPidFile(): boolean {
+  try {
+    const raw = fs.readFileSync(path.join(homeDir, '.node9', 'daemon.pid'), 'utf-8');
+    const pid = (JSON.parse(raw) as { pid?: unknown }).pid;
+    if (typeof pid !== 'number' || pid === process.pid) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The socket file is gone, or (review of 2026-11-06) a different socket now
+ *  sits at the path: the agent, as the same user, can remove the socket and
+ *  bind its own there to receive every activity line. Either way: bind again,
+ *  unless a newer daemon owns the pid file. */
+function probeActivitySocket(): void {
+  const socketPath = ACTIVITY_SOCKET_PATH;
+  if (!socketPath) return;
+  if (process.platform === 'win32') {
+    if (!fs.existsSync(socketPath)) attemptRebind('health-probe');
+    return;
+  }
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(socketPath);
+  } catch {
+    attemptRebind('health-probe');
+    return;
+  }
+  const bound = activitySocketIdentity;
+  if (!bound || (st.dev === bound.dev && st.ino === bound.ino)) return;
+  if (anotherDaemonOwnsPidFile()) {
+    logActivitySocket('another daemon owns daemon.pid; this one stops watching the socket');
+    stopHealthProbe();
+    return;
+  }
+  attemptRebind('socket-replaced');
 }
 
 /** Removes the socket this daemon bound, then its per-HOME directory if that
@@ -649,8 +702,7 @@ export function startActivitySocket(): void {
  *  process ends anyway, and Node's close() unlinks whatever file is at the
  *  path, even a socket another daemon bound there since. */
 export function stopActivitySocket(): void {
-  if (activityHealthInterval) clearInterval(activityHealthInterval);
-  activityHealthInterval = null;
+  stopHealthProbe();
   const socketPath = ACTIVITY_SOCKET_PATH;
   const bound = activitySocketIdentity;
   ACTIVITY_SOCKET_PATH = null;
@@ -673,6 +725,9 @@ function attemptRebind(reason: string): void {
       reason: 'rebind-loop',
       message: 'Activity socket repeatedly disappearing — run: node9 daemon restart',
     });
+    // Tripped for good (until a restart): stop probing, or this logged once
+    // every tick (review of 2026-11-06).
+    stopHealthProbe();
     return;
   }
   logActivitySocket(`rebinding (reason: ${reason}, attempt ${activityRebindAttempts.length})`);

@@ -272,6 +272,62 @@ describe('activity socket — self-healing rebind (#tail-stability)', () => {
     expect(await ssePromise).toBe(true);
   }, 15_000);
 
+  // Review of 2026-11-06 (low 2): the agent, as the same user, could remove the
+  // socket and bind its own at the same path; the probe only checked that a
+  // file existed, so the listener kept receiving every activity line. The
+  // probe now compares the socket with the one the daemon bound and binds
+  // again when it differs.
+  it('a socket swapped in at the path is replaced by the daemon', async ({ skip }) => {
+    if (process.platform === 'win32') skip();
+    if (!portWasFree) skip();
+    const got: string[] = [];
+    const squatter = net.createServer((c) => {
+      let buf = '';
+      c.on('data', (d) => (buf += d.toString()));
+      c.on('end', () => {
+        got.push(buf);
+        c.end();
+      });
+    });
+    try {
+      fs.unlinkSync(ACTIVITY_SOCKET_PATH);
+      await new Promise<void>((r) => squatter.listen(ACTIVITY_SOCKET_PATH, () => r()));
+      const squatIno = fs.statSync(ACTIVITY_SOCKET_PATH).ino;
+      // Within one or two probe ticks the daemon binds its own socket again.
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        try {
+          if (fs.statSync(ACTIVITY_SOCKET_PATH).ino !== squatIno) break;
+        } catch {}
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(fs.statSync(ACTIVITY_SOCKET_PATH).ino).not.toBe(squatIno);
+      const id = `swap-${Date.now()}`;
+      const ssePromise = waitForActivityEvent(authToken, id, 4000);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(
+        await sendOverSocket(
+          JSON.stringify({
+            id,
+            ts: Date.now(),
+            tool: 'Bash',
+            args: {},
+            status: 'pending',
+            agent: 'T',
+          })
+        )
+      ).toBe(true);
+      expect(await ssePromise).toBe(true);
+      expect(got.join('')).not.toContain(id);
+    } finally {
+      // Node's close() unlinks the file at the path, so the daemon rebinds
+      // once more; wait for that here, not in the next test's quiet window.
+      await new Promise<void>((r) => squatter.close(() => r()));
+      await waitForFile(ACTIVITY_SOCKET_PATH, 6000);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }, 30_000);
+
   // Regression test for the rebind-loop bug: an earlier fs.watch-based
   // self-heal would observe the daemon's own unlink-then-listen sequence
   // and trigger another rebind, which fired another inotify event, etc.
