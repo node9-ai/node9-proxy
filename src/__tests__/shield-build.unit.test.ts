@@ -72,6 +72,37 @@ describe('pathRules', () => {
     }
   });
 
+  // node9Firewall#392: `/bin` as a jail used to match `./bin`, `src/bin/x`
+  // and the word `bin` in prose, because the fragment matched the segment at
+  // any boundary. An absolute, non-home jail anchors to an absolute
+  // occurrence; a home jail keeps the tail match (`~/.aws` and
+  // `/home/u/.aws` are the same jail).
+  it('an absolute jail matches only an absolute occurrence (#392)', () => {
+    const [bash] = pathRules('/bin', 'block');
+    const re = new RegExp(bash.conditions[0].value!);
+    expect(re.test('cat /bin/x')).toBe(true);
+    expect(re.test('ls /bin')).toBe(true);
+    expect(re.test('cat "/bin/x"')).toBe(true);
+    expect(re.test('X=/bin/x; cat $X')).toBe(true);
+    expect(re.test('ls ./bin')).toBe(false);
+    expect(re.test('cat src/bin/run')).toBe(false);
+    expect(re.test('echo the bin folder')).toBe(false);
+    expect(re.test('cat /binary/x')).toBe(false);
+    expect(re.test('cat /usr/bin/x')).toBe(false); // /usr/bin is not /bin
+    const [etc] = pathRules('/etc', 'block');
+    const re2 = new RegExp(etc.conditions[0].value!);
+    expect(re2.test('cat /etc/os-release')).toBe(true);
+    expect(re2.test('cat project/etc/config.yml')).toBe(false);
+  });
+
+  it('a home jail still matches both spellings and a relative mention does not (#392)', () => {
+    expect(pathMatchesFragment('/home/u/.aws/credentials', '~/.aws')).toBe(true);
+    expect(pathMatchesFragment('cat ~/.aws/credentials', '/home/u/.aws')).toBe(true);
+    expect(pathMatchesFragment('/opt/data/x', '/opt/data')).toBe(true);
+    expect(pathMatchesFragment('src/opt/data/x', '/opt/data')).toBe(false);
+    expect(pathMatchesFragment('./bin', '/bin')).toBe(false);
+  });
+
   it('handles a multi-segment path', () => {
     const [bash] = pathRules('~/.aws/credentials', 'review');
     const re = new RegExp(bash.conditions[0].value!);
