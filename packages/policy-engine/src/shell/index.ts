@@ -804,11 +804,22 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
     if (f === PARSE_FAIL) return null; // parse error → fail open, as the catch below did
     let result: 'block' | 'review' | null = null;
     const assigned = assignedNames(f);
+    const known = plainlyNamedPrograms(f);
 
-    walk(f, (node: unknown) => {
+    // A function body is judged at its call with the arguments bound
+    // (node9Firewall#361's walk), so `main "$@"` with `main() { "$1" ...; }`
+    // reads `"$1"` as the literal the script passed: a dispatcher that names
+    // its own commands is ordinary; one handed `rm` is judged as `rm`.
+    // The byte ranges of function bodies: in the top-level pass (callDepth 0)
+    // a word inside one is not judged here, since its `$1` is unbound there;
+    // walkWithCalls judges the body at every call with the arguments bound.
+    const bodies: Array<[number, number]> = [];
+    const inBody = (pos: number): boolean => bodies.some(([a, b]) => pos >= a && pos < b);
+    walkWithCalls(f, (node: unknown) => {
       if (!node || result === 'block') return false; // short-circuit once blocked
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
+      if (n.kind === 'FuncDecl' && n.Body && callDepth === 0) bodies.push([n.Body.pos, n.Body.end]);
       if (n.kind === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
         const call = n.Y.Cmd;
         if (call && call.kind === 'CallExpr') {
@@ -851,9 +862,12 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
       const lookup =
         headWords[0]?.toLowerCase() === 'command' &&
         headWords.slice(1).some((w) => w === '-v' || w === '-V');
+      const unboundBody = callDepth === 0 && inBody(n.pos ?? -1);
       if (
         !lookup &&
-        (opaqueExecutable(args[0], assigned) || opaqueExecutable(args[head], assigned))
+        !unboundBody &&
+        (opaqueExecutable(args[0], assigned, known) ||
+          opaqueExecutable(args[head], assigned, known))
       )
         result = 'review';
 
@@ -913,6 +927,8 @@ function lookupSubstitution(part: any): string | null {
   return null;
 }
 
+const EMPTY_NAMES: ReadonlySet<string> = new Set();
+
 interface ExecutablePart {
   kind: 'Lit' | 'Dynamic';
   value: string;
@@ -952,11 +968,118 @@ function assignedNames(f: any): Set<string> {
   return names;
 }
 
-function executableParts(word: any, assigned: Set<string>, quoted = false): ExecutablePart[] {
+/** A program name a script may plainly give a variable: one word, no
+ *  separator a later IFS could split, no quote or expansion syntax. */
+const PLAIN_PROGRAM_NAME = /^[A-Za-z_][\w.+-]*$/;
+
+/**
+ * The names the script itself gives its variables, as literal program names
+ * (node9Firewall#385, benign scripts): `cmd=ls`, `a=(true false)`,
+ * `is_prime[2]=true`, and every function it declares. A variable is KNOWN
+ * when every value the script gives it is one and the same plain name, and
+ * the script never changes IFS (`IFS=,;CMD=r,m;$CMD` is the
+ * evasion this must not learn). A variable assigned from an expansion,
+ * a substitution, a reader (`read X`) or a loop is not known: the shell
+ * decides its value. Returns the empty set when IFS is touched.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function plainlyNamedPrograms(f: any): Set<string> {
+  const values = new Map<string, Set<string> | null>();
+  // An array of plain names: whichever element runs, it is one of them, so
+  // the count does not matter. A scalar must be given one and the same name.
+  const arrays = new Set<string>();
+  const give = (name: string, value: string | null): void => {
+    if (value === null || !PLAIN_PROGRAM_NAME.test(value)) {
+      values.set(name, null);
+      return;
+    }
+    const cur = values.get(name);
+    if (cur === null) return;
+    if (cur === undefined) values.set(name, new Set([value]));
+    else cur.add(value);
+  };
+  const literalOnly = (w: any): string | null => {
+    const parts: any[] = w?.Parts ?? [];
+    if (parts.length !== 1) return null;
+    const p = parts[0];
+    if (p.kind === 'Lit') return p.Value ?? null;
+    // `func=${FUNCNAME[0]}`: the running function's own name, a function.
+    if (p.kind === 'ParamExp' && expansionName(p) === 'FUNCNAME') return 'FUNCNAME';
+    if (p.kind === 'SglQuoted' && !p.Dollar) return p.Value ?? null;
+    if (p.kind === 'DblQuoted') {
+      const inner: any[] = p.Parts ?? [];
+      return inner.length === 1 && inner[0].kind === 'Lit' ? (inner[0].Value ?? null) : null;
+    }
+    return null;
+  };
+  let ifsTouched = false;
+  walk(f, (node: any) => {
+    if (!node) return false;
+    const kind = node.kind;
+    if (kind === 'FuncDecl' && node.Name?.Value) give(node.Name.Value, node.Name.Value);
+    if (kind === 'Assign' && node.Name?.Value) {
+      const name: string = node.Name.Value;
+      if (name === 'IFS') ifsTouched = true;
+      if (node.Append) values.set(name, null);
+      else if (node.Array) {
+        arrays.add(name);
+        for (const el of node.Array.Elems ?? []) give(name, literalOnly(el.Value));
+      } else if (node.Index) {
+        arrays.add(name);
+        give(name, node.Value ? literalOnly(node.Value) : null);
+      } else give(name, node.Value ? literalOnly(node.Value) : null);
+    }
+    if (kind === 'ForClause' && node.Loop?.Name?.Value) values.set(node.Loop.Name.Value, null);
+    if (kind === 'CallExpr') {
+      const words = (node.Args ?? []).map((a: any) => resolveWordLiteral(a));
+      if (VARIABLE_READERS.has(words[0] ?? ''))
+        for (const w of words.slice(1)) if (w && /^[A-Za-z_]\w*$/.test(w)) values.set(w, null);
+    }
+    return true;
+  });
+  if (ifsTouched) return new Set();
+  const known = new Set<string>();
+  // Exactly one distinct value: `cmd=ls; cmd=rm; $cmd` depends on which
+  // assignment ran last, so the script did not plainly name the program.
+  for (const [name, vals] of values)
+    if (vals && (vals.size === 1 || (arrays.has(name) && vals.size > 0))) known.add(name);
+  return known;
+}
+
+/** `$name`, `"$name"`, `${name}`, `${name[i]}`: the variable a plain or
+ *  indexed expansion reads, with no other modifier. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function expansionName(part: any): string | null {
+  if (part.kind !== 'ParamExp') return null;
+  if (part.Excl || part.Length || part.Width || part.Slice || part.Repl || part.Exp) return null;
+  return part.Param?.Value ?? null;
+}
+
+function executableParts(
+  word: any,
+  assigned: Set<string>,
+  quoted = false,
+  known: ReadonlySet<string> = EMPTY_NAMES
+): ExecutablePart[] {
   return (word?.Parts ?? []).flatMap((part: any): ExecutablePart[] => {
     const kind = part.kind;
-    if (kind === 'DblQuoted') return executableParts(part, assigned, true);
+    if (kind === 'DblQuoted') return executableParts(part, assigned, true, known);
     if (kind === 'Lit') return [{ kind: 'Lit', value: part.Value ?? '', quoted }];
+    // A variable the script plainly named (a function, a literal, an array of
+    // literals) names the program as surely as the literal would. `FUNCNAME`
+    // is the running function's own name: a function, by construction.
+    const name = expansionName(part);
+    if (name !== null && (known.has(name) || name === 'FUNCNAME'))
+      return [{ kind: 'Lit', value: name, quoted }];
+    // Inside a function body judged at its call, a bound argument (`$1`,
+    // `"$@"` with one argument) or a variable the body set from one resolves
+    // through the call's table to the literal the caller passed.
+    if (name !== null) {
+      // `"$@"` or `$*` in command position runs the first argument.
+      const bound = recordedExpansion(name === '@' || name === '*' ? '1' : name);
+      if (typeof bound === 'string' && PLAIN_PROGRAM_NAME.test(bound))
+        return [{ kind: 'Lit', value: bound, quoted }];
+    }
     if (kind === 'SglQuoted')
       return [{ kind: part.Dollar ? 'Dynamic' : 'Lit', value: part.Value ?? '', quoted: true }];
     if (kind === 'ParamExp' && isDefaultExpansion(part) && !assigned.has(part.Param?.Value)) {
@@ -975,8 +1098,12 @@ function executableParts(word: any, assigned: Set<string>, quoted = false): Exec
 // `$HOME/.cargo/bin/cargo` and `"$(npm bin)/eslint"` name the program plainly
 // while `$(printf rm)`, `$CMD` and `/bin/{rm,}` do not. Expansions in ordinary
 // arguments, quoted documentation, and script stdin never trigger it.
-function opaqueExecutable(word: any, assigned: Set<string>): boolean {
-  const parts = executableParts(word, assigned);
+function opaqueExecutable(
+  word: any,
+  assigned: Set<string>,
+  known: ReadonlySet<string> = EMPTY_NAMES
+): boolean {
+  const parts = executableParts(word, assigned, false, known);
   let lastSlash = -1;
   parts.forEach((p, i) => {
     if (p.kind === 'Lit' && p.value.includes('/')) lastSlash = i;
