@@ -46,7 +46,7 @@ import {
 import {
   frameUntrusted,
   frameUntrustedSource,
-  isFramedWhole,
+  unframeLeaves,
   newUntrustedFrame,
   newSourceFrame,
   neutralizeMarkers,
@@ -516,8 +516,6 @@ export function registerLogCommand(program: Command): void {
                 const shellA = ucA?.enabled ? shellFetch(tool, rawInput) : null;
                 const sourceA = !!ucA?.enabled && (toolRole(tool, ucA).source || !!shellA?.fetches);
                 let injection: ReturnType<typeof scanInjection> = null;
-                // fw#447: a result the gateway already framed is not framed again.
-                const framedWholeA = isFramedWhole([result], () => false);
                 if (injectionOn) {
                   const m = scanInjection(result, {
                     tool: rawToolName,
@@ -526,7 +524,7 @@ export function registerLogCommand(program: Command): void {
                   if (m && atLeastConfidence(m.confidence, inj.minConfidence)) {
                     injection = m;
                     // Random per-frame boundary (utils/untrusted-frame.ts).
-                    if (!framedWholeA) out = frameUntrusted(result);
+                    out = frameUntrusted(result);
                   }
                 }
                 if (sourceA) {
@@ -544,7 +542,7 @@ export function registerLogCommand(program: Command): void {
                     agentToolName: rawToolName,
                     hashArgs: config.settings.auditHashArgs === true,
                   });
-                  if (ucA.spotlight && !framedWholeA) out = frameUntrustedSource(result, wordA);
+                  if (ucA.spotlight) out = frameUntrustedSource(result, wordA);
                 }
                 process.stdout.write(JSON.stringify({ redacted: out, found, injection }) + '\n');
               } else {
@@ -622,21 +620,22 @@ export function registerLogCommand(program: Command): void {
                     }
                     if (agent === 'Claude Code' && !spotlightApplies) {
                       // Frame the leaves that carry the injection, inside the
-                      // shape, unless the gateway already framed it (fw#447).
+                      // shape. A result the gateway already framed whole is
+                      // framed with node9's frame in place of the gateway's
+                      // (fw#447).
                       const base = updatedToolOutput ?? payload.tool_response;
                       const suspect = (leaf: string) => scanInjection(leaf, injCtx) !== null;
-                      const framed = isFramedWhole(
+                      const un = unframeLeaves(
                         toolOutputLeaves(base),
                         (leaf) => leaf.length >= 40 || suspect(leaf)
                       );
-                      if (!framed) {
-                        updatedToolOutput = frameToolOutputLeaves(
-                          base,
-                          suspect,
-                          newUntrustedFrame,
-                          neutralizeMarkers
-                        );
-                      }
+                      let at = 0;
+                      updatedToolOutput = frameToolOutputLeaves(
+                        un ? mapToolOutputStrings(base, () => un.leaves[at++]) : base,
+                        suspect,
+                        newUntrustedFrame,
+                        neutralizeMarkers
+                      );
                     }
                     await notifySessionTaint(
                       payloadSessionId ?? '',
@@ -679,19 +678,25 @@ export function registerLogCommand(program: Command): void {
                       const needsFrame = (leaf: string) =>
                         leaf.length >= 40 || (injectedLeaf !== null && injectedLeaf(leaf));
                       // A result `node9 mcp-gateway` already framed whole is
-                      // left as it is: framing it again nests two frames and
-                      // reports the inner markers as imitations (fw#447).
-                      if (!isFramedWhole(toolOutputLeaves(base), needsFrame)) {
-                        const framedOut = mapToolOutputStrings(base, (leaf) =>
-                          needsFrame(leaf)
-                            ? frameUntrustedSource(leaf, word)
-                            : neutralizeMarkers(leaf)
-                        );
-                        // Emit a replacement only when a leaf actually changed: a
-                        // short result ("sent") must not produce a no-op rewrite.
-                        if (JSON.stringify(framedOut) !== JSON.stringify(base))
-                          updatedToolOutput = framedOut;
-                      }
+                      // framed again without the gateway's frame: nesting the
+                      // two would report the inner markers as imitations
+                      // (fw#447). The leaves that carried that frame keep one.
+                      const un = unframeLeaves(toolOutputLeaves(base), needsFrame);
+                      let at = 0;
+                      const framedOut = mapToolOutputStrings(base, (leaf) => {
+                        const i = at++;
+                        const text = un ? un.leaves[i] : leaf;
+                        // A leaf that held only the header or footer stays empty.
+                        const carried =
+                          un !== null && (i === un.start || i === un.end) && text.trim() !== '';
+                        return carried || needsFrame(text)
+                          ? frameUntrustedSource(text, word)
+                          : neutralizeMarkers(text);
+                      });
+                      // Emit a replacement only when a leaf actually changed: a
+                      // short result ("sent") must not produce a no-op rewrite.
+                      if (JSON.stringify(framedOut) !== JSON.stringify(base))
+                        updatedToolOutput = framedOut;
                     } else {
                       const f = newSourceFrame(word);
                       warnings.push(
