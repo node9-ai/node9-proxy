@@ -148,6 +148,35 @@ function hits(
   return false;
 }
 
+/**
+ * A change inside ~/.node9 (node9Firewall#445 follow-up), or a recursive
+ * change of a directory that holds it (`rm -rf ~`). A pattern counts only
+ * when its literal part is already inside ~/.node9 (`rm ~/.node9/*`): a
+ * search of the whole home for another name (`find ~ -name node_modules
+ * -exec rm -rf {} +`) is not aimed at node9.
+ */
+function hitsNode9Dir(
+  access: FileAccess,
+  dirs: readonly string[],
+  context: FileAccessContext
+): boolean {
+  const home = context.homeDirs?.[0] ?? '~';
+  if (access.glob) {
+    const pattern = normalizeFilePath(access.glob, access.cwd ?? context.cwd, home);
+    const magic = pattern.search(/[*?[{]/);
+    const literal = magic < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', magic));
+    return dirs.some((d) => within(literal, d));
+  }
+  const candidates = access.candidates ?? [
+    normalizeFilePath(access.path, access.cwd ?? context.cwd, home),
+  ];
+  return candidates.some(
+    (p) =>
+      dirs.some((d) => within(p, d)) ||
+      (access.recursive === true && dirs.some((d) => within(d, p)))
+  );
+}
+
 const exempt = (p: string): boolean => SYSTEM_DIRS_EXEMPT.some((d) => within(p, d));
 
 /**
@@ -224,6 +253,9 @@ export function evaluateProtectedFileAccess(
   const consider = (result: ProtectedFileVerdict): void => {
     if (!best || RANK[result.decision] > RANK[best.decision]) best = result;
   };
+  // node9's own state (node9Firewall#445 follow-up): its config, the daemon's
+  // pid file and key. A write there from the agent switches node9 off.
+  const node9Dirs = homes.map((home) => `${home.replace(/\/$/, '')}/.node9`);
   for (const access of accesses) {
     const mutation = access.operation !== 'read';
     let kind: [string, string, string] | null;
@@ -265,7 +297,13 @@ export function evaluateProtectedFileAccess(
                         'review-root-home-read',
                         "Reading the root account's home requires approval",
                       ]
-                    : null;
+                    : mutation && hitsNode9Dir(access, node9Dirs, context)
+                      ? [
+                          'commands.node9-disarm',
+                          'review-node9-disarm',
+                          "Changing node9's own files requires approval",
+                        ]
+                      : null;
     } catch {
       // picomatch refuses patterns beyond its input limit. An operand the
       // matcher cannot evaluate is not evidence that the target is harmless.

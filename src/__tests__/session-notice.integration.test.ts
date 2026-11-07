@@ -12,7 +12,11 @@ import { execFileSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { claimSessionNotice, SESSION_NOTICE_NOTE } from '../notices/session-notice';
+import {
+  claimSessionNotice,
+  sessionNoticeLine,
+  SESSION_NOTICE_NOTE,
+} from '../notices/session-notice';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const cliExists = fs.existsSync(CLI);
@@ -323,5 +327,48 @@ describe('the notice is shown once, and once more only when the level changes', 
     expect(claimSessionNotice('k1', home, 'standard')).toBeNull();
     expect(claimSessionNotice('k1', home, 'audit')).toBe('changed');
     expect(claimSessionNotice('k1', home, 'audit')).toBeNull();
+  });
+});
+
+// node9Firewall#445 follow-up: a daemon that stays down (automatic start off)
+// switches the outside-content check off, so the notice says it once, and
+// once more when it comes back. With automatic start on, the hook starts it.
+describe('the notice says when the daemon stays down', () => {
+  it('claimSessionNotice tells a daemon change apart from a level change', () => {
+    const home = fs.mkdtempSync(path.join(room, 'daemon-kinds-'));
+    expect(claimSessionNotice('d1', home, 'standard')).toBe('first');
+    expect(claimSessionNotice('d1', home, 'standard:no-daemon')).toBe('daemon');
+    expect(claimSessionNotice('d1', home, 'standard:no-daemon')).toBeNull();
+    expect(claimSessionNotice('d1', home, 'standard')).toBe('daemon');
+    expect(claimSessionNotice('d1', home, 'strict:no-daemon')).toBe('changed');
+  });
+
+  it('the lines name what is off, per level', () => {
+    expect(sessionNoticeLine('standard', 'first', true)).toBe(
+      `${STANDARD} The node9 daemon is not running: outside-content checks are off until it starts (node9 daemon start).`
+    );
+    expect(sessionNoticeLine('strict', 'daemon', true)).toBe(
+      `${SHIELD} Node9: the daemon is not running. Sends to unknown addresses are held until it starts (node9 daemon start).`
+    );
+    expect(sessionNoticeLine('standard', 'daemon', false)).toBe(
+      `${SHIELD} Node9: the daemon is running again. Every action in this session is checked.`
+    );
+  });
+
+  itUnix('the first notice says so when automatic start is off', () => {
+    const where = makeHome('daemon-off');
+    fs.writeFileSync(
+      path.join(where.home, '.node9', 'config.json'),
+      JSON.stringify({ settings: { mode: 'standard', autoStartDaemon: false } })
+    );
+    const r = check(where, 'daemon-off-1', 'ls');
+    expect(r.status).toBe(0);
+    expect(r.json?.systemMessage).toMatch(/daemon is not running: outside-content checks are off/);
+  });
+
+  itUnix('with automatic start on (the default) the notice says nothing about it', () => {
+    const where = makeHome('daemon-auto', 'standard');
+    const r = check(where, 'daemon-auto-1', 'ls');
+    expect(r.json?.systemMessage).toBe(STANDARD);
   });
 });

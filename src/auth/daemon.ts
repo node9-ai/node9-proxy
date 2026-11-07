@@ -901,14 +901,17 @@ export async function notifyUserMentions(
   }
 }
 
-/** Fail-open: a daemon blip returns { exposed: false }. */
+/** Fail-open: a daemon blip returns { exposed: false }. No daemon at all says
+ *  so (daemonUnavailable), so the gate can record it and Strict can hold
+ *  (node9Firewall#445 follow-up). */
 export async function checkSessionExposure(sessionId: string): Promise<SessionExposureCheckResult> {
   const forecast = forecastRun();
   if (forecast) {
     const record = forecast.session.checkExposure(forecast.now);
     return record ? { exposed: true, record } : { exposed: false };
   }
-  if (!sessionId || !isDaemonRunning()) return { exposed: false };
+  if (!sessionId) return { exposed: false };
+  if (!isDaemonRunning()) return { exposed: false, daemonUnavailable: true };
   try {
     return (await exposurePost(
       '/session-exposure/check',

@@ -278,7 +278,7 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     owasp: 'ASI10',
     title: 'node9 disarmed from the shell',
     catches:
-      'a node9 command that clears a session flag, trusts a destination, pauses the gate or weakens a shield, run by the agent',
+      'the agent stopping or killing the node9 daemon, stopping its service, uninstalling node9, changing files in ~/.node9, or running a node9 command that clears a session flag, trusts a destination, pauses the gate or weakens a shield',
     values: ALL,
     defaultValue: 'review',
     legacy: ['review-node9-disarm'],

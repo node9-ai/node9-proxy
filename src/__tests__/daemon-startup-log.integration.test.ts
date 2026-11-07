@@ -207,52 +207,56 @@ describe('A4c — the daemon logs its own startup outcome', () => {
   });
 });
 
-describe('A4c — an unidentifiable port holder is recorded as a FAILURE, not benign', () => {
-  itUnix('records orphan-unidentified when the pid cannot be recovered', async (ctx) => {
-    // The daemon answers /settings (so it is healthy) but neither `ss` nor `lsof`
-    // can name its pid, so NO pid file is written — and every pid-file-based
-    // command keeps reporting "not running" while each new start exits 0. Recording
-    // that as benign (an earlier design did) hides an unbounded silent loop.
-    await occupyDaemonPort();
-    if (blocker) {
-      // occupyDaemonPort's plain TCP socket cannot answer the daemon's
-      // fetch(/settings) probe, and that probe GATES the branch under test — a raw
-      // net.Server never emits 'request', so the daemon would retry forever. Swap
-      // in a real HTTP server that answers 200.
-      await new Promise<void>((r) => blocker!.close(() => r()));
-      blocker = null;
-    }
-    const healthy = http.createServer((_req, res) => res.writeHead(200).end('{}'));
-    const bound = await new Promise<boolean>((resolve) => {
-      healthy.once('error', () => resolve(false)); // a real daemon owns the port
-      healthy.listen(DAEMON_PORT, DAEMON_HOST, () => resolve(true));
-    });
-    if (!bound) {
-      // SKIP loudly rather than `return`: a bare return reports a green tick for a
-      // test that asserted nothing, which is worse than no test because it looks
-      // like coverage.
-      ctx.skip();
-      return;
-    }
-    blocker = healthy as unknown as net.Server; // afterEach closes it
-    trackSockets(blocker);
+describe('A4c — an unverified port holder is recorded as a FAILURE, not benign', () => {
+  itUnix(
+    'records port-held-unverified when the holder cannot prove the daemon key',
+    async (ctx) => {
+      // The holder answers HTTP (it looks healthy) but does not prove it holds
+      // this HOME's daemon key (fw#445), so it is never adopted and NO pid file is
+      // written. Recording that as benign would hide an unbounded loop: every
+      // pid-file-based command keeps reporting "not running" while each new
+      // start exits 0. node9Firewall#445 covers the adoption rules themselves on
+      // a port of its own (daemon-port-trust.integration.test.ts).
+      await occupyDaemonPort();
+      if (blocker) {
+        // occupyDaemonPort's plain TCP socket cannot answer the daemon's /health
+        // probe, and that probe GATES the branch under test. Swap in a real HTTP
+        // server that answers 200.
+        await new Promise<void>((r) => blocker!.close(() => r()));
+        blocker = null;
+      }
+      const healthy = http.createServer((_req, res) => res.writeHead(200).end('{}'));
+      const bound = await new Promise<boolean>((resolve) => {
+        healthy.once('error', () => resolve(false)); // a real daemon owns the port
+        healthy.listen(DAEMON_PORT, DAEMON_HOST, () => resolve(true));
+      });
+      if (!bound) {
+        // SKIP loudly rather than `return`: a bare return reports a green tick for a
+        // test that asserted nothing, which is worse than no test because it looks
+        // like coverage.
+        ctx.skip();
+        return;
+      }
+      blocker = healthy as unknown as net.Server; // afterEach closes it
+      trackSockets(blocker);
 
-    // Hide both pid-recovery tools so identification must fail.
-    const emptyBin = path.join(home, 'nobin');
-    fs.mkdirSync(emptyBin, { recursive: true });
-    const { code } = await runDaemonAsync({ PATH: emptyBin });
+      // The child must probe the port this process bound (NODE9_DAEMON_PORT is
+      // read only under NODE9_TESTING), so a run with a port of its own works too.
+      const { code } = await runDaemonAsync({
+        NODE9_TESTING: '1',
+        NODE9_DAEMON_PORT: String(DAEMON_PORT),
+      });
 
-    expect(code).toBe(0); // still a clean exit — it is not a crash
-    const state = JSON.parse(
-      fs.readFileSync(path.join(home, '.node9', 'daemon-startup-state.json'), 'utf-8')
-    );
-    expect(state.outcome).toBe('failed');
-    expect(state.kind).toBe('orphan-unidentified');
-    // …and the advice must not tell the user to kill a daemon we just proved healthy.
-    expect(state.detail).toMatch(/healthy daemon/);
-    expect(state.detail).not.toMatch(/stop it/);
-    expect(fs.existsSync(path.join(home, '.node9', 'daemon.pid'))).toBe(false);
-  });
+      expect(code).toBe(0); // still a clean exit — it is not a crash
+      const state = JSON.parse(
+        fs.readFileSync(path.join(home, '.node9', 'daemon-startup-state.json'), 'utf-8')
+      );
+      expect(state.outcome).toBe('failed');
+      expect(state.kind).toBe('port-held-unverified');
+      expect(state.detail).toMatch(/stop it/);
+      expect(fs.existsSync(path.join(home, '.node9', 'daemon.pid'))).toBe(false);
+    }
+  );
 });
 
 describe('F1 — `node9 daemon --background` is covered by the diagnostic', () => {

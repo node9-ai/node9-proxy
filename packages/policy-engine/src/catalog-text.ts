@@ -326,7 +326,7 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   'commands.node9-disarm': {
     plain:
-      'The agent runs a node9 command that would switch off a protection: clear a session flag, trust an address, pause the gate, weaken a shield.',
+      'The agent switches node9 off or weakens it: stops or kills the daemon, stops its service, uninstalls node9, changes files in ~/.node9, clears a session flag, trusts an address, pauses the gate, weakens a shield.',
     example: 'After reading a web page, the agent runs node9 session-exposure clear --all',
     advice:
       'Keep Review: these are your commands to run. Block if the agent should never touch node9.',

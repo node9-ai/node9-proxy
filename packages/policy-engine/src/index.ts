@@ -206,6 +206,7 @@ export {
   levelOf,
   isRecordOnly,
   reviewsEveryInline,
+  holdsSendsWithoutDaemon,
   isBlockAll,
   levelCheckValue,
   levelChecks,

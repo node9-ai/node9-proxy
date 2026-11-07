@@ -36,6 +36,7 @@ import {
   type ShellCommandAnalysis,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
+import { analyzeNode9Disarm } from '../shell/node9-disarm';
 import { analyzeOutbound } from '../shell/outbound';
 import { extractRegistryOverrides, isPublicRegistryHost } from '../shell/package-registry';
 import {
@@ -182,6 +183,10 @@ export interface PolicyHostHooks {
    *  holds a `.git` entry. Decides `git -C <dir> add .` (node9Firewall#413).
    *  Absent, or no cwd: the stage-all finding stands. */
   isGitWorkTreeTop?: (dir: string, cwd: string) => boolean;
+  /** The running daemon's pid from ~/.node9/daemon.pid, or null. A `kill` of
+   *  that number switches node9 off (commands.node9-disarm). Absent: a numeric
+   *  kill is never read as the daemon. */
+  daemonPid?: () => number | null;
 }
 
 export interface PolicyVerdict {
@@ -526,7 +531,8 @@ async function evaluatePolicyCore(
   hooks: PolicyHostHooks = {}
 ): Promise<PolicyVerdict> {
   const { agent, cwd, activeEnvironment } = context;
-  const { checkProvenance, isTrustedHost, isConfiguredRegistry, isGitWorkTreeTop } = hooks;
+  const { checkProvenance, isTrustedHost, isConfiguredRegistry, isGitWorkTreeTop, daemonPid } =
+    hooks;
   const settingsView = catalogSettings(config);
   const layers = inspectionLayers(config.policy);
   // ONE reader for every built-in site: the check's value in force.
@@ -843,6 +849,27 @@ async function evaluatePolicyCore(
         // user's own `block-force-push` rule (the commonest git rule people
         // write) must still win over it, as for the credential-copy review
         // above. A `block` value set on the check returns at once.
+        if (v?.logged) noteLogged(v);
+        else if (v?.decision === 'block') return v;
+        else if (v && !pendingAstReview) pendingAstReview = v;
+      }
+    }
+
+    // node9 switched off from the shell (node9Firewall#445 follow-up): the
+    // daemon stopped or killed, its service stopped, node9 uninstalled. The
+    // regex twin `review-node9-disarm` keeps the weakening subcommands.
+    if (cv('commands.node9-disarm') !== 'off') {
+      const finding = analyzeNode9Disarm(bashCommand, daemonPid?.() ?? null);
+      if (finding) {
+        const v = applyCheckValue(cv('commands.node9-disarm'), {
+          decision: 'review',
+          blockedByLabel: `Node9 (AST): ${finding.ruleName}`,
+          reason: finding.reason,
+          tier: 2,
+          ruleName: finding.ruleName,
+          ruleDescription: finding.description,
+          checkId: 'commands.node9-disarm',
+        });
         if (v?.logged) noteLogged(v);
         else if (v?.decision === 'block') return v;
         else if (v && !pendingAstReview) pendingAstReview = v;
