@@ -2639,8 +2639,6 @@ function attachedCode(interp: string, flag: string): string | null {
   return rest === '' ? null : rest;
 }
 
-/** The interpreters that take node's flags. */
-const NODE_FAMILY = /^(?:node|tsx|ts-node|bun|deno)$/;
 /** node's flags whose value is the next word, or joined with `=`. */
 const NODE_VALUE_FLAG =
   /^(-r|--require|--import|--loader|--experimental-loader|--env-file|--env-file-if-exists|--input-type|-C|--conditions)(?:=(.*))?$/;
@@ -2686,12 +2684,7 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   const fromStdin = (): InlineCall => {
     if (stdinFed) {
       const { code, source } = stdinCodeOf(redirs);
-      return {
-        interp,
-        code: [code],
-        source,
-        ...(preload.dotenv || preload.envFiles ? { preload } : {}),
-      };
+      return { interp, code: [code], source, preload };
     }
     return { interp, code: [null], source: 'pipe' };
   };
@@ -2700,7 +2693,7 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   let selectedProgram = false; // a script operand or `-m module` was chosen
   const codes: Array<string | null> = [];
   const preload: InlinePreload = {};
-  const nodeFamily = NODE_FAMILY.test(interp);
+  const nodeFamily = inlineLanguageOf(interp) === 'node';
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     // node's flags that take a value: the value is not a script operand
@@ -2774,7 +2767,7 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
       interp,
       code: codes,
       source: codes.includes(null) ? 'variable' : undefined,
-      ...(preload.dotenv || preload.envFiles ? { preload } : {}),
+      preload,
     };
   }
 
@@ -4492,11 +4485,16 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // the reader indirectly (a loop variable, a glob, $PWD, find -exec) is
   // resolved by the structural file-access walk, so it is consulted when the
   // direct reading found nothing (jail-indirect-reads design, 2026-11-02).
-  // Inline interpreter code is read last (node9Firewall#440).
-  const computed =
+  // Inline interpreter code is read last (node9Firewall#440), and its block is
+  // not hidden by a review the other readings found (`cp .env x; python3 -c
+  // "open('.env')"`, /code-review 2026-11-07).
+  const direct =
     analyzeFsOperationImpl(command) ??
-    (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null) ??
-    (runsInlineInterpreter(command, normalized) ? inlineCodeJailRead(command) : null);
+    (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null);
+  const computed =
+    direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
+      ? direct
+      : stricter(direct, inlineCodeJailRead(command));
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
@@ -5852,7 +5850,9 @@ function structuralJailRead(command: string): FsOpVerdict | null {
 
 /** An interpreter name inlineLanguageOf reads, in either reading of the
  *  command: the prescreen for the inline-code jail walk. */
-const INLINE_INTERP_PRESCREEN_RE = /(?:python|node|tsx|ts-node|deno|bun|perl|ruby|irb|php)/i;
+// A whole word, so `node_modules`, `ubuntu` and `bundle` do not pay for the walk.
+const INLINE_INTERP_PRESCREEN_RE =
+  /(?:^|[^\w-])(?:python|node|tsx|ts-node|deno|bun|perl|ruby|irb|php)(?![A-Za-z_])/i;
 const runsInlineInterpreter = (command: string, normalized: string): boolean =>
   INLINE_INTERP_PRESCREEN_RE.test(command) || INLINE_INTERP_PRESCREEN_RE.test(normalized);
 

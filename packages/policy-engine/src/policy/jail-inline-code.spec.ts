@@ -142,6 +142,18 @@ const READS: Array<[string, string, string]> = [
   ['ruby File.read', `ruby -e 'puts File.read(".env")'`, 'block-read-env'],
   ['php file_get_contents', `php -r 'echo file_get_contents(".env");'`, 'block-read-env'],
   ['perl open', `perl -e 'open(my $f, "<", ".env"); print <$f>'`, 'block-read-env'],
+  // /code-review 2026-11-07: an earlier review (a copy) must not hide the read.
+  [
+    'a read after a copy in the same command',
+    `cp .env /tmp/x; python3 -c "print(open('.env').read())"`,
+    'block-read-env',
+  ],
+  // 'a+' appends and reads; it is not a write that hides the content.
+  [
+    'an append-and-read mode',
+    `python3 -c "f = open('.env', 'a+'); f.seek(0); print(f.read())"`,
+    'block-read-env',
+  ],
   [
     'dotenv pointed at a jailed path',
     `node -e 'require("dotenv").config({ path: "be/.env" }); console.log(process.env.DB_URL)'`,
@@ -220,6 +232,10 @@ describe('everyday inline code stays allowed', () => {
     [
       'a write through a wrapped path',
       `python3 -c "import json,os; json.dump({'k':1}, open(os.path.join(h,'.node9','credentials.json'),'w'))"`,
+    ],
+    [
+      'a write through Path.open',
+      `python3 -c "from pathlib import Path; Path('.env').open('w').write('A=1')"`,
     ],
     ['a perl write', `perl -e 'open(my $f, ">", ".env"); print $f "A=1"'`],
     [

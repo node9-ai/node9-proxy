@@ -331,7 +331,10 @@ const STR_PREFIX = String.raw`[rRbBuUfF]{0,2}`;
 // A write is not a read: `open(p, "w")`, `fopen(p, "a")`, `File.open(p, "w")`,
 // perl's `open(F, ">", p)` / `">p"`. A test that writes a fake key into a
 // scratch home (`open(f'{H}/.ssh/id_rsa','w')`) is a common agent shape.
-const WRITE_MODE = String.raw`\s*,\s*(?:mode\s*=\s*)?['"](?=[rbtU+]*[wax])[rwaxbtU+]{1,4}['"]`;
+// A mode that writes without reading back: `w` (truncates), or `a`/`x` without
+// `+`. `a+` and `r+` read the file, so they stay reads.
+const WRITE_MODE_LITERAL = String.raw`['"](?=[rbtU+]*w|(?![^'"]*\+)[rbtU]*[ax])[rwaxbtU+]{1,4}['"]`;
+const WRITE_MODE = String.raw`\s*,\s*(?:mode\s*=\s*)?${WRITE_MODE_LITERAL}`;
 // After the string, past the wrappers' closing parens: `open(join(h, 'x'), 'w')`.
 const WRITE_MODE_AFTER = new RegExp(`^(?:\\s*\\)){0,3}${WRITE_MODE}`);
 const PERL_WRITE_BEFORE = /['"]\s*(?:\+?[>|]|>>)\s*['"]\s*,\s*$/;
@@ -349,7 +352,9 @@ const READ_BEFORE: Record<InlineLanguage, RegExp> = {
 };
 // `Path(".env").read_text()`: the read call comes after the string.
 const READ_AFTER: Partial<Record<InlineLanguage, RegExp>> = {
-  python: /^\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\(/,
+  python: new RegExp(
+    String.raw`^\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\((?!\s*(?:mode\s*=\s*)?${WRITE_MODE_LITERAL})`
+  ),
 };
 // `NAME = <wrappers>"..."`, the string being the assignment's value.
 const ASSIGNED = new RegExp(String.raw`([$\w]+)\s*=\s*${WRAP}${STR_PREFIX}$`);
