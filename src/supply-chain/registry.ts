@@ -44,15 +44,25 @@ export interface ReleaseHistory {
   previousFile?: string;
 }
 
-const TIMEOUT_MS = 1500;
-const MAX_BYTES = 2 * 1024 * 1024;
+const TIMEOUT_MS = 2000;
+/**
+ * The largest registry documents measured on 2026-11-07: nx's abbreviated
+ * document 6.2 MB, typescript's 8.8 MB, react's 3.0 MB, boto3's PyPI project
+ * document 3.3 MB (its simple-API document is 2.2 MB, so no smaller route
+ * exists). Under the old 2 MB cap those lost their version list, so the
+ * release history and the age signal did not run for the largest projects
+ * (node9Firewall#393). 16 MB reads them all; a document over it still falls
+ * back as before. The timeout grew with it: typescript's arrives in about
+ * 1.2 s on a good link.
+ */
+const MAX_BYTES = 16 * 1024 * 1024;
 /** A version document (`/<name>/latest`) is one manifest: nx's is about 13 KB. */
 const VERSION_DOC_MAX_BYTES = 256 * 1024;
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 
 /**
  * The version document of one tag or version, read when the abbreviated
- * document is over MAX_BYTES (nx, typescript-eslint's largest packages): it
+ * document is over MAX_BYTES (rare since fw#393 raised it to 16 MB): it
  * still names the resolved version and its scripts, so the package is not
  * left with no version at all, which read as "has known malicious versions"
  * whenever the record covered any version (fw#372 A10). It carries no publish
@@ -79,7 +89,7 @@ async function npmVersionDocument(url: string, selector: string): Promise<Regist
  * no per-version times, and ANY publish moves it (a `next` or `beta` tag
  * included). So `modified` is only a hint: when it falls inside the window
  * the caller cares about, the full document is read for `time[version]`,
- * capped at MAX_BYTES (react's is 7 MB). Over the cap or unavailable, the
+ * capped at MAX_BYTES (nx's full document is 14 MB). Over the cap or unavailable, the
  * hint stands (the conservative side) and `ageFallback` says so.
  */
 async function npmInfo(

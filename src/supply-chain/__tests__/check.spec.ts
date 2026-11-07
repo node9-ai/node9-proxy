@@ -479,7 +479,7 @@ describe('runPackageCheck — npm age is version-true', () => {
         ? npmDoc('2.0.0', { modified: FRESH })
         : new Response('{}', {
             status: 200,
-            headers: { 'content-length': String(5 * 1024 * 1024) },
+            headers: { 'content-length': String(17 * 1024 * 1024) },
           });
     const r = await runPackageCheck(...bash('npm i node9-canary-big'), CFG);
     expect(r.findings.map((f) => f.kind)).toEqual(['new']);
@@ -651,7 +651,7 @@ describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10
   const tooLarge = () =>
     new Response('{}', {
       status: 200,
-      headers: { 'content-type': 'application/json', 'content-length': String(3 * 1024 * 1024) },
+      headers: { 'content-type': 'application/json', 'content-length': String(17 * 1024 * 1024) },
     });
   it('resolves the version from the version document, so a record for other versions is not a block', async () => {
     indexWith('npm', 'node9-canary-big', [{ id: 'MAL-0000-0002', versions: ['1.0.0'] }]);
@@ -704,6 +704,58 @@ describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10
     });
     expect(r.verdict).toBe('allow');
     expect(calls).toContain('http://registry.test/node9-canary-big/1.5.0');
+  });
+});
+
+describe('runPackageCheck — registry documents between 2 MB and 16 MB are read (node9Firewall#393)', () => {
+  const FRESH = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  /** A document whose Content-Length declares `mb` megabytes; the body is the JSON. */
+  const sized = (body: unknown, mb: number) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-length': String(mb * 1024 * 1024) },
+    });
+  it('npm: a 6 MB abbreviated document (nx) keeps its version list, so the release history is read', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nx'] = () =>
+      sized(
+        {
+          name: 'node9-canary-nx',
+          modified: OLD,
+          'dist-tags': { latest: '2.0.0' },
+          versions: {
+            '1.0.0': { hasInstallScript: true },
+            '2.0.0': { hasInstallScript: true },
+          },
+        },
+        6
+      );
+    const r = await runPackageCheck(...bash('pnpm add node9-canary-nx'), CFG);
+    // The previous release ran the same script: no finding, no fallback miss.
+    expect(r.verdict).toBe('allow');
+    expect(r.misses).toEqual([]);
+    expect(calls).not.toContain('http://registry.test/node9-canary-nx/latest');
+  });
+  it('PyPI: a 3 MB project document (boto3) still yields the version and its age', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    routes['http://pypi.test/pypi/node9-canary-big-py/json'] = () =>
+      sized(
+        {
+          info: { version: '1.2.0' },
+          urls: [{ filename: 'node9_canary_big_py-1.2.0.tar.gz', upload_time_iso_8601: FRESH }],
+          releases: {
+            '1.1.0': [{ filename: 'node9_canary_big_py-1.1.0.tar.gz' }],
+            '1.2.0': [{ filename: 'node9_canary_big_py-1.2.0.tar.gz' }],
+          },
+        },
+        3
+      );
+    const r = await runPackageCheck(...bash('pip install node9-canary-big-py'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+    expect(r.findings[0].version).toBe('1.2.0');
+    // The only miss left is the provenance read this fake registry does not
+    // serve; the document itself was read in full.
+    expect(r.misses.join(' ')).not.toMatch(/metadata unavailable|too large/);
   });
 });
 
