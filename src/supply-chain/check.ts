@@ -13,6 +13,9 @@
 //   no package by that name on npm or PyPI, or npm's security holding package
 //       in its place → review (node9Firewall#385 wave 3; policy.packageCheck
 //       .lookalike), unless the install can come from a registry the user set up
+//   a name one edit (or a separator, a scope, a padding word) away from one of
+//       the most downloaded names, when the package is absent, under a year old
+//       or (npm) under 1,000 downloads a week → review (same knob)
 //   anything else, and every lookup failure → allow
 //
 // The registry also names the version an unpinned install resolves to, so it
@@ -36,12 +39,14 @@ import {
   HAS_REGISTRY_CLIENT,
   pypiHistory,
   registryInfo,
+  registryStanding,
   type RegistryInfo,
   type ReleaseHistory,
 } from './registry';
 import { npmSourceRepo, pypiSourceRepo, type SourceRepo } from './provenance';
 import { resolveInstalled, LOCAL_FIRST_MANAGERS } from './local-resolve';
 import { configuredRegistryHosts } from './registries';
+import { describeNearMiss, nearMiss } from './lookalike';
 
 export interface PackageCheckConfig {
   enabled: boolean;
@@ -75,7 +80,8 @@ export interface PackageFinding {
     | 'install-script'
     | 'provenance-drop'
     | 'absent'
-    | 'placeholder';
+    | 'placeholder'
+    | 'lookalike';
   detail: string;
   advisories?: string[];
 }
@@ -121,6 +127,11 @@ function label(p: PackageInstallRequest, version?: string): string {
 }
 
 const REGISTRY_NAME: Partial<Record<PackageEcosystem, string>> = { npm: 'npm', PyPI: 'PyPI' };
+
+/** A lookalike younger than this has no standing by age. */
+const LOOKALIKE_MAX_AGE_MS = 365 * 24 * 3_600_000;
+/** An npm lookalike under this many downloads a week has no standing by use. */
+const LOOKALIKE_MIN_WEEKLY_DOWNLOADS = 1000;
 
 /**
  * Whether an install in this command can only come from the public registry:
@@ -321,7 +332,53 @@ async function checkOne(
   const mal = await maliciousFor(p, version, cfg, misses, networkCapped);
   if (mal) findings.push(mal);
 
-  if (absent && cfg.lookalike !== 'off' && publicRegistryOnly(ctx)) {
+  if (cfg.lookalike !== 'off' && (absent || info) && !networkCapped) {
+    const near = await nearMiss(p.ecosystem, p.name);
+    if (near && absent && publicRegistryOnly(ctx)) {
+      findings.push({
+        pkg: p,
+        kind: 'lookalike',
+        detail: `${label(p)} looks like "${near.popular}" (${describeNearMiss(near)}) and does not exist on ${REGISTRY_NAME[p.ecosystem]}`,
+      });
+    } else if (near && info) {
+      const standing =
+        info.createdAtMs !== undefined
+          ? { createdAtMs: info.createdAtMs }
+          : await registryStanding(p.ecosystem, p.name);
+      const ageMs = standing.createdAtMs !== undefined ? Date.now() - standing.createdAtMs : NaN;
+      const alike = `${label(p)} looks like "${near.popular}" (${describeNearMiss(near)})`;
+      if (Number.isFinite(ageMs) && ageMs < LOOKALIKE_MAX_AGE_MS) {
+        findings.push({
+          pkg: p,
+          version,
+          kind: 'lookalike',
+          detail: `${alike} and was first published ${Math.max(1, Math.round(ageMs / 86_400_000))} days ago`,
+        });
+      } else if (
+        p.ecosystem === 'npm' &&
+        standing.weeklyDownloads !== undefined &&
+        standing.weeklyDownloads < LOOKALIKE_MIN_WEEKLY_DOWNLOADS
+      ) {
+        findings.push({
+          pkg: p,
+          version,
+          kind: 'lookalike',
+          detail: `${alike} and had ${standing.weeklyDownloads} downloads last week`,
+        });
+      } else if (
+        !Number.isFinite(ageMs) &&
+        (p.ecosystem !== 'npm' || standing.weeklyDownloads === undefined)
+      ) {
+        misses.push(`${alike}: its age and downloads could not be read, so it is not a finding`);
+      }
+    } else if (absent && publicRegistryOnly(ctx)) {
+      findings.push({
+        pkg: p,
+        kind: 'absent',
+        detail: `${label(p)} does not exist on ${REGISTRY_NAME[p.ecosystem]}; a name an agent invents can be registered by anyone`,
+      });
+    }
+  } else if (absent && cfg.lookalike !== 'off' && publicRegistryOnly(ctx)) {
     findings.push({
       pkg: p,
       kind: 'absent',

@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { runPackageCheck, type PackageCheckConfig } from '../check';
 import { registryInfo } from '../registry';
+import { _setPopularNamesForTests } from '../lookalike';
 import { writeMeta, writeShard, shardOf, indexKey } from '../osv-index';
 import type { PackageEcosystem } from '@node9/policy-engine';
 
@@ -887,6 +888,114 @@ describe('runPackageCheck — a name the registry does not have, and a takeover 
       });
     const r = await runPackageCheck(...bash('npm i node9-canary-sec'), QUIET);
     expect(r.findings).toEqual([]);
+  });
+});
+
+describe('runPackageCheck — a name that looks like a popular one (node9Firewall#385 wave 3)', () => {
+  const QUIET = { ...CFG, newPackage: 'off' as const, installScript: 'off' as const };
+  const DAY = 86_400_000;
+  const isAbbrev = (init?: RequestInit) =>
+    String((init?.headers as Record<string, string> | undefined)?.Accept ?? '').includes(
+      'install-v1'
+    );
+  /** An npm package with one version, created `ageDays` ago. */
+  const npmPackage = (createdMs: number) => (init?: RequestInit) =>
+    isAbbrev(init)
+      ? npmDoc('1.0.0')
+      : json({ time: { created: new Date(createdMs).toISOString(), '1.0.0': OLD } });
+  beforeEach(() => {
+    process.env.NODE9_NPM_DOWNLOADS_URL = 'http://downloads.test';
+    _setPopularNamesForTests({ npm: ['node9-canary-famous'], PyPI: ['node9-canary-famous'] });
+    indexWith('npm', 'node9-canary-other', []);
+    indexWith('PyPI', 'node9-canary-other', []);
+  });
+  afterEach(() => {
+    _setPopularNamesForTests(null);
+    delete process.env.NODE9_NPM_DOWNLOADS_URL;
+  });
+
+  it('a young package one letter off a popular name is a review that names both', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 12 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('looks like "node9-canary-famous" (one letter off)');
+    expect(r.reason).toContain('first published 12 days ago');
+  });
+  it('an old package with few downloads is a review by its downloads', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ downloads: 17, package: 'node9-canary-famuos' });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('had 17 downloads last week');
+  });
+  it('an old, well-downloaded neighbour is a real package: no finding', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ downloads: 48_000, package: 'node9-canary-famuos' });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('a name the downloads API never counted has no downloads', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ error: 'package node9-canary-famuos not found' }, 404);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.reason).toContain('had 0 downloads last week');
+  });
+  it('age and downloads both unreadable: a miss, not a finding', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = (init) =>
+      isAbbrev(init) ? npmDoc('1.0.0') : json({}, 503);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({}, 503);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.verdict).toBe('allow');
+    expect(r.misses.join(' ')).toContain('age and downloads could not be read');
+  });
+  it('absent and alike: one finding that says both', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = () =>
+      new Response('{"error":"Not found"}', { status: 404 });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('looks like "node9-canary-famous"');
+    expect(r.reason).toContain('does not exist on npm');
+  });
+  it('PyPI: the project document says when the project first existed', async () => {
+    const young = new Date(Date.now() - 20 * DAY).toISOString();
+    routes['http://pypi.test/pypi/node9-canary-famuos/json'] = () =>
+      json({
+        info: { version: '0.2.0' },
+        urls: [{ filename: 'node9_canary_famuos-0.2.0.tar.gz', upload_time_iso_8601: young }],
+        releases: {
+          '0.1.0': [{ filename: 'node9_canary_famuos-0.1.0.tar.gz', upload_time_iso_8601: young }],
+          '0.2.0': [{ filename: 'node9_canary_famuos-0.2.0.tar.gz', upload_time_iso_8601: young }],
+        },
+      });
+    const r = await runPackageCheck(...bash('pip install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('first published 20 days ago');
+    expect(calls).toHaveLength(1);
+  });
+  it('the popular name itself, and a name nothing resembles, are not looked into', async () => {
+    routes['http://registry.test/node9-canary-famous'] = npmPackage(Date.now() - 5 * DAY);
+    routes['http://registry.test/node9-canary-nothing-alike'] = npmPackage(Date.now() - 5 * DAY);
+    for (const name of ['node9-canary-famous', 'node9-canary-nothing-alike']) {
+      calls.length = 0;
+      const r = await runPackageCheck(...bash(`npm install ${name}`), QUIET);
+      expect(r.findings, name).toEqual([]);
+      expect(calls, name).toEqual([`http://registry.test/${name}`]);
+    }
+  });
+  it('lookalike off: nothing is compared', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 5 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), {
+      ...QUIET,
+      lookalike: 'off',
+    });
+    expect(r.findings).toEqual([]);
+    expect(calls).toEqual(['http://registry.test/node9-canary-famuos']);
   });
 });
 

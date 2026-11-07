@@ -11,6 +11,8 @@ export interface Endpoints {
   osvBucket: string | null;
   osvApi: string | null;
   npmRegistry: string | null;
+  /** npm's download counts (api.npmjs.org), read for the lookalike check. */
+  npmDownloads: string | null;
   pypi: string | null;
 }
 
@@ -18,6 +20,7 @@ const DEFAULTS = {
   osvBucket: 'https://osv-vulnerabilities.storage.googleapis.com',
   osvApi: 'https://api.osv.dev',
   npmRegistry: 'https://registry.npmjs.org',
+  npmDownloads: 'https://api.npmjs.org',
   pypi: 'https://pypi.org',
 };
 
@@ -25,6 +28,7 @@ const OVERRIDES: Record<keyof Endpoints, string> = {
   osvBucket: 'NODE9_OSV_BUCKET_URL',
   osvApi: 'NODE9_OSV_API_URL',
   npmRegistry: 'NODE9_NPM_REGISTRY_URL',
+  npmDownloads: 'NODE9_NPM_DOWNLOADS_URL',
   pypi: 'NODE9_PYPI_URL',
 };
 
@@ -39,6 +43,7 @@ export function endpoints(): Endpoints {
     osvBucket: pick('osvBucket'),
     osvApi: pick('osvApi'),
     npmRegistry: pick('npmRegistry'),
+    npmDownloads: pick('npmDownloads'),
     pypi: pick('pypi'),
   };
 }

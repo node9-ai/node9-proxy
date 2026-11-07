@@ -31,6 +31,16 @@ export interface RegistryInfo {
   /** npm: the package was removed as malicious and a `-security` holding
    *  version is all the registry serves (node9Firewall#385, wave 3). */
   placeholder?: boolean;
+  /** When the package's first release was published (epoch ms), where the
+   *  document read already says: PyPI's project document, npm's full one. */
+  createdAtMs?: number;
+}
+
+/** What a package has to its name, for the lookalike check: its age and,
+ *  on npm, its downloads last week. A field is absent when unreadable. */
+export interface Standing {
+  createdAtMs?: number;
+  weeklyDownloads?: number;
 }
 
 /** `absent`: the registry answered that no package has this name (a 404 on
@@ -189,6 +199,8 @@ async function npmInfo(
     } | null;
     const t = full?.time?.[resolved];
     const tMs = t ? Date.parse(t) : NaN;
+    const created = full?.time?.created ? Date.parse(full.time.created) : NaN;
+    if (Number.isFinite(created)) info.createdAtMs = created;
     if (Number.isFinite(tMs)) {
       info.publishedAtMs = tMs;
       return info;
@@ -226,14 +238,75 @@ async function pypiInfo(name: string, version?: string): Promise<RegistryLookup>
     file: doc.urls?.find((u) => typeof u.filename === 'string')?.filename,
   };
   // The project document (an unpinned install) lists every release.
-  if (doc.releases) info.history = pypiHistoryOf(doc.releases, resolved) ?? undefined;
+  if (doc.releases) {
+    info.history = pypiHistoryOf(doc.releases, resolved) ?? undefined;
+    info.createdAtMs = pypiCreatedOf(doc.releases);
+  }
   return info;
+}
+
+/** The earliest upload across every release: when the project first existed. */
+function pypiCreatedOf(
+  releases: NonNullable<NonNullable<PypiDoc>['releases']>
+): number | undefined {
+  let min = Infinity;
+  for (const files of Object.values(releases)) {
+    for (const f of files ?? []) {
+      const t = f.upload_time_iso_8601 ? Date.parse(f.upload_time_iso_8601) : NaN;
+      if (Number.isFinite(t) && t < min) min = t;
+    }
+  }
+  return Number.isFinite(min) ? min : undefined;
+}
+
+/**
+ * The standing of a package whose name looks like a popular one
+ * (node9Firewall#385, wave 3): npm's full document for `time.created` (small
+ * for a package with few versions, which a lookalike is) and its downloads
+ * last week; PyPI's project document for the earliest upload. Each part that
+ * cannot be read is left out; the caller records the miss.
+ */
+export async function registryStanding(eco: PackageEcosystem, name: string): Promise<Standing> {
+  const out: Standing = {};
+  const ep = endpoints();
+  if (eco === 'npm' && ep.npmRegistry) {
+    const encoded = name.replaceAll('/', '%2F');
+    const [full, downloads] = await Promise.all([
+      fetchJson(`${ep.npmRegistry}/${encoded}`, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })
+        .then((d) => d as { time?: { created?: string } } | null)
+        .catch(() => undefined),
+      ep.npmDownloads
+        ? fetchJson(`${ep.npmDownloads}/downloads/point/last-week/${encoded}`, {
+            timeoutMs: TIMEOUT_MS,
+            maxBytes: 64 * 1024,
+          })
+            .then((d) => d as { downloads?: number } | null)
+            .catch(() => undefined)
+        : Promise.resolve(undefined),
+    ]);
+    const created = full?.time?.created ? Date.parse(full.time.created) : NaN;
+    if (Number.isFinite(created)) out.createdAtMs = created;
+    // The downloads API answers 404 with a body for a name it never counted;
+    // fetchJson maps that to null, which is "no downloads" too.
+    if (downloads === null) out.weeklyDownloads = 0;
+    else if (typeof downloads?.downloads === 'number') out.weeklyDownloads = downloads.downloads;
+  } else if (eco === 'PyPI' && ep.pypi) {
+    const doc = (await fetchJson(`${ep.pypi}/pypi/${encodeURIComponent(name)}/json`, {
+      timeoutMs: TIMEOUT_MS,
+      maxBytes: MAX_BYTES,
+    }).catch(() => undefined)) as PypiDoc | undefined;
+    if (doc?.releases) out.createdAtMs = pypiCreatedOf(doc.releases);
+  }
+  return out;
 }
 
 type PypiDoc = {
   info?: { version?: string };
   urls?: Array<{ upload_time_iso_8601?: string; filename?: string }>;
-  releases?: Record<string, Array<{ filename?: string; yanked?: boolean }>>;
+  releases?: Record<
+    string,
+    Array<{ filename?: string; yanked?: boolean; upload_time_iso_8601?: string }>
+  >;
 } | null;
 
 function pypiHistoryOf(
