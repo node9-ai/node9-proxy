@@ -287,6 +287,30 @@ describe('the gate', () => {
       (await jailed(py('print(open("~/.gmail-mcp/creds.json").read())'), ['~/.gmail-mcp'])).decision
     ).toBe('review');
   });
+
+  it('a long run of slashes in a literal costs no more under a jail', () => {
+    // Trimming trailing slashes with /\/+$/ is quadratic on a run of slashes
+    // that does not end the string (CodeQL js/polynomial-redos). CPU time, so
+    // a busy machine does not count; both halves run under the same load.
+    const cpuNow = (): number => {
+      const u = process.cpuUsage();
+      return (u.user + u.system) / 1000;
+    };
+    const lines = Array.from({ length: 15 }, (_, i) => `p${i} = "${'/'.repeat(4090)}x"`);
+    const command = py(`${lines.join('\n')}\nprint(1)`);
+    const cost = (jailPaths: string[]) => {
+      const runs = [0, 1, 2].map(() => {
+        const t = cpuNow();
+        inlineExecReview(command, jailPaths);
+        return cpuNow() - t;
+      });
+      return runs.sort((a, b) => a - b)[1];
+    };
+    cost([]);
+    const without = cost([]);
+    const withJail = cost(['/usr', '~/.gmail-mcp']);
+    expect(withJail).toBeLessThan(without * 5 + 15);
+  });
 });
 
 describe('inlineExecReason', () => {

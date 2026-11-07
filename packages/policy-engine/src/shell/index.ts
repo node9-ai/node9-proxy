@@ -2897,10 +2897,10 @@ function isProtectedCodePath(p: string): boolean {
  * met by either spelling of the same directory.
  */
 function isJailedCodePath(literal: string, jailPaths: readonly string[]): boolean {
-  const value = literal.replace(/\\/g, '/').replace(/\/+$/, '');
+  const value = trimTrailingSlashes(literal.replace(/\\/g, '/'));
   if (!value) return false;
   for (const raw of jailPaths) {
-    const jail = raw.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    const jail = trimTrailingSlashes(raw.trim().replace(/\\/g, '/'));
     if (!jail) continue;
     const home = homeTail(jail);
     if (home === null) {
@@ -2913,6 +2913,14 @@ function isJailedCodePath(literal: string, jailPaths: readonly string[]): boolea
     if (tail !== null && (tail === home || tail.startsWith(home + '/'))) return true;
   }
   return false;
+}
+
+/** `s` without its trailing slashes. A loop: `/\/+$/` is quadratic on a long
+ *  run of slashes that does not end the string. */
+function trimTrailingSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end--;
+  return s.slice(0, end);
 }
 
 /** The part of a home path after `~/`, `$HOME/`, `/home/<u>/`, `/Users/<u>/`
