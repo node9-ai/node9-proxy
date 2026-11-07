@@ -102,6 +102,16 @@ export function mapToolOutputStrings(toolResponse: unknown, fn: (s: string) => s
   return walk(toolResponse, 0);
 }
 
+/** Every string leaf of `toolResponse`, in the order mapToolOutputStrings visits them. */
+export function toolOutputLeaves(toolResponse: unknown): string[] {
+  const leaves: string[] = [];
+  mapToolOutputStrings(toolResponse, (s) => {
+    leaves.push(s);
+    return s;
+  });
+  return leaves;
+}
+
 /**
  * Frame the leaves of a tool result that carry an injected instruction.
  *

@@ -3,12 +3,15 @@
 // which level. Nothing else told them: on 2026-10-30 a workspace sat at Audit
 // (log only) unnoticed, and a dry run looked as if node9 did not work.
 //
-// The channel is systemMessage. 2.48.0 also asked the agent to quote the line
-// at the top of its reply (the desktop app keeps systemMessage behind the
-// collapsed tool row), but the instruction stays in the conversation and was
-// obeyed in every later reply; measured 2026-11-02, see SESSION_NOTICE_NOTE.
-// The agent now gets the line as context and is asked not to mention it.
-// A level change mid-session gets one more notice.
+// Two channels. systemMessage, which the CLI shows and the desktop app hides
+// behind the collapsed tool row; and the agent, asked to open its next reply
+// with the line (node9Firewall#442). That ask stays in the conversation, and
+// 2.48.0 measured it obeyed in every later reply (one session in five, 2026-11-02),
+// so the user's next prompt closes it: UserPromptSubmit tells the agent the line
+// was shown. The prompt, not the next tool call: the first reply usually makes
+// several calls before it writes any text, and a close sent on the second of
+// them would land before the line was ever shown.
+// A level change mid-session gets one more notice, closed the same way.
 //
 // UX only: a failure here never changes the decision and never blocks.
 
@@ -35,13 +38,18 @@ const LEVEL_NAMES: Readonly<Record<Level, string>> = {
   'block-all': 'Block all',
 };
 
-// No quote instruction (fallback c of the notice-repeat design). Measured
-// 2026-11-02 in Claude Code: with "show the line once ... leave it out of later
-// replies" one session in five still opened all four replies with it, and a
-// level-change line came back in the next reply. The line now reaches the user
-// as systemMessage only; the agent is told the fact and asked not to mention it.
-export const SESSION_NOTICE_NOTE =
-  'node9 shows the user this line itself. Do not mention it unless the user asks about node9.';
+/** Asks the agent to show the line once; sent with it on an allowed call. */
+export const SESSION_NOTICE_ASK =
+  'Start your next reply to the user with the line above, exactly as written, then continue.';
+
+/** Sent on the user's next prompt: the line is shown and stays out from now on. */
+export const SESSION_NOTICE_DONE =
+  'The node9 line was already shown to the user. Do not include it in this reply or any later one. ' +
+  'If node9 sends a new node9 line later, show that one once, as it asks.';
+
+/** Flag suffix while the agent has been asked for the line and the user's next
+ *  prompt has not closed the ask yet. A flag without it is closed. */
+const OPEN_MARK = '+open';
 
 /** What the hook says this call: the first notice of the session, a notice
  *  that the level changed, one that the daemon stopped or came back
@@ -105,9 +113,19 @@ export function sessionNoticeOutput(
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      additionalContext: `${line}\n${SESSION_NOTICE_NOTE}`,
+      additionalContext: `${line}\n${SESSION_NOTICE_ASK}`,
     },
     systemMessage: line,
+  });
+}
+
+/** The UserPromptSubmit hook output that closes an open notice. */
+export function sessionNoticeClosedOutput(): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: SESSION_NOTICE_DONE,
+    },
   });
 }
 
@@ -124,7 +142,8 @@ const FLAG_MAX_BYTES = 32;
 
 /**
  * Whether this call carries a notice. The flag file `<id>.node9-flag` holds
- * the level the session was last told about:
+ * the level the session was last told about, with `+open` until the user's
+ * next prompt closes the ask (closeSessionNotice):
  * - no flag: create it (O_EXCL, so two concurrent hook calls cannot both
  *   win) with the level, and say 'first';
  * - a flag with another level: rewrite it (temp file and rename) and say
@@ -153,7 +172,7 @@ export function claimSessionNotice(
     const fd = fs.openSync(flag, 'wx', 0o600);
     created = true;
     try {
-      fs.writeSync(fd, level);
+      fs.writeSync(fd, level + OPEN_MARK);
     } finally {
       fs.closeSync(fd);
     }
@@ -184,17 +203,45 @@ function levelChange(
   level: string
 ): 'changed' | 'daemon' | null {
   try {
-    const told = readFlag(flag);
-    if (told === null) return null;
+    const content = readFlag(flag);
+    if (content === null) return null;
+    const told = content.endsWith(OPEN_MARK) ? content.slice(0, -OPEN_MARK.length) : content;
     if (told === level) return null;
     if (!isSameOwnDir(dir, seen)) return null;
-    atomicWriteSync(flag, level, { mode: 0o600 });
+    // A 2.48.0 flag (empty) records the level without a notice, so it stays
+    // closed; every notice below asks for the line and waits for the close.
+    atomicWriteSync(flag, told === '' ? level : level + OPEN_MARK, { mode: 0o600 });
     if (told === '') return null;
     // Only the daemon part moved (a flag of 2.48.1 to 2.51 holds the level alone).
     const levelPart = (v: string) => v.split(':')[0];
     return levelPart(told) === levelPart(level) ? 'daemon' : 'changed';
   } catch {
     return null;
+  }
+}
+
+/**
+ * The user's next prompt after a notice: true when the session's flag was open,
+ * which it now no longer is. Called on UserPromptSubmit, so the agent is told
+ * the line was shown before it writes the next reply. Any problem returns false:
+ * at worst the agent shows the line once more.
+ */
+export function closeSessionNotice(sessionId: string | undefined, home = os.homedir()): boolean {
+  if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) return false;
+  const dir = path.join(home, '.node9', 'notice-sessions');
+  try {
+    // Most prompts have nothing to close: no directory made, no checks run.
+    if (!fs.existsSync(path.join(dir, sessionId + SESSION_FLAG_SUFFIX))) return false;
+    const seen = ensureOwnDir(dir);
+    if (!seen) return false;
+    const flag = path.join(dir, sessionId + SESSION_FLAG_SUFFIX);
+    const content = readFlag(flag);
+    if (content === null || !content.endsWith(OPEN_MARK)) return false;
+    if (!isSameOwnDir(dir, seen)) return false;
+    atomicWriteSync(flag, content.slice(0, -OPEN_MARK.length), { mode: 0o600 });
+    return true;
+  } catch {
+    return false;
   }
 }
 

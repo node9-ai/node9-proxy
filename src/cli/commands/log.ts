@@ -46,6 +46,7 @@ import {
 import {
   frameUntrusted,
   frameUntrustedSource,
+  unframeLeaves,
   newUntrustedFrame,
   newSourceFrame,
   neutralizeMarkers,
@@ -55,6 +56,7 @@ import {
   shellOutputText,
   mapToolOutputStrings,
   frameToolOutputLeaves,
+  toolOutputLeaves,
 } from '../../tool-output';
 import { hashArgs } from '../../audit/hasher';
 import { derivedWrites } from '@node9/policy-engine';
@@ -617,10 +619,20 @@ export function registerLogCommand(program: Command): void {
                       injectedLeaf = (leaf) => scanInjection(leaf, injCtx) !== null;
                     }
                     if (agent === 'Claude Code' && !spotlightApplies) {
-                      // Frame the leaves that carry the injection, inside the shape.
+                      // Frame the leaves that carry the injection, inside the
+                      // shape. A result the gateway already framed whole is
+                      // framed with node9's frame in place of the gateway's
+                      // (fw#447).
+                      const base = updatedToolOutput ?? payload.tool_response;
+                      const suspect = (leaf: string) => scanInjection(leaf, injCtx) !== null;
+                      const un = unframeLeaves(
+                        toolOutputLeaves(base),
+                        (leaf) => leaf.length >= 40 || suspect(leaf)
+                      );
+                      let at = 0;
                       updatedToolOutput = frameToolOutputLeaves(
-                        updatedToolOutput ?? payload.tool_response,
-                        (leaf) => scanInjection(leaf, injCtx) !== null,
+                        un ? mapToolOutputStrings(base, () => un.leaves[at++]) : base,
+                        suspect,
                         newUntrustedFrame,
                         neutralizeMarkers
                       );
@@ -663,11 +675,24 @@ export function registerLogCommand(program: Command): void {
                       // Every leaf of substance is framed; short leaves (ids,
                       // flags) only lose any text imitating a node9 marker.
                       const base = updatedToolOutput ?? payload.tool_response;
-                      const framedOut = mapToolOutputStrings(base, (leaf) =>
-                        leaf.length >= 40 || (injectedLeaf !== null && injectedLeaf(leaf))
-                          ? frameUntrustedSource(leaf, word)
-                          : neutralizeMarkers(leaf)
-                      );
+                      const needsFrame = (leaf: string) =>
+                        leaf.length >= 40 || (injectedLeaf !== null && injectedLeaf(leaf));
+                      // A result `node9 mcp-gateway` already framed whole is
+                      // framed again without the gateway's frame: nesting the
+                      // two would report the inner markers as imitations
+                      // (fw#447). The leaves that carried that frame keep one.
+                      const un = unframeLeaves(toolOutputLeaves(base), needsFrame);
+                      let at = 0;
+                      const framedOut = mapToolOutputStrings(base, (leaf) => {
+                        const i = at++;
+                        const text = un ? un.leaves[i] : leaf;
+                        // A leaf that held only the header or footer stays empty.
+                        const carried =
+                          un !== null && (i === un.start || i === un.end) && text.trim() !== '';
+                        return carried || needsFrame(text)
+                          ? frameUntrustedSource(text, word)
+                          : neutralizeMarkers(text);
+                      });
                       // Emit a replacement only when a leaf actually changed: a
                       // short result ("sent") must not produce a no-op rewrite.
                       if (JSON.stringify(framedOut) !== JSON.stringify(base))

@@ -20,7 +20,13 @@ import { foldHomoglyphs } from '../dlp/normalize';
 import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES, type FileAccess } from '../files/paths';
 import picomatch from 'picomatch';
 import { collectShellFileAccesses } from './file-access';
-import { inlineLanguageOf, judgeInlineCode, type InlineCodeCategory } from './inline-code';
+import {
+  inlineLanguageOf,
+  inlineReadPaths,
+  judgeInlineCode,
+  type InlineCodeCategory,
+  type InlinePreload,
+} from './inline-code';
 export {
   BASH_TOOL_NAMES,
   isBashTool,
@@ -2570,6 +2576,8 @@ interface InlineCall {
   code: Array<string | null>;
   /** How the unreadable code arrives, for the approval prompt. */
   source?: 'pipe' | 'file' | 'variable' | 'payload';
+  /** What node loads before the code runs (-r dotenv/config, --env-file). */
+  preload?: InlinePreload;
 }
 
 /** A heredoc body as the interpreter receives it, or null when the shell would
@@ -2631,6 +2639,10 @@ function attachedCode(interp: string, flag: string): string | null {
   return rest === '' ? null : rest;
 }
 
+/** node's flags whose value is the next word, or joined with `=`. */
+const NODE_VALUE_FLAG =
+  /^(-r|--require|--import|--loader|--experimental-loader|--env-file|--env-file-if-exists|--input-type|-C|--conditions)(?:=(.*))?$/;
+
 /**
  * Does this ONE statement execute inline code, and which? `pipeFed` says whether
  * it reads another command's stdout (decided by the caller at the pipeline
@@ -2672,7 +2684,7 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   const fromStdin = (): InlineCall => {
     if (stdinFed) {
       const { code, source } = stdinCodeOf(redirs);
-      return { interp, code: [code], source };
+      return { interp, code: [code], source, preload };
     }
     return { interp, code: [null], source: 'pipe' };
   };
@@ -2680,8 +2692,24 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   let positionals = 0;
   let selectedProgram = false; // a script operand or `-m module` was chosen
   const codes: Array<string | null> = [];
+  const preload: InlinePreload = {};
+  const nodeFamily = inlineLanguageOf(interp) === 'node';
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    // node's flags that take a value: the value is not a script operand
+    // (`node --env-file .env -e CODE` read `.env` as the script and missed
+    // `-e`), and two of them load the environment (node9Firewall#440).
+    if (nodeFamily && !selectedProgram && codes.length === 0 && a != null) {
+      const flag = NODE_VALUE_FLAG.exec(a);
+      if (flag) {
+        const value = flag[2] ?? args[++i];
+        if (value != null) {
+          if (/^--env-file/.test(flag[1])) (preload.envFiles ??= []).push(value);
+          else if (/^dotenv\/config(?:\.js)?$/.test(value)) preload.dotenv = true;
+        }
+        continue;
+      }
+    }
     if (a == null) {
       if (codes.length > 0) break; // an argument to the code, not the interpreter
       positionals++; // dynamic arg — treat as a script operand
@@ -2735,7 +2763,12 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
     }
   }
   if (codes.length > 0) {
-    return { interp, code: codes, source: codes.includes(null) ? 'variable' : undefined };
+    return {
+      interp,
+      code: codes,
+      source: codes.includes(null) ? 'variable' : undefined,
+      preload,
+    };
   }
 
   // No script operand + code arriving over stdin (heredoc, herestring,
@@ -4438,7 +4471,8 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   if (
     !FS_OP_PRESCREEN_RE.test(normalized) &&
     !FS_OP_PRESCREEN_RE.test(command) &&
-    !SOURCES_FILE_RE.test(command)
+    !SOURCES_FILE_RE.test(command) &&
+    !runsInlineInterpreter(command, normalized)
   )
     return null;
   if (fsOpCache.has(command)) {
@@ -4451,9 +4485,16 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // the reader indirectly (a loop variable, a glob, $PWD, find -exec) is
   // resolved by the structural file-access walk, so it is consulted when the
   // direct reading found nothing (jail-indirect-reads design, 2026-11-02).
-  const computed =
+  // Inline interpreter code is read last (node9Firewall#440), and its block is
+  // not hidden by a review the other readings found (`cp .env x; python3 -c
+  // "open('.env')"`, /code-review 2026-11-07).
+  const direct =
     analyzeFsOperationImpl(command) ??
     (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null);
+  const computed =
+    direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
+      ? direct
+      : stricter(direct, inlineCodeJailRead(command));
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
@@ -5803,6 +5844,42 @@ function structuralJailRead(command: string): FsOpVerdict | null {
     const hit = glob ? matchSensitiveGlob(glob, !!a.dotGlob) : matchSensitivePath(a.path);
     if (hit?.verdict === 'block') return hit;
     review ??= hit;
+  }
+  return review;
+}
+
+/** An interpreter name inlineLanguageOf reads, in either reading of the
+ *  command: the prescreen for the inline-code jail walk. */
+// A whole word, so `node_modules`, `ubuntu` and `bundle` do not pay for the walk.
+const INLINE_INTERP_PRESCREEN_RE =
+  /(?:^|[^\w-])(?:python|node|tsx|ts-node|deno|bun|perl|ruby|irb|php)(?![A-Za-z_])/i;
+const runsInlineInterpreter = (command: string, normalized: string): boolean =>
+  INLINE_INTERP_PRESCREEN_RE.test(command) || INLINE_INTERP_PRESCREEN_RE.test(normalized);
+
+/**
+ * A jailed file read from inline interpreter code (node9Firewall#440):
+ * `python3 -c "print(open('.env').read())"`, a heredoc into `python3 -`,
+ * `node -e 'require("dotenv").config(); console.log(process.env.KEY)'`. Each
+ * path the code opens (inlineReadPaths) meets the jail's own path matcher, so
+ * the verdict and rule are the ones `cat` on that path gets. Part of the jail,
+ * not of commands.inline-exec, so it runs whatever that check says. Only the
+ * languages node9 reads: a shell payload is read by the walks above.
+ */
+function inlineCodeJailRead(command: string): FsOpVerdict | null {
+  const calls = inlineExecCalls(command);
+  if (calls === PARSE_FAIL) return null;
+  let review: FsOpVerdict | null = null;
+  for (const call of calls) {
+    const language = inlineLanguageOf(call.interp);
+    if (language === null) continue;
+    for (const code of call.code) {
+      if (code === null) continue;
+      for (const p of inlineReadPaths(language, code, call.preload)) {
+        const hit = matchSensitivePath(p);
+        if (hit?.verdict === 'block') return hit;
+        review ??= hit;
+      }
+    }
   }
   return review;
 }

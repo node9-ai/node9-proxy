@@ -199,7 +199,8 @@ export interface PolicyVerdict {
   /**
    * False when NO human may override this verdict: the SSRF tier-1 floors,
    * whose own reason string already tells the user "This address cannot be
-   * allowlisted". Absent means an override is a legitimate product decision,
+   * allowlisted", and a credential-file block (NOT_OVERRIDABLE_CHECKS,
+   * node9Firewall#441). Absent means an override is a legitimate product decision,
    * which is every other verdict.
    *
    * It exists because the host downgrades a hard block into a review whenever a
@@ -425,7 +426,7 @@ function applyCheckValue(value: Verdict, verdict: PolicyVerdict): PolicyVerdict 
  * the binary for a shell one, so it is the single right subject for both.
  *
  * `overridable` is deliberately unset: the egress POLICY is overridable (an
- * allowlist entry lifts it). Only the SSRF floor carries overridable: false.
+ * allowlist entry lifts it). Among network verdicts only the SSRF floor carries overridable: false.
  */
 function egressPolicyVerdict(eg: EgressVerdict): PolicyVerdict {
   return {
@@ -440,7 +441,32 @@ function egressPolicyVerdict(eg: EgressVerdict): PolicyVerdict {
   };
 }
 
+// The checks whose block no person may override in the moment
+// (node9Firewall#441, founder decision a, 2026-11-07): the credential files.
+// The host softens a block into an override card whenever a person can
+// approve, and on that card Enter means Allow; for `.env`, ~/.ssh and ~/.aws
+// that put a secret one reflexive Enter away. Someone who needs access changes
+// the jail's rule in config. Names known only at run time
+// (data.credential-files-unknown) are a guess and keep the card.
+const NOT_OVERRIDABLE_CHECKS: ReadonlySet<string> = new Set([
+  'data.credential-files',
+  'data.credential-files-other',
+]);
+
 export async function evaluatePolicy(
+  config: PolicyConfig,
+  toolName: string,
+  args?: unknown,
+  context: PolicyContext = {},
+  hostHooks: PolicyHostHooks = {}
+): Promise<PolicyVerdict> {
+  const v = await evaluatePolicyVerdict(config, toolName, args, context, hostHooks);
+  return v.decision === 'block' && v.checkId !== undefined && NOT_OVERRIDABLE_CHECKS.has(v.checkId)
+    ? { ...v, overridable: false }
+    : v;
+}
+
+async function evaluatePolicyVerdict(
   config: PolicyConfig,
   toolName: string,
   args?: unknown,

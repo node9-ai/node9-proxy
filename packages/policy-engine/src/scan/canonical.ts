@@ -805,7 +805,13 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // is dropped); `-o`, `-iname` and `-prune` in find; find piped through other
 // stages, braces, a subshell or `sudo xargs`; `declare -p NAME`; and `$?`,
 // `$1`, PATH or a loop variable after `source .env` is not a print.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v38';
+// canonical-v39 (2026-11-07, node9Firewall#440): the credential jail reads
+// inline interpreter code (python/node/perl/ruby/php via -c/-e, a heredoc or a
+// here-string): a jailed path a read call opens is the read `cat` of that file
+// would be, and a dotenv load (or node -r dotenv/config, --env-file) whose
+// values reach the code reads ./.env. node's value flags (`--env-file .env`)
+// no longer hide the `-e` after them. Histories scanned under v38 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
 // gained the Dropbox App Secret pattern and an Authorization-header reading of
@@ -865,7 +871,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v38';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2d3dfcccff2c2f65';
+export const CANONICAL_EXTRACTOR_HASH = 'e07d9e5e537017ae';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

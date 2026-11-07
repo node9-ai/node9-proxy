@@ -87,14 +87,26 @@ const readLog = () => (fs.existsSync(startupLog()) ? fs.readFileSync(startupLog(
  * is already held by a real daemon on this machine — equally valid for the test,
  * which only needs "the port is occupied", not "occupied by us".
  */
-async function occupyDaemonPort(): Promise<void> {
+async function occupyDaemonPort(port = DAEMON_PORT): Promise<void> {
   await new Promise<void>((resolve) => {
     const s = net.createServer();
     s.once('error', () => resolve()); // already in use — precondition satisfied
-    s.listen(DAEMON_PORT, DAEMON_HOST, () => {
+    s.listen(port, DAEMON_HOST, () => {
       blocker = s;
       trackSockets(s);
       resolve();
+    });
+  });
+}
+
+/** A port nothing listens on right now. */
+async function freePort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, DAEMON_HOST, () => {
+      const port = (s.address() as net.AddressInfo).port;
+      s.close(() => resolve(port));
     });
   });
 }
@@ -190,17 +202,24 @@ function crashPackage(condition = 'process.argv[2] === "daemon"'): string {
 
 describe('A4c — the daemon logs its own startup outcome', () => {
   itUnix('records port-in-use and exits 0 when another daemon owns the port', async () => {
-    await occupyDaemonPort();
+    // A port of its own, held by a plain socket that answers no /health probe.
+    // On the real port a developer's own daemon (a build with the fw#445 key)
+    // answers the probe with a proof for another HOME, and the start is then
+    // recorded as port-held-unverified: the test passed in CI and failed on any
+    // machine running a current daemon (2026-11-07).
+    const port = await freePort();
+    await occupyDaemonPort(port);
     // A pid file naming a process that is definitely alive (this test runner) puts
     // the daemon on the "another daemon owns it" branch deterministically, instead
     // of depending on whatever happens to be running on the machine.
     fs.writeFileSync(
       path.join(home, '.node9', 'daemon.pid'),
-      JSON.stringify({ pid: process.pid, port: DAEMON_PORT, internalToken: 'x' }),
+      JSON.stringify({ pid: process.pid, port, internalToken: 'x' }),
       'utf-8'
     );
 
-    const r = runDaemon();
+    // NODE9_DAEMON_PORT is read only under NODE9_TESTING.
+    const r = runDaemon(CLI, { NODE9_TESTING: '1', NODE9_DAEMON_PORT: String(port) });
     expect(r.error).toBeUndefined();
     expect(r.status).toBe(0); // losing a port race is benign, not a failure
     expect(readLog()).toMatch(/daemon-startup:port-in-use/);

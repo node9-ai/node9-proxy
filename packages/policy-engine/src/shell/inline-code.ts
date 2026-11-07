@@ -280,6 +280,167 @@ function protectedLiteral(code: string, isProtected: (p: string) => boolean): st
   return null;
 }
 
+// The paths inline code reads, for the credential jail (node9Firewall#440).
+//
+// A string counts only where a read call opens it: `open(".env")`,
+// `readFileSync(path.join(os.homedir(), ".ssh/id_rsa"))`, `File.read(".env")`,
+// or a variable assigned the string and then opened (`p = '.env'; open(p)`).
+// A jailed name that is only text (a script that edits code mentioning `.env`,
+// a probe that passes `"cat ~/.ssh/id_rsa"` to a function, `os.path.exists`)
+// is not a read: on 63,797 real agent commands, reading every string literal
+// stopped 480 commands, nearly all of them text; this reading stops 49, each a
+// real read (2026-11-07). The trade-off: a path assembled from pieces at run time
+// (`os.path.join(home, ".ssh", "id_rsa")`) is not seen.
+//
+// dotenv: a loader names no path, and `require("dotenv").config()`,
+// `load_dotenv()`, `node -r dotenv/config` and `node --env-file=F` read ./.env
+// (or F) into the environment. That counts as a read when the code also reads
+// the environment (founder decision a): `require("dotenv").config();
+// require("./migrate")` loads it for another program and stays quiet. A call
+// that hands the file's values to the code itself (Python dotenv_values /
+// get_key, node `.parsed` or config() used as a value) is a read on its own. A
+// loader given a literal path reads that path, which the read-call scan judges.
+
+/** What reaches the code before it runs: node's -r/--import and --env-file. */
+export interface InlinePreload {
+  /** `node -r dotenv/config`, `--import dotenv/config`. */
+  dotenv?: boolean;
+  /** `node --env-file=F`: each F is loaded into the environment. */
+  envFiles?: string[];
+}
+
+// A call that opens its argument for reading. The name is matched whole:
+// `reopen(` and `fileAccessView(` are not `open(` and `file(`.
+const READ_CALL: Record<InlineLanguage, string> = {
+  python: String.raw`(?:\b(?:io|codecs)\.)?\bopen|\b(?:dotenv_values|load_dotenv|get_key|read_file|loadtxt|read_csv)`,
+  node: String.raw`\b(?:readFileSync|readFile|createReadStream|readTextFile(?:Sync)?|readFileStr|openSync|file)`,
+  perl: String.raw`\b(?:open|sysopen|read_file|slurp)`,
+  ruby: String.raw`\b(?:File|IO)\.(?:read|binread|readlines|foreach|open)|\bDotenv\.(?:load|parse|overload)`,
+  php: String.raw`\b(?:file_get_contents|fopen|file|readfile|parse_ini_file|highlight_file|show_source)`,
+};
+
+// Up to three wrapping calls between the read call and the string, each with up
+// to three plain arguments before it: `open(os.path.expanduser(`,
+// `readFileSync(path.join(os.homedir(), __dirname, `, `open(my $f, "<", `. Bounded
+// repetitions, no nested `*`: this runs once per string literal.
+const ARG = String.raw`(?:(?:(?:my|our|local)\s+)?[\w.$]+(?:\s*\(\s*\))?|'[^'\n]{0,8}'|"[^"\n]{0,8}")\s*,\s*`;
+const WRAP = String.raw`(?:(?:new\s+)?[\w.$]+\s*\(\s*(?:${ARG}){0,3}){0,3}`;
+// Python string prefixes (`f"..."`, `rb"..."`), perl's 2-argument `open(F, "<x")`.
+const STR_PREFIX = String.raw`[rRbBuUfF]{0,2}`;
+
+// A write is not a read: `open(p, "w")`, `fopen(p, "a")`, `File.open(p, "w")`,
+// perl's `open(F, ">", p)` / `">p"`. A test that writes a fake key into a
+// scratch home (`open(f'{H}/.ssh/id_rsa','w')`) is a common agent shape.
+// A mode that writes without reading back: `w` (truncates), or `a`/`x` without
+// `+`. `a+` and `r+` read the file, so they stay reads.
+const WRITE_MODE_LITERAL = String.raw`['"](?=[rbtU+]*w|(?![^'"]*\+)[rbtU]*[ax])[rwaxbtU+]{1,4}['"]`;
+const WRITE_MODE = String.raw`\s*,\s*(?:mode\s*=\s*)?${WRITE_MODE_LITERAL}`;
+// After the string, past the wrappers' closing parens: `open(join(h, 'x'), 'w')`.
+const WRITE_MODE_AFTER = new RegExp(`^(?:\\s*\\)){0,3}${WRITE_MODE}`);
+const PERL_WRITE_BEFORE = /['"]\s*(?:\+?[>|]|>>)\s*['"]\s*,\s*$/;
+
+const readCallBefore = (language: InlineLanguage): RegExp =>
+  new RegExp(
+    String.raw`(?:${READ_CALL[language]})(?![\w$])\s*\(?\s*(?:${ARG}){0,3}${WRAP}${STR_PREFIX}$`
+  );
+const READ_BEFORE: Record<InlineLanguage, RegExp> = {
+  python: readCallBefore('python'),
+  node: readCallBefore('node'),
+  perl: readCallBefore('perl'),
+  ruby: readCallBefore('ruby'),
+  php: readCallBefore('php'),
+};
+// `Path(".env").read_text()`: the read call comes after the string.
+const READ_AFTER: Partial<Record<InlineLanguage, RegExp>> = {
+  python: new RegExp(
+    String.raw`^\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\((?!\s*(?:mode\s*=\s*)?${WRITE_MODE_LITERAL})`
+  ),
+};
+// `NAME = <wrappers>"..."`, the string being the assignment's value.
+const ASSIGNED = new RegExp(String.raw`([$\w]+)\s*=\s*${WRAP}${STR_PREFIX}$`);
+
+// A name a read call opens: `open(p)`, `readFileSync(path.join(dir, p))`, and
+// python's `Path(p).read_text()`.
+const openedName = (language: InlineLanguage): RegExp =>
+  new RegExp(
+    String.raw`(?:${READ_CALL[language]})(?![\w$])\s*\(?\s*(?:${ARG}){0,3}${WRAP}([$\w]+)(?!${WRITE_MODE})\s*[),]` +
+      (language === 'python'
+        ? String.raw`|\bPath\s*\(\s*([$\w]+)\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\(`
+        : ''),
+    'g'
+  );
+const OPENED_NAME: Record<InlineLanguage, RegExp> = {
+  python: openedName('python'),
+  node: openedName('node'),
+  perl: openedName('perl'),
+  ruby: openedName('ruby'),
+  php: openedName('php'),
+};
+
+const DOTENV = {
+  node: {
+    load: /\brequire\s*\(\s*['"`]dotenv(?:\/config)?['"`]\s*\)|\bimport\s*(?:[\w${}\s,*]+\s+from\s*)?['"`]dotenv(?:\/config)?['"`]|\bimport\s*\(\s*['"`]dotenv(?:\/config)?['"`]\s*\)/,
+    values: /\.parsed\b|[(,]\s*(?:require\s*\(\s*['"`]dotenv['"`]\s*\)|dotenv)\s*\.\s*config\s*\(/,
+    env: /\b(?:process|Deno|Bun)\s*\.\s*env\b/,
+    literalPath: /\bconfig\s*\(\s*\{[^)]*\bpath\s*:\s*['"`]/,
+  },
+  python: {
+    load: /\b(?:load_dotenv|dotenv_values|get_key)\s*\(/,
+    values: /\b(?:dotenv_values|get_key)\s*\(/,
+    env: /\b(?:environ|getenv)\b/,
+    literalPath: /\b(?:load_dotenv|dotenv_values)\s*\(\s*(?:dotenv_path\s*=\s*)?[rRbBuU]?['"]/,
+  },
+} as const;
+const DOTENV_PATH_OPTION = /\bconfig\s*\(\s*\{[^)]*\bpath\s*:\s*$/;
+
+/**
+ * The paths a block of inline code reads, as the credential jail should judge
+ * them. Candidates only: the caller's path matcher decides which are jailed.
+ */
+export function inlineReadPaths(
+  language: InlineLanguage,
+  code: string,
+  preload: InlinePreload = {}
+): string[] {
+  const out: string[] = [];
+  const before = READ_BEFORE[language];
+  const after = READ_AFTER[language];
+  const assigned = new Map<string, string[]>();
+  for (const m of code.matchAll(STRING_LITERAL)) {
+    const raw = m[2].trim();
+    const value = raw.replace(/^[<+]\s*/, ''); // perl `open(F, "<.env")`
+    if (!value) continue;
+    const head = code.slice(Math.max(0, m.index - 160), m.index);
+    const tail = code.slice(m.index + m[0].length, m.index + m[0].length + 40);
+    if (/^[>|]/.test(raw) || WRITE_MODE_AFTER.test(tail) || PERL_WRITE_BEFORE.test(head)) continue;
+    if (
+      before.test(head) ||
+      after?.test(tail) ||
+      (language === 'node' && DOTENV_PATH_OPTION.test(head))
+    ) {
+      out.push(value);
+      continue;
+    }
+    const name = ASSIGNED.exec(head)?.[1];
+    if (name) assigned.set(name, [...(assigned.get(name) ?? []), value]);
+  }
+  if (assigned.size > 0) {
+    // One pass collects the names a read call opens; a per-name search was
+    // quadratic on code with thousands of assignments.
+    const opened = new Set<string>();
+    for (const m of code.matchAll(OPENED_NAME[language])) opened.add(m[1] ?? m[2]);
+    for (const [name, values] of assigned) if (opened.has(name)) out.push(...values);
+  }
+  if (language === 'python' || language === 'node') {
+    const d = DOTENV[language];
+    const readsEnv = d.env.test(code);
+    const loads = /dotenv/.test(code) && d.load.test(code) && !d.literalPath.test(code);
+    if ((loads || preload.dotenv) && (readsEnv || d.values.test(code))) out.push('.env');
+    if (readsEnv) out.push(...(preload.envFiles ?? []));
+  }
+  return out;
+}
+
 /** Endless loop containing a write or a send: the amplification shape. */
 function amplifies(language: InlineLanguage, code: string): string | null {
   const loop =
