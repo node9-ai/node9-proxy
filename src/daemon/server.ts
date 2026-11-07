@@ -22,7 +22,6 @@ import {
   type Channel,
 } from '../auth/decision-record';
 import type { Card, CardKind, CardRequest } from './cards';
-import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { authorizeHeadless, getGlobalSettings, getConfig, _resetConfigCache } from '../core';
 import { isKeyedForPolicy } from '../config/keyed-guard';
@@ -38,6 +37,7 @@ import {
 } from '../cli/commands/scan';
 import { buildScanSummary } from '../scan-summary';
 import { CURRENT_BUILD, buildIdString, parseBuildId, compareBuild } from './build-id';
+import { loadDaemonKey, healthProof, HEALTH_NONCE, probePortHolder } from './daemon-key';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -353,6 +353,11 @@ export function startDaemon(): void {
   // re-stat'd. CURRENT_BUILD is a module-load constant, so /health reports the
   // code this process LOADED even after a rebuild overwrites dist on disk.
   const startedAt = new Date().toISOString();
+
+  // This HOME's daemon key (fw#445): /health proves with it, and a start that
+  // finds the port held checks the holder's proof against it. Null when it
+  // cannot be kept safely; this daemon then proves nothing and adopts no one.
+  const daemonKey = loadDaemonKey();
 
   // ── Graceful Idle Timeout ────────────────────────────────────────────────
   const IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -799,6 +804,7 @@ export function startDaemon(): void {
     // dist and misreport the running code as current, making same-version
     // takeover impossible (G3 in rogue-daemon-code-design.md).
     if (req.method === 'GET' && pathname === '/health') {
+      const nonce = reqUrl.searchParams.get('nonce') ?? '';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(
         JSON.stringify({
@@ -807,6 +813,9 @@ export function startDaemon(): void {
           pid: process.pid,
           startedAt,
           autoStarted,
+          // fw#445: the key proof, for a start that finds this port held.
+          ...(daemonKey &&
+            HEALTH_NONCE.test(nonce) && { proof: healthProof(daemonKey, nonce, process.pid) }),
         })
       );
     }
@@ -1516,25 +1525,48 @@ export function startDaemon(): void {
     server.listen(DAEMON_PORT, DAEMON_HOST);
   }
 
+  // fw#445: a holder that answers /health but cannot prove the key, while it
+  // claims a build that has the key (this one or newer) or names no build at
+  // all, is not a node9 daemon of this HOME. A holder of an older build
+  // answers without a proof and keeps the pre-key handling (upgrade path).
+  // With no key of our own nothing can be checked, so nothing is refused.
+  function isUnverifiedHolder(
+    answered: boolean,
+    proof: 'valid' | 'invalid' | 'absent',
+    build: ReturnType<typeof parseBuildId>
+  ): boolean {
+    if (!daemonKey || !answered || proof === 'valid') return false;
+    if (proof === 'invalid') return true;
+    return !build || compareBuild(build, CURRENT_BUILD) >= 0;
+  }
+
+  function refuseUnverifiedHolder(): void {
+    logDaemonStartup(
+      'port-held-unverified',
+      `:${DAEMON_PORT} is held by a process that is not a node9 daemon of this user`
+    );
+    recordStartupState(
+      'failed',
+      'port-held-unverified',
+      `:${DAEMON_PORT} is held by a process that could not prove it is this user's node9 daemon (another program, or a daemon started with another HOME) — stop it, then: node9 daemon --background`
+    );
+    process.exit(0);
+  }
+
   // Task #18 commit (b) — the takeover decision against a LIVE pidfile holder.
   // Rule (rogue-daemon-code-design.md §4): strictly newer build → cooperative
   // /shutdown + take the port; same-or-newer holder → yield exactly as before;
   // holder without /health (pre-#18 build) → yield (startup NEVER signals a
   // process; clearing legacy rogues is `node9 daemon restart`'s job, G1).
   async function decideAgainstHolder(holderPid: number, holderToken: string | null): Promise<void> {
-    let holderBuildId: string | null = null;
-    try {
-      const res = await fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/health`, {
-        signal: AbortSignal.timeout(800),
-      });
-      if (res.ok) {
-        const j = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-        if (j && typeof j.buildId === 'string') holderBuildId = j.buildId;
-      }
-    } catch {
-      /* port held but /health unreachable — treat as unknown build, yield */
-    }
+    // fw#445: the holder gets the token or a yield only when it is a node9
+    // daemon. /health unreachable: unknown build, yield as before.
+    const holder = await probePortHolder(daemonKey, DAEMON_HOST, DAEMON_PORT);
+    const holderBuildId = holder.buildId;
     const holderBuild = holderBuildId ? parseBuildId(holderBuildId) : null;
+    if (isUnverifiedHolder(holder.answered, holder.proof, holderBuild)) {
+      return refuseUnverifiedHolder();
+    }
 
     if (holderBuild && compareBuild(CURRENT_BUILD, holderBuild) > 0 && holderToken) {
       // I am strictly newer and can authenticate — ask the holder to yield.
@@ -1637,97 +1669,59 @@ export function startDaemon(): void {
       }
 
       // No PID file but port is in use — orphaned daemon from a previous run.
-      fetch(`http://${DAEMON_HOST}:${DAEMON_PORT}/settings`, {
-        signal: AbortSignal.timeout(1000),
-      })
-        .then((res) => {
-          if (res.ok) {
-            // Try to recover the orphan's PID and re-create the PID file so
-            // future stop/status calls can find it. Try `ss` first (Linux,
-            // fast); fall back to `lsof` (macOS + portable Linux).
-            let adopted = false;
-            try {
-              let orphanPid: number | null = null;
-              const ss = spawnSync('ss', ['-Htnp', `sport = :${DAEMON_PORT}`], {
-                encoding: 'utf8',
-                timeout: 1000,
-              });
-              if (!ss.error && ss.status === 0) {
-                const m = ss.stdout?.match(/pid=(\d+)/);
-                if (m) orphanPid = parseInt(m[1], 10);
-              } else if (
-                (ss.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ||
-                ss.status === null
-              ) {
-                const lsof = spawnSync(
-                  'lsof',
-                  ['-nP', `-iTCP:${DAEMON_PORT}`, '-sTCP:LISTEN', '-t'],
-                  { encoding: 'utf8', timeout: 1000 }
-                );
-                if (!lsof.error && lsof.status === 0) {
-                  const first = (lsof.stdout ?? '').split('\n')[0].trim();
-                  if (/^\d+$/.test(first)) orphanPid = parseInt(first, 10);
-                }
-              }
-              if (orphanPid !== null) {
-                process.kill(orphanPid, 0);
-                // G2 (task #18): internalToken is null, NOT this process's token
-                // — the holder never knew our token, and writing it would make
-                // a later /shutdown 401 against a healthy daemon. null tells
-                // readers "cannot token-auth; use the pid" (restart's fallback).
-                atomicWriteSync(
-                  DAEMON_PID_FILE,
-                  JSON.stringify({
-                    pid: orphanPid,
-                    port: DAEMON_PORT,
-                    internalToken: null,
-                    autoStarted,
-                  }),
-                  { mode: 0o600 }
-                );
-                adopted = true;
-              }
-            } catch {}
-            // The two outcomes here are NOT the same, and recording them
-            // identically is how a silent failure loop gets built:
-            if (adopted) {
-              // A healthy daemon owns the port and the pid file now names it.
-              logDaemonStartup(
-                'port-in-use-orphan',
-                `adopted the daemon already on :${DAEMON_PORT}`
-              );
-              recordStartupState('ok-elsewhere');
-            } else {
-              // Something holds the port but we could not identify it (no ss/lsof,
-              // or the pid is not ours to signal), so NO pid file was written —
-              // and every CLI keeps reporting "daemon not running" while each new
-              // start exits 0 right here. That loop is invisible unless it is
-              // recorded as the failure it is.
-              // NB: this branch is gated on /settings answering OK, so the daemon
-              // on the port is provably HEALTHY — it just could not be identified
-              // (no `ss`/`lsof`, or its pid is not ours to signal). Telling the
-              // user to kill it would be wrong; the problem is only that every
-              // pid-file-based command will keep reporting "not running".
-              logDaemonStartup(
-                'orphan-unidentified',
-                `healthy daemon on :${DAEMON_PORT} could not be identified — no pid file written`
-              );
-              recordStartupState(
-                'failed',
-                'orphan-unidentified',
-                `a healthy daemon is running on :${DAEMON_PORT} but its process could not be identified, so node9 cannot track it — install \`ss\` or \`lsof\`, or restart it with: node9 daemon --background`
-              );
-            }
-            process.exit(0);
-          } else {
-            // Something answered on the port but it is not a healthy daemon.
-            retryListen();
-          }
-        })
-        .catch(() => {
+      // fw#445: adopted only when it proves it holds this HOME's daemon key,
+      // and the pid written is the one the proof covers. Anything else that
+      // answers on the port (another program, a daemon of another HOME, a
+      // build before the key) is never written into daemon.pid.
+      void probePortHolder(daemonKey, DAEMON_HOST, DAEMON_PORT, 1000).then((holder) => {
+        if (!holder.answered) {
           // Nothing answered (timeout / refused) — the holder is not a daemon.
           retryListen();
-        });
+          return;
+        }
+        if (holder.proof !== 'valid' || holder.pid === null) return refuseUnverifiedHolder();
+        let adopted = false;
+        try {
+          process.kill(holder.pid, 0);
+          // G2 (task #18): internalToken is null, NOT this process's token
+          // — the holder never knew our token, and writing it would make
+          // a later /shutdown 401 against a healthy daemon. null tells
+          // readers "cannot token-auth; use the pid" (restart's fallback).
+          atomicWriteSync(
+            DAEMON_PID_FILE,
+            JSON.stringify({
+              pid: holder.pid,
+              port: DAEMON_PORT,
+              internalToken: null,
+              autoStarted,
+            }),
+            { mode: 0o600 }
+          );
+          adopted = true;
+        } catch {}
+        // The two outcomes here are NOT the same, and recording them
+        // identically is how a silent failure loop gets built:
+        if (adopted) {
+          // A healthy daemon owns the port and the pid file now names it.
+          logDaemonStartup('port-in-use-orphan', `adopted the daemon already on :${DAEMON_PORT}`);
+          recordStartupState('ok-elsewhere');
+        } else {
+          // The holder proved the key but its pid is not ours to signal, or
+          // the pid file could not be written: every pid-file-based command
+          // keeps reporting "not running" while each new start exits 0 here.
+          // That loop is invisible unless it is recorded as the failure it is.
+          logDaemonStartup(
+            'orphan-unidentified',
+            `healthy daemon on :${DAEMON_PORT} could not be identified — no pid file written`
+          );
+          recordStartupState(
+            'failed',
+            'orphan-unidentified',
+            `a healthy daemon is running on :${DAEMON_PORT} but its process could not be identified, so node9 cannot track it — restart it with: node9 daemon --background`
+          );
+        }
+        process.exit(0);
+      });
       return;
     }
     logDaemonStartup('bind-failed', e.message);
