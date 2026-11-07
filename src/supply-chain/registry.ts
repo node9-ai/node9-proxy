@@ -59,6 +59,9 @@ export interface ReleaseHistory {
   previousProvenance?: boolean;
   /** PyPI: one file of the previous release. */
   previousFile?: string;
+  /** When the previous release was published (epoch ms), where the document
+   *  read says: npm's full document, PyPI's project document. */
+  previousPublishedAtMs?: number;
 }
 
 const TIMEOUT_MS = 2000;
@@ -201,6 +204,9 @@ async function npmInfo(
     const tMs = t ? Date.parse(t) : NaN;
     const created = full?.time?.created ? Date.parse(full.time.created) : NaN;
     if (Number.isFinite(created)) info.createdAtMs = created;
+    const prevT = info.history?.previous ? full?.time?.[info.history.previous] : undefined;
+    const prevMs = prevT ? Date.parse(prevT) : NaN;
+    if (info.history && Number.isFinite(prevMs)) info.history.previousPublishedAtMs = prevMs;
     if (Number.isFinite(tMs)) {
       info.publishedAtMs = tMs;
       return info;
@@ -317,11 +323,15 @@ function pypiHistoryOf(
   const versions = Object.keys(releases).filter((v) => (releases[v] ?? []).length > 0);
   const previous = previousRelease('PyPI', versions, version);
   if (previous === undefined) return null;
+  const previousPublishedAtMs = previous
+    ? pypiCreatedOf({ [previous]: releases[previous] })
+    : undefined;
   return {
     previous,
     previousFile: previous
       ? releases[previous]?.find((f) => typeof f.filename === 'string')?.filename
       : undefined,
+    previousPublishedAtMs,
   };
 }
 
@@ -330,14 +340,19 @@ function pypiHistoryOf(
  * on the table (its project document is the large one: every release). Null
  * when it cannot be read.
  */
-export async function pypiHistory(name: string, version: string): Promise<ReleaseHistory | null> {
+export async function pypiHistory(
+  name: string,
+  version: string
+): Promise<{ history: ReleaseHistory; createdAtMs?: number } | null> {
   const base = endpoints().pypi;
   if (!base) return null;
   const doc = (await fetchJson(`${base}/pypi/${encodeURIComponent(name)}/json`, {
     timeoutMs: TIMEOUT_MS,
     maxBytes: MAX_BYTES,
   })) as PypiDoc;
-  return doc?.releases ? pypiHistoryOf(doc.releases, version) : null;
+  if (!doc?.releases) return null;
+  const history = pypiHistoryOf(doc.releases, version);
+  return history ? { history, createdAtMs: pypiCreatedOf(doc.releases) } : null;
 }
 
 /**

@@ -116,8 +116,11 @@ describe('the level table', () => {
       newPackage: 'off',
       installScript: 'off',
       lookalike: 'off',
+      establishedAge: 'off',
     });
-    expect(levelPackageSignals('strict')).toBeUndefined();
+    // Strict asks about a young release of an established package (wave 3).
+    expect(levelPackageSignals('strict')).toEqual({ establishedAge: 'review' });
+    expect(levelPackageSignals('block-all')).toEqual({ establishedAge: 'review' });
   });
 
   it('spot values from the agreed table', () => {

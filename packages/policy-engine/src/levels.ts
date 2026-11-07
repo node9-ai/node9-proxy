@@ -142,15 +142,19 @@ export function levelChecks(mode: string | undefined): Readonly<Record<string, V
 }
 
 /** The package registry signals (`loading.malicious-package` tuning), which
- *  allow only review or off. Soft turns all three off; the others keep review. */
-export function levelPackageSignals(mode: string | undefined):
-  | {
-      newPackage: 'review' | 'off';
-      installScript: 'review' | 'off';
-      lookalike: 'review' | 'off';
-    }
-  | undefined {
-  return levelOf(mode) === 'soft'
-    ? { newPackage: 'off', installScript: 'off', lookalike: 'off' }
-    : undefined;
+ *  allow only review or off, as a level sets them: Soft turns every signal off;
+ *  Strict and Block all ask about a young release of an established package
+ *  too (`establishedAge`, node9Firewall#385 wave 3); Standard and Audit keep
+ *  the defaults. Only the keys returned are written. */
+export function levelPackageSignals(
+  mode: string | undefined
+): Partial<Record<PackageSignal, 'review' | 'off'>> | undefined {
+  const level = levelOf(mode);
+  if (level === 'soft') {
+    return { newPackage: 'off', installScript: 'off', lookalike: 'off', establishedAge: 'off' };
+  }
+  if (level === 'strict' || level === 'block-all') return { establishedAge: 'review' };
+  return undefined;
 }
+
+export type PackageSignal = 'newPackage' | 'installScript' | 'lookalike' | 'establishedAge';

@@ -247,6 +247,7 @@ export interface Config {
       maxAgeHours: number;
       installScript: 'review' | 'off';
       lookalike: 'review' | 'off';
+      establishedAge: 'review' | 'off';
       onlineFallback: boolean;
       allow: string[];
     };
@@ -606,6 +607,7 @@ export const DEFAULT_CONFIG: Config = {
       maxAgeHours: 48,
       installScript: 'review',
       lookalike: 'review',
+      establishedAge: 'off',
       onlineFallback: true,
       allow: [],
     },
@@ -995,7 +997,8 @@ const KNOB_TO_CHECK: Record<string, string> = {
  *  policy block states, including the 2.27.0 `registrySignals` boolean. */
 function statedSignalFields(policy: LegacyPolicyKnobs): string[] {
   return Object.keys(tuningFromLegacyPolicy(policy)['loading.malicious-package'] ?? {}).filter(
-    (k) => k === 'newPackage' || k === 'installScript' || k === 'lookalike'
+    (k) =>
+      k === 'newPackage' || k === 'installScript' || k === 'lookalike' || k === 'establishedAge'
   );
 }
 
@@ -1299,6 +1302,8 @@ export function getConfig(cwd?: string): Config {
       if (pc.installScript === 'review' || pc.installScript === 'off')
         cur.installScript = pc.installScript;
       if (pc.lookalike === 'review' || pc.lookalike === 'off') cur.lookalike = pc.lookalike;
+      if (pc.establishedAge === 'review' || pc.establishedAge === 'off')
+        cur.establishedAge = pc.establishedAge;
       if (typeof pc.maxAgeHours === 'number' && pc.maxAgeHours >= 0)
         cur.maxAgeHours = pc.maxAgeHours;
       if (typeof pc.onlineFallback === 'boolean') cur.onlineFallback = pc.onlineFallback;
@@ -1469,6 +1474,7 @@ export function getConfig(cwd?: string): Config {
             newPackage?: unknown;
             installScript?: unknown;
             lookalike?: unknown;
+            establishedAge?: unknown;
             maxAgeHours?: unknown;
             onlineFallback?: unknown;
             allow?: unknown;
@@ -1703,6 +1709,10 @@ export function getConfig(cwd?: string): Config {
                   : cur.installScript,
             lookalike:
               pc.lookalike === 'review' || pc.lookalike === 'off' ? pc.lookalike : cur.lookalike,
+            establishedAge:
+              pc.establishedAge === 'review' || pc.establishedAge === 'off'
+                ? pc.establishedAge
+                : cur.establishedAge,
             maxAgeHours:
               typeof pc.maxAgeHours === 'number' &&
               Number.isFinite(pc.maxAgeHours) &&
@@ -2181,10 +2191,13 @@ export function getConfig(cwd?: string): Config {
       checkToLegacyPolicy(mergedPolicy as Record<string, unknown>, id, v);
     }
     if (signals) {
-      for (const key of ['newPackage', 'installScript', 'lookalike'] as const) {
-        // Soft only turns a signal off, so any layer that stated it keeps it.
+      for (const [key, value] of Object.entries(signals) as [
+        keyof typeof signals,
+        'review' | 'off',
+      ][]) {
+        // A level only sets a signal no layer stated; any layer that stated it keeps it.
         if (trustedSignals.has(key) || projectSignals.has(key)) continue;
-        mergedPolicy.packageCheck[key] = signals[key];
+        mergedPolicy.packageCheck[key] = value;
       }
     }
   }

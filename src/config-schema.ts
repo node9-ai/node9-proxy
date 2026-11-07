@@ -210,6 +210,7 @@ export const ConfigFileSchema = z
             newPackage: z.enum(['review', 'off']).optional(),
             installScript: z.enum(['review', 'off']).optional(),
             lookalike: z.enum(['review', 'off']).optional(),
+            establishedAge: z.enum(['review', 'off']).optional(),
             maxAgeHours: z.number().min(0).optional(),
             onlineFallback: z.boolean().optional(),
             allow: z.array(z.string()).optional(),

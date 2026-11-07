@@ -17,6 +17,7 @@ const CFG: PackageCheckConfig = {
   newPackage: 'review',
   installScript: 'review',
   lookalike: 'review',
+  establishedAge: 'off',
   maxAgeHours: 48,
   onlineFallback: true,
   allow: [],
@@ -996,6 +997,105 @@ describe('runPackageCheck — a name that looks like a popular one (node9Firewal
     });
     expect(r.findings).toEqual([]);
     expect(calls).toEqual(['http://registry.test/node9-canary-famuos']);
+  });
+});
+
+describe('runPackageCheck — a young release of an established package (node9Firewall#385 wave 3, A3 option b)', () => {
+  const DAY = 86_400_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const isAbbrev = (init?: RequestInit) =>
+    String((init?.headers as Record<string, string> | undefined)?.Accept ?? '').includes(
+      'install-v1'
+    );
+  /** An npm package: created `createdMs` ago, previous release `previousMs` ago, latest 3 h old. */
+  const established =
+    (createdMs: number, previousMs: number, withCreated = true) =>
+    (init?: RequestInit) =>
+      isAbbrev(init)
+        ? json({
+            name: 'x',
+            modified: ago(3 * 3_600_000),
+            'dist-tags': { latest: '1.1.0' },
+            versions: { '1.0.0': {}, '1.1.0': {} },
+          })
+        : json({
+            time: {
+              ...(withCreated ? { created: ago(createdMs) } : {}),
+              '1.0.0': ago(previousMs),
+              '1.1.0': ago(3 * 3_600_000),
+            },
+          });
+  beforeEach(() => indexWith('npm', 'node9-canary-other', []));
+
+  it('Standard: a package over a year old that released within 180 days is its cadence, no finding', async () => {
+    routes['http://registry.test/node9-canary-steady'] = established(900 * DAY, 20 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-steady'), CFG);
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('Strict (establishedAge: review): the same release still asks', async () => {
+    routes['http://registry.test/node9-canary-steady'] = established(900 * DAY, 20 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-steady'), {
+      ...CFG,
+      establishedAge: 'review',
+    });
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('a revival: the previous release is over 180 days old, so the young one asks', async () => {
+    routes['http://registry.test/node9-canary-dormant'] = established(900 * DAY, 200 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-dormant'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('a package under a year old asks', async () => {
+    routes['http://registry.test/node9-canary-young'] = established(100 * DAY, 10 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-young'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('the creation time unreadable: the finding is kept', async () => {
+    routes['http://registry.test/node9-canary-nocreated'] = established(900 * DAY, 20 * DAY, false);
+    const r = await runPackageCheck(...bash('npm install node9-canary-nocreated'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('a new install script on the steady release is its own finding and stands', async () => {
+    routes['http://registry.test/node9-canary-steady'] = (init) =>
+      isAbbrev(init)
+        ? json({
+            name: 'x',
+            modified: ago(3 * 3_600_000),
+            'dist-tags': { latest: '1.1.0' },
+            versions: { '1.0.0': {}, '1.1.0': { hasInstallScript: true } },
+          })
+        : json({
+            time: { created: ago(900 * DAY), '1.0.0': ago(20 * DAY), '1.1.0': ago(3 * 3_600_000) },
+          });
+    const r = await runPackageCheck(...bash('npm install node9-canary-steady'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['install-script']);
+  });
+  it('PyPI, pinned: the project document gives the creation and the previous release', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    const fresh = ago(3 * 3_600_000);
+    routes['http://pypi.test/pypi/node9-canary-steady/1.1.0/json'] = () =>
+      json({
+        info: { version: '1.1.0' },
+        urls: [{ filename: 'node9_canary_steady-1.1.0.tar.gz', upload_time_iso_8601: fresh }],
+      });
+    routes['http://pypi.test/pypi/node9-canary-steady/json'] = () =>
+      json({
+        info: { version: '1.1.0' },
+        urls: [{ filename: 'node9_canary_steady-1.1.0.tar.gz', upload_time_iso_8601: fresh }],
+        releases: {
+          '1.0.0': [{ filename: 'a-1.0.0.tar.gz', upload_time_iso_8601: ago(800 * DAY) }],
+          '1.0.5': [{ filename: 'a-1.0.5.tar.gz', upload_time_iso_8601: ago(20 * DAY) }],
+          '1.1.0': [{ filename: 'a-1.1.0.tar.gz', upload_time_iso_8601: fresh }],
+        },
+      });
+    const r = await runPackageCheck(...bash('pip install node9-canary-steady==1.1.0'), CFG);
+    expect(r.findings).toEqual([]);
+    const strict = await runPackageCheck(...bash('pip install node9-canary-steady==1.1.0'), {
+      ...CFG,
+      establishedAge: 'review',
+    });
+    expect(strict.findings.map((f) => f.kind)).toEqual(['new']);
   });
 });
 

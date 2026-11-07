@@ -9,6 +9,9 @@
 //   ...unless the release is built from the same repository as the one before
 //       it (registry provenance), and an install script the previous release
 //       also ran is no signal (node9Firewall#385)
+//   ...and, with establishedAge off (Standard), a young release of a package
+//       over a year old that released within the last 180 days is its normal
+//       cadence, not a signal; Strict keeps asking (node9Firewall#385 wave 3)
 //   a release without the provenance its previous release had → review
 //   no package by that name on npm or PyPI, or npm's security holding package
 //       in its place → review (node9Firewall#385 wave 3; policy.packageCheck
@@ -57,6 +60,10 @@ export interface PackageCheckConfig {
   /** A name that looks like a popular one, does not exist on the registry,
    *  or was removed as malicious (node9Firewall#385, wave 3). */
   lookalike: 'review' | 'off';
+  /** Whether a young release of an established package (first release over
+   *  a year ago, the previous one within 180 days) still asks for its age
+   *  alone. Off at Standard, review at Strict (node9Firewall#385, wave 3). */
+  establishedAge: 'review' | 'off';
   onlineFallback: boolean;
   allow: string[];
 }
@@ -416,12 +423,33 @@ async function checkOne(
     });
   }
   if (info && version && (cfg.newPackage !== 'off' || cfg.installScript !== 'off')) {
-    return byHistory(p, version, info, findings, misses);
+    return byHistory(p, version, info, findings, misses, cfg);
   }
   return findings;
 }
 
 const SOFT: ReadonlySet<PackageFinding['kind']> = new Set(['new', 'install-script']);
+
+/** A package older than this has standing of its own. */
+const ESTABLISHED_MS = 365 * 24 * 3_600_000;
+/** A previous release older than this makes the young one a revival. */
+const DORMANT_MS = 180 * 24 * 3_600_000;
+
+/**
+ * Option (b) of node9Firewall#385 wave 3: the age finding on an established
+ * package is its normal release cadence, not a signal, when the package's
+ * first release is over a year old and the previous release came within the
+ * last 180 days. Kept when either time is unknown, when this is the first
+ * release, or when the package was dormant (the revival pattern). The other
+ * findings on the same release stand on their own.
+ */
+function establishedCadence(info: RegistryInfo, h: ReleaseHistory): boolean {
+  if (info.createdAtMs === undefined || !h.previous || h.previousPublishedAtMs === undefined) {
+    return false;
+  }
+  const now = Date.now();
+  return now - info.createdAtMs >= ESTABLISHED_MS && now - h.previousPublishedAtMs < DORMANT_MS;
+}
 
 /**
  * Weigh the age and install-script findings against the release before this
@@ -444,13 +472,18 @@ async function byHistory(
   version: string,
   info: RegistryInfo,
   findings: PackageFinding[],
-  misses: string[]
+  misses: string[],
+  cfg: PackageCheckConfig
 ): Promise<PackageFinding[]> {
   let out = findings;
   let h: ReleaseHistory | undefined = info.history;
   if (!h && p.ecosystem === 'PyPI' && out.some((f) => SOFT.has(f.kind))) {
     try {
-      h = (await pypiHistory(p.name, version)) ?? undefined;
+      const read = await pypiHistory(p.name, version);
+      if (read) {
+        h = read.history;
+        if (info.createdAtMs === undefined) info.createdAtMs = read.createdAtMs;
+      }
     } catch (err) {
       misses.push(`${label(p, version)}: release history ${(err as Error).message}`);
     }
@@ -460,6 +493,9 @@ async function byHistory(
 
   if (h.previousHasInstallScript === true) {
     out = out.filter((f) => f.kind !== 'install-script');
+  }
+  if (cfg.establishedAge === 'off' && establishedCadence(info, h)) {
+    out = out.filter((f) => f.kind !== 'new');
   }
 
   const drop = (): PackageFinding => ({

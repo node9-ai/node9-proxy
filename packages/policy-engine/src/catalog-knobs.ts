@@ -37,6 +37,7 @@ export interface LegacyPolicyKnobs {
     newPackage?: string;
     installScript?: string;
     lookalike?: string;
+    establishedAge?: string;
     maxAgeHours?: number;
     onlineFallback?: boolean;
     allow?: string[];
@@ -93,6 +94,11 @@ export const TUNING_FIELDS: readonly TuningField[] = [
     checkId: 'loading.malicious-package',
     name: 'lookalike',
     legacy: ['packageCheck', 'lookalike'],
+  },
+  {
+    checkId: 'loading.malicious-package',
+    name: 'establishedAge',
+    legacy: ['packageCheck', 'establishedAge'],
   },
   {
     checkId: 'loading.malicious-package',
