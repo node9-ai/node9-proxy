@@ -272,16 +272,23 @@ function pypiCreatedOf(
  * last week; PyPI's project document for the earliest upload. Each part that
  * cannot be read is left out; the caller records the miss.
  */
-export async function registryStanding(eco: PackageEcosystem, name: string): Promise<Standing> {
+export async function registryStanding(
+  eco: PackageEcosystem,
+  name: string,
+  /** Which parts to read; a part the caller already has is not fetched again. */
+  want: { created: boolean; downloads: boolean } = { created: true, downloads: true }
+): Promise<Standing> {
   const out: Standing = {};
   const ep = endpoints();
   if (eco === 'npm' && ep.npmRegistry) {
     const encoded = name.replaceAll('/', '%2F');
     const [full, downloads] = await Promise.all([
-      fetchJson(`${ep.npmRegistry}/${encoded}`, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })
-        .then((d) => d as { time?: { created?: string } } | null)
-        .catch(() => undefined),
-      ep.npmDownloads
+      want.created
+        ? fetchJson(`${ep.npmRegistry}/${encoded}`, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })
+            .then((d) => d as { time?: { created?: string } } | null)
+            .catch(() => undefined)
+        : Promise.resolve(undefined),
+      want.downloads && ep.npmDownloads
         ? fetchJson(`${ep.npmDownloads}/downloads/point/last-week/${encoded}`, {
             timeoutMs: TIMEOUT_MS,
             maxBytes: 64 * 1024,
@@ -296,7 +303,7 @@ export async function registryStanding(eco: PackageEcosystem, name: string): Pro
     // fetchJson maps that to null, which is "no downloads" too.
     if (downloads === null) out.weeklyDownloads = 0;
     else if (typeof downloads?.downloads === 'number') out.weeklyDownloads = downloads.downloads;
-  } else if (eco === 'PyPI' && ep.pypi) {
+  } else if (eco === 'PyPI' && ep.pypi && want.created) {
     const doc = (await fetchJson(`${ep.pypi}/pypi/${encodeURIComponent(name)}/json`, {
       timeoutMs: TIMEOUT_MS,
       maxBytes: MAX_BYTES,

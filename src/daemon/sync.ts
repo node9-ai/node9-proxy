@@ -839,6 +839,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
       out2.installScript = pc.installScript;
     else if (legacyOff) out2.installScript = 'off';
     if (pc.lookalike === 'review' || pc.lookalike === 'off') out2.lookalike = pc.lookalike;
+    else if (legacyOff) out2.lookalike = 'off';
     if (pc.establishedAge === 'review' || pc.establishedAge === 'off')
       out2.establishedAge = pc.establishedAge;
     if (

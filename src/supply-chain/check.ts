@@ -73,6 +73,9 @@ interface CheckContext {
   command: string;
   /** The hook's validated absolute working directory. */
   cwd?: string;
+  /** Whether an install in this command can only come from the public
+   *  registry; worked out once per command, on the first name that needs it. */
+  publicRegistryOnly: () => boolean;
 }
 
 export interface PackageFinding {
@@ -146,12 +149,85 @@ const LOOKALIKE_MIN_WEEKLY_DOWNLOADS = 1000;
  * package-manager configuration (registries.ts). A 404 from the public
  * registry proves nothing about a name a private registry may serve.
  */
-function publicRegistryOnly(ctx: CheckContext): boolean {
-  if (extractRegistryOverrides(ctx.command).length > 0) return false;
-  for (const host of configuredRegistryHosts(ctx.cwd)) {
+function publicRegistryOnly(command: string, cwd: string | undefined): boolean {
+  if (extractRegistryOverrides(command).length > 0) return false;
+  for (const host of configuredRegistryHosts(cwd)) {
     if (!isPublicRegistryHost(host)) return false;
   }
   return true;
+}
+
+function contextFor(command: string, cwd: string | undefined): CheckContext {
+  let publicOnly: boolean | undefined;
+  return {
+    command,
+    cwd,
+    publicRegistryOnly: () => (publicOnly ??= publicRegistryOnly(command, cwd)),
+  };
+}
+
+/**
+ * The lookalike finding for a name that resembles a popular one
+ * (node9Firewall#385, wave 3), or null when the package has standing of its
+ * own: absent from the registry → finding; first published under a year ago
+ * → finding; otherwise (npm) its downloads last week decide, under 1,000 →
+ * finding. Age and downloads both unreadable is a miss, never a finding.
+ */
+async function lookalikeFinding(
+  p: PackageInstallRequest,
+  version: string | undefined,
+  info: RegistryInfo | null,
+  absent: boolean,
+  ctx: CheckContext,
+  misses: string[]
+): Promise<PackageFinding | null> {
+  const near = await nearMiss(p.ecosystem, p.name);
+  if (!near) return null;
+  const alike = `${label(p)} looks like "${near.popular}" (${describeNearMiss(near)})`;
+  if (absent) {
+    if (!ctx.publicRegistryOnly()) return null;
+    return {
+      pkg: p,
+      kind: 'lookalike',
+      detail: `${alike} and does not exist on ${REGISTRY_NAME[p.ecosystem]}`,
+    };
+  }
+  if (!info) return null;
+  // The creation time the document already gave is kept; the downloads are
+  // asked whenever the age alone does not make the finding.
+  const standing = await registryStanding(p.ecosystem, p.name, {
+    created: info.createdAtMs === undefined,
+    downloads: p.ecosystem === 'npm',
+  });
+  const createdAtMs = info.createdAtMs ?? standing.createdAtMs;
+  const ageMs = createdAtMs !== undefined ? Date.now() - createdAtMs : NaN;
+  if (Number.isFinite(ageMs) && ageMs < LOOKALIKE_MAX_AGE_MS) {
+    return {
+      pkg: p,
+      version,
+      kind: 'lookalike',
+      detail: `${alike} and was first published ${Math.max(1, Math.round(ageMs / 86_400_000))} days ago`,
+    };
+  }
+  if (
+    p.ecosystem === 'npm' &&
+    standing.weeklyDownloads !== undefined &&
+    standing.weeklyDownloads < LOOKALIKE_MIN_WEEKLY_DOWNLOADS
+  ) {
+    return {
+      pkg: p,
+      version,
+      kind: 'lookalike',
+      detail: `${alike} and had ${standing.weeklyDownloads} downloads last week`,
+    };
+  }
+  if (
+    !Number.isFinite(ageMs) &&
+    (p.ecosystem !== 'npm' || standing.weeklyDownloads === undefined)
+  ) {
+    misses.push(`${alike}: its age and downloads could not be read, so it is not a finding`);
+  }
+  return null;
 }
 
 /**
@@ -317,12 +393,12 @@ async function checkOne(
       // (a second, larger request) is never fetched.
       const windowMs = cfg.newPackage === 'off' ? 0 : cfg.maxAgeHours * 3_600_000;
       const looked = await registryInfo(p.ecosystem, p.name, p.version, windowMs, p.raw);
+      // An absent name is still asked of OSV below: a removed malicious
+      // package keeps its record.
       if (looked === 'absent') absent = true;
       else info = looked;
-      if (absent) {
-        // Still asked of OSV below: a removed malicious package keeps its record.
-      } else if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
-      else if (info.ageFallback)
+      if (!absent && !info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
+      else if (info?.ageFallback)
         misses.push(
           `${label(p, info.version)}: ${
             info.publishedAtMs === undefined
@@ -339,58 +415,18 @@ async function checkOne(
   const mal = await maliciousFor(p, version, cfg, misses, networkCapped);
   if (mal) findings.push(mal);
 
-  if (cfg.lookalike !== 'off' && (absent || info) && !networkCapped) {
-    const near = await nearMiss(p.ecosystem, p.name);
-    if (near && absent && publicRegistryOnly(ctx)) {
-      findings.push({
-        pkg: p,
-        kind: 'lookalike',
-        detail: `${label(p)} looks like "${near.popular}" (${describeNearMiss(near)}) and does not exist on ${REGISTRY_NAME[p.ecosystem]}`,
-      });
-    } else if (near && info) {
-      const standing =
-        info.createdAtMs !== undefined
-          ? { createdAtMs: info.createdAtMs }
-          : await registryStanding(p.ecosystem, p.name);
-      const ageMs = standing.createdAtMs !== undefined ? Date.now() - standing.createdAtMs : NaN;
-      const alike = `${label(p)} looks like "${near.popular}" (${describeNearMiss(near)})`;
-      if (Number.isFinite(ageMs) && ageMs < LOOKALIKE_MAX_AGE_MS) {
-        findings.push({
-          pkg: p,
-          version,
-          kind: 'lookalike',
-          detail: `${alike} and was first published ${Math.max(1, Math.round(ageMs / 86_400_000))} days ago`,
-        });
-      } else if (
-        p.ecosystem === 'npm' &&
-        standing.weeklyDownloads !== undefined &&
-        standing.weeklyDownloads < LOOKALIKE_MIN_WEEKLY_DOWNLOADS
-      ) {
-        findings.push({
-          pkg: p,
-          version,
-          kind: 'lookalike',
-          detail: `${alike} and had ${standing.weeklyDownloads} downloads last week`,
-        });
-      } else if (
-        !Number.isFinite(ageMs) &&
-        (p.ecosystem !== 'npm' || standing.weeklyDownloads === undefined)
-      ) {
-        misses.push(`${alike}: its age and downloads could not be read, so it is not a finding`);
-      }
-    } else if (absent && publicRegistryOnly(ctx)) {
+  // `absent` is only ever true after a registry answer, so this block never
+  // runs over the network cap.
+  if (cfg.lookalike !== 'off' && (absent || info)) {
+    const alike = await lookalikeFinding(p, version, info, absent, ctx, misses);
+    if (alike) findings.push(alike);
+    else if (absent && ctx.publicRegistryOnly()) {
       findings.push({
         pkg: p,
         kind: 'absent',
         detail: `${label(p)} does not exist on ${REGISTRY_NAME[p.ecosystem]}; a name an agent invents can be registered by anyone`,
       });
     }
-  } else if (absent && cfg.lookalike !== 'off' && publicRegistryOnly(ctx)) {
-    findings.push({
-      pkg: p,
-      kind: 'absent',
-      detail: `${label(p)} does not exist on ${REGISTRY_NAME[p.ecosystem]}; a name an agent invents can be registered by anyone`,
-    });
   }
   if (info?.placeholder && cfg.lookalike !== 'off') {
     findings.push({
@@ -570,12 +606,10 @@ export async function runPackageCheck(
 
     const misses: string[] = [];
     const checked = requests;
+    const ctx = contextFor(command, cwd);
     const settled = await Promise.allSettled(
       checked.map((p, i) =>
-        checkOne(p, cfg, misses, opts.offline === true || i >= MAX_NETWORK_PACKAGES, {
-          command,
-          cwd,
-        })
+        checkOne(p, cfg, misses, opts.offline === true || i >= MAX_NETWORK_PACKAGES, ctx)
       )
     );
     const findings: PackageFinding[] = [];

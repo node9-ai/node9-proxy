@@ -417,6 +417,7 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
       const pc = cfg().policy.packageCheck;
       expect(pc.newPackage).toBe('off');
       expect(pc.installScript).toBe('off');
+      expect(pc.lookalike).toBe('off');
     });
 
     it('K6f: an explicit new key beats the legacy boolean', () => {

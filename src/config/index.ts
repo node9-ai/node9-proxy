@@ -239,7 +239,8 @@ export interface Config {
     // (node9Firewall#385 wave 3). `allow` holds package-name globs
     // that are never checked. A failed lookup always allows and is recorded
     // in hook-debug.log. The 2.27.0 key `registrySignals` (one boolean for
-    // both signals) is still read: false turns both off, true changes nothing.
+    // the registry signals) is still read: false turns newPackage,
+    // installScript and lookalike off, true changes nothing.
     packageCheck: {
       enabled: boolean;
       onMalicious: 'block' | 'review';
@@ -1297,6 +1298,7 @@ export function getConfig(cwd?: string): Config {
       if ((pc as { registrySignals?: unknown }).registrySignals === false) {
         cur.newPackage = 'off';
         cur.installScript = 'off';
+        cur.lookalike = 'off';
       }
       if (pc.newPackage === 'review' || pc.newPackage === 'off') cur.newPackage = pc.newPackage;
       if (pc.installScript === 'review' || pc.installScript === 'off')
@@ -1708,7 +1710,11 @@ export function getConfig(cwd?: string): Config {
                   ? 'off'
                   : cur.installScript,
             lookalike:
-              pc.lookalike === 'review' || pc.lookalike === 'off' ? pc.lookalike : cur.lookalike,
+              pc.lookalike === 'review' || pc.lookalike === 'off'
+                ? pc.lookalike
+                : pc.registrySignals === false
+                  ? 'off'
+                  : cur.lookalike,
             establishedAge:
               pc.establishedAge === 'review' || pc.establishedAge === 'off'
                 ? pc.establishedAge

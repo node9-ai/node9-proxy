@@ -423,7 +423,11 @@ describe('extractManagedConfig — reviewChannel + approvalTimeoutMs (Preference
     const legacy = extractManagedConfig({
       managedConfig: { packageCheck: { registrySignals: false, newPackage: 'review' }, locked: [] },
     });
-    expect(legacy?.packageCheck).toEqual({ newPackage: 'review', installScript: 'off' });
+    expect(legacy?.packageCheck).toEqual({
+      newPackage: 'review',
+      installScript: 'off',
+      lookalike: 'off',
+    });
     expect(
       extractManagedConfig({ managedConfig: { packageCheck: { enabled: 'yes' }, locked: [] } })
     ).toBeUndefined();

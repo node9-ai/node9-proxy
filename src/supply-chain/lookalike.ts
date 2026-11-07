@@ -61,6 +61,29 @@ async function popular(): Promise<Lists> {
   return lists;
 }
 
+/** A list prepared once: what every call would otherwise recompute per name. */
+interface Prepared {
+  names: ReadonlySet<string>;
+  rows: { name: string; stripped: string; tail: string | null }[];
+}
+const prepared = new WeakMap<readonly string[], Prepared>();
+
+function prepare(list: readonly string[]): Prepared {
+  let p = prepared.get(list);
+  if (!p) {
+    p = {
+      names: new Set(list),
+      rows: list.map((name) => ({
+        name,
+        stripped: stripSeparators(name),
+        tail: name.startsWith('@') ? name.slice(name.indexOf('/') + 1) : null,
+      })),
+    };
+    prepared.set(list, p);
+  }
+  return p;
+}
+
 /** Test seam: compare against these names instead of the generated lists. */
 export function _setPopularNamesForTests(value: Lists | null): void {
   override = value;
@@ -115,10 +138,12 @@ export function nearMissIn(
   list: readonly string[]
 ): NearMiss | null {
   const c = normalizedName(eco, name);
-  if (list.includes(c)) return null;
+  const { names, rows } = prepare(list);
+  if (names.has(c)) return null;
   const stripped = stripSeparators(c);
-  for (const p of list) {
-    if (stripSeparators(p) === stripped) return { popular: p, rule: 'separators' };
+  for (const row of rows) {
+    const p = row.name;
+    if (row.stripped === stripped) return { popular: p, rule: 'separators' };
     const diff = Math.abs(p.length - c.length);
     if (p.length >= 5 && diff <= 2) {
       const max = p.length >= 10 ? 2 : 1;
@@ -127,9 +152,8 @@ export function nearMissIn(
         if (d <= max) return { popular: p, rule: 'edit', distance: d };
       }
     }
-    if (eco === 'npm' && p.startsWith('@')) {
-      const tail = p.slice(p.indexOf('/') + 1);
-      if (tail.length >= 6 && tail === c) return { popular: p, rule: 'scope-dropped' };
+    if (eco === 'npm' && row.tail !== null && row.tail.length >= 6 && row.tail === c) {
+      return { popular: p, rule: 'scope-dropped' };
     }
     if (p.length >= 4 && c.length > p.length && c.includes(p)) {
       for (const t of PADDING) {

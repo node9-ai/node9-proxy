@@ -923,6 +923,20 @@ describe('runPackageCheck — a name that looks like a popular one (node9Firewal
     expect(r.reason).toContain('looks like "node9-canary-famous" (one letter off)');
     expect(r.reason).toContain('first published 12 days ago');
   });
+  it('the age already known and old: the downloads still decide, the document is not read twice', async () => {
+    const FRESH = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    // Modified inside the window: npmInfo reads the full document (created 900 days ago).
+    routes['http://registry.test/node9-canary-famuos'] = (init) =>
+      isAbbrev(init)
+        ? npmDoc('1.0.0', { modified: FRESH })
+        : json({ time: { created: new Date(Date.now() - 900 * DAY).toISOString(), '1.0.0': OLD } });
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ downloads: 17, package: 'node9-canary-famuos' });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('had 17 downloads last week');
+    expect(calls.filter((u) => u === 'http://registry.test/node9-canary-famuos')).toHaveLength(2);
+  });
   it('an old package with few downloads is a review by its downloads', async () => {
     routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
     routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
@@ -988,6 +1002,15 @@ describe('runPackageCheck — a name that looks like a popular one (node9Firewal
       expect(r.findings, name).toEqual([]);
       expect(calls, name).toEqual([`http://registry.test/${name}`]);
     }
+  });
+  it('the 2.27.0 registrySignals:false turns this signal off with the others (no registry call)', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 5 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos@1.0.0'), {
+      ...QUIET,
+      lookalike: 'off',
+    });
+    expect(r.findings).toEqual([]);
+    expect(calls).toEqual([]);
   });
   it('lookalike off: nothing is compared', async () => {
     routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 5 * DAY);
