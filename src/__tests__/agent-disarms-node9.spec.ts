@@ -63,6 +63,12 @@ const HELD = [
   'launchctl unload ~/Library/LaunchAgents/ai.node9.daemon.plist',
   'taskkill /F /IM node.exe',
   `taskkill /PID ${DAEMON_PID} /F`,
+];
+
+// The file gate's half. On Windows the protected-file gate does not run at
+// all (prepareFileAccesses returns no accesses there), so these rows are
+// POSIX only, like the gate's other tests.
+const HELD_FILES = [
   "echo '{}' > ~/.node9/config.json",
   'sed -i s/strict/audit/ ~/.node9/config.json',
   'echo {} > ~/.node9/daemon.pid',
@@ -70,6 +76,7 @@ const HELD = [
   'mv ~/.node9 /tmp/n9-old',
   'cp /tmp/x.json ~/.node9/config.json',
 ];
+const posix = it.skipIf(process.platform === 'win32');
 
 const ALLOWED = [
   'node9 daemon restart',
@@ -108,7 +115,16 @@ describe('switching node9 off is held (commands.node9-disarm)', () => {
     expect(await bash(command)).toBe('block');
   });
 
-  it('a file tool writing node9 files is held too', async () => {
+  posix.each(HELD_FILES)('file: review at Standard: %s', async (command) => {
+    expect(await bash(command)).toBe('review');
+  });
+
+  posix.each(HELD_FILES)('file: block at Strict: %s', async (command) => {
+    setLevel('strict');
+    expect(await bash(command)).toBe('block');
+  });
+
+  posix('a file tool writing node9 files is held too', async () => {
     const file = path.join(node9Dir, 'config.json');
     expect((await explainPolicy('Write', { file_path: file, content: '{}' })).decision).toBe(
       'review'
