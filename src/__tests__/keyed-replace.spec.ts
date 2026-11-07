@@ -379,6 +379,7 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
         newPackage: 'review',
         maxAgeHours: 48,
         installScript: 'review',
+        lookalike: 'review',
         onlineFallback: true,
         allow: [],
       });
@@ -402,6 +403,7 @@ describe('§K — keyed replace-mode: policy = DEFAULT_CONFIG ⊕ cloud only', (
         newPackage: 'off',
         maxAgeHours: 48,
         installScript: 'review',
+        lookalike: 'review',
         onlineFallback: true,
         allow: ['@myorg/*'],
       });

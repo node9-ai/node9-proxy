@@ -354,7 +354,7 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
   },
   'loading.malicious-package': {
     plain:
-      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only. A new release built from the same repository as the one before it (registry provenance) and an install script the package has always run do not stop; a release that lost the provenance its previous release had does.',
+      'The agent installs a package that the public malicious-package database (OSV) lists, or one published minutes ago. Covers npm, PyPI, RubyGems, crates.io, Go, NuGet, Maven, Packagist and VS Code extensions; the publish-age and install-script signals are npm and PyPI only. A new release built from the same repository as the one before it (registry provenance) and an install script the package has always run do not stop; a release that lost the provenance its previous release had does. A name that looks like a popular package and has no standing of its own, a name no package on npm or PyPI has, or a package npm removed as malicious also stops for review (the lookalike tuning).',
     example: 'npm install of a package flagged as malware',
     advice: 'Keep Block for known-malicious packages; brand-new packages already stop for Review.',
   },

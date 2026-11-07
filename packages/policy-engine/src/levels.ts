@@ -142,9 +142,15 @@ export function levelChecks(mode: string | undefined): Readonly<Record<string, V
 }
 
 /** The package registry signals (`loading.malicious-package` tuning), which
- *  allow only review or off. Soft turns both off; the others keep review. */
-export function levelPackageSignals(
-  mode: string | undefined
-): { newPackage: 'review' | 'off'; installScript: 'review' | 'off' } | undefined {
-  return levelOf(mode) === 'soft' ? { newPackage: 'off', installScript: 'off' } : undefined;
+ *  allow only review or off. Soft turns all three off; the others keep review. */
+export function levelPackageSignals(mode: string | undefined):
+  | {
+      newPackage: 'review' | 'off';
+      installScript: 'review' | 'off';
+      lookalike: 'review' | 'off';
+    }
+  | undefined {
+  return levelOf(mode) === 'soft'
+    ? { newPackage: 'off', installScript: 'off', lookalike: 'off' }
+    : undefined;
 }

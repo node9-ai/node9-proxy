@@ -28,7 +28,14 @@ export interface RegistryInfo {
   history?: ReleaseHistory;
   /** PyPI: one file of this release, the key of its provenance record. */
   file?: string;
+  /** npm: the package was removed as malicious and a `-security` holding
+   *  version is all the registry serves (node9Firewall#385, wave 3). */
+  placeholder?: boolean;
 }
+
+/** `absent`: the registry answered that no package has this name (a 404 on
+ *  the package document). `null`: the lookup failed or was ambiguous. */
+export type RegistryLookup = RegistryInfo | 'absent' | null;
 
 /** The release before the resolved one (node9Firewall#385). */
 export interface ReleaseHistory {
@@ -97,7 +104,7 @@ async function npmInfo(
   version: string | undefined,
   freshWindowMs: number,
   raw?: string
-): Promise<RegistryInfo | null> {
+): Promise<RegistryLookup> {
   const base = endpoints().npmRegistry;
   if (!base) return null;
   // Every slash, not the first: a valid scoped name has one, and a name with
@@ -134,7 +141,8 @@ async function npmInfo(
     if (info && range && !satisfies(info.version, range)) return null;
     return info;
   }
-  if (!doc) return null;
+  // fetchJson answers a 404 with null: no package has this name.
+  if (!doc) return 'absent';
   const latest = doc['dist-tags']?.latest;
   let resolved = version;
   if (!resolved) {
@@ -151,11 +159,14 @@ async function npmInfo(
   if (!resolved) return null;
   const v = doc.versions?.[resolved];
   const modifiedMs = doc.modified ? Date.parse(doc.modified) : NaN;
+  const versionKeys = Object.keys(doc.versions ?? {});
   const info: RegistryInfo = {
     version: resolved,
     hasInstallScript: v?.hasInstallScript === true,
   };
-  const previous = previousRelease('npm', Object.keys(doc.versions ?? {}), resolved);
+  // npm's takeover marker: one version, named `0.0.1-security` (or alike).
+  if (versionKeys.length === 1 && /-security$/.test(resolved)) info.placeholder = true;
+  const previous = previousRelease('npm', versionKeys, resolved);
   if (v && previous !== undefined) {
     const pv = previous ? doc.versions?.[previous] : undefined;
     info.history = {
@@ -192,13 +203,17 @@ async function npmInfo(
   return info;
 }
 
-async function pypiInfo(name: string, version?: string): Promise<RegistryInfo | null> {
+async function pypiInfo(name: string, version?: string): Promise<RegistryLookup> {
   const base = endpoints().pypi;
   if (!base) return null;
   const url = version
     ? `${base}/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`
     : `${base}/pypi/${encodeURIComponent(name)}/json`;
   const doc = (await fetchJson(url, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })) as PypiDoc;
+  // The project document 404s only when no project has the name; a release
+  // document 404s for a version the project never had, too, so a pinned
+  // install's 404 says nothing about the name.
+  if (doc === null) return version ? null : 'absent';
   if (!doc?.info?.version) return null;
   const times = (doc.urls ?? [])
     .map((u) => (u.upload_time_iso_8601 ? Date.parse(u.upload_time_iso_8601) : NaN))
@@ -265,7 +280,7 @@ export async function registryInfo(
   /** The age window the caller judges by; inside it npm's per-version time is read. */
   freshWindowMs: number,
   raw?: string
-): Promise<RegistryInfo | null> {
+): Promise<RegistryLookup> {
   if (eco === 'npm') return npmInfo(name, version, freshWindowMs, raw);
   if (eco === 'PyPI') return pypiInfo(name, version);
   return null;

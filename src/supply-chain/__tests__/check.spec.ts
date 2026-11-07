@@ -15,6 +15,7 @@ const CFG: PackageCheckConfig = {
   onMalicious: 'block',
   newPackage: 'review',
   installScript: 'review',
+  lookalike: 'review',
   maxAgeHours: 48,
   onlineFallback: true,
   allow: [],
@@ -143,6 +144,7 @@ describe('runPackageCheck — malicious', () => {
       ...CFG,
       newPackage: 'off',
       installScript: 'off',
+      lookalike: 'off',
     });
     expect(r.verdict).toBe('allow');
     expect(calls).toEqual([]);
@@ -337,12 +339,13 @@ describe('runPackageCheck — newPackage / installScript knobs', () => {
     expect(r.verdict).toBe('allow');
     expect(r.findings).toEqual([]);
   });
-  it('both off: a pinned malicious version still blocks, with no registry call', async () => {
+  it('all three signals off: a pinned malicious version still blocks, with no registry call', async () => {
     indexWith('npm', 'node9-canary-past', [{ id: 'MAL-0000-0412', versions: ['1.0.0'] }]);
     const r = await runPackageCheck(...bash('npm install node9-canary-past@1.0.0'), {
       ...CFG,
       newPackage: 'off',
       installScript: 'off',
+      lookalike: 'off',
     });
     expect(r.verdict).toBe('block');
     expect(r.reason).toContain('MAL-0000-0412');
@@ -756,6 +759,134 @@ describe('runPackageCheck — registry documents between 2 MB and 16 MB are read
     // The only miss left is the provenance read this fake registry does not
     // serve; the document itself was read in full.
     expect(r.misses.join(' ')).not.toMatch(/metadata unavailable|too large/);
+  });
+});
+
+describe('runPackageCheck — a name the registry does not have, and a takeover placeholder (node9Firewall#385 wave 3)', () => {
+  const QUIET = { ...CFG, newPackage: 'off' as const, installScript: 'off' as const };
+  const absent = () => new Response('{"error":"Not found"}', { status: 404 });
+  it('npm: a 404 on the package document is a review that names the registry', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), QUIET);
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+    expect(r.reason).toContain('"node9-canary-nowhere" does not exist on npm');
+    expect(r.misses).toEqual([]);
+  });
+  it('PyPI: an unpinned install of a name no project has is a review', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    routes['http://pypi.test/pypi/node9-canary-nowhere/json'] = absent;
+    const r = await runPackageCheck(...bash('pip install node9-canary-nowhere'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+    expect(r.reason).toContain('does not exist on PyPI');
+  });
+  it('PyPI: a pinned install 404s for a version the project never had, which says nothing about the name', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    routes['http://pypi.test/pypi/node9-canary-real/9.9.9/json'] = absent;
+    const r = await runPackageCheck(...bash('pip install node9-canary-real==9.9.9'), QUIET);
+    expect(r.verdict).toBe('allow');
+    expect(r.misses.join(' ')).toContain('registry metadata unavailable');
+  });
+  it('a pinned npm install still asks the registry when only this signal is on', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const r = await runPackageCheck(...bash('npm i node9-canary-nowhere@1.0.0'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+  });
+  it('a removed package keeps its malicious record: block, with the absent note beside it', async () => {
+    indexWith('npm', 'node9-canary-gone', [{ id: 'MAL-0000-0009', all: true }]);
+    routes['http://registry.test/node9-canary-gone'] = absent;
+    const r = await runPackageCheck(...bash('npm i node9-canary-gone'), QUIET);
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('MAL-0000-0009');
+    expect(r.findings.map((f) => f.kind).sort()).toEqual(['absent', 'malicious']);
+  });
+  it('lookalike off: a 404 is a miss, never a finding', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), {
+      ...QUIET,
+      lookalike: 'off',
+    });
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('a registry named on the command line: the public 404 proves nothing', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-private'] = absent;
+    const r = await runPackageCheck(
+      ...bash('npm install --registry https://npm.corp.example node9-canary-private'),
+      QUIET
+    );
+    expect(r.findings).toEqual([]);
+  });
+  it('a private registry in the project .npmrc: no finding', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-private'] = absent;
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-proj-'));
+    try {
+      fs.writeFileSync(path.join(project, '.npmrc'), 'registry=https://npm.corp.example/\n');
+      const r = await runPackageCheck(...bash('npm install node9-canary-private'), QUIET, project);
+      expect(r.findings).toEqual([]);
+      // The same command from a project without that file asks.
+      const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-plain-'));
+      try {
+        const r2 = await runPackageCheck(...bash('npm install node9-canary-private'), QUIET, plain);
+        expect(r2.findings.map((f) => f.kind)).toEqual(['absent']);
+      } finally {
+        fs.rmSync(plain, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+  it('a public mirror in the config does not count as a private registry', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-proj-'));
+    try {
+      fs.writeFileSync(path.join(project, '.npmrc'), 'registry=https://registry.npmjs.org/\n');
+      const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), QUIET, project);
+      expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+  it('an allowlisted name is never looked up, so never absent', async () => {
+    const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), {
+      ...QUIET,
+      allow: ['node9-canary-*'],
+    });
+    expect(r.verdict).toBe('allow');
+    expect(calls).toEqual([]);
+  });
+  it("npm's security holding package in place of a removed one is a review", async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-held'] = () =>
+      json({
+        name: 'node9-canary-held',
+        description: 'security holding package',
+        modified: OLD,
+        'dist-tags': { latest: '0.0.1-security' },
+        versions: { '0.0.1-security': {} },
+      });
+    const r = await runPackageCheck(...bash('npm i node9-canary-held'), QUIET);
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toEqual(['placeholder']);
+    expect(r.reason).toContain('removed by npm as malicious');
+  });
+  it('a real package whose latest happens to end in -security, among other versions, is not a placeholder', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-sec'] = () =>
+      json({
+        name: 'node9-canary-sec',
+        modified: OLD,
+        'dist-tags': { latest: '2.0.0-security' },
+        versions: { '1.0.0': {}, '2.0.0-security': {} },
+      });
+    const r = await runPackageCheck(...bash('npm i node9-canary-sec'), QUIET);
+    expect(r.findings).toEqual([]);
   });
 });
 

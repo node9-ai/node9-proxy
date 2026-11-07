@@ -10,6 +10,9 @@
 //       it (registry provenance), and an install script the previous release
 //       also ran is no signal (node9Firewall#385)
 //   a release without the provenance its previous release had → review
+//   no package by that name on npm or PyPI, or npm's security holding package
+//       in its place → review (node9Firewall#385 wave 3; policy.packageCheck
+//       .lookalike), unless the install can come from a registry the user set up
 //   anything else, and every lookup failure → allow
 //
 // The registry also names the version an unpinned install resolves to, so it
@@ -21,7 +24,9 @@ import picomatch from 'picomatch';
 import path from 'path';
 import {
   extractPackageInstalls,
+  extractRegistryOverrides,
   isBashTool,
+  isPublicRegistryHost,
   type PackageEcosystem,
   type PackageInstallRequest,
 } from '@node9/policy-engine';
@@ -36,6 +41,7 @@ import {
 } from './registry';
 import { npmSourceRepo, pypiSourceRepo, type SourceRepo } from './provenance';
 import { resolveInstalled, LOCAL_FIRST_MANAGERS } from './local-resolve';
+import { configuredRegistryHosts } from './registries';
 
 export interface PackageCheckConfig {
   enabled: boolean;
@@ -43,8 +49,18 @@ export interface PackageCheckConfig {
   newPackage: 'review' | 'off';
   maxAgeHours: number;
   installScript: 'review' | 'off';
+  /** A name that looks like a popular one, does not exist on the registry,
+   *  or was removed as malicious (node9Firewall#385, wave 3). */
+  lookalike: 'review' | 'off';
   onlineFallback: boolean;
   allow: string[];
+}
+
+/** What the check knows about the command around the package. */
+interface CheckContext {
+  command: string;
+  /** The hook's validated absolute working directory. */
+  cwd?: string;
 }
 
 export interface PackageFinding {
@@ -52,7 +68,14 @@ export interface PackageFinding {
   version?: string;
   /** The finding is about the copy already in node_modules, not a download. */
   installed?: boolean;
-  kind: 'malicious' | 'malicious-unpinned' | 'new' | 'install-script' | 'provenance-drop';
+  kind:
+    | 'malicious'
+    | 'malicious-unpinned'
+    | 'new'
+    | 'install-script'
+    | 'provenance-drop'
+    | 'absent'
+    | 'placeholder';
   detail: string;
   advisories?: string[];
 }
@@ -95,6 +118,22 @@ const KIND: Record<PackageEcosystem, string> = {
 
 function label(p: PackageInstallRequest, version?: string): string {
   return `${KIND[p.ecosystem]} "${p.name}${version ? `@${version}` : ''}"`;
+}
+
+const REGISTRY_NAME: Partial<Record<PackageEcosystem, string>> = { npm: 'npm', PyPI: 'PyPI' };
+
+/**
+ * Whether an install in this command can only come from the public registry:
+ * no registry or index named on the command line, and none in the user's
+ * package-manager configuration (registries.ts). A 404 from the public
+ * registry proves nothing about a name a private registry may serve.
+ */
+function publicRegistryOnly(ctx: CheckContext): boolean {
+  if (extractRegistryOverrides(ctx.command).length > 0) return false;
+  for (const host of configuredRegistryHosts(ctx.cwd)) {
+    if (!isPublicRegistryHost(host)) return false;
+  }
+  return true;
 }
 
 /**
@@ -222,8 +261,9 @@ async function checkOne(
   cfg: PackageCheckConfig,
   misses: string[],
   networkCapped: boolean,
-  cwd: string | undefined
+  ctx: CheckContext
 ): Promise<PackageFinding[]> {
+  const { cwd } = ctx;
   if (
     p.ecosystem === 'npm' &&
     LOCAL_FIRST_MANAGERS.has(p.manager) &&
@@ -240,6 +280,7 @@ async function checkOne(
   }
   const findings: PackageFinding[] = [];
   let info: RegistryInfo | null = null;
+  let absent = false;
   // Registry metadata exists for npm and PyPI only; the other ecosystems are
   // checked against OSV alone, and no request leaves for a registry that
   // would answer for a different ecosystem. With both signals off the
@@ -247,15 +288,22 @@ async function checkOne(
   // install gets, and without it a record on any old version reads as "has
   // known malicious versions" (node9Firewall#412, the Soft level).
   const wantsRegistry =
-    (cfg.newPackage !== 'off' || cfg.installScript !== 'off' || !p.version) &&
+    (cfg.newPackage !== 'off' ||
+      cfg.installScript !== 'off' ||
+      cfg.lookalike !== 'off' ||
+      !p.version) &&
     HAS_REGISTRY_CLIENT.has(p.ecosystem);
   if (wantsRegistry && !networkCapped) {
     try {
       // With the age signal off there is no window, so the per-version time
       // (a second, larger request) is never fetched.
       const windowMs = cfg.newPackage === 'off' ? 0 : cfg.maxAgeHours * 3_600_000;
-      info = await registryInfo(p.ecosystem, p.name, p.version, windowMs, p.raw);
-      if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
+      const looked = await registryInfo(p.ecosystem, p.name, p.version, windowMs, p.raw);
+      if (looked === 'absent') absent = true;
+      else info = looked;
+      if (absent) {
+        // Still asked of OSV below: a removed malicious package keeps its record.
+      } else if (!info) misses.push(`${label(p, p.version)}: registry metadata unavailable`);
       else if (info.ageFallback)
         misses.push(
           `${label(p, info.version)}: ${
@@ -272,6 +320,22 @@ async function checkOne(
 
   const mal = await maliciousFor(p, version, cfg, misses, networkCapped);
   if (mal) findings.push(mal);
+
+  if (absent && cfg.lookalike !== 'off' && publicRegistryOnly(ctx)) {
+    findings.push({
+      pkg: p,
+      kind: 'absent',
+      detail: `${label(p)} does not exist on ${REGISTRY_NAME[p.ecosystem]}; a name an agent invents can be registered by anyone`,
+    });
+  }
+  if (info?.placeholder && cfg.lookalike !== 'off') {
+    findings.push({
+      pkg: p,
+      version,
+      kind: 'placeholder',
+      detail: `${label(p)} was removed by npm as malicious; what remains is a security holding package`,
+    });
+  }
 
   if (cfg.newPackage !== 'off' && info?.publishedAtMs !== undefined) {
     const ageH = (Date.now() - info.publishedAtMs) / 3_600_000;
@@ -415,7 +479,10 @@ export async function runPackageCheck(
     const checked = requests;
     const settled = await Promise.allSettled(
       checked.map((p, i) =>
-        checkOne(p, cfg, misses, opts.offline === true || i >= MAX_NETWORK_PACKAGES, cwd)
+        checkOne(p, cfg, misses, opts.offline === true || i >= MAX_NETWORK_PACKAGES, {
+          command,
+          cwd,
+        })
       )
     );
     const findings: PackageFinding[] = [];

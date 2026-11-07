@@ -36,6 +36,7 @@ export interface LegacyPolicyKnobs {
     registrySignals?: boolean;
     newPackage?: string;
     installScript?: string;
+    lookalike?: string;
     maxAgeHours?: number;
     onlineFallback?: boolean;
     allow?: string[];
@@ -87,6 +88,11 @@ export const TUNING_FIELDS: readonly TuningField[] = [
     checkId: 'loading.malicious-package',
     name: 'installScript',
     legacy: ['packageCheck', 'installScript'],
+  },
+  {
+    checkId: 'loading.malicious-package',
+    name: 'lookalike',
+    legacy: ['packageCheck', 'lookalike'],
   },
   {
     checkId: 'loading.malicious-package',

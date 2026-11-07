@@ -112,7 +112,11 @@ describe('the level table', () => {
   });
 
   it('Soft turns the package registry signals off; the others keep them', () => {
-    expect(levelPackageSignals('soft')).toEqual({ newPackage: 'off', installScript: 'off' });
+    expect(levelPackageSignals('soft')).toEqual({
+      newPackage: 'off',
+      installScript: 'off',
+      lookalike: 'off',
+    });
     expect(levelPackageSignals('strict')).toBeUndefined();
   });
 
