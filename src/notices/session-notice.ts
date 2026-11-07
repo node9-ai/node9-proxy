@@ -15,7 +15,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { levelOf, type Level } from '@node9/policy-engine';
+import { levelOf, holdsSendsWithoutDaemon, type Level } from '@node9/policy-engine';
 import { atomicWriteSync } from '../utils/atomic-write';
 import {
   ensureOwnDir,
@@ -44,8 +44,18 @@ export const SESSION_NOTICE_NOTE =
   'node9 shows the user this line itself. Do not mention it unless the user asks about node9.';
 
 /** What the hook says this call: the first notice of the session, a notice
- *  that the level changed, or nothing. */
-export type SessionNoticeKind = 'first' | 'changed';
+ *  that the level changed, one that the daemon stopped or came back
+ *  (node9Firewall#445 follow-up), or nothing. */
+export type SessionNoticeKind = 'first' | 'changed' | 'daemon';
+
+/** Kept in the session flag after the level while the daemon stays down. */
+export const NO_DAEMON_SUFFIX = ':no-daemon';
+
+function daemonSentence(mode: string | undefined): string {
+  return holdsSendsWithoutDaemon(mode)
+    ? 'Sends to unknown addresses are held until it starts (node9 daemon start).'
+    : 'Outside-content checks are off until it starts (node9 daemon start).';
+}
 
 /** Session flags older than this are removed when a new session claims one. */
 const FLAG_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -56,8 +66,21 @@ const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
  *  change mid-session reads "level changed to ...". */
 export function sessionNoticeLine(
   mode: string | undefined,
-  kind: SessionNoticeKind = 'first'
+  kind: SessionNoticeKind = 'first',
+  daemonDown = false
 ): string {
+  if (kind === 'daemon') {
+    return daemonDown
+      ? `${ICON} Node9: the daemon is not running. ${daemonSentence(mode)}`
+      : `${ICON} Node9: the daemon is running again. Every action in this session is checked.`;
+  }
+  const line = levelLine(mode, kind);
+  if (!daemonDown) return line;
+  const sentence = daemonSentence(mode);
+  return `${line} The node9 daemon is not running: ${sentence[0].toLowerCase()}${sentence.slice(1)}`;
+}
+
+function levelLine(mode: string | undefined, kind: 'first' | 'changed'): string {
   const level = levelOf(mode);
   const name = LEVEL_NAMES[level];
   if (kind === 'changed') {
@@ -75,9 +98,10 @@ export function sessionNoticeLine(
  *  permissionDecision: the agent's own permission flow is untouched. */
 export function sessionNoticeOutput(
   mode: string | undefined,
-  kind: SessionNoticeKind = 'first'
+  kind: SessionNoticeKind = 'first',
+  daemonDown = false
 ): string {
-  const line = sessionNoticeLine(mode, kind);
+  const line = sessionNoticeLine(mode, kind, daemonDown);
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -153,14 +177,22 @@ export function claimSessionNotice(
 
 /** The flag exists: 'changed' when it holds another level (and now holds this
  *  one), null otherwise. Only a regular file with one name is read. */
-function levelChange(dir: string, seen: OwnDir, flag: string, level: string): 'changed' | null {
+function levelChange(
+  dir: string,
+  seen: OwnDir,
+  flag: string,
+  level: string
+): 'changed' | 'daemon' | null {
   try {
     const told = readFlag(flag);
     if (told === null) return null;
     if (told === level) return null;
     if (!isSameOwnDir(dir, seen)) return null;
     atomicWriteSync(flag, level, { mode: 0o600 });
-    return told === '' ? null : 'changed';
+    if (told === '') return null;
+    // Only the daemon part moved (a flag of 2.48.1 to 2.51 holds the level alone).
+    const levelPart = (v: string) => v.split(':')[0];
+    return levelPart(told) === levelPart(level) ? 'daemon' : 'changed';
   } catch {
     return null;
   }

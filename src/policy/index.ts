@@ -14,6 +14,8 @@ import fs from 'fs';
 import { readCappedText } from '../utils/read-capped';
 import path from 'path';
 import os from 'os';
+import { readSmallFile } from '../utils/read-small-file';
+import { forecastRun } from '../auth/forecast-context';
 import { scanArgumentSecrets, scanFilePath, detectArgsPii } from '../dlp';
 import {
   runStatelessGates,
@@ -113,8 +115,29 @@ export async function evaluatePolicy(
       readAgentSettings,
       isConfiguredRegistry: (host: string, at?: string) => configuredRegistryHosts(at).has(host),
       isGitWorkTreeTop,
+      daemonPid: daemonPidFromFile,
     }
   );
+}
+
+/**
+ * The pid ~/.node9/daemon.pid names, for commands.node9-disarm: a `kill` of
+ * that number stops node9. Not checked for liveness: a kill aimed at the
+ * daemon's pid is held whether or not the daemon is up right now.
+ */
+function daemonPidFromFile(): number | null {
+  // A forecast replays a session with no daemon and touches nothing under HOME.
+  if (forecastRun()) return null;
+  const text = readSmallFile(path.join(os.homedir(), '.node9', 'daemon.pid'), 4096);
+  if (text === null) return null;
+  try {
+    const pid = (JSON.parse(text) as { pid?: unknown }).pid;
+    return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid <= 4_194_304
+      ? pid
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

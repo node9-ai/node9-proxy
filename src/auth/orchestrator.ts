@@ -30,7 +30,12 @@ import {
 } from '@node9/policy-engine';
 import { prepareFileAccesses, type PreparedFileAccess } from '../policy/file-access';
 import { resolveSessionScript, recordSessionWrites, type SessionScript } from './session-script';
-import { scanInjection, argumentLeavesText, isRecordOnly } from '@node9/policy-engine';
+import {
+  scanInjection,
+  argumentLeavesText,
+  isRecordOnly,
+  holdsSendsWithoutDaemon,
+} from '@node9/policy-engine';
 import {
   extractShellDestinations,
   extractToolDestinations,
@@ -1009,8 +1014,27 @@ export async function _authorizeHeadlessCore(
     const judged = sendsSomething || ((!!shellExp?.fetches || writes.length > 0) && mayBeExposed);
     if (judged) {
       const exposure = await checkSessionExposure(meta.sessionId);
-      if (exposure.exposed && exposure.record) {
-        const rec = exposure.record;
+      // No daemon answered, so nobody knows what this session read
+      // (node9Firewall#445 follow-up). Strict and Block all judge its sends
+      // as after outside content, against nothing read; writes stay as they
+      // are. Standard only records it (the exposure-unavailable line below).
+      const unknownRead =
+        exposure.daemonUnavailable === true && holdsSendsWithoutDaemon(config.settings.mode);
+      const rec =
+        exposure.exposed && exposure.record
+          ? exposure.record
+          : unknownRead
+            ? {
+                sessionId: meta.sessionId,
+                sources: [],
+                destinations: [],
+                userMentioned: [],
+                approved: [],
+                createdAt: 0,
+                expiresAt: 0,
+              }
+            : null;
+      if (rec) {
         // Argument destinations are a SEND only for an MCP action; what a
         // write tool carries in its content is judged by the write rules.
         const dests = new Set<string>(
@@ -1127,7 +1151,7 @@ export async function _authorizeHeadlessCore(
         // P4: writes after exposure (design 6). Each hold carries a key so
         // ask-once can clear that path (or that destination) for the session.
         const writeHolds: WriteHold[] =
-          writes.length > 0
+          writes.length > 0 && !(unknownRead && !exposure.exposed)
             ? judgeWritesAfterExposure({
                 accesses: writes,
                 args,
@@ -1183,7 +1207,10 @@ export async function _authorizeHeadlessCore(
                   : `writes content carrying ${destinationValue(w.destination ?? '')}, ${noun(w.destination ?? 'host:x')} that appeared in that ${readWord}`
             );
           }
-          exposureReview = `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
+          exposureReview =
+            unknownRead && !exposure.exposed
+              ? `🛡️ Node9: the node9 daemon is not running, so node9 cannot tell what this session read. This call ${parts.join('; and ')}. Start it with: node9 daemon start.`
+              : `🛡️ Node9: this session read ${read}. This call ${parts.join('; and ')}.`;
           // fw#318 2b: the edge from the read to this send, on the rows the
           // review writes (the race outcome, the no-channel deny) and, through
           // the review marker, the inline outcome row.

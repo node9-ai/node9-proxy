@@ -53,6 +53,7 @@ import {
   claimSessionNotice,
   sessionNoticeEnabled,
   sessionNoticeOutput,
+  NO_DAEMON_SUFFIX,
 } from '../../notices/session-notice';
 
 /**
@@ -1034,17 +1035,27 @@ export function registerCheckCommand(program: Command): void {
           // A paused node9 checks nothing: no "is on" notice, and the flag stays
           // free for the first checked call after the pause.
           const allowExit = (checkedBy?: string): never => {
-            // Once per session, and once more when the level changes mid-session.
+            // Once per session, and once more when the level changes mid-session
+            // or the daemon stays down (automatic start off: with it on, this
+            // call already started the daemon; node9Firewall#445 follow-up).
+            const daemonStaysDown = daemonDown && config.settings.autoStartDaemon === false;
             const notice =
               checkedBy !== 'paused' &&
               agent === 'Claude Code' &&
               !isSubagentCall &&
               sessionNoticeEnabled()
-                ? claimSessionNotice(safeSessionId, os.homedir(), levelOf(config.settings.mode))
+                ? claimSessionNotice(
+                    safeSessionId,
+                    os.homedir(),
+                    levelOf(config.settings.mode) + (daemonStaysDown ? NO_DAEMON_SUFFIX : '')
+                  )
                 : null;
             if (notice) {
               try {
-                fs.writeSync(1, sessionNoticeOutput(config.settings.mode, notice) + '\n');
+                fs.writeSync(
+                  1,
+                  sessionNoticeOutput(config.settings.mode, notice, daemonStaysDown) + '\n'
+                );
               } catch {
                 /* UX only */
               }

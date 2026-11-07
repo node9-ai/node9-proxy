@@ -50,6 +50,14 @@ export function reviewsEveryAgentFileWrite(mode: string | undefined): boolean {
   return level === 'strict' || level === 'block-all';
 }
 
+/** Strict and Block all hold a send to an unknown destination while the
+ *  daemon is down, since nobody knows what the session read; Standard records
+ *  it only (node9Firewall#445 follow-up). */
+export function holdsSendsWithoutDaemon(mode: string | undefined): boolean {
+  const level = levelOf(mode);
+  return level === 'strict' || level === 'block-all';
+}
+
 /** Block all: ask before any call no check recognised (the catch-all,
  *  `commands.unknown`) and about a binary of unknown origin. This is what
  *  `strict` meant before the levels. */

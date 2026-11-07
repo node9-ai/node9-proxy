@@ -805,7 +805,7 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // is dropped); `-o`, `-iname` and `-prune` in find; find piped through other
 // stages, braces, a subshell or `sudo xargs`; `declare -p NAME`; and `$?`,
 // `$1`, PATH or a loop variable after `source .env` is not a print.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v37';
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v38';
 
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
 // gained the Dropbox App Secret pattern and an Authorization-header reading of
@@ -865,7 +865,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v37';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2c9a0271d9c1dd57';
+export const CANONICAL_EXTRACTOR_HASH = '2d3dfcccff2c2f65';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
