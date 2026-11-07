@@ -298,18 +298,16 @@ describe('the gate', () => {
     };
     const lines = Array.from({ length: 15 }, (_, i) => `p${i} = "${'/'.repeat(4090)}x"`);
     const command = py(`${lines.join('\n')}\nprint(1)`);
+    // Ten runs each: Windows counts CPU time in steps of about 15 ms.
     const cost = (jailPaths: string[]) => {
-      const runs = [0, 1, 2].map(() => {
-        const t = cpuNow();
-        inlineExecReview(command, jailPaths);
-        return cpuNow() - t;
-      });
-      return runs.sort((a, b) => a - b)[1];
+      const t = cpuNow();
+      for (let i = 0; i < 10; i++) inlineExecReview(command, jailPaths);
+      return cpuNow() - t;
     };
-    cost([]);
+    inlineExecReview(command, ['/usr']);
     const without = cost([]);
     const withJail = cost(['/usr', '~/.gmail-mcp']);
-    expect(withJail).toBeLessThan(without * 5 + 15);
+    expect(withJail).toBeLessThan(without * 3 + 50);
   });
 });
 
