@@ -2,6 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { scanArgs, scanText, redactText } from './index';
 import { inspectArgumentSecrets, scanArgumentSecrets } from './arguments';
 
+// CPU time of this test process, in ms. The speed rows below compare against
+// it, not against wall-clock time: on a loaded machine (another full suite
+// running alongside) the wait for a CPU counted as the code's own time and the
+// rows failed while the code was fast (2026-11-06).
+const cpuNow = (): number => {
+  const u = process.cpuUsage();
+  return (u.user + u.system) / 1000;
+};
+
 // Credential shapes the argument gate missed on the public split of a
 // benchmark of labelled credential lines: an HTTP Basic value, the secret of
 // an OTP constructor, JSON escaped inside a string literal, and names outside
@@ -254,9 +263,9 @@ describe('the new shapes are gate-only and stay linear', () => {
   it('long runs of the new keywords finish quickly', () => {
     for (const word of ['Basic ', 'TOTP(', 'pass=', 'consumer_key', '\\"token\\":\\"']) {
       const text = word.repeat(Math.ceil(200_000 / word.length));
-      const start = performance.now();
+      const start = cpuNow();
       gate({ content: text });
-      expect(performance.now() - start, word).toBeLessThan(500);
+      expect(cpuNow() - start, word).toBeLessThan(500);
     }
   });
 });

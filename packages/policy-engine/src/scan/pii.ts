@@ -294,7 +294,9 @@ function* validCardRuns(
   while ((m = re.exec(text)) !== null) {
     const digits = m[0].replace(/\D/g, '');
     const fraction =
-      exemptFractions && isDecimalFraction(text, m.index, digits.length === m[0].length);
+      exemptFractions &&
+      (isDecimalFraction(text, m.index, digits.length === m[0].length) ||
+        isInteriorDotNumber(m[0]));
     if (!fraction && validateLuhn(digits)) {
       yield { index: m.index, length: m[0].length, digits };
     } else {
@@ -355,6 +357,22 @@ export function replaceValidCards(
  * A grouped run ("4xxx 4xxx ...") is never a fraction, so it is not exempt.
  * A comma after any other digit is NOT exempt: "1,<run>" is a CSV row.
  */
+/**
+ * A run whose only separator is one dot with digits on both sides
+ * (`6069.397933300514`) is a decimal number, not a card: a float printed at
+ * full precision whose integer part happens to open a card shape. The run
+ * starts before the dot, so isDecimalFraction (which reads what precedes the
+ * run) cannot see it. A card written with dots has three (4.4.4.4, the
+ * `sep-dot` row), and a dot among other separators is a group separator
+ * (`sep-mixed`); both keep matching (node9Firewall#385, benign scripts).
+ */
+function isInteriorDotNumber(run: string): boolean {
+  const first = run.indexOf('.');
+  if (first <= 0 || first === run.length - 1) return false;
+  if (run.indexOf('.', first + 1) !== -1) return false;
+  return !/[-\s]/.test(run);
+}
+
 function isDecimalFraction(text: string, index: number, unseparated: boolean): boolean {
   if (!unseparated) return false;
   const sep = text[index - 1];

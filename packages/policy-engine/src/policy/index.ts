@@ -105,6 +105,14 @@ export interface PolicyConfig {
     /** Where each `checks` value came from (the host's resolution). A pinned,
      *  cloud-mandated pack rule follows only a `workspace` value (fw#390). */
     checkSources?: Record<string, 'local' | 'project' | 'workspace'>;
+    /**
+     * The user's and the organisation's jail paths as given (`/usr`,
+     * `~/.gmail-mcp`): the directories whose rules the host injected. The
+     * inline-code judge reads them so a jailed directory named as a string
+     * inside a script is a read of it (node9Firewall#391). Optional: a caller
+     * without a jail builds no list.
+     */
+    jailPaths?: string[];
   };
   settings: {
     mode: string;
@@ -1065,7 +1073,7 @@ async function evaluatePolicyCore(
       ? detectInlineExec(shellCommand)
         ? undefined
         : null
-      : inlineExecReview(shellCommand);
+      : inlineExecReview(shellCommand, config.policy.jailPaths);
     if (inline !== null) {
       consider('commands.inline-exec', {
         decision: 'review',

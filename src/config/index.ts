@@ -20,6 +20,7 @@ import {
   strictestOf,
 } from './managed';
 import { pathRules } from '../shields/build';
+import { readJailPaths, USER_JAIL_SHIELD } from '../shields/jail';
 import { normalizeHost } from '../auth/trusted-hosts';
 
 // SmartCondition + SmartRule are now defined in @node9/policy-engine.
@@ -286,6 +287,9 @@ export interface Config {
     // file-tool guard needs the PATHS themselves: rules alone can't tell it
     // whether to stop a Read/Grep/Glob from taking the ignoredTools fast path.
     managedJailPaths: Array<{ path: string; verdict: 'block' | 'review' }>;
+    /** Every jail path in force, local and managed, for the inline-code
+     *  judge (node9Firewall#391). */
+    jailPaths: string[];
     /**
      * RESOLVED output, never user input: every catalog check's value in
      * force, built from the legacy knobs above plus the explicit `checks` of
@@ -615,6 +619,7 @@ export const DEFAULT_CONFIG: Config = {
     appPermissions: {},
     appLinks: {},
     managedJailPaths: [],
+    jailPaths: [],
   },
   environments: {},
 };
@@ -1062,6 +1067,7 @@ export function getConfig(cwd?: string): Config {
     appPermissions: {},
     appLinks: {} as Record<string, string>,
     managedJailPaths: [] as Array<{ path: string; verdict: 'block' | 'review' }>,
+    jailPaths: [] as string[],
   };
   const mergedEnvironments: Record<string, EnvironmentConfig> = { ...DEFAULT_CONFIG.environments };
 
@@ -1750,6 +1756,7 @@ export function getConfig(cwd?: string): Config {
             // to know it must stop that fast path (the same bypass task #20
             // fixed for the local jail, which this managed route reintroduced).
             mergedPolicy.managedJailPaths.push({ path, verdict });
+            mergedPolicy.jailPaths.push(path);
           }
         }
         // Managed trusted hosts REPLACE the local list (the org owns the
@@ -1927,6 +1934,14 @@ export function getConfig(cwd?: string): Config {
   // Always assigned (even when empty) so a stale value can never leak in
   // from a config file — this field is resolver output, not user input.
   mergedPolicy.appliedShields = appliedShields.sort();
+  // node9Firewall#391: the local jail's paths ride beside its rules, for the
+  // inline-code judge. Only when the user-jail shield actually applied (a
+  // keyed machine runs the cloud's shields, and its jail came in above).
+  if (appliedShields.includes(USER_JAIL_SHIELD)) {
+    for (const { path } of readJailPaths()) {
+      if (!mergedPolicy.jailPaths.includes(path)) mergedPolicy.jailPaths.push(path);
+    }
+  }
 
   // Advisory rm rules are always appended last so user-defined rules (project/global/shield)
   // are evaluated first and can override default rm behaviour.

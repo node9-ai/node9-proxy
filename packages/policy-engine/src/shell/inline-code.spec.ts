@@ -243,6 +243,72 @@ describe('the gate', () => {
     const v = await gate(py('print(open("/home/u/.ssh/config").read())'));
     expect(v.decision).not.toBe('allow');
   });
+
+  // node9Firewall#391: a jailed directory written as a quoted string inside
+  // inline code is a read of it, as `cat` of the same path would be. The
+  // user jail reaches the engine as `policy.jailPaths`.
+  const jailed = (command: string, jailPaths: string[]) =>
+    evaluatePolicy(
+      {
+        ...DEFAULT_CONFIG,
+        policy: { ...DEFAULT_CONFIG.policy, jailPaths },
+      } as typeof DEFAULT_CONFIG,
+      'Bash',
+      { command },
+      { agent: 'Claude Code' }
+    );
+  const JOIN = py(
+    'import os\ncurrent = "/usr"\npath = os.path.join(current, "./share/x")\nprint(open(path).read())'
+  );
+
+  it('a quoted jailed path inside inline code is reviewed under that jail (#391)', async () => {
+    const v = await jailed(JOIN, ['/usr']);
+    expect(v.decision).toBe('review');
+    expect(v.checkId).toBe('commands.inline-exec');
+    expect(v.reason).toMatch(/reads a protected file/);
+  });
+
+  it('the same code under no jail, or a jail elsewhere, is ordinary', async () => {
+    expect((await jailed(JOIN, [])).decision).toBe('allow');
+    expect((await jailed(JOIN, ['/opt/data'])).decision).toBe('allow');
+  });
+
+  it('a word that only looks like the jail is not a path (#391, #392)', async () => {
+    expect((await jailed(py('name = "usr"\nprint(name)'), ['/usr'])).decision).toBe('allow');
+    expect((await jailed(py('p = "src/usr/x"\nprint(p)'), ['/usr'])).decision).toBe('allow');
+  });
+
+  it('a home jail meets both spellings in inline code', async () => {
+    expect(
+      (await jailed(py('print(open("/home/u/.gmail-mcp/creds.json").read())'), ['~/.gmail-mcp']))
+        .decision
+    ).toBe('review');
+    expect(
+      (await jailed(py('print(open("~/.gmail-mcp/creds.json").read())'), ['~/.gmail-mcp'])).decision
+    ).toBe('review');
+  });
+
+  it('a long run of slashes in a literal costs no more under a jail', () => {
+    // Trimming trailing slashes with /\/+$/ is quadratic on a run of slashes
+    // that does not end the string (CodeQL js/polynomial-redos). CPU time, so
+    // a busy machine does not count; both halves run under the same load.
+    const cpuNow = (): number => {
+      const u = process.cpuUsage();
+      return (u.user + u.system) / 1000;
+    };
+    const lines = Array.from({ length: 15 }, (_, i) => `p${i} = "${'/'.repeat(4090)}x"`);
+    const command = py(`${lines.join('\n')}\nprint(1)`);
+    // Ten runs each: Windows counts CPU time in steps of about 15 ms.
+    const cost = (jailPaths: string[]) => {
+      const t = cpuNow();
+      for (let i = 0; i < 10; i++) inlineExecReview(command, jailPaths);
+      return cpuNow() - t;
+    };
+    inlineExecReview(command, ['/usr']);
+    const without = cost([]);
+    const withJail = cost(['/usr', '~/.gmail-mcp']);
+    expect(withJail).toBeLessThan(without * 3 + 50);
+  });
 });
 
 describe('inlineExecReason', () => {

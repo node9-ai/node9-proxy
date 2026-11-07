@@ -38,8 +38,8 @@ const SEP = '[/\\\\]';
  * Returns '' for a path with no usable tail (e.g. bare `~`).
  */
 export function pathToRegexFragment(rawPath: string): string {
-  const tail = rawPath
-    .trim()
+  const trimmed = rawPath.trim();
+  const tail = trimmed
     .replace(/^~[\\/]?/, '')
     .replace(/^\$\{?HOME\}?[\\/]?/, '')
     .replace(/^\/(?:home|Users)\/[^\\/]+[\\/]?/, '')
@@ -55,7 +55,22 @@ export function pathToRegexFragment(rawPath: string): string {
     .filter(Boolean)
     .map(escapeRegex);
   if (segments.length === 0) return '';
+  // node9Firewall#392: a jail given as an absolute path outside any home
+  // directory (`/bin`, `/etc`, `/opt/data`) is that directory, not its last
+  // segments anywhere: `./bin`, `src/bin/run` and the word `bin` in prose
+  // used to meet it. Such a jail anchors to a slash that no path character
+  // precedes, so only an absolute occurrence counts (quoted, assigned or
+  // bare). A home jail keeps the tail match, since `~/.aws` and
+  // `/home/u/.aws` must denote the same jail; a drive path keeps it too.
+  if (isAbsoluteOutsideHome(trimmed)) {
+    return `(^|[^A-Za-z0-9_.~\\/-])/${segments.join(SEP)}(${B}|$)`;
+  }
   return `(^|${B})${segments.join(SEP)}(${B}|$)`;
+}
+
+/** A POSIX absolute path that is not under a home directory. */
+function isAbsoluteOutsideHome(p: string): boolean {
+  return p.startsWith('/') && !/^\/(?:home|Users|root)(?:\/|$)/.test(p);
 }
 
 /** Block/review an entire tool by name (empty conditions = match-all). */

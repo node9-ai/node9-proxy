@@ -435,10 +435,15 @@ describe('Q: the harmless forms the filters exist for are still dropped', () => 
 });
 
 describe('Q: the new filters stay fast on a crafted line (the file is the PR author)', () => {
+  // CPU time of this test process, not wall-clock time: with another full
+  // suite on the machine the 1 MiB row took 3.65 s of wall-clock time against
+  // a 3 s budget (2026-11-06), while its own work is about 0.15 s of CPU
+  // (0.35 s under 24 busy processes). Same fix as ci-check-redos.spec.ts.
   const timed = (f: () => unknown) => {
-    const t = performance.now();
+    const t0 = process.cpuUsage();
     f();
-    return performance.now() - t;
+    const used = process.cpuUsage(t0);
+    return (used.user + used.system) / 1000;
   };
 
   it('a 1 MiB line of official installers: bounded, and the line is reported, not excused', () => {

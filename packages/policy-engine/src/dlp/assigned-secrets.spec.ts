@@ -2,6 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { scanArgs, scanText, redactText } from './index';
 import { inspectArgumentSecrets, scanArgumentSecrets } from './arguments';
 
+// CPU time of this test process, in ms. The speed rows below compare against
+// it, not against wall-clock time: on a loaded machine (another full suite
+// running alongside) the wait for a CPU counted as the code's own time and the
+// rows failed while the code was fast (2026-11-06).
+const cpuNow = (): number => {
+  const u = process.cpuUsage();
+  return (u.user + u.system) / 1000;
+};
+
 // The bounded argument gate: the only entry point that uses the context patterns.
 const gate = (args: unknown) => scanArgumentSecrets(args);
 
@@ -140,9 +149,9 @@ describe('Assigned Secret', () => {
   it('stays linear on long runs of a keyword', () => {
     for (const word of ['pwd', 'token', 'api_key', 'secret', 'password=']) {
       const text = word.repeat(Math.ceil(200_000 / word.length));
-      const start = performance.now();
+      const start = cpuNow();
       gate({ content: text });
-      expect(performance.now() - start, word).toBeLessThan(500);
+      expect(cpuNow() - start, word).toBeLessThan(500);
     }
   });
 

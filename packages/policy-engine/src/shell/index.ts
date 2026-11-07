@@ -804,11 +804,27 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
     if (f === PARSE_FAIL) return null; // parse error → fail open, as the catch below did
     let result: 'block' | 'review' | null = null;
     const assigned = assignedNames(f);
+    const known = plainlyNamedPrograms(f);
 
-    walk(f, (node: unknown) => {
+    // A function body is judged at its call with the arguments bound
+    // (node9Firewall#361's walk), so `main "$@"` with `main() { "$1" ...; }`
+    // reads `"$1"` as the literal the script passed: a dispatcher that names
+    // its own commands is ordinary; one handed `rm` is judged as `rm`.
+    // The byte ranges of function bodies: in the top-level pass (callDepth 0)
+    // a word inside one is not judged here, since its `$1` is unbound there;
+    // walkWithCalls judges the body at every call with the arguments bound.
+    // Only a function called by its literal name is judged at its call;
+    // one run through `trap`, a variable or a dynamic dispatch is judged
+    // where it stands (code review).
+    const calledByName = literallyCalledFunctions(f);
+    const bodies: Array<[number, number]> = [];
+    const inBody = (pos: number): boolean => bodies.some(([a, b]) => pos >= a && pos < b);
+    walkWithCalls(f, (node: unknown) => {
       if (!node || result === 'block') return false; // short-circuit once blocked
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
+      if (n.kind === 'FuncDecl' && n.Body && callDepth === 0 && calledByName.has(n.Name?.Value))
+        bodies.push([n.Body.pos, n.Body.end]);
       if (n.kind === 'BinaryCmd' && n.Y && !listOps().has(n.Op)) {
         const call = n.Y.Cmd;
         if (call && call.kind === 'CallExpr') {
@@ -851,9 +867,12 @@ export function detectDangerousShellExec(command: string): 'block' | 'review' | 
       const lookup =
         headWords[0]?.toLowerCase() === 'command' &&
         headWords.slice(1).some((w) => w === '-v' || w === '-V');
+      const unboundBody = callDepth === 0 && inBody(n.pos ?? -1);
       if (
         !lookup &&
-        (opaqueExecutable(args[0], assigned) || opaqueExecutable(args[head], assigned))
+        !unboundBody &&
+        (opaqueExecutable(args[0], assigned, known) ||
+          opaqueExecutable(args[head], assigned, known))
       )
         result = 'review';
 
@@ -913,6 +932,8 @@ function lookupSubstitution(part: any): string | null {
   return null;
 }
 
+const EMPTY_NAMES: ReadonlySet<string> = new Set();
+
 interface ExecutablePart {
   kind: 'Lit' | 'Dynamic';
   value: string;
@@ -952,11 +973,149 @@ function assignedNames(f: any): Set<string> {
   return names;
 }
 
-function executableParts(word: any, assigned: Set<string>, quoted = false): ExecutablePart[] {
+/** The names of the script's functions that some command calls by its
+ *  literal name (`main "$@"`), so walkWithCalls judges their bodies there. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function literallyCalledFunctions(f: any): Set<string> {
+  const declared = new Set<string>();
+  const called = new Set<string>();
+  walk(f, (node: any) => {
+    if (!node) return false;
+    if (node.kind === 'FuncDecl' && node.Name?.Value) declared.add(node.Name.Value);
+    if (node.kind === 'CallExpr') {
+      const head = resolveWordLiteral(node.Args?.[0]);
+      if (head) called.add(head);
+    }
+    return true;
+  });
+  return new Set([...declared].filter((name) => called.has(name)));
+}
+
+/** A program name a script may plainly give a variable: one word, no
+ *  separator a later IFS could split, no quote or expansion syntax. */
+const PLAIN_PROGRAM_NAME = /^[A-Za-z_][\w.+-]*$/;
+
+/**
+ * The names the script itself gives its variables, as literal program names
+ * (node9Firewall#385, benign scripts): `cmd=ls`, `a=(true false)`,
+ * `is_prime[2]=true`, and every function it declares. A variable is KNOWN
+ * when every value the script gives it is one and the same plain name, and
+ * the script never changes IFS (`IFS=,;CMD=r,m;$CMD` is the
+ * evasion this must not learn). A variable assigned from an expansion,
+ * a substitution, a reader (`read X`) or a loop is not known: the shell
+ * decides its value. Returns the empty set when IFS is touched.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function plainlyNamedPrograms(f: any): Set<string> {
+  const values = new Map<string, Set<string> | null>();
+  // An array of plain names: whichever element runs, it is one of them, so
+  // the count does not matter. A scalar must be given one and the same name.
+  const arrays = new Set<string>();
+  const give = (name: string, value: string | null): void => {
+    if (value === null || !PLAIN_PROGRAM_NAME.test(value)) {
+      values.set(name, null);
+      return;
+    }
+    const cur = values.get(name);
+    if (cur === null) return;
+    if (cur === undefined) values.set(name, new Set([value]));
+    else cur.add(value);
+  };
+  const literalOnly = (w: any): string | null => {
+    const parts: any[] = w?.Parts ?? [];
+    if (parts.length !== 1) return null;
+    const p = parts[0];
+    if (p.kind === 'Lit') return p.Value ?? null;
+    // `func=${FUNCNAME[0]}`: the running function's own name, a function.
+    if (p.kind === 'ParamExp' && expansionName(p) === 'FUNCNAME') return 'FUNCNAME';
+    if (p.kind === 'SglQuoted' && !p.Dollar) return p.Value ?? null;
+    if (p.kind === 'DblQuoted') {
+      const inner: any[] = p.Parts ?? [];
+      return inner.length === 1 && inner[0].kind === 'Lit' ? (inner[0].Value ?? null) : null;
+    }
+    return null;
+  };
+  let ifsTouched = false;
+  walk(f, (node: any) => {
+    if (!node) return false;
+    const kind = node.kind;
+    if (kind === 'FuncDecl' && node.Name?.Value) give(node.Name.Value, node.Name.Value);
+    if (kind === 'Assign' && node.Name?.Value) {
+      const name: string = node.Name.Value;
+      if (name === 'IFS') ifsTouched = true;
+      if (node.Append) values.set(name, null);
+      else if (node.Array) {
+        arrays.add(name);
+        for (const el of node.Array.Elems ?? []) give(name, literalOnly(el.Value));
+      } else if (node.Index) {
+        arrays.add(name);
+        give(name, node.Value ? literalOnly(node.Value) : null);
+      } else give(name, node.Value ? literalOnly(node.Value) : null);
+    }
+    if (kind === 'ForClause' && node.Loop?.Name?.Value) values.set(node.Loop.Name.Value, null);
+    if (kind === 'CallExpr') {
+      const words = (node.Args ?? []).map((a: any) => resolveWordLiteral(a));
+      if (VARIABLE_READERS.has(words[0] ?? ''))
+        for (const w of words.slice(1)) if (w && /^[A-Za-z_]\w*$/.test(w)) values.set(w, null);
+    }
+    return true;
+  });
+  if (ifsTouched) return new Set();
+  // Code review: only a function the script declares, or a boolean builtin,
+  // is safe to call through a variable. A program name (`cmd=rm; $cmd -rf`)
+  // is not resolved by the other rules, so a variable naming one stays opaque.
+  const functions = new Set<string>();
+  walk(f, (node: any) => {
+    if (node && node.kind === 'FuncDecl' && node.Name?.Value) functions.add(node.Name.Value);
+    return true;
+  });
+  const callable = (v: string): boolean =>
+    functions.has(v) || v === 'FUNCNAME' || v === 'true' || v === 'false' || v === ':';
+  for (const [name, vals] of values) {
+    if (vals && ![...vals].every(callable)) values.set(name, null);
+  }
+  const known = new Set<string>();
+  // Exactly one distinct value: `cmd=ls; cmd=rm; $cmd` depends on which
+  // assignment ran last, so the script did not plainly name the program.
+  for (const [name, vals] of values)
+    if (vals && (vals.size === 1 || (arrays.has(name) && vals.size > 0))) known.add(name);
+  return known;
+}
+
+/** `$name`, `"$name"`, `${name}`, `${name[i]}`: the variable a plain or
+ *  indexed expansion reads, with no other modifier. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function expansionName(part: any): string | null {
+  if (part.kind !== 'ParamExp') return null;
+  if (part.Excl || part.Length || part.Width || part.Slice || part.Repl || part.Exp) return null;
+  return part.Param?.Value ?? null;
+}
+
+function executableParts(
+  word: any,
+  assigned: Set<string>,
+  quoted = false,
+  known: ReadonlySet<string> = EMPTY_NAMES
+): ExecutablePart[] {
   return (word?.Parts ?? []).flatMap((part: any): ExecutablePart[] => {
     const kind = part.kind;
-    if (kind === 'DblQuoted') return executableParts(part, assigned, true);
+    if (kind === 'DblQuoted') return executableParts(part, assigned, true, known);
     if (kind === 'Lit') return [{ kind: 'Lit', value: part.Value ?? '', quoted }];
+    // A variable the script plainly named (a function, a literal, an array of
+    // literals) names the program as surely as the literal would. `FUNCNAME`
+    // is the running function's own name: a function, by construction.
+    const name = expansionName(part);
+    if (name !== null && (known.has(name) || name === 'FUNCNAME'))
+      return [{ kind: 'Lit', value: name, quoted }];
+    // Inside a function body judged at its call, a bound argument (`$1`,
+    // `"$@"` with one argument) or a variable the body set from one resolves
+    // through the call's table to the literal the caller passed.
+    if (name !== null) {
+      // `"$@"` or `$*` in command position runs the first argument.
+      const bound = recordedExpansion(name === '@' || name === '*' ? '1' : name);
+      if (typeof bound === 'string' && PLAIN_PROGRAM_NAME.test(bound))
+        return [{ kind: 'Lit', value: bound, quoted }];
+    }
     if (kind === 'SglQuoted')
       return [{ kind: part.Dollar ? 'Dynamic' : 'Lit', value: part.Value ?? '', quoted: true }];
     if (kind === 'ParamExp' && isDefaultExpansion(part) && !assigned.has(part.Param?.Value)) {
@@ -975,8 +1134,12 @@ function executableParts(word: any, assigned: Set<string>, quoted = false): Exec
 // `$HOME/.cargo/bin/cargo` and `"$(npm bin)/eslint"` name the program plainly
 // while `$(printf rm)`, `$CMD` and `/bin/{rm,}` do not. Expansions in ordinary
 // arguments, quoted documentation, and script stdin never trigger it.
-function opaqueExecutable(word: any, assigned: Set<string>): boolean {
-  const parts = executableParts(word, assigned);
+function opaqueExecutable(
+  word: any,
+  assigned: Set<string>,
+  known: ReadonlySet<string> = EMPTY_NAMES
+): boolean {
+  const parts = executableParts(word, assigned, false, known);
   let lastSlash = -1;
   parts.forEach((p, i) => {
     if (p.kind === 'Lit' && p.value.includes('/')) lastSlash = i;
@@ -2261,6 +2424,11 @@ let _listOps: Set<number> | null = null;
 export function isListOp(op: number): boolean {
   return listOps().has(op);
 }
+/** A BinaryCmd operator that is a pipe (`|`, `|&`). Exported for the git
+ *  walk, which reads a producer feeding `git add` (node9Firewall#385). */
+export function isPipeOp(op: number): boolean {
+  return pipeOps().has(op);
+}
 function listOps(): Set<number> {
   if (_listOps) return _listOps;
   _listOps = new Set<number>(
@@ -2720,6 +2888,49 @@ function isProtectedCodePath(p: string): boolean {
   );
 }
 
+/**
+ * A string literal that names a user- or org-jailed directory, or a file
+ * under it (node9Firewall#391). The same reading as the jail's shell rule
+ * after node9Firewall#392: a jail given absolute outside any home directory
+ * (`/usr`) is met only by an absolute path (`"/usr/share/x"`, never `"usr"`
+ * or `"src/usr/x"`); a home jail (`~/.gmail-mcp`, `/home/u/.gmail-mcp`) is
+ * met by either spelling of the same directory.
+ */
+function isJailedCodePath(literal: string, jailPaths: readonly string[]): boolean {
+  const value = trimTrailingSlashes(literal.replace(/\\/g, '/'));
+  if (!value) return false;
+  for (const raw of jailPaths) {
+    const jail = trimTrailingSlashes(raw.trim().replace(/\\/g, '/'));
+    if (!jail) continue;
+    const home = homeTail(jail);
+    if (home === null) {
+      // Absolute outside home: exact directory or a path under it.
+      if (value === jail || value.startsWith(jail + '/')) return true;
+      continue;
+    }
+    if (!home) continue; // a bare `~` or `/home/u` jails nothing (over-broad)
+    const tail = homeTail(value);
+    if (tail !== null && (tail === home || tail.startsWith(home + '/'))) return true;
+  }
+  return false;
+}
+
+/** `s` without its trailing slashes. A loop: `/\/+$/` is quadratic on a long
+ *  run of slashes that does not end the string. */
+function trimTrailingSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 47) end--;
+  return s.slice(0, end);
+}
+
+/** The part of a home path after `~/`, `$HOME/`, `/home/<u>/`, `/Users/<u>/`
+ *  or `/root/`; null when the path is not under a home directory. */
+function homeTail(p: string): string | null {
+  const m = /^(?:~|\$\{?HOME\}?|\/home\/[^/]+|\/Users\/[^/]+|\/root)(?:\/(.*))?$/.exec(p);
+  if (!m) return null;
+  return m[1] ?? '';
+}
+
 /** What the approval prompt says about an inline-code review. */
 export function inlineExecDescription(r: InlineExecReview | null | undefined): string {
   const lead = r
@@ -2740,7 +2951,14 @@ export function inlineExecReason(r: InlineExecReview): string {
  * first dangerous finding, or the first unreadable one when none is dangerous.
  * A command with no inline code returns null.
  */
-export function inlineExecReview(command: string): InlineExecReview | null {
+export function inlineExecReview(
+  command: string,
+  jailPaths: readonly string[] = []
+): InlineExecReview | null {
+  const isProtected =
+    jailPaths.length === 0
+      ? isProtectedCodePath
+      : (p: string) => isProtectedCodePath(p) || isJailedCodePath(p, jailPaths);
   const calls = inlineExecCalls(command);
   if (calls === PARSE_FAIL) {
     return INLINE_EXEC_FALLBACK.test(command)
@@ -2770,7 +2988,7 @@ export function inlineExecReview(command: string): InlineExecReview | null {
           what: `is ${call.interp} code, which node9 does not read`,
         };
       } else {
-        const judged = judgeInlineCode(language, code, isProtectedCodePath);
+        const judged = judgeInlineCode(language, code, isProtected);
         if (judged) finding = { ...judged, interp: call.interp };
       }
       if (finding?.outcome === 'dangerous') return finding;
@@ -3406,6 +3624,16 @@ function recordTopLevelStmt(stmt: any): boolean {
   return (stmt.Cmd.Args || []).length === 0 && (stmt.Cmd.Assigns || []).length > 0;
 }
 
+/** A recorded array literal: this mark, then the elements joined by ARRAY_SEP. */
+const ARRAY_MARK = '\u0001array\u0001';
+const ARRAY_SEP = '\u0001';
+/** The elements of a recorded array value, or null for a scalar / unknown. */
+export function arrayElements(value: string | null | undefined): string[] | null {
+  if (typeof value !== 'string' || !value.startsWith(ARRAY_MARK)) return null;
+  const body = value.slice(ARRAY_MARK.length);
+  return body === '' ? [] : body.split(ARRAY_SEP);
+}
+
 /** Record the assignments a CallExpr or DeclClause carries. PREFIX assignments
  *  (`HOME=/tmp/x cat $HOME/...`, Args present) are ignored on purpose: bash
  *  expands that command's own words with the OLD value, so the read is real and
@@ -3426,7 +3654,23 @@ function recordAssignments(n: any, at: number): void {
   } else return;
   for (const a of assigns) {
     const name: string | undefined = a?.Name?.Value;
-    if (!name || !a.Value || a.Append) continue; // `export K` and `K+=x` are not followed
+    if (!name) continue;
+    // node9Firewall#385 (c): an array of literals is recorded as its elements
+    // joined by a separator no shell word carries, so `"${a[@]}"` expands to
+    // them one by one (see arrayElements) and `${a[i]}` to one of them.
+    if (a.Array) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const elems = ((a.Array.Elems || []) as any[]).map((e) =>
+        e?.Index ? null : resolveWordLiteral(e?.Value)
+      );
+      const literal = elems.every((v): v is string => v !== null);
+      assignmentTable.set(name, {
+        value: literal && !a.Append ? ARRAY_MARK + elems.join(ARRAY_SEP) : null,
+        at,
+      });
+      continue;
+    }
+    if (!a.Value || a.Append) continue; // `export K` and `K+=x` are not followed (JAIL-14a)
     // Resolved with the table so far, so `S=$HOME/.ssh; D=$S/id_rsa` is transitive.
     assignmentTable.set(name, { value: resolveWordLiteral(a.Value), at });
   }
@@ -3459,7 +3703,40 @@ function resolveTrivialSubst(part: any): string | undefined {
   const st = stmts[0];
   if ((st.Redirs || []).length > 0 || st.Negated || st.Background) return undefined;
   const cmd = st.Cmd;
-  if (!cmd || cmd.kind !== 'CallExpr') return undefined;
+  if (!cmd) return undefined;
+  // node9Firewall#385 (c): `$(printf '%s' X | base64 -d)` and `$(printf '%s'
+  // X | rev)` with a literal X are X decoded or reversed: the value is known
+  // at parse time, so it is resolved and judged as the word it is.
+  if (cmd.kind === 'BinaryCmd' && pipeOps().has(cmd.Op)) {
+    const left = cmd.X?.Cmd;
+    const right = cmd.Y?.Cmd;
+    if (!left || !right || left.kind !== 'CallExpr' || right.kind !== 'CallExpr') return undefined;
+    if ((cmd.X.Redirs || []).length > 0 || (cmd.Y.Redirs || []).length > 0) return undefined;
+    const input = trivialCallOutput(left);
+    if (input === undefined) return undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const filter = ((right.Args || []) as any[]).map((a) => resolveWordLiteral(a));
+    if (filter.some((w) => w === null)) return undefined;
+    const f = baseWord(filter[0] as string);
+    const flags = filter.slice(1) as string[];
+    if (f === 'base64' && flags.length === 1 && /^(-d|-D|--decode)$/.test(flags[0])) {
+      try {
+        const out = Buffer.from(input, 'base64').toString('utf8');
+        return /^[\x20-\x7e]*$/.test(out) ? out : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    if (f === 'rev' && flags.length === 0) return [...input].reverse().join('');
+    return undefined;
+  }
+  if (cmd.kind !== 'CallExpr') return undefined;
+  return trivialCallOutput(cmd);
+}
+
+/** What a lone `echo` or `printf` call writes, when every word is literal. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function trivialCallOutput(cmd: any): string | undefined {
   if ((cmd.Assigns || []).length > 0) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const words: (string | null)[] = (cmd.Args || []).map((a: any) => resolveWordLiteral(a));
@@ -3472,16 +3749,27 @@ function resolveTrivialSubst(part: any): string | undefined {
     return rest.slice(i).join(' ');
   }
   if (head === 'printf') {
+    // A format of nothing but octal and hex escapes (`'\\143\\157'`,
+    // `'\\x2d\\x2d'`) is a literal written as bytes.
+    if (rest.length === 1 && /^(?:\\(?:[0-7]{1,3}|x[0-9A-Fa-f]{1,2}))+$/.test(rest[0])) {
+      return rest[0].replace(/\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3}))/g, (_, hex, oct) =>
+        String.fromCharCode(hex ? parseInt(hex, 16) : parseInt(oct, 8))
+      );
+    }
     if (rest.length !== 2) return undefined;
-    if (!/^%s(\\n)?$/.test(rest[0])) return undefined;
-    return rest[1];
+    // `%s`, or a literal prefix and suffix around one `%s` (`':!%s'`,
+    // `'refs/heads/%s'`): the result is the literal with the argument put
+    // in. A second conversion or a width is a computation.
+    const m = /^([^%]*)%s([^%]*?)(\\n)?$/.exec(rest[0]);
+    if (!m) return undefined;
+    return m[1] + rest[1] + m[2];
   }
   return undefined;
 }
 
 /** The recorded value for a plain expansion of `name`, or undefined when the
  *  table has nothing to say (which lets the HOME default speak). */
-function recordedExpansion(name: string | undefined): string | null | undefined {
+export function recordedExpansion(name: string | undefined): string | null | undefined {
   if (!assignmentTable || !name) return undefined;
   const rec = assignmentTable.get(name);
   if (rec === undefined || rec.at >= currentStmtOffset) return undefined;
@@ -3492,6 +3780,15 @@ function isPlainParam(p: any): boolean {
   if (p.kind !== 'ParamExp') return false;
   // Any modifier means the value is computed, not the variable itself.
   return !(p.Excl || p.Length || p.Width || p.Index || p.Slice || p.Repl || p.Exp);
+}
+/** `${a[2]}`, `${a[@]}`, `${a[*]}`: an indexed expansion with no other modifier. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function indexedParam(p: any): { name: string; index: string } | null {
+  if (p.kind !== 'ParamExp' || !p.Index) return null;
+  if (p.Excl || p.Length || p.Width || p.Slice || p.Repl || p.Exp) return null;
+  const index = resolveWordLiteral(p.Index);
+  const name: string | undefined = p.Param?.Value;
+  return name && index !== null ? { name, index } : null;
 }
 /**
  * What a plain ParamExp contributes: the recorded assignment if the table has
@@ -3509,9 +3806,19 @@ function expandPlainParam(p: any): string | null | undefined {
   // `HOME=/tmp/fake; cat $HOME/.ssh/id_rsa` judged `~/.ssh/id_rsa`). Outside a
   // walk a ParamExp stays dynamic, exactly as before stage 6.
   if (!assignmentTable) return undefined;
+  const indexed = indexedParam(p);
+  if (indexed) {
+    const elems = arrayElements(recordedExpansion(indexed.name));
+    if (elems === null) return undefined;
+    if (indexed.index === '@' || indexed.index === '*') return elems.join(' ');
+    return /^\d+$/.test(indexed.index) ? (elems[Number(indexed.index)] ?? null) : null;
+  }
   if (!isPlainParam(p)) return undefined;
   const recorded = recordedExpansion(p.Param?.Value);
-  if (recorded !== undefined) return recorded;
+  if (recorded !== undefined) {
+    const elems = arrayElements(recorded);
+    return elems === null ? recorded : (elems[0] ?? '');
+  }
   return HOME_VARIABLES.has(p.Param?.Value) ? '~' : undefined;
 }
 

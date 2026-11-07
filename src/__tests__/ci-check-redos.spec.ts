@@ -251,14 +251,20 @@ describe('L — no crafted input stalls a scan', () => {
   const keyLines = (n: number, value: string) =>
     Array.from({ length: n }, (_, i) => `k${i}: ${value}`).join('\n');
 
+  // Its own budget: with two full suites on the machine the CPU time of this
+  // ~0.3 s parse reached 2.18 s (2026-11-06), so 2 s still failed under load.
+  // 5 s keeps the guard: the quadratic parse it exists to catch took 9.7 s of
+  // CPU. The growth check below is the load-independent guard.
+  const KEYS_BUDGET_MS = 5000;
+
   it('a SKILL.md frontmatter and a workflow with 32,000 keys', () => {
     const keys = keyLines(32_000, 'v');
     expect(
       timed(() => analyzeSkillGrants('.claude/skills/x/SKILL.md', `---\n${keys}\n---\n`))
-    ).toBeLessThan(BUDGET_MS);
+    ).toBeLessThan(KEYS_BUDGET_MS);
     expect(
       timed(() => analyzeWorkflow('.github/workflows/a.yml', `on: push\n${keys}\n`))
-    ).toBeLessThan(BUDGET_MS);
+    ).toBeLessThan(KEYS_BUDGET_MS);
   });
 
   // The duplicate-key check this row guards against was quadratic: 8 times the
