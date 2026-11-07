@@ -15,7 +15,8 @@ import path from 'path';
 import {
   claimSessionNotice,
   sessionNoticeLine,
-  SESSION_NOTICE_NOTE,
+  SESSION_NOTICE_ASK,
+  SESSION_NOTICE_DONE,
 } from '../notices/session-notice';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
@@ -115,6 +116,50 @@ function check(
   };
 }
 
+/** A UserPromptSubmit hook call, as Claude Code sends it. */
+function prompt(
+  where: { home: string; project: string },
+  sessionId: string,
+  text: string,
+  envExtra: Record<string, string> = {}
+) {
+  const env = { ...process.env, ...envExtra };
+  delete env.NODE9_API_KEY;
+  delete env.NODE9_API_URL;
+  const payload = {
+    hook_event_name: 'UserPromptSubmit',
+    prompt: text,
+    cwd: where.project,
+    session_id: sessionId,
+    permission_mode: 'default',
+  };
+  const result = spawnSync(process.execPath, [CLI, 'check', JSON.stringify(payload)], {
+    encoding: 'utf-8',
+    timeout: 60000,
+    cwd: where.project,
+    env: {
+      ...env,
+      HOME: where.home,
+      USERPROFILE: where.home,
+      NODE9_NO_AUTO_DAEMON: '1',
+      NODE9_TESTING: '1',
+      NODE9_SESSION_NOTICE: '1',
+    },
+  });
+  expect(result.error).toBeUndefined();
+  const out = (result.stdout ?? '').trim();
+  return { status: result.status, out, json: out ? (JSON.parse(out) as HookOut) : null };
+}
+
+/** The closing note's hook output, spelled out so an undefined note fails. */
+const closed = () => ({
+  hookEventName: 'UserPromptSubmit',
+  additionalContext: expect.stringMatching(/already shown/i) as unknown as string,
+});
+
+const flagOf = (home: string, sessionId: string) =>
+  fs.readFileSync(path.join(home, '.node9', 'notice-sessions', `${sessionId}.node9-flag`), 'utf8');
+
 describe('the session level notice at the real hook (fw#420)', () => {
   itUnix('the first allowed call carries the notice, without a decision', () => {
     const where = makeHome('first');
@@ -122,7 +167,7 @@ describe('the session level notice at the real hook (fw#420)', () => {
     expect(r.status).toBe(0);
     const h = r.json?.hookSpecificOutput ?? {};
     expect(h.hookEventName).toBe('PreToolUse');
-    expect(h.additionalContext).toBe(`${STANDARD}\n${SESSION_NOTICE_NOTE}`);
+    expect(h.additionalContext).toBe(`${STANDARD}\n${SESSION_NOTICE_ASK}`);
     expect(h.permissionDecision).toBeUndefined();
     expect(r.json?.systemMessage).toBe(STANDARD);
   });
@@ -276,10 +321,18 @@ describe('claimSessionNotice', () => {
 // founder moved the workspace back to Audit the repeated line named the old
 // level. Design: docs/roadmap/active/notice-repeat-fix-code-design.md.
 describe('the notice is shown once, and once more only when the level changes', () => {
-  // Fallback c: the measured "once" wording still repeated (1 session in 5).
-  it('the session notice asks the agent for nothing but silence', () => {
-    expect(SESSION_NOTICE_NOTE).not.toMatch(/start your|show the line|quote/i);
-    expect(SESSION_NOTICE_NOTE).toMatch(/do not mention it/i);
+  // node9Firewall#442: systemMessage alone is hidden in the desktop app, so the
+  // agent is asked to open its next reply with the line, and the user's next
+  // prompt tells it the line was shown. The word "repeat" stays out of both:
+  // naming it made the agent do it.
+  it('the agent is asked for the line in one reply, then told it was shown', () => {
+    expect(SESSION_NOTICE_ASK).toMatch(/start your next reply/i);
+    expect(SESSION_NOTICE_DONE).toMatch(/already shown/i);
+    expect(SESSION_NOTICE_DONE).toMatch(/do not/i);
+    // /code-review: a standing "never" must not swallow a later level change.
+    expect(SESSION_NOTICE_DONE).toMatch(/new node9 line/i);
+    for (const text of [SESSION_NOTICE_ASK, SESSION_NOTICE_DONE])
+      expect(text).not.toMatch(/repeat/i);
   });
 
   itUnix('a level change mid-session gives one notice with the new level, then nothing', () => {
@@ -370,5 +423,75 @@ describe('the notice says when the daemon stays down', () => {
     const where = makeHome('daemon-auto', 'standard');
     const r = check(where, 'daemon-auto-1', 'ls');
     expect(r.json?.systemMessage).toBe(STANDARD);
+  });
+});
+
+// node9Firewall#442: the notice reaches the reply once. The user's next prompt
+// (UserPromptSubmit) carries the note that it was shown, so it lands after the
+// first reply however many tool calls that reply made.
+describe("the user's next prompt closes the notice (fw#442)", () => {
+  itUnix('a notice waits for the next prompt, which says it was shown, once', () => {
+    const where = makeHome('close');
+    expect(check(where, 'sess-close', 'ls').json?.systemMessage).toBe(STANDARD);
+    // Later calls of the same reply say nothing and do not close it.
+    expect(check(where, 'sess-close', 'pwd').out).toBe('');
+    const next = prompt(where, 'sess-close', 'what is in src?');
+    expect(next.status).toBe(0);
+    expect(next.json?.hookSpecificOutput).toEqual({
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: SESSION_NOTICE_DONE,
+    });
+    expect(next.json?.systemMessage).toBeUndefined();
+    const after = prompt(where, 'sess-close', 'and in test?');
+    expect(after.status).toBe(0);
+    expect(after.out).toBe('');
+    expect(check(where, 'sess-close', 'ls').out).toBe('');
+  });
+
+  itUnix('a prompt before any notice says nothing', () => {
+    const where = makeHome('close-none');
+    const r = prompt(where, 'sess-none', 'hello');
+    expect(r.status).toBe(0);
+    expect(r.out).toBe('');
+    // /code-review: a prompt with nothing to close touches nothing on disk.
+    expect(fs.existsSync(path.join(where.home, '.node9', 'notice-sessions'))).toBe(false);
+  });
+
+  itUnix('a level change asks again and the next prompt closes it', () => {
+    const where = makeHome('close-change', 'standard');
+    check(where, 'sess-cc', 'ls');
+    prompt(where, 'sess-cc', 'go on');
+    setMode(where.home, 'audit');
+    expect(check(where, 'sess-cc', 'ls').json?.systemMessage).toBe(CHANGED_AUDIT);
+    expect(prompt(where, 'sess-cc', 'next').json?.hookSpecificOutput).toEqual(closed());
+    expect(prompt(where, 'sess-cc', 'next').out).toBe('');
+  });
+
+  itUnix('a flag from 2.48.1 (the level alone) counts as closed', () => {
+    const where = makeHome('close-legacy', 'standard');
+    const dir = path.join(where.home, '.node9', 'notice-sessions');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(dir, 'sess-l.node9-flag'), 'standard');
+    expect(prompt(where, 'sess-l', 'hi').out).toBe('');
+    expect(check(where, 'sess-l', 'ls').out).toBe('');
+  });
+
+  itUnix('a prompt blocked for a secret leaves the notice open', () => {
+    const where = makeHome('close-dlp');
+    check(where, 'sess-dlp', 'ls');
+    const fakeAwsKey = 'AKIA' + 'QWERTYASDFGHJKLM'; // composed so this file never trips DLP
+    const blocked = prompt(where, 'sess-dlp', `use aws_access_key_id=${fakeAwsKey}`);
+    expect(blocked.status).toBe(2);
+    expect(flagOf(where.home, 'sess-dlp')).not.toBe('standard');
+    expect(prompt(where, 'sess-dlp', 'ok, without it').json?.hookSpecificOutput).toEqual(closed());
+    expect(flagOf(where.home, 'sess-dlp')).toBe('standard');
+  });
+
+  itUnix('a paused node9 still closes an open notice', () => {
+    const where = makeHome('close-paused');
+    check(where, 'sess-p', 'ls');
+    const r = prompt(where, 'sess-p', 'hi', { NODE9_PAUSED: '1' });
+    expect(r.status).toBe(0);
+    expect(r.json?.hookSpecificOutput).toEqual(closed());
   });
 });

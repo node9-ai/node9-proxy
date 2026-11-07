@@ -51,7 +51,9 @@ import {
 } from '../../utils/own-dir';
 import {
   claimSessionNotice,
+  closeSessionNotice,
   sessionNoticeEnabled,
+  sessionNoticeClosedOutput,
   sessionNoticeOutput,
   NO_DAEMON_SUFFIX,
 } from '../../notices/session-notice';
@@ -295,13 +297,36 @@ export function registerCheckCommand(program: Command): void {
               }
             }
 
-            if (!prompt) process.exit(0);
+            // node9Firewall#442: a session notice asked the agent to open its
+            // reply with node9's line; the user's next prompt tells it the line
+            // was shown, before the next reply is written. On every exit that
+            // lets the prompt through (a paused node9 included: the ask is
+            // already in the conversation), never on a blocked prompt, which
+            // the agent does not see.
+            const allowPrompt = (): never => {
+              if (
+                sessionNoticeEnabled() &&
+                closeSessionNotice(
+                  typeof payload.session_id === 'string' ? payload.session_id : undefined,
+                  os.homedir()
+                )
+              ) {
+                try {
+                  fs.writeSync(1, sessionNoticeClosedOutput() + '\n');
+                } catch {
+                  /* UX only */
+                }
+              }
+              process.exit(0);
+            };
+
+            if (!prompt) allowPrompt();
 
             // `node9 pause` must silence this gate too — the tool-call path
             // honors it in authorizeHeadless (orchestrator.ts:273); without
             // this, prompts stayed BLOCKED while everything else was paused
             // (dogfound 2026-07-05). Same guard pair as the orchestrator.
-            if (process.env.NODE9_PAUSED === '1' || checkPause().paused) process.exit(0);
+            if (process.env.NODE9_PAUSED === '1' || checkPause().paused) allowPrompt();
 
             const dlpMatch = scanArgs({ prompt });
             // Decoy credentials: a planted value pasted into a prompt is the same
@@ -336,7 +361,7 @@ export function registerCheckCommand(program: Command): void {
               } catch {
                 /* never block the prompt on this */
               }
-              process.exit(0);
+              allowPrompt();
             }
             let canaryRec: ReturnType<typeof loadCanaries>[number] | null = null;
             if (canaryHit) {
