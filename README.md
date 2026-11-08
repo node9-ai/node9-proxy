@@ -25,7 +25,7 @@ metadata address is blocked, and the agent gets the reason and carries on.
 Deleting files waits for your approval, right in the chat.
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/bfd3eec5-94fa-45a9-ac79-d06684ab4b2c" width="760" alt="node9 in a Claude Code session: two calls allowed, one blocked, one held for approval" />
+  <img src="https://github.com/user-attachments/assets/be4e7037-3cbb-41d8-9f1a-985067914c1f" width="760" alt="node9 in a Claude Code session: node9 is on, a .env read is blocked, a force push waits for approval" />
 </p>
 
 ## Install
