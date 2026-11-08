@@ -55,6 +55,10 @@ describe('a system service stopped directly', () => {
       'com.example.agent.plist',
     ],
     ['launchctl bootout system /System/Library/LaunchDaemons/ssh.plist', 'ssh.plist'],
+    // Review: a string-wrapped command is read like any other.
+    ['sh -c "pkill sshd"', 'sshd'],
+    ["sudo bash -c 'systemctl stop docker'", 'dockerd'],
+    ['bash -c "sh -c \'killall nginx\'"', 'nginx'],
   ])('%s', (command, service) => {
     const f = detectSystemProcessStop(command);
     expect(f?.service, command).toBe(service);

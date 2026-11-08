@@ -17,7 +17,13 @@
 //
 // Free: `kill <pid>` with no listed name in the script, `pkill node`, `kill
 // %1`, `killall python`, `systemctl restart nginx`, `systemctl --user stop x`.
-import { baseWord, resolveWordLiteral, unwrapCommandHead, walkCommandScope } from './index';
+import {
+  baseWord,
+  literalShellPayload,
+  resolveWordLiteral,
+  unwrapCommandHead,
+  walkCommandScope,
+} from './index';
 import { serviceNamedIn, serviceOf } from './services';
 
 export interface SystemProcessFinding {
@@ -33,6 +39,8 @@ const KILL_SIGNAL_RE = /^-(?:\d+|s|SIG[A-Z]+|[A-Z]{2,})$/;
 const SYSTEMCTL_STOP_VERBS = new Set(['stop', 'kill', 'disable', 'mask']);
 const LAUNCHCTL_UNLOAD_VERBS = new Set(['unload', 'bootout', 'remove']);
 const LAUNCH_DAEMONS_RE = /(?:^|\/)(?:System\/)?Library\/LaunchDaemons\//;
+/** `sh -c "sh -c '…'"`: payloads read inside payloads, at most this deep. */
+const MAX_PAYLOAD_DEPTH = 3;
 
 function shownOf(words: (string | null)[]): string {
   return words
@@ -50,7 +58,7 @@ function withoutComments(command: string): string {
     .join('\n');
 }
 
-export function detectSystemProcessStop(command: string): SystemProcessFinding | null {
+export function detectSystemProcessStop(command: string, depth = 0): SystemProcessFinding | null {
   if (!PRESCREEN_RE.test(command)) return null;
   const named = serviceNamedIn(withoutComments(command));
   let direct: SystemProcessFinding | null = null;
@@ -67,6 +75,16 @@ export function detectSystemProcessStop(command: string): SystemProcessFinding |
     if (baseWord(words[0]) === 'xargs' && words.some((w) => w !== null && baseWord(w) === 'kill')) {
       dynamicKill ??= shownOf(words);
       return true;
+    }
+    // A string-wrapped command (`sh -c "pkill sshd"`, `sudo bash -c …`): the
+    // payload is a command line of its own; read it the same way.
+    if (depth < MAX_PAYLOAD_DEPTH) {
+      const payload = literalShellPayload(words, baseWord(words[0]));
+      if (payload !== null) {
+        const inner = detectSystemProcessStop(payload, depth + 1);
+        if (inner) direct = inner;
+        return true;
+      }
     }
     const head = unwrapCommandHead(words);
     if (head >= words.length) return true;
