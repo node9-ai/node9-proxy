@@ -329,6 +329,17 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     legacy: ['Manual Nuclear Protection'],
   },
   {
+    id: 'commands.system-processes',
+    group: 'commands',
+    owasp: 'ASI02',
+    title: 'Stops a system service',
+    catches:
+      'kill, pkill, killall, systemctl stop or kill, service stop or launchctl unload aimed at a system service (sshd, dockerd, systemd, kubelet, cron, a database or web server), or a script that walks the process list for one of those names and kills what it finds',
+    values: ALL,
+    defaultValue: 'review',
+    legacy: ['Node9: System Service Stopped'],
+  },
+  {
     id: 'commands.dangerous-word',
     group: 'commands',
     owasp: 'ASI02',

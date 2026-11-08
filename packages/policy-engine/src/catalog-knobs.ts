@@ -386,6 +386,7 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   'commands.sql-no-where',
   'commands.temp-binary',
   'commands.disk-destroy',
+  'commands.system-processes',
   'commands.dangerous-word',
   'commands.node9-disarm',
   'commands.reverse-shell',

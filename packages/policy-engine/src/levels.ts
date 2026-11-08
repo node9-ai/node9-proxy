@@ -77,6 +77,7 @@ const SOFT: Readonly<Record<string, Verdict>> = {
   'commands.sql-no-where': 'log',
   'commands.temp-binary': 'log',
   'commands.disk-destroy': 'log',
+  'commands.system-processes': 'log',
   'commands.dangerous-word': 'log',
   'files.system-dirs': 'log',
   'files.shell-startup': 'log',

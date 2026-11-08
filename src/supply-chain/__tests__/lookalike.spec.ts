@@ -98,9 +98,15 @@ describe('the generated list', () => {
     expect(await nearMiss('PyPI', 'requests')).toBeNull();
     expect(await nearMiss('npm', 'request')).toBeNull();
   });
-  it('costs under 25 ms a name (about 6 ms on a loaded machine)', async () => {
+  it('costs under 25 ms of CPU a name', async () => {
+    // CPU time of this process, not wall-clock: on a loaded machine the wait
+    // for a CPU counted as the code's own time and the row failed while the
+    // matcher was fast (2026-11-08, load 25).
+    const cpuNow = (): number => {
+      const u = process.cpuUsage();
+      return (u.user + u.system) / 1000;
+    };
     await nearMiss('npm', 'warm-up');
-    const t0 = performance.now();
     const names = [
       'left-pad',
       'my-company-tools',
@@ -109,8 +115,9 @@ describe('the generated list', () => {
       'zzzz',
       '@scope/thing',
     ];
+    const t0 = cpuNow();
     for (const n of names) await nearMiss('npm', n);
-    expect((performance.now() - t0) / names.length).toBeLessThan(25);
+    expect((cpuNow() - t0) / names.length).toBeLessThan(25);
   });
   it('describes each rule in plain words', () => {
     expect(describeNearMiss({ popular: 'x', rule: 'edit', distance: 1 })).toBe('one letter off');

@@ -79,6 +79,7 @@ describe('OWASP risk on every check', () => {
           'commands.sql-ddl',
           'commands.sql-no-where',
           'commands.disk-destroy',
+          'commands.system-processes',
           'commands.dangerous-word',
         ],
       },

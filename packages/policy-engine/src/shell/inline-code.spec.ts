@@ -14,6 +14,8 @@ const never = () => false;
 
 describe('ordinary inline code passes', () => {
   it.each([
+    // A service named without a kill.
+    py('print("nginx is up")'),
     "python3 -c 'print(1 + 2)'",
     'python3 -c "import json,sys; print(json.load(sys.stdin)[\'name\'])"',
     py(
@@ -39,6 +41,22 @@ describe('ordinary inline code passes', () => {
 
 describe('dangerous inline code is reviewed, by category', () => {
   it.each([
+    // stops a system service (node9Firewall#385 wave 4): the benchmark's
+    // psutil shape, and the direct os.kill with a named service.
+    [
+      py(
+        'import psutil\nfor proc in psutil.process_iter(["pid", "cmdline"]):\n    if "sshd" in " ".join(proc.info["cmdline"] or []):\n        proc.kill()'
+      ),
+      'kills-service',
+    ],
+    [
+      py('import os, signal\nfor pid in pids_of("nginx"):\n    os.kill(pid, signal.SIGKILL)'),
+      'kills-service',
+    ],
+    ["node -e \"process.kill(findPid('dockerd'), 'SIGKILL')\"", 'kills-service'],
+    ['ruby -e \'Process.kill("KILL", pid_of("mysqld"))\'', 'kills-service'],
+    // A kill with no listed service is what the table says it is.
+    [py('import os, signal\nos.kill(1234, signal.SIGTERM)'), 'runs-commands'],
     // deletes
     [py('import os\nos.remove("notes.txt")'), 'deletes'],
     [py('import shutil\nshutil.rmtree("build")'), 'deletes'],
