@@ -461,7 +461,13 @@ describe('forecast-cases (integration)', () => {
     const alone = { ...chain, id: 'c.noprior', prior: undefined };
     fs.writeFileSync(file, [chain, alone].map((c) => JSON.stringify(c)).join('\n') + '\n');
     const { byId } = run(home, [file]);
-    expect(byId.get('c.shellsource')).toMatchObject({ decision: 'review', enforced: true });
+    // The check the hook's audit row names for this hold (round 4c): without
+    // it the dashboard files the attack as "no check naming it".
+    expect(byId.get('c.shellsource')).toMatchObject({
+      decision: 'review',
+      enforced: true,
+      checkId: 'behavior.untrusted-content',
+    });
     expect(byId.get('c.noprior')?.decision).toBe('allow');
   });
 
@@ -673,6 +679,28 @@ describe('forecast-cases helpers', () => {
         ...base,
       },
       { id: '9', owasp: 'ASI02', expected: 'block', error: 'boom', ...base },
+      // A headline attack of ASI01 that a check of another risk saw: it is
+      // ASI01's passed attack, not ASI03's.
+      {
+        id: '10',
+        owasp: 'ASI01',
+        expected: 'review',
+        decision: 'block',
+        enforced: false,
+        checkId: 'data.pii',
+        notEnforcedBecause: 'settings.mode=observe',
+        ...base,
+      },
+      // A vendor attack let through: counted in its cell, never in passedHeadline.
+      {
+        id: '11',
+        owasp: 'ASI03',
+        expected: 'block',
+        decision: 'allow',
+        enforced: false,
+        setup: 'clean',
+        section: 'vendor',
+      },
     ];
     const s = summarize(results, DEFAULT_CONFIG);
     expect(s.byRisk.ASI03.headline).toMatchObject({
@@ -684,11 +712,21 @@ describe('forecast-cases helpers', () => {
       interrupted: 1,
     });
     expect(s.passedByCheck['data.credential-files']).toMatchObject({ count: 1 });
-    expect(s.passedUnattributed.ASI03).toBe(1);
+    // The superseded fields still sum both sections, as older servers read them.
+    expect(s.passedUnattributed.ASI03).toBe(2);
+    expect(s.passedHeadline.ASI03).toEqual({
+      byCheck: { 'data.credential-files': { value: expect.any(String), count: 1 } },
+      unattributed: 1,
+    });
+    expect(s.passedHeadline.ASI01).toEqual({
+      byCheck: { 'data.pii': { value: expect.any(String), count: 1 } },
+      unattributed: 0,
+    });
+    expect(s.byRisk.ASI03.vendor).toMatchObject({ attacks: 1, passed: 1 });
+    expect(s.cases).toBe(11);
     expect(s.byRisk.ASI04.headline).toMatchObject({ notApplicable: 1, volatile: 1, attacks: 0 });
     expect(s.byRisk.ASI01.headline.notSimulated).toBe(1);
     expect(s.byRisk.ASI02.headline.errors).toBe(1);
     expect(s.notApplicableBy.decoy).toBe(1);
-    expect(s.cases).toBe(9);
   });
 });
