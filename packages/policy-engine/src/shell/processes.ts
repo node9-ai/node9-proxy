@@ -52,9 +52,18 @@ function shownOf(words: (string | null)[]): string {
 /** The command without its `#` comments: a service named in prose beside a
  *  kill ("start a fresh systemd daemon") is not a process-matching pattern. */
 function withoutComments(command: string): string {
+  // A linear scan, not `/(^|\s)#.*$/`: that regex is polynomial on a line of
+  // `# # # …` (CodeQL js/polynomial-redos).
   return command
     .split('\n')
-    .map((line) => line.replace(/(^|\s)#.*$/, '$1'))
+    .map((line) => {
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) {
+          return line.slice(0, i);
+        }
+      }
+      return line;
+    })
     .join('\n');
 }
 

@@ -85,6 +85,19 @@ describe('a system service killed through the process list', () => {
   });
 });
 
+describe('a long line of comment marks is read in linear time', () => {
+  it('# # # … beside a kill', () => {
+    const cpuNow = (): number => {
+      const u = process.cpuUsage();
+      return (u.user + u.system) / 1000;
+    };
+    const command = `${'# '.repeat(50_000)}\nkill $pid`;
+    const t0 = cpuNow();
+    expect(detectSystemProcessStop(command)).toBeNull();
+    expect(cpuNow() - t0).toBeLessThan(500);
+  });
+});
+
 describe('everyday process management stays free', () => {
   it.each([
     'kill 12345',
