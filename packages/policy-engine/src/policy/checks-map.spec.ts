@@ -188,6 +188,15 @@ describe('detectors follow their check', () => {
     expect(v.decision).toBe('block');
     expect(v.checkId).toBe('network.metadata');
   });
+  it('a system service stopped is its own check (node9Firewall#385 wave 4)', async () => {
+    expect((await bash(cfg(), 'systemctl stop docker')).checkId).toBe('commands.system-processes');
+    expect((await bash(cfg({ 'commands.system-processes': 'off' }), 'pkill sshd')).decision).toBe(
+      'allow'
+    );
+    expect((await bash(cfg({ 'commands.system-processes': 'block' }), 'pkill sshd')).decision).toBe(
+      'block'
+    );
+  });
   it('dangerous words: the product word and a pack word are two checks', async () => {
     expect((await bash(cfg(), 'mkfs.ext4 /dev/sda1')).checkId).toBe('commands.disk-destroy');
     expect((await bash(cfg(), 'dropdb mydb')).checkId).toBe('commands.dangerous-word');

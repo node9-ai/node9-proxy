@@ -173,6 +173,13 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     example: '/tmp/build-helper --serve',
     advice: 'Keep Review. Malware often runs from /tmp.',
   },
+  'commands.system-processes': {
+    plain:
+      'The agent stops or kills a system service: sshd, dockerd, containerd, systemd, kubelet, cron, the firewall, the display server, or a database or web server (nginx, apache, mysql, postgres, redis, mongo). Directly (pkill sshd, systemctl stop docker, kill of pid 1) or through the process list (a script that finds the processes of a name and kills them). Killing a process by its number, pkill node, killall python and systemctl restart are not this check.',
+    example: "ps -eo pid,cmd | grep sshd | awk '{print $1}' | xargs kill -9",
+    advice:
+      'Keep Review: a stopped service takes other people and programs down with it. Set Log on a machine where agents manage local servers all day.',
+  },
   'commands.disk-destroy': {
     plain: 'The agent formats, overwrites or securely erases a disk or file.',
     example: 'dd if=/dev/zero of=/dev/sda',

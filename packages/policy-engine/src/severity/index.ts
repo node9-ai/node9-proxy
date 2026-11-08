@@ -75,6 +75,7 @@ export function classifyRuleSeverity(
     'delete-branch',
     'delete-remote',
     'unknown-registry',
+    'system-processes',
   ];
   if (highPatterns.some((p) => n.includes(p))) return 'high';
 
@@ -126,6 +127,7 @@ export function narrativeRuleLabel(name: string): string {
     'reverse-shell': 'reverse shell',
     'env-exfil': 'environment sent out',
     'unknown-registry': 'install from an unknown registry',
+    'system-processes': 'system service stopped',
     'agent-file-write': 'agent instruction file written',
     'agent-file-content': 'instruction written into an agent file',
     'agent-hooks-change': 'agent hooks changed',

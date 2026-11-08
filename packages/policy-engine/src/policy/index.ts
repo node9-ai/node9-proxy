@@ -36,6 +36,7 @@ import {
   type ShellCommandAnalysis,
 } from '../shell';
 import { analyzeGit } from '../shell/git';
+import { detectSystemProcessStop } from '../shell/processes';
 import { analyzeNode9Disarm } from '../shell/node9-disarm';
 import { analyzeOutbound } from '../shell/outbound';
 import { extractRegistryOverrides, isPublicRegistryHost } from '../shell/package-registry';
@@ -1148,6 +1149,20 @@ async function evaluatePolicyCore(
           'The AI is running a command that includes a variable or subshell expansion. The actual command executed at runtime may differ from what is shown here.',
         tier: 3,
         checkId: 'commands.eval-dynamic',
+      });
+    }
+
+    // A system service stopped or killed (node9Firewall#385 wave 4).
+    const stopped = detectSystemProcessStop(shellCommand);
+    if (stopped) {
+      consider('commands.system-processes', {
+        decision: 'review',
+        blockedByLabel: 'Node9: System Service Stopped',
+        reason: `The AI ${stopped.how} ${stopped.service}: ${stopped.shown}`,
+        ruleDescription:
+          'The AI stops or kills a system service (sshd, dockerd, systemd, a database or web server). Other people and programs on this machine depend on it; confirm this is intentional.',
+        tier: 3,
+        checkId: 'commands.system-processes',
       });
     }
 

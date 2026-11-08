@@ -25,6 +25,8 @@
 // same command on their own; this decides only whether the inline FORM asks.
 // Pure: no I/O.
 
+import { serviceNamedIn } from './services';
+
 export type InlineLanguage = 'python' | 'node' | 'perl' | 'ruby' | 'php';
 
 export type InlineCodeCategory =
@@ -37,7 +39,8 @@ export type InlineCodeCategory =
   | 'builds-code'
   | 'permissions'
   | 'monitors'
-  | 'amplifies';
+  | 'amplifies'
+  | 'kills-service';
 
 export interface InlineCodeFinding {
   outcome: 'dangerous' | 'unreadable';
@@ -62,7 +65,29 @@ const WHAT: Record<InlineCodeCategory, string> = {
   permissions: 'changes permissions or ownership',
   monitors: 'captures the screen, the clipboard or the keyboard',
   amplifies: 'writes or sends in an endless loop',
+  'kills-service': 'stops a system service',
 };
+
+/** The process-killing calls of each language. */
+const KILL_API: Record<InlineLanguage, RegExp> = {
+  python: /\bos\.kill(?:pg)?\s*\(|\.(?:kill|terminate)\s*\(|\bsignal\.SIGKILL\b/,
+  node: /\bprocess\.kill\s*\(|\.kill\s*\(\s*['"`]?SIG/,
+  perl: /\bkill\s+(?:-?\d+|['"]?[A-Z]+['"]?)\s*,/,
+  ruby: /\bProcess\.kill\b/,
+  php: /\bposix_kill\s*\(/,
+};
+
+/**
+ * Code that kills processes and names a listed system service (services.ts):
+ * the benchmark's psutil scripts walk the process list and kill what matches
+ * `sshd` or `nginx` (node9Firewall#385 wave 4). The evidence names both.
+ */
+function killsService(language: InlineLanguage, code: string): string | null {
+  const api = KILL_API[language].exec(code);
+  if (!api) return null;
+  const service = serviceNamedIn(code);
+  return service ? `${api[0].trim()} with ${service}` : null;
+}
 
 type Table = Array<[InlineCodeCategory, RegExp]>;
 
@@ -473,6 +498,15 @@ export function judgeInlineCode(
     return { outcome: 'unreadable', what: 'is too long for node9 to read' };
   }
   const text = language === 'python' ? resolvePythonAliases(code) : code;
+  const killed = killsService(language, text);
+  if (killed) {
+    return {
+      outcome: 'dangerous',
+      what: WHAT['kills-service'],
+      evidence: killed.slice(0, 60),
+      category: 'kills-service',
+    };
+  }
   for (const [category, re] of TABLES[language]) {
     const m = re.exec(text);
     if (!m) continue;
