@@ -86,7 +86,9 @@ beforeAll(() => {
   for (const p of ['/bin', '/usr', '/etc']) {
     expect(cli(['jail', 'add', p]).status).toBe(0);
   }
-});
+  // Three cold starts of the CLI: past vitest's 10 s hook default when the
+  // suite runs at full width (the pre-commit run failed here twice, 2026-11-08).
+}, 60_000);
 
 afterAll(() => {
   if (room) fs.rmSync(room, { recursive: true, force: true });

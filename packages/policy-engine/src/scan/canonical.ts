@@ -813,6 +813,10 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // no longer hide the `-e` after them. Histories scanned under v38 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
 
+// 2026-11-08, hash bumped with NO version bump (node9Firewall#451): dlp/index.ts
+// gained the Inline Secret Assignment pattern. argumentsOnly, which scanArgs
+// (the extractor's DLP pass) skips, so detector output is identical.
+
 // 2026-10-30, hash bumped with NO version bump (node9Firewall#385): dlp/index.ts
 // gained the Dropbox App Secret pattern and an Authorization-header reading of
 // HTTP Basic. Both are argumentsOnly, which scanArgs (the extractor's DLP pass)
@@ -871,7 +875,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '57bb2a3e73279278';
+export const CANONICAL_EXTRACTOR_HASH = '40803f3331f55a36';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
