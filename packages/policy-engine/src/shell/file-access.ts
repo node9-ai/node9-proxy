@@ -288,6 +288,46 @@ function wordValues(word: any, state: State): Word[] {
 }
 
 /** No verdict cache: cwd, homes, assignments, and host state belong to each call. */
+/**
+ * The replacement texts of a sed script made only of `s` commands (any
+ * delimiter, an optional address, the usual flags), or null for any other
+ * script: a deletion, a change, an unterminated or unknown command, whose
+ * effect on the file cannot be told from the text (node9Firewall#385).
+ */
+export function sedSubstitutions(script: string): string[] | null {
+  const out: string[] = [];
+  for (const raw of script.split(/\r?\n|;/)) {
+    const cmd = raw.trim();
+    if (cmd === '') continue;
+    const m = /^(?:(?:\d+|\$|\/(?:\\.|[^\\/])*\/)(?:,(?:\d+|\$|\/(?:\\.|[^\\/])*\/))?)?s(.)/.exec(
+      cmd
+    );
+    if (!m) return null;
+    const delimiter = m[1];
+    if (delimiter === '\\') return null;
+    const parts: string[] = [];
+    let cur = '';
+    let i = m[0].length;
+    for (; i < cmd.length && parts.length < 2; i++) {
+      const ch = cmd[i];
+      if (ch === '\\' && i + 1 < cmd.length) {
+        cur += ch + cmd[++i];
+        continue;
+      }
+      if (ch === delimiter) {
+        parts.push(cur);
+        cur = '';
+        continue;
+      }
+      cur += ch;
+    }
+    if (parts.length < 2) return null;
+    if (!/^[gpiImM0-9]*$/.test(cmd.slice(i))) return null;
+    out.push(parts[1].replace(/\\(.)/g, '$1'));
+  }
+  return out.length > 0 ? out : null;
+}
+
 export function collectShellFileAccesses(
   command: string,
   context: FileAccessContext = {}
@@ -422,8 +462,10 @@ export function collectShellFileAccesses(
     if (name === 'sed') {
       let inplace = false,
         hasScript = false,
-        ended = false;
+        ended = false,
+        scriptUnknown = false;
       const files: Word[] = [];
+      const scriptParts: string[] = [];
       for (let i = 0; i < args.length; i++) {
         const token = args[i];
         if (!token) {
@@ -441,7 +483,11 @@ export function collectShellFileAccesses(
             hasScript = true;
             const eq = value.indexOf('=');
             const script = eq < 0 ? args[++i] : { value: value.slice(eq + 1) };
-            if (value.startsWith('--file') && script) add('read', script, state);
+            if (value.startsWith('--file')) {
+              scriptUnknown = true;
+              if (script) add('read', script, state);
+            } else if (script?.value) scriptParts.push(script.value);
+            else scriptUnknown = true;
           }
           continue;
         }
@@ -457,7 +503,11 @@ export function collectShellFileAccesses(
             if (flag === 'e' || flag === 'f') {
               hasScript = true;
               const script = value.slice(j + 1) ? { value: value.slice(j + 1) } : args[++i];
-              if (flag === 'f' && script) add('read', script, state);
+              if (flag === 'f') {
+                scriptUnknown = true;
+                if (script) add('read', script, state);
+              } else if (script?.value) scriptParts.push(script.value);
+              else scriptUnknown = true;
               break;
             }
             if (flag === 'l') {
@@ -467,10 +517,14 @@ export function collectShellFileAccesses(
           }
           continue;
         }
-        if (!hasScript) hasScript = true;
-        else files.push(token);
+        if (!hasScript) {
+          hasScript = true;
+          scriptParts.push(value);
+        } else files.push(token);
       }
-      for (const file of files) add(inplace ? 'write' : 'read', file, state);
+      const edits = inplace && !scriptUnknown ? sedSubstitutions(scriptParts.join('\n')) : null;
+      for (const file of files)
+        add(inplace ? 'write' : 'read', file, state, edits ? { edits } : {});
       return;
     }
     if (FS_READ_TOOLS.has(name) && name !== 'dd') {
@@ -1032,11 +1086,20 @@ export function collectShellFileAccesses(
     const headWord =
       stmt.Cmd && stmt.Cmd.kind === 'CallExpr' ? base(resolveWordLiteral(stmt.Cmd.Args?.[0])) : '';
     const sends = SENDING_STDIN.has(headWord);
+    // What a `>` redirect puts in the file, when every word of it is literal
+    // (`cat <<EOF`, `echo`, `printf`): the hook-file check judges the text
+    // instead of counting every shell write as an overwrite (fw#385).
+    let produced: string | null | undefined;
     for (const redir of stmt.Redirs ?? []) {
       substitutions(redir.Word, state, depth);
       for (const word of wordValues(redir.Word, state)) {
-        if (ops().WRITES.has(redir.Op))
-          add('write', word, state, ops().APPENDS.has(redir.Op) ? { append: true } : {});
+        if (ops().WRITES.has(redir.Op)) {
+          if (ops().APPENDS.has(redir.Op)) add('write', word, state, { append: true });
+          else {
+            if (produced === undefined) produced = producedText(stmt);
+            add('write', word, state, produced !== null ? { text: produced } : {});
+          }
+        }
         if (ops().READS.has(redir.Op)) add('read', word, state, sends ? { upload: true } : {});
         if (redir.Op === ops().DUP_OUT && word.value && !/^\d+$/.test(word.value))
           add('write', word, state);
