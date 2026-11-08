@@ -94,6 +94,7 @@ describe('a hook disarmed from the shell', () => {
     "sed -i '' 's/a/b/' .husky/pre-commit",
     "sed -i -e 's/a/b/' -e 's|c|d|g' .husky/pre-commit",
     "sed -i '/^npm/s/test/run check/' .git/hooks/pre-push",
+    "tee .husky/pre-commit <<'SH'\n#!/bin/sh\nnpm test\nSH",
   ])('%s is work, not a bypass', (cmd) => {
     expect(shell(cmd), cmd).toBeNull();
   });
@@ -107,6 +108,10 @@ describe('a hook disarmed from the shell', () => {
     'sed -i -f edits.sed .husky/pre-commit',
     'cat > .githooks/pre-commit < other-file',
     'cat other-file | tee .husky/pre-commit',
+    // Review: stderr goes to the hook, whatever stdout says; tee's heredoc of
+    // nothing empties it.
+    'echo "npm test" 2> .husky/pre-commit',
+    "tee .husky/pre-commit <<'SH'\nexit 0\nSH",
   ])('%s still asks', (cmd) => {
     expect(shell(cmd)?.decision, cmd).toBe('review');
   });

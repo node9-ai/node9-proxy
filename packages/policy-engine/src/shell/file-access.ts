@@ -340,6 +340,9 @@ export function collectShellFileAccesses(
   const seenCalls = new Set<string>();
   // The literal text a pipeline stage receives on stdin (`echo NAMES | ...`).
   const pipedStdin = new WeakMap<object, string>();
+  // The literal stdin (a heredoc or a herestring) of the statement whose
+  // command is being walked; read by the handlers that write it to a file.
+  let currentStdin: string | null = null;
   let callWalks = MAX_CALL_WALKS;
   const initial: State = {
     cwd: [context.cwd ?? ''],
@@ -670,9 +673,12 @@ export function collectShellFileAccesses(
         const remove = name === 'rm' || name === 'unlink';
         const append =
           name === 'tee' && strings.some((s) => s === '--append' || /^-[^-]*a/.test(s));
+        // `tee hook <<EOF`: the file gets the literal stdin text (fw#385).
+        const teed = name === 'tee' && !append ? currentStdin : null;
         add(remove ? 'remove' : name === 'touch' ? 'create' : 'write', token, state, {
           recursive: remove && strings.some((s) => /^-[^-]*[rR]/.test(s) || s === '--recursive'),
           ...(append ? { append: true } : {}),
+          ...(teed !== null ? { text: teed } : {}),
         });
       }
       return;
@@ -1096,8 +1102,11 @@ export function collectShellFileAccesses(
         if (ops().WRITES.has(redir.Op)) {
           if (ops().APPENDS.has(redir.Op)) add('write', word, state, { append: true });
           else {
-            if (produced === undefined) produced = producedText(stmt);
-            add('write', word, state, produced !== null ? { text: produced } : {});
+            // Only stdout carries the produced text; `2> hook` truncates the
+            // file with stderr, whatever the command prints.
+            const stdout = redir.N == null || redir.N.Value === '1';
+            if (stdout && produced === undefined) produced = producedText(stmt);
+            add('write', word, state, stdout && produced ? { text: produced } : {});
           }
         }
         if (ops().READS.has(redir.Op)) add('read', word, state, sends ? { upload: true } : {});
@@ -1113,6 +1122,7 @@ export function collectShellFileAccesses(
     // `xargs CMD <<< NAMES`: the names reach CMD as operands.
     const fedText = stdinText(stmt);
     if (fedText !== null) nestedPayload(xargsPayload(stmt, fedText), clone(state), depth);
+    currentStdin = fedText;
     switch (cmd.kind) {
       case 'CallExpr':
         call(cmd, state, depth);
