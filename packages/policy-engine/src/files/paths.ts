@@ -120,6 +120,12 @@ export interface FileAccess {
   recursive?: boolean;
   /** A write that adds to the file (`>>`, `tee -a`): its content stays. */
   append?: true;
+  /** A shell write whose whole content is literal (a heredoc, `echo`, `printf`
+   *  redirected to the file): what the file will hold (node9Firewall#385). */
+  text?: string;
+  /** An in-place edit made only of substitutions (`sed -i 's/a/b/'`): the
+   *  replacement texts, judged as an edit tool's new text would be. */
+  edits?: string[];
   /** This basename-joined candidate applies only if this operand is a directory. */
   directoryTarget?: string;
   candidates?: string[];

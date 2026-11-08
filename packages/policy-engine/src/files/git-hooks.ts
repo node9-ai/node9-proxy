@@ -9,7 +9,10 @@
 // A hook written with real content is work, not a bypass: only text that
 // runs nothing (empty, comments, a shebang, `exit 0`, `true`, `:`) counts for
 // a file tool, and an Edit that puts `exit` or `true` on a line of its own.
-// A shell write whose content cannot be seen counts; an append does not.
+// A shell write is judged the same way when its content can be seen (a
+// heredoc, `echo`, `printf`, or a `sed -i` made of substitutions, which the
+// collector carries as `text` / `edits`, node9Firewall#385); one whose content
+// cannot be seen counts; an append does not.
 
 import { checkValue, type CatalogSettings } from '../catalog';
 import type { PolicyVerdict } from '../policy';
@@ -76,8 +79,16 @@ export function evaluateGitHooksFileAccess(
       disarms = true;
       how = 'removed';
     } else if (texts === null) {
-      disarms = true;
-      how = 'overwritten';
+      if (access.edits) {
+        disarms = access.edits.some(editDisarms);
+        how = 'edited to exit';
+      } else if (access.text !== undefined) {
+        disarms = hookTextRunsNothing(access.text);
+        how = 'emptied';
+      } else {
+        disarms = true;
+        how = 'overwritten';
+      }
     } else if (texts.whole.length > 0) {
       disarms = texts.whole.some(hookTextRunsNothing);
       how = 'emptied';

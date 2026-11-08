@@ -84,6 +84,47 @@ describe('a hook disarmed from the shell', () => {
     expect(v?.checkId).toBe('commands.git-hooks-bypass');
   });
 
+  // node9Firewall#385 wave 3 follow-up: a hook written or edited with real
+  // content from the shell is work, as it already was for a file tool.
+  it.each([
+    "cat > .githooks/pre-commit <<'SH'\n#!/bin/sh\nset -eu\nnpm run lint:ci\npnpm test\nSH\nchmod +x .githooks/pre-commit\ngit config core.hooksPath .githooks",
+    "printf '#!/bin/sh\\nnpm test\\n' > .husky/pre-commit",
+    'echo "npm test" > .git/hooks/pre-commit',
+    "sed -i 's/bundle exec rubocop/bundle exec rubocop --format progress/' .githooks/pre-commit",
+    "sed -i '' 's/a/b/' .husky/pre-commit",
+    "sed -i -e 's/a/b/' -e 's|c|d|g' .husky/pre-commit",
+    "sed -i '/^npm/s/test/run check/' .git/hooks/pre-push",
+    "tee .husky/pre-commit <<'SH'\n#!/bin/sh\nnpm test\nSH",
+  ])('%s is work, not a bypass', (cmd) => {
+    expect(shell(cmd), cmd).toBeNull();
+  });
+  it.each([
+    "cat > .githooks/pre-commit <<'SH'\n#!/bin/sh\nexit 0\nSH",
+    'printf "" > .husky/pre-commit',
+    "sed -i '/npm test/d' .husky/pre-commit",
+    "sed -i 's/.*//' .git/hooks/pre-commit",
+    "sed -i 's/npm test/exit 0/' .husky/pre-commit",
+    "sed -i 's/npm test/true/' .husky/pre-commit",
+    'sed -i -f edits.sed .husky/pre-commit',
+    'cat > .githooks/pre-commit < other-file',
+    'cat other-file | tee .husky/pre-commit',
+    // Review: stderr goes to the hook, whatever stdout says; tee's heredoc of
+    // nothing empties it.
+    'echo "npm test" 2> .husky/pre-commit',
+    "tee .husky/pre-commit <<'SH'\nexit 0\nSH",
+  ])('%s still asks', (cmd) => {
+    expect(shell(cmd)?.decision, cmd).toBe('review');
+  });
+  it('the collector carries the written text and the substitutions', () => {
+    const write = (command: string) =>
+      collectFileAccesses('Bash', { command }, ctx).find((a) => a.operation === 'write');
+    expect(write("cat > .husky/pre-commit <<'SH'\nnpm test\nSH")?.text).toBe('npm test\n');
+    expect(write('echo "npm test" > .husky/pre-commit')?.text).toBe('npm test');
+    expect(write("sed -i 's/a/b/;s/c/d/' .husky/pre-commit")?.edits).toEqual(['b', 'd']);
+    expect(write("sed -i '/x/d' .husky/pre-commit")?.edits).toBeUndefined();
+    expect(write('cat > .husky/pre-commit < other')?.text).toBeUndefined();
+  });
+
   it.each([
     'cat .git/hooks/pre-commit',
     'ls -la .husky',
