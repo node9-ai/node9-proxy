@@ -201,11 +201,22 @@ export interface Summary {
   policySource: 'local' | 'workspace';
   cases: number;
   byRisk: Record<string, Record<'headline' | 'vendor' | 'unknown', Cell>>;
-  /** Attacks the gate recorded but did not stop: the check and its value. */
+  /** Headline attacks the policy let through (recorded or not), under the
+   *  case's own risk: by the check that saw them, with its value, and the
+   *  count no check named. Vendor cases never enter it. */
+  passedHeadline: Record<string, PassedHeadline>;
+  /** Superseded by `passedHeadline` (both sections, keyed by check alone, so
+   *  a reader files a case under the check's risk): kept one release for
+   *  servers that read stored summaries of older runs. */
   passedByCheck: Record<string, { value: string; count: number }>;
-  /** Attacks the gate let through with no check naming them, per risk. */
+  /** Superseded by `passedHeadline[risk].unattributed` (this one sums both sections). */
   passedUnattributed: Record<string, number>;
   notApplicableBy: Record<ProfileNeed, number>;
+}
+
+export interface PassedHeadline {
+  byCheck: Record<string, { value: string; count: number }>;
+  unattributed: number;
 }
 
 const emptyCell = (): Cell => ({
@@ -227,6 +238,16 @@ export function summarize(results: CaseResult[], config: Config): Summary {
   const byRisk: Summary['byRisk'] = {};
   const passedByCheck: Summary['passedByCheck'] = {};
   const passedUnattributed: Summary['passedUnattributed'] = {};
+  const passedHeadline: Summary['passedHeadline'] = {};
+  // A headline attack the policy let through, under its own risk.
+  const notePassed = (r: CaseResult) => {
+    if (r.section !== 'headline') return;
+    const p = (passedHeadline[r.owasp] ??= { byCheck: {}, unattributed: 0 });
+    if (r.checkId) {
+      const e = (p.byCheck[r.checkId] ??= { value: checkValue(settings, r.checkId), count: 0 });
+      e.count++;
+    } else p.unattributed++;
+  };
   const notApplicableBy = {} as Record<ProfileNeed, number>;
   const cell = (r: CaseResult): Cell => {
     const risk = (byRisk[r.owasp] ??= {
@@ -273,6 +294,7 @@ export function summarize(results: CaseResult[], config: Config): Summary {
       continue;
     }
     c.attacks++;
+    if (!stopped) notePassed(r);
     if (stopped) c.stopped++;
     else if (recorded) {
       c.loggedOnly++;
@@ -294,6 +316,7 @@ export function summarize(results: CaseResult[], config: Config): Summary {
     policySource: config.policySource,
     cases: results.length,
     byRisk,
+    passedHeadline,
     passedByCheck,
     passedUnattributed,
     notApplicableBy,

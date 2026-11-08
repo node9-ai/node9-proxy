@@ -9,7 +9,12 @@
 // caller's settings and says separately whether that decision is enforced:
 // observe mode and a check set to `log` record and let the call through.
 
-import { checkIdForRule, isRecordOnly, type Verdict } from '@node9/policy-engine';
+import {
+  checkIdForCheckedBy,
+  checkIdForRule,
+  isRecordOnly,
+  type Verdict,
+} from '@node9/policy-engine';
 import type { Config } from '../config';
 import { getConfig } from '../config';
 import { _authorizeHeadlessCore, type AuthResult } from './orchestrator';
@@ -196,7 +201,16 @@ function toVerdict(
 
   const decidingRow = decision === 'log' ? logRow : denyRow;
   const ruleName = result.ruleHit ?? decidingRow?.ruleName;
-  const checkId = result.checkId ?? checkIdForRule(ruleName) ?? decidingRow?.checkId;
+  // The audit's own derivation (src/audit): the result's check, the rule's,
+  // then the row's. A deferred review may carry only its label (the exposure
+  // hold: "Node9 Exposure", a legacy name of behavior.untrusted-content), and
+  // a row only its tag; both name the check the hook's audit row names.
+  const checkId =
+    result.checkId ??
+    checkIdForRule(ruleName) ??
+    checkIdForRule(result.blockedByLabel) ??
+    decidingRow?.checkId ??
+    checkIdForCheckedBy(decidingRow?.checkedBy);
 
   const stops = decision === 'review' || decision === 'block';
   const enforced = stops && !recordOnly;
