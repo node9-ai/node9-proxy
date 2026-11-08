@@ -1,13 +1,32 @@
 name: Sync dev from main
 
-# After any push to main (release bot version bump, hotfix, etc.)
-# fast-forward dev so the next dev -> main PR has no stale divergence.
+# After the release workflow finishes on main, merge main into dev so the
+# next dev -> main PR has no stale divergence.
+#
+# Not `on: push` to main: that fired on the dev -> main merge, while Release
+# was still running, and the version commits Release pushes afterwards carry
+# `[skip ci]`, so no push workflow ever saw them. dev stayed one version
+# behind main after every release (src/__tests__/sync-dev-workflow.spec.ts).
+# Release runs on every push to main that is not `[skip ci]`, so waiting for
+# it also covers a hotfix pushed straight to main. Any conclusion: a release
+# that failed after pushing its version commit still needs them on dev.
+#
+# workflow_run reads this file from the default branch (main), so a change
+# here takes effect only once it is merged to main.
 on:
-  push:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# Two releases close together must not push dev at the same time.
+concurrency:
+  group: sync-dev
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -15,8 +34,6 @@ jobs:
       contents: write
     name: Merge main → dev
     runs-on: ubuntu-latest
-    # Skip the release bot's own commits to avoid infinite loops
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,6 +45,14 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git merge origin/main --no-edit -m "chore: sync dev from main [skip ci]"
-          git push origin dev
+          # dev may move while this runs (another push lands first): fetch,
+          # merge and push again rather than fail on a rejected push.
+          for attempt in 1 2 3; do
+            git fetch origin main dev
+            git reset --hard origin/dev
+            git merge origin/main --no-edit -m "chore: sync dev from main [skip ci]"
+            if git push origin dev; then exit 0; fi
+            sleep $((attempt * 10))
+          done
+          echo "dev moved three times while syncing; run this workflow again" >&2
+          exit 1
