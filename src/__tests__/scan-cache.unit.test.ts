@@ -133,32 +133,42 @@ describe('the incremental scan', () => {
   });
 
   it('the window selects days: yesterday is out, today is in, and a warm run agrees with a cold one', async () => {
-    const other = path.join(path.dirname(transcript), 'sess-2.jsonl');
-    const yesterday = new Date(Date.now() - 36 * 3600_000).toISOString();
-    fs.writeFileSync(
-      other,
-      [line('y1', CRED, yesterday), line('y2', 'ls', yesterday), line('t1', PIPE, t(0))].join(
-        '\n'
-      ) + '\n'
-    );
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const cold = await scanClaudeHistory(start, undefined, undefined, { cache: false });
-    const warm1 = await scanClaudeHistory(start);
-    const warm2 = await scanClaudeHistory(start);
-    expect(comparable(warm2)).toEqual(comparable(warm1));
-    expect(comparable(warm2)).toEqual(comparable(cold));
-    // The credential read of yesterday is outside the window; today's pipe rows
-    // are in (one row: the same command in the same project is one finding).
-    expect(cold.findings.map((f) => f.checkId).sort()).toEqual(['commands.curl-pipe-shell']);
-    expect(cold.sessions).toBe(2);
-    expect(cold.totalToolCalls).toBe(5);
-    const all = await scanClaudeHistory(null);
-    expect(all.findings.map((f) => f.checkId).sort()).toEqual([
-      'commands.curl-pipe-shell',
-      'data.credential-files',
-    ]);
-    expect(all.totalToolCalls).toBe(7);
+    // The fixture rows are one hour old, so between midnight and 01:00 local
+    // "today's" row would fall on yesterday and out of the window. The clock
+    // (Date only) reads at least 02:00 today for this row; file times stay real.
+    const floor = new Date();
+    floor.setHours(2, 0, 0, 0);
+    vi.useFakeTimers({ now: Math.max(Date.now(), floor.getTime()), toFake: ['Date'] });
+    try {
+      const other = path.join(path.dirname(transcript), 'sess-2.jsonl');
+      const yesterday = new Date(Date.now() - 36 * 3600_000).toISOString();
+      fs.writeFileSync(
+        other,
+        [line('y1', CRED, yesterday), line('y2', 'ls', yesterday), line('t1', PIPE, t(0))].join(
+          '\n'
+        ) + '\n'
+      );
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const cold = await scanClaudeHistory(start, undefined, undefined, { cache: false });
+      const warm1 = await scanClaudeHistory(start);
+      const warm2 = await scanClaudeHistory(start);
+      expect(comparable(warm2)).toEqual(comparable(warm1));
+      expect(comparable(warm2)).toEqual(comparable(cold));
+      // The credential read of yesterday is outside the window; today's pipe rows
+      // are in (one row: the same command in the same project is one finding).
+      expect(cold.findings.map((f) => f.checkId).sort()).toEqual(['commands.curl-pipe-shell']);
+      expect(cold.sessions).toBe(2);
+      expect(cold.totalToolCalls).toBe(5);
+      const all = await scanClaudeHistory(null);
+      expect(all.findings.map((f) => f.checkId).sort()).toEqual([
+        'commands.curl-pipe-shell',
+        'data.credential-files',
+      ]);
+      expect(all.totalToolCalls).toBe(7);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('session state crosses the window boundary: a secret read yesterday taints a send today', async () => {
