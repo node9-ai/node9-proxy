@@ -205,6 +205,8 @@ export interface ManagedConfigCache {
     onMalicious?: 'block' | 'review';
     newPackage?: 'review' | 'off';
     installScript?: 'review' | 'off';
+    lookalike?: 'review' | 'off';
+    establishedAge?: 'review' | 'off';
     maxAgeHours?: number;
     onlineFallback?: boolean;
     allow?: string[];
@@ -264,6 +266,8 @@ export interface CloudPolicyBody {
       registrySignals?: unknown;
       newPackage?: unknown;
       installScript?: unknown;
+      lookalike?: unknown;
+      establishedAge?: unknown;
       maxAgeHours?: unknown;
       onlineFallback?: unknown;
       allow?: unknown;
@@ -834,6 +838,10 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (pc.installScript === 'review' || pc.installScript === 'off')
       out2.installScript = pc.installScript;
     else if (legacyOff) out2.installScript = 'off';
+    if (pc.lookalike === 'review' || pc.lookalike === 'off') out2.lookalike = pc.lookalike;
+    else if (legacyOff) out2.lookalike = 'off';
+    if (pc.establishedAge === 'review' || pc.establishedAge === 'off')
+      out2.establishedAge = pc.establishedAge;
     if (
       typeof pc.maxAgeHours === 'number' &&
       Number.isFinite(pc.maxAgeHours) &&

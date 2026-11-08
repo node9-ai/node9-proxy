@@ -112,8 +112,15 @@ describe('the level table', () => {
   });
 
   it('Soft turns the package registry signals off; the others keep them', () => {
-    expect(levelPackageSignals('soft')).toEqual({ newPackage: 'off', installScript: 'off' });
-    expect(levelPackageSignals('strict')).toBeUndefined();
+    expect(levelPackageSignals('soft')).toEqual({
+      newPackage: 'off',
+      installScript: 'off',
+      lookalike: 'off',
+      establishedAge: 'off',
+    });
+    // Strict asks about a young release of an established package (wave 3).
+    expect(levelPackageSignals('strict')).toEqual({ establishedAge: 'review' });
+    expect(levelPackageSignals('block-all')).toEqual({ establishedAge: 'review' });
   });
 
   it('spot values from the agreed table', () => {

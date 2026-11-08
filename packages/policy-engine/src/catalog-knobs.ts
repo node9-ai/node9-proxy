@@ -36,6 +36,8 @@ export interface LegacyPolicyKnobs {
     registrySignals?: boolean;
     newPackage?: string;
     installScript?: string;
+    lookalike?: string;
+    establishedAge?: string;
     maxAgeHours?: number;
     onlineFallback?: boolean;
     allow?: string[];
@@ -90,6 +92,16 @@ export const TUNING_FIELDS: readonly TuningField[] = [
   },
   {
     checkId: 'loading.malicious-package',
+    name: 'lookalike',
+    legacy: ['packageCheck', 'lookalike'],
+  },
+  {
+    checkId: 'loading.malicious-package',
+    name: 'establishedAge',
+    legacy: ['packageCheck', 'establishedAge'],
+  },
+  {
+    checkId: 'loading.malicious-package',
     name: 'onlineFallback',
     legacy: ['packageCheck', 'onlineFallback'],
   },
@@ -121,7 +133,11 @@ export function tuningFromLegacyPolicy(policy: LegacyPolicyKnobs): Record<string
   // The 2.27.0 `registrySignals: false` reads as both new fields off, unless
   // the block states them itself (the loop below then overwrites).
   if (policy.packageCheck?.registrySignals === false) {
-    out['loading.malicious-package'] = { newPackage: 'off', installScript: 'off' };
+    out['loading.malicious-package'] = {
+      newPackage: 'off',
+      installScript: 'off',
+      lookalike: 'off',
+    };
   }
   for (const f of TUNING_FIELDS) {
     const [block, key] = f.legacy;
@@ -143,6 +159,7 @@ export function tuningToLegacyPolicy(policy: Obj, tuning: Record<string, unknown
       if (normalized.registrySignals === false) {
         normalized.newPackage ??= 'off';
         normalized.installScript ??= 'off';
+        normalized.lookalike ??= 'off';
       }
       delete normalized.registrySignals;
     }

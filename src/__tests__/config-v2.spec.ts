@@ -235,6 +235,7 @@ describe('translation', () => {
     expect(v2.tuning?.['loading.malicious-package']).toEqual({
       newPackage: 'off',
       installScript: 'off',
+      lookalike: 'off',
     });
     expect(JSON.stringify(v2)).not.toContain('registrySignals');
     const { legacy } = v2ToLegacy(v2 as unknown as Record<string, unknown>);

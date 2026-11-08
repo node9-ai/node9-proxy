@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import { runPackageCheck, type PackageCheckConfig } from '../check';
 import { registryInfo } from '../registry';
+import { _setPopularNamesForTests } from '../lookalike';
 import { writeMeta, writeShard, shardOf, indexKey } from '../osv-index';
 import type { PackageEcosystem } from '@node9/policy-engine';
 
@@ -15,6 +16,8 @@ const CFG: PackageCheckConfig = {
   onMalicious: 'block',
   newPackage: 'review',
   installScript: 'review',
+  lookalike: 'review',
+  establishedAge: 'off',
   maxAgeHours: 48,
   onlineFallback: true,
   allow: [],
@@ -143,6 +146,7 @@ describe('runPackageCheck — malicious', () => {
       ...CFG,
       newPackage: 'off',
       installScript: 'off',
+      lookalike: 'off',
     });
     expect(r.verdict).toBe('allow');
     expect(calls).toEqual([]);
@@ -337,12 +341,13 @@ describe('runPackageCheck — newPackage / installScript knobs', () => {
     expect(r.verdict).toBe('allow');
     expect(r.findings).toEqual([]);
   });
-  it('both off: a pinned malicious version still blocks, with no registry call', async () => {
+  it('all three signals off: a pinned malicious version still blocks, with no registry call', async () => {
     indexWith('npm', 'node9-canary-past', [{ id: 'MAL-0000-0412', versions: ['1.0.0'] }]);
     const r = await runPackageCheck(...bash('npm install node9-canary-past@1.0.0'), {
       ...CFG,
       newPackage: 'off',
       installScript: 'off',
+      lookalike: 'off',
     });
     expect(r.verdict).toBe('block');
     expect(r.reason).toContain('MAL-0000-0412');
@@ -479,7 +484,7 @@ describe('runPackageCheck — npm age is version-true', () => {
         ? npmDoc('2.0.0', { modified: FRESH })
         : new Response('{}', {
             status: 200,
-            headers: { 'content-length': String(5 * 1024 * 1024) },
+            headers: { 'content-length': String(17 * 1024 * 1024) },
           });
     const r = await runPackageCheck(...bash('npm i node9-canary-big'), CFG);
     expect(r.findings.map((f) => f.kind)).toEqual(['new']);
@@ -651,7 +656,7 @@ describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10
   const tooLarge = () =>
     new Response('{}', {
       status: 200,
-      headers: { 'content-type': 'application/json', 'content-length': String(3 * 1024 * 1024) },
+      headers: { 'content-type': 'application/json', 'content-length': String(17 * 1024 * 1024) },
     });
   it('resolves the version from the version document, so a record for other versions is not a block', async () => {
     indexWith('npm', 'node9-canary-big', [{ id: 'MAL-0000-0002', versions: ['1.0.0'] }]);
@@ -704,6 +709,416 @@ describe('runPackageCheck — abbreviated document over the size cap (fw#372 A10
     });
     expect(r.verdict).toBe('allow');
     expect(calls).toContain('http://registry.test/node9-canary-big/1.5.0');
+  });
+});
+
+describe('runPackageCheck — registry documents between 2 MB and 16 MB are read (node9Firewall#393)', () => {
+  const FRESH = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  /** A document whose Content-Length declares `mb` megabytes; the body is the JSON. */
+  const sized = (body: unknown, mb: number) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-length': String(mb * 1024 * 1024) },
+    });
+  it('npm: a 6 MB abbreviated document (nx) keeps its version list, so the release history is read', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nx'] = () =>
+      sized(
+        {
+          name: 'node9-canary-nx',
+          modified: OLD,
+          'dist-tags': { latest: '2.0.0' },
+          versions: {
+            '1.0.0': { hasInstallScript: true },
+            '2.0.0': { hasInstallScript: true },
+          },
+        },
+        6
+      );
+    const r = await runPackageCheck(...bash('pnpm add node9-canary-nx'), CFG);
+    // The previous release ran the same script: no finding, no fallback miss.
+    expect(r.verdict).toBe('allow');
+    expect(r.misses).toEqual([]);
+    expect(calls).not.toContain('http://registry.test/node9-canary-nx/latest');
+  });
+  it('PyPI: a 3 MB project document (boto3) still yields the version and its age', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    routes['http://pypi.test/pypi/node9-canary-big-py/json'] = () =>
+      sized(
+        {
+          info: { version: '1.2.0' },
+          urls: [{ filename: 'node9_canary_big_py-1.2.0.tar.gz', upload_time_iso_8601: FRESH }],
+          releases: {
+            '1.1.0': [{ filename: 'node9_canary_big_py-1.1.0.tar.gz' }],
+            '1.2.0': [{ filename: 'node9_canary_big_py-1.2.0.tar.gz' }],
+          },
+        },
+        3
+      );
+    const r = await runPackageCheck(...bash('pip install node9-canary-big-py'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+    expect(r.findings[0].version).toBe('1.2.0');
+    // The only miss left is the provenance read this fake registry does not
+    // serve; the document itself was read in full.
+    expect(r.misses.join(' ')).not.toMatch(/metadata unavailable|too large/);
+  });
+});
+
+describe('runPackageCheck — a name the registry does not have, and a takeover placeholder (node9Firewall#385 wave 3)', () => {
+  const QUIET = { ...CFG, newPackage: 'off' as const, installScript: 'off' as const };
+  const absent = () => new Response('{"error":"Not found"}', { status: 404 });
+  it('npm: a 404 on the package document is a review that names the registry', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), QUIET);
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+    expect(r.reason).toContain('"node9-canary-nowhere" does not exist on npm');
+    expect(r.misses).toEqual([]);
+  });
+  it('PyPI: an unpinned install of a name no project has is a review', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    routes['http://pypi.test/pypi/node9-canary-nowhere/json'] = absent;
+    const r = await runPackageCheck(...bash('pip install node9-canary-nowhere'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+    expect(r.reason).toContain('does not exist on PyPI');
+  });
+  it('PyPI: a pinned install 404s for a version the project never had, which says nothing about the name', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    routes['http://pypi.test/pypi/node9-canary-real/9.9.9/json'] = absent;
+    const r = await runPackageCheck(...bash('pip install node9-canary-real==9.9.9'), QUIET);
+    expect(r.verdict).toBe('allow');
+    expect(r.misses.join(' ')).toContain('registry metadata unavailable');
+  });
+  it('a pinned npm install still asks the registry when only this signal is on', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const r = await runPackageCheck(...bash('npm i node9-canary-nowhere@1.0.0'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+  });
+  it('a removed package keeps its malicious record: block, with the absent note beside it', async () => {
+    indexWith('npm', 'node9-canary-gone', [{ id: 'MAL-0000-0009', all: true }]);
+    routes['http://registry.test/node9-canary-gone'] = absent;
+    const r = await runPackageCheck(...bash('npm i node9-canary-gone'), QUIET);
+    expect(r.verdict).toBe('block');
+    expect(r.reason).toContain('MAL-0000-0009');
+    expect(r.findings.map((f) => f.kind).sort()).toEqual(['absent', 'malicious']);
+  });
+  it('lookalike off: a 404 is a miss, never a finding', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), {
+      ...QUIET,
+      lookalike: 'off',
+    });
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('a registry named on the command line: the public 404 proves nothing', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-private'] = absent;
+    const r = await runPackageCheck(
+      ...bash('npm install --registry https://npm.corp.example node9-canary-private'),
+      QUIET
+    );
+    expect(r.findings).toEqual([]);
+  });
+  it('a private registry in the project .npmrc: no finding', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-private'] = absent;
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-proj-'));
+    try {
+      fs.writeFileSync(path.join(project, '.npmrc'), 'registry=https://npm.corp.example/\n');
+      const r = await runPackageCheck(...bash('npm install node9-canary-private'), QUIET, project);
+      expect(r.findings).toEqual([]);
+      // The same command from a project without that file asks.
+      const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-plain-'));
+      try {
+        const r2 = await runPackageCheck(...bash('npm install node9-canary-private'), QUIET, plain);
+        expect(r2.findings.map((f) => f.kind)).toEqual(['absent']);
+      } finally {
+        fs.rmSync(plain, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+  it('a public mirror in the config does not count as a private registry', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-nowhere'] = absent;
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pkgcheck-proj-'));
+    try {
+      fs.writeFileSync(path.join(project, '.npmrc'), 'registry=https://registry.npmjs.org/\n');
+      const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), QUIET, project);
+      expect(r.findings.map((f) => f.kind)).toEqual(['absent']);
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+  it('an allowlisted name is never looked up, so never absent', async () => {
+    const r = await runPackageCheck(...bash('npm install node9-canary-nowhere'), {
+      ...QUIET,
+      allow: ['node9-canary-*'],
+    });
+    expect(r.verdict).toBe('allow');
+    expect(calls).toEqual([]);
+  });
+  it("npm's security holding package in place of a removed one is a review", async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-held'] = () =>
+      json({
+        name: 'node9-canary-held',
+        description: 'security holding package',
+        modified: OLD,
+        'dist-tags': { latest: '0.0.1-security' },
+        versions: { '0.0.1-security': {} },
+      });
+    const r = await runPackageCheck(...bash('npm i node9-canary-held'), QUIET);
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toEqual(['placeholder']);
+    expect(r.reason).toContain('removed by npm as malicious');
+  });
+  it('a real package whose latest happens to end in -security, among other versions, is not a placeholder', async () => {
+    indexWith('npm', 'node9-canary-other', []);
+    routes['http://registry.test/node9-canary-sec'] = () =>
+      json({
+        name: 'node9-canary-sec',
+        modified: OLD,
+        'dist-tags': { latest: '2.0.0-security' },
+        versions: { '1.0.0': {}, '2.0.0-security': {} },
+      });
+    const r = await runPackageCheck(...bash('npm i node9-canary-sec'), QUIET);
+    expect(r.findings).toEqual([]);
+  });
+});
+
+describe('runPackageCheck — a name that looks like a popular one (node9Firewall#385 wave 3)', () => {
+  const QUIET = { ...CFG, newPackage: 'off' as const, installScript: 'off' as const };
+  const DAY = 86_400_000;
+  const isAbbrev = (init?: RequestInit) =>
+    String((init?.headers as Record<string, string> | undefined)?.Accept ?? '').includes(
+      'install-v1'
+    );
+  /** An npm package with one version, created `ageDays` ago. */
+  const npmPackage = (createdMs: number) => (init?: RequestInit) =>
+    isAbbrev(init)
+      ? npmDoc('1.0.0')
+      : json({ time: { created: new Date(createdMs).toISOString(), '1.0.0': OLD } });
+  beforeEach(() => {
+    process.env.NODE9_NPM_DOWNLOADS_URL = 'http://downloads.test';
+    _setPopularNamesForTests({ npm: ['node9-canary-famous'], PyPI: ['node9-canary-famous'] });
+    indexWith('npm', 'node9-canary-other', []);
+    indexWith('PyPI', 'node9-canary-other', []);
+  });
+  afterEach(() => {
+    _setPopularNamesForTests(null);
+    delete process.env.NODE9_NPM_DOWNLOADS_URL;
+  });
+
+  it('a young package one letter off a popular name is a review that names both', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 12 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.verdict).toBe('review');
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('looks like "node9-canary-famous" (one letter off)');
+    expect(r.reason).toContain('first published 12 days ago');
+  });
+  it('the age already known and old: the downloads still decide, the document is not read twice', async () => {
+    const FRESH = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    // Modified inside the window: npmInfo reads the full document (created 900 days ago).
+    routes['http://registry.test/node9-canary-famuos'] = (init) =>
+      isAbbrev(init)
+        ? npmDoc('1.0.0', { modified: FRESH })
+        : json({ time: { created: new Date(Date.now() - 900 * DAY).toISOString(), '1.0.0': OLD } });
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ downloads: 17, package: 'node9-canary-famuos' });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('had 17 downloads last week');
+    expect(calls.filter((u) => u === 'http://registry.test/node9-canary-famuos')).toHaveLength(2);
+  });
+  it('an old package with few downloads is a review by its downloads', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ downloads: 17, package: 'node9-canary-famuos' });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('had 17 downloads last week');
+  });
+  it('an old, well-downloaded neighbour is a real package: no finding', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ downloads: 48_000, package: 'node9-canary-famuos' });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('a name the downloads API never counted has no downloads', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 900 * DAY);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({ error: 'package node9-canary-famuos not found' }, 404);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.reason).toContain('had 0 downloads last week');
+  });
+  it('age and downloads both unreadable: a miss, not a finding', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = (init) =>
+      isAbbrev(init) ? npmDoc('1.0.0') : json({}, 503);
+    routes['http://downloads.test/downloads/point/last-week/node9-canary-famuos'] = () =>
+      json({}, 503);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.verdict).toBe('allow');
+    expect(r.misses.join(' ')).toContain('age and downloads could not be read');
+  });
+  it('absent and alike: one finding that says both', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = () =>
+      new Response('{"error":"Not found"}', { status: 404 });
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('looks like "node9-canary-famous"');
+    expect(r.reason).toContain('does not exist on npm');
+  });
+  it('PyPI: the project document says when the project first existed', async () => {
+    const young = new Date(Date.now() - 20 * DAY).toISOString();
+    routes['http://pypi.test/pypi/node9-canary-famuos/json'] = () =>
+      json({
+        info: { version: '0.2.0' },
+        urls: [{ filename: 'node9_canary_famuos-0.2.0.tar.gz', upload_time_iso_8601: young }],
+        releases: {
+          '0.1.0': [{ filename: 'node9_canary_famuos-0.1.0.tar.gz', upload_time_iso_8601: young }],
+          '0.2.0': [{ filename: 'node9_canary_famuos-0.2.0.tar.gz', upload_time_iso_8601: young }],
+        },
+      });
+    const r = await runPackageCheck(...bash('pip install node9-canary-famuos'), QUIET);
+    expect(r.findings.map((f) => f.kind)).toEqual(['lookalike']);
+    expect(r.reason).toContain('first published 20 days ago');
+    expect(calls).toHaveLength(1);
+  });
+  it('the popular name itself, and a name nothing resembles, are not looked into', async () => {
+    routes['http://registry.test/node9-canary-famous'] = npmPackage(Date.now() - 5 * DAY);
+    routes['http://registry.test/node9-canary-nothing-alike'] = npmPackage(Date.now() - 5 * DAY);
+    for (const name of ['node9-canary-famous', 'node9-canary-nothing-alike']) {
+      calls.length = 0;
+      const r = await runPackageCheck(...bash(`npm install ${name}`), QUIET);
+      expect(r.findings, name).toEqual([]);
+      expect(calls, name).toEqual([`http://registry.test/${name}`]);
+    }
+  });
+  it('the 2.27.0 registrySignals:false turns this signal off with the others (no registry call)', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 5 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos@1.0.0'), {
+      ...QUIET,
+      lookalike: 'off',
+    });
+    expect(r.findings).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+  it('lookalike off: nothing is compared', async () => {
+    routes['http://registry.test/node9-canary-famuos'] = npmPackage(Date.now() - 5 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-famuos'), {
+      ...QUIET,
+      lookalike: 'off',
+    });
+    expect(r.findings).toEqual([]);
+    expect(calls).toEqual(['http://registry.test/node9-canary-famuos']);
+  });
+});
+
+describe('runPackageCheck — a young release of an established package (node9Firewall#385 wave 3, A3 option b)', () => {
+  const DAY = 86_400_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const isAbbrev = (init?: RequestInit) =>
+    String((init?.headers as Record<string, string> | undefined)?.Accept ?? '').includes(
+      'install-v1'
+    );
+  /** An npm package: created `createdMs` ago, previous release `previousMs` ago, latest 3 h old. */
+  const established =
+    (createdMs: number, previousMs: number, withCreated = true) =>
+    (init?: RequestInit) =>
+      isAbbrev(init)
+        ? json({
+            name: 'x',
+            modified: ago(3 * 3_600_000),
+            'dist-tags': { latest: '1.1.0' },
+            versions: { '1.0.0': {}, '1.1.0': {} },
+          })
+        : json({
+            time: {
+              ...(withCreated ? { created: ago(createdMs) } : {}),
+              '1.0.0': ago(previousMs),
+              '1.1.0': ago(3 * 3_600_000),
+            },
+          });
+  beforeEach(() => indexWith('npm', 'node9-canary-other', []));
+
+  it('Standard: a package over a year old that released within 180 days is its cadence, no finding', async () => {
+    routes['http://registry.test/node9-canary-steady'] = established(900 * DAY, 20 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-steady'), CFG);
+    expect(r.verdict).toBe('allow');
+    expect(r.findings).toEqual([]);
+  });
+  it('Strict (establishedAge: review): the same release still asks', async () => {
+    routes['http://registry.test/node9-canary-steady'] = established(900 * DAY, 20 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-steady'), {
+      ...CFG,
+      establishedAge: 'review',
+    });
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('a revival: the previous release is over 180 days old, so the young one asks', async () => {
+    routes['http://registry.test/node9-canary-dormant'] = established(900 * DAY, 200 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-dormant'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('a package under a year old asks', async () => {
+    routes['http://registry.test/node9-canary-young'] = established(100 * DAY, 10 * DAY);
+    const r = await runPackageCheck(...bash('npm install node9-canary-young'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('the creation time unreadable: the finding is kept', async () => {
+    routes['http://registry.test/node9-canary-nocreated'] = established(900 * DAY, 20 * DAY, false);
+    const r = await runPackageCheck(...bash('npm install node9-canary-nocreated'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['new']);
+  });
+  it('a new install script on the steady release is its own finding and stands', async () => {
+    routes['http://registry.test/node9-canary-steady'] = (init) =>
+      isAbbrev(init)
+        ? json({
+            name: 'x',
+            modified: ago(3 * 3_600_000),
+            'dist-tags': { latest: '1.1.0' },
+            versions: { '1.0.0': {}, '1.1.0': { hasInstallScript: true } },
+          })
+        : json({
+            time: { created: ago(900 * DAY), '1.0.0': ago(20 * DAY), '1.1.0': ago(3 * 3_600_000) },
+          });
+    const r = await runPackageCheck(...bash('npm install node9-canary-steady'), CFG);
+    expect(r.findings.map((f) => f.kind)).toEqual(['install-script']);
+  });
+  it('PyPI, pinned: the project document gives the creation and the previous release', async () => {
+    indexWith('PyPI', 'node9-canary-other', []);
+    const fresh = ago(3 * 3_600_000);
+    routes['http://pypi.test/pypi/node9-canary-steady/1.1.0/json'] = () =>
+      json({
+        info: { version: '1.1.0' },
+        urls: [{ filename: 'node9_canary_steady-1.1.0.tar.gz', upload_time_iso_8601: fresh }],
+      });
+    routes['http://pypi.test/pypi/node9-canary-steady/json'] = () =>
+      json({
+        info: { version: '1.1.0' },
+        urls: [{ filename: 'node9_canary_steady-1.1.0.tar.gz', upload_time_iso_8601: fresh }],
+        releases: {
+          '1.0.0': [{ filename: 'a-1.0.0.tar.gz', upload_time_iso_8601: ago(800 * DAY) }],
+          '1.0.5': [{ filename: 'a-1.0.5.tar.gz', upload_time_iso_8601: ago(20 * DAY) }],
+          '1.1.0': [{ filename: 'a-1.1.0.tar.gz', upload_time_iso_8601: fresh }],
+        },
+      });
+    const r = await runPackageCheck(...bash('pip install node9-canary-steady==1.1.0'), CFG);
+    expect(r.findings).toEqual([]);
+    const strict = await runPackageCheck(...bash('pip install node9-canary-steady==1.1.0'), {
+      ...CFG,
+      establishedAge: 'review',
+    });
+    expect(strict.findings.map((f) => f.kind)).toEqual(['new']);
   });
 });
 

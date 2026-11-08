@@ -234,16 +234,21 @@ export interface Config {
     // poetry) is checked against the local OSV malicious-package index, with
     // OSV online as a fallback. Known malicious → `onMalicious`; a version
     // published under `maxAgeHours` → `newPackage`; an npm install script →
-    // `installScript` (each review or off). `allow` holds package-name globs
+    // `installScript` (each review or off); a name that looks like a popular
+    // one, does not exist, or was removed as malicious → `lookalike`
+    // (node9Firewall#385 wave 3). `allow` holds package-name globs
     // that are never checked. A failed lookup always allows and is recorded
     // in hook-debug.log. The 2.27.0 key `registrySignals` (one boolean for
-    // both signals) is still read: false turns both off, true changes nothing.
+    // the registry signals) is still read: false turns newPackage,
+    // installScript and lookalike off, true changes nothing.
     packageCheck: {
       enabled: boolean;
       onMalicious: 'block' | 'review';
       newPackage: 'review' | 'off';
       maxAgeHours: number;
       installScript: 'review' | 'off';
+      lookalike: 'review' | 'off';
+      establishedAge: 'review' | 'off';
       onlineFallback: boolean;
       allow: string[];
     };
@@ -602,6 +607,8 @@ export const DEFAULT_CONFIG: Config = {
       newPackage: 'review',
       maxAgeHours: 48,
       installScript: 'review',
+      lookalike: 'review',
+      establishedAge: 'off',
       onlineFallback: true,
       allow: [],
     },
@@ -987,11 +994,12 @@ const KNOB_TO_CHECK: Record<string, string> = {
   pipeChainHigh: 'data.pipe-chain',
 };
 
-/** The package-signal fields (`newPackage`, `installScript`) a policy block
- *  states, including the 2.27.0 `registrySignals` boolean. */
+/** The package-signal fields (`newPackage`, `installScript`, `lookalike`) a
+ *  policy block states, including the 2.27.0 `registrySignals` boolean. */
 function statedSignalFields(policy: LegacyPolicyKnobs): string[] {
   return Object.keys(tuningFromLegacyPolicy(policy)['loading.malicious-package'] ?? {}).filter(
-    (k) => k === 'newPackage' || k === 'installScript'
+    (k) =>
+      k === 'newPackage' || k === 'installScript' || k === 'lookalike' || k === 'establishedAge'
   );
 }
 
@@ -1290,10 +1298,14 @@ export function getConfig(cwd?: string): Config {
       if ((pc as { registrySignals?: unknown }).registrySignals === false) {
         cur.newPackage = 'off';
         cur.installScript = 'off';
+        cur.lookalike = 'off';
       }
       if (pc.newPackage === 'review' || pc.newPackage === 'off') cur.newPackage = pc.newPackage;
       if (pc.installScript === 'review' || pc.installScript === 'off')
         cur.installScript = pc.installScript;
+      if (pc.lookalike === 'review' || pc.lookalike === 'off') cur.lookalike = pc.lookalike;
+      if (pc.establishedAge === 'review' || pc.establishedAge === 'off')
+        cur.establishedAge = pc.establishedAge;
       if (typeof pc.maxAgeHours === 'number' && pc.maxAgeHours >= 0)
         cur.maxAgeHours = pc.maxAgeHours;
       if (typeof pc.onlineFallback === 'boolean') cur.onlineFallback = pc.onlineFallback;
@@ -1463,6 +1475,8 @@ export function getConfig(cwd?: string): Config {
             registrySignals?: unknown;
             newPackage?: unknown;
             installScript?: unknown;
+            lookalike?: unknown;
+            establishedAge?: unknown;
             maxAgeHours?: unknown;
             onlineFallback?: unknown;
             allow?: unknown;
@@ -1695,6 +1709,16 @@ export function getConfig(cwd?: string): Config {
                 : pc.registrySignals === false
                   ? 'off'
                   : cur.installScript,
+            lookalike:
+              pc.lookalike === 'review' || pc.lookalike === 'off'
+                ? pc.lookalike
+                : pc.registrySignals === false
+                  ? 'off'
+                  : cur.lookalike,
+            establishedAge:
+              pc.establishedAge === 'review' || pc.establishedAge === 'off'
+                ? pc.establishedAge
+                : cur.establishedAge,
             maxAgeHours:
               typeof pc.maxAgeHours === 'number' &&
               Number.isFinite(pc.maxAgeHours) &&
@@ -2173,10 +2197,13 @@ export function getConfig(cwd?: string): Config {
       checkToLegacyPolicy(mergedPolicy as Record<string, unknown>, id, v);
     }
     if (signals) {
-      for (const key of ['newPackage', 'installScript'] as const) {
-        // Soft only turns a signal off, so any layer that stated it keeps it.
+      for (const [key, value] of Object.entries(signals) as [
+        keyof typeof signals,
+        'review' | 'off',
+      ][]) {
+        // A level only sets a signal no layer stated; any layer that stated it keeps it.
         if (trustedSignals.has(key) || projectSignals.has(key)) continue;
-        mergedPolicy.packageCheck[key] = signals[key];
+        mergedPolicy.packageCheck[key] = value;
       }
     }
   }
