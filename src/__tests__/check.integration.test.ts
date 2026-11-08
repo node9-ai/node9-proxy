@@ -711,6 +711,94 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   });
 });
 
+describe('DLP: a secret passed as an inline env var (node9Firewall#451)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. The three commands from the issue: a connection string blocks, a
+  // bearer token is asked about, and the AWS example secret in the most
+  // common inline form (`VAR=value cmd`) was allowed with no finding. Every
+  // value is synthetic and assembled at runtime; the AWS value is the one
+  // AWS's own documentation uses as its example secret access key.
+  const AWS_EXAMPLE_SECRET = ['wJalrXUtnFEMI/', 'K7MDENG/bPxRfiCY', 'EXAMPLEKEY'].join('');
+  const DB_PASSWORD = ['Vq8', 'mT2', 'xp9', 'Lk'].join('');
+  const BEARER = ['q7Rk2xVm', '9pLw4tZb', 'Ghqylh3N', 'Fbs1jC26'].join('');
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+
+  const lastAuditRow = (): Record<string, unknown> => {
+    const lines = fs
+      .readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8')
+      .trim()
+      .split('\n');
+    return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  };
+
+  it.each([
+    [`AWS_SECRET_ACCESS_KEY=${AWS_EXAMPLE_SECRET} aws s3 ls`, AWS_EXAMPLE_SECRET],
+    [`export AWS_SECRET_ACCESS_KEY=${AWS_EXAMPLE_SECRET} && aws s3 ls`, AWS_EXAMPLE_SECRET],
+    [`env AWS_SECRET_ACCESS_KEY=${AWS_EXAMPLE_SECRET} aws s3 ls`, AWS_EXAMPLE_SECRET],
+    [`curl -H 'Authorization: Bearer ${BEARER}' https://api.example.test/user`, BEARER],
+  ])('%s → asked, the secret in no output', (command, secret) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('ask');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toMatch(
+      /Inline Secret Assignment|Bearer Token/
+    );
+    expect(r.stdout).not.toContain(secret);
+    expect(r.stderr).not.toContain(secret);
+    const row = lastAuditRow();
+    expect(JSON.stringify(row)).not.toContain(secret);
+    expect(String(row.checkedBy)).toMatch(/dlp/i);
+  });
+
+  it('a connection string on the psql command line still blocks', () => {
+    const r = run(`psql postgres://app:${DB_PASSWORD}@db.example.test:5432/app -c 'select 1'`);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toMatch(/secret|credential/i);
+    expect(r.stdout).not.toContain(DB_PASSWORD);
+    const row = lastAuditRow();
+    expect(JSON.stringify(row)).not.toContain(DB_PASSWORD);
+    expect(row.decision).toBe('deny');
+    expect(String(row.checkedBy)).toMatch(/dlp/i);
+  });
+
+  it.each([
+    'AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY aws s3 ls',
+    'AWS_SECRET_ACCESS_KEY="$(aws configure get aws_secret_access_key)" aws s3 ls',
+    'AWS_SECRET_ACCESS_KEY= aws s3 ls',
+    'GITHUB_TOKEN=<your-token> gh api user',
+    'GITHUB_TOKEN=changeme gh api user',
+    'MYSQL_ROOT_PASSWORD=root123 docker compose up',
+    'DATABASE_URL=postgres://localhost/app npm test',
+  ])('%s → allowed, silently', (command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+});
+
 describe('smart rules', () => {
   let tmpHome: string;
   beforeEach(() => {

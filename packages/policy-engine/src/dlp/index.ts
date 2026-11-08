@@ -300,6 +300,108 @@ function validateAssignedSecret(raw: string, before = ''): boolean {
   return looksGenerated(value, 12, mixed ? 3.0 : 3.5);
 }
 
+// ── Inline secret assignment (node9Firewall#451) ──────────────────────────
+// `AWS_SECRET_ACCESS_KEY=... aws s3 ls`, `export GITHUB_TOKEN=... && gh api`,
+// `env NPM_TOKEN=... npm publish`: a variable the process reads AS a
+// credential, assigned a literal. Assigned Secret judges such a line by the
+// value's shape, so a value it reads as documentation (AWS's own example
+// secret carries the stopword `example`) passes. Here the NAME decides: an
+// exact well-known name (the list below) is a finding for any literal that
+// is not a reference or a placeholder; a name that only ends in a secret
+// suffix (`*_SECRET`, `*_TOKEN`, `*_PASSWORD`, `*_API_KEY`) also needs a
+// value that is not a bare word, not a dev default and at least 8 long, so
+// `MYSQL_ROOT_PASSWORD=root123 docker compose up` is not asked about.
+
+/** Names a process reads as one credential; the value is the secret, whatever its shape. */
+const INLINE_SECRET_NAMES = new Set([
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'NPM_TOKEN',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'DATABASE_URL',
+]);
+
+/** `NAME=value` at the end of the match; the value keeps its quotes here. */
+const INLINE_SECRET_PARTS_RE = /([A-Z][A-Z0-9_]*)=([\s\S]+)$/;
+
+/**
+ * Not a literal: a reference (`$X`, `${X}`, `$(cmd)`, a backtick), anywhere
+ * in an unquoted or double-quoted value. The shell expands it; the text
+ * here is not the credential. Inside single quotes the shell expands
+ * nothing, so `'p$ss-w0rd'` is a literal.
+ */
+const INLINE_REFERENCE_RE = /[$`]/;
+
+/**
+ * A word that says fixture wherever it stands in the value, as a whole word
+ * (split on anything that is not a letter): `dummy-token-for-tests`,
+ * `not-a-real-token`, `fake_key_1`. Not `example`: AWS's example secret
+ * carries it inside one run of letters (`...CYEXAMPLEKEY`), and a whole
+ * word `example` is in the list below anyway.
+ */
+const INLINE_FIXTURE_WORDS = new Set([
+  ...['dummy', 'fake', 'mock', 'stub', 'placeholder', 'changeme', 'redacted', 'sample'],
+  ...['test', 'tests', 'testing', 'real', 'invalid', 'bogus', 'nonexistent', 'notreal'],
+]);
+
+/**
+ * Words that are documentation when they make up the WHOLE value:
+ * `your_token_here`, `replace-me`, `secret123`. The dev defaults a local
+ * service ships with (`root`, `postgres`, `redis`) are here too: a password
+ * equal to the product name is the image's default, not a secret.
+ */
+const INLINE_PLACEHOLDER_WORDS = new Set([
+  ...['pass', 'password', 'passwd', 'pwd', 'secret', 'token', 'key', 'apikey', 'value'],
+  ...['admin', 'administrator', 'root', 'user', 'guest', 'demo', 'default', 'letmein', 'qwerty'],
+  ...['test', 'testing', 'example', 'sample', 'dummy', 'fake', 'mock', 'stub', 'placeholder'],
+  ...['changeme', 'change', 'replace', 'insert', 'paste', 'fill', 'put', 'set', 'me', 'in', 'it'],
+  ...['your', 'my', 'the', 'a', 'here', 'goes', 'string', 'foo', 'bar', 'baz', 'todo', 'fixme'],
+  ...['redacted', 'hidden', 'omitted', 'removed', 'masked', 'none', 'null', 'undefined', 'nil'],
+  ...['xxx', 'postgres', 'mysql', 'mariadb', 'redis', 'mongo', 'dev', 'development', 'local'],
+  ...['localhost', 'docker', 'ci', 'invalid', 'unset', 'empty', 'missing', 'skip', 'noop'],
+]);
+
+/** A template or redaction marker, a fixture word or a run: never a real one. */
+function isInlinePlaceholder(value: string): boolean {
+  const lower = value.toLowerCase();
+  if (/^(.)\1*$/.test(value)) return true; // `x`, `xxxx`, `0000`, `****`
+  if (/^<.*>$/.test(value) || /^\[.*\]$/.test(value)) return true; // `<token>`, `[REDACTED]`
+  if (BASIC_TEMPLATE_MARKERS.some((m) => lower.includes(m))) return true;
+  if (hasSequentialRun(value)) return true; // `12345678`, `abcdefghijkl`
+  const words = lower.split(/[^a-z]+/).filter(Boolean);
+  if (words.some((w) => INLINE_FIXTURE_WORDS.has(w))) return true;
+  return words.length > 0 && words.every((w) => INLINE_PLACEHOLDER_WORDS.has(w));
+}
+
+function validateInlineSecretAssignment(raw: string): boolean {
+  const parts = raw.match(INLINE_SECRET_PARTS_RE);
+  if (!parts) return false;
+  const name = parts[1];
+  let value = parts[2];
+  const quote = value.charAt(0);
+  if ((quote === '"' || quote === "'") && value.endsWith(quote)) value = value.slice(1, -1);
+  if (value === '') return false;
+  if (quote !== "'" && INLINE_REFERENCE_RE.test(value)) return false;
+  if (isInlinePlaceholder(value)) return false;
+  if (rejectedByStructuredValidator(value)) return false;
+  if (name === 'DATABASE_URL') {
+    // The secret of a connection string is its password; a URL without one
+    // (`postgres://localhost/app`, `sqlite::memory:`) names a database only.
+    const password = capturedValue(value, DB_URL_PASSWORD_RE);
+    return password !== null && !isInlinePlaceholder(password);
+  }
+  if (INLINE_SECRET_NAMES.has(name)) return true;
+  // A suffix name: the process behind it is unknown, so the value must look
+  // like a credential at all. `nameHoldsCredential` drops `TEST_TOKEN`,
+  // `FAKE_API_KEY`, `PUBLIC_TOKEN`.
+  if (!nameHoldsCredential(name)) return false;
+  if (value.length < 8 || IDENTIFIER_VALUE_RE.test(value)) return false;
+  return true;
+}
+
 const CIPHER_KEY_NAME_RE = /^([A-Za-z_][\w.]{0,40})/;
 const CIPHER_NAME_PARTS = new Set([
   'cipher',
@@ -1130,6 +1232,27 @@ export const DLP_PATTERNS: DlpPattern[] = [
     validate: validateAssignedSecret,
     argumentsOnly: true,
   },
+  // ── Known secret variable assigned a literal ──────────────────────────────
+  // `AWS_SECRET_ACCESS_KEY=… aws s3 ls`, `export GH_TOKEN=… && gh api`, `env
+  // NPM_TOKEN=… npm publish`, and a `*_SECRET` / `*_TOKEN` / `*_PASSWORD` /
+  // `*_API_KEY` name in the same place. The name starts a shell word (the
+  // start of the text, a space, a newline, `;`, `&`, `|`, `(`), so an
+  // assignment given as an argument (`docker run -e GITHUB_TOKEN=…`) is the
+  // same handoff and counts too; the value is the rest of the word, or a
+  // quoted string. The validator decides by the
+  // name (node9Firewall#451): see validateInlineSecretAssignment. review, as
+  // every name-based finding: the shape of the value is not checked, so a
+  // human confirms rather than the gate deciding alone.
+  {
+    name: 'Inline Secret Assignment',
+    regex:
+      /(?:^|[\s;&|(])((?:AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|DATABASE_URL)|[A-Z][A-Z0-9_]{0,60}_(?:SECRET|TOKEN|PASSWORD|API_KEY))=("[^"\n]{1,512}"|'[^'\n]{1,512}'|[^\s;&|"'`()<>]{1,512})/,
+    severity: 'review',
+    keywords: ['_secret', '_token', '_password', '_api_key', 'database_url'],
+    validate: validateInlineSecretAssignment,
+    redactGroup: 2,
+    argumentsOnly: true,
+  },
 ];
 
 // Pre-compiled global versions of each DLP pattern regex, built once at module
@@ -1266,12 +1389,16 @@ assertBuiltinPatternsAreSafe();
  * Masks a matched secret: keeps 4-char prefix + 4-char suffix, replaces the
  * middle with asterisks.  e.g. "AKIA1234567890ABCD" → "AKIA**********ABCD"
  */
-function maskSecret(raw: string, pattern: RegExp): string {
+function maskSecret(raw: string, pattern: RegExp, redactGroup?: number): string {
   const match = raw.match(pattern);
   if (!match) return '****';
   const secret = match[0];
   if (secret.length < 8) return '****';
   const prefix = secret.slice(0, 4);
+  // A pattern that names the secret's group and accepts a short value
+  // (`GITHUB_TOKEN=abc`): the four-character tail would be the whole value.
+  const group = redactGroup !== undefined ? match[redactGroup] : undefined;
+  if (typeof group === 'string' && group.length < 8) return `${prefix}****`;
   const suffix = secret.slice(-4);
   const stars = '*'.repeat(Math.min(secret.length - 8, 12));
   return `${prefix}${stars}${suffix}`;
@@ -1369,7 +1496,7 @@ export function matchArgumentText(
     const match: DlpMatch = {
       patternName: pattern.name,
       fieldPath,
-      redactedSample: maskSecret(raw, pattern.regex),
+      redactedSample: maskSecret(raw, pattern.regex, pattern.redactGroup),
       severity,
     };
     if (severity === 'block') return match;
