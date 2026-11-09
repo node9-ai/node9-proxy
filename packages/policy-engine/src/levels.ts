@@ -109,6 +109,8 @@ const STRICT: Readonly<Record<string, Verdict>> = {
   'network.unknown-host': 'review',
   'network.internal-addresses': 'block',
   'behavior.prompt-injection': 'log',
+  // The brief handed to a subagent is content too (node9Firewall#428).
+  'behavior.agent-handoff': 'log',
   'loading.skill-tamper': 'block',
   // Standard records money moves (catalog default log); Strict asks.
   'actions.money': 'review',

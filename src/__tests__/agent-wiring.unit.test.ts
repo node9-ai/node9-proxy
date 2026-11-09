@@ -174,6 +174,23 @@ describe('agent-wiring registry', () => {
     expect(stateOf('copilot')).toBe('wired');
   });
 
+  it('lists Codex PostToolUse (node9 log) and reads it from hooks.json (node9Firewall#428)', () => {
+    writeJson('.codex/hooks.json', {
+      hooks: {
+        PreToolUse: [matcher],
+        PostToolUse: [{ matcher: '.*', hooks: [{ command: 'node9 log' }] }],
+      },
+    });
+    const codex = getAgentWiring(home).find((a) => a.id === 'codex')!;
+    const post = codex.hooks.find((h) => h.label.startsWith('PostToolUse'));
+    expect(post?.wired).toBe(true);
+    // Without it in the file, the row shows and is not wired.
+    writeJson('.codex/hooks.json', { hooks: { PreToolUse: [matcher] } });
+    const again = getAgentWiring(home).find((a) => a.id === 'codex')!;
+    expect(again.hooks.find((h) => h.label.startsWith('PostToolUse'))?.wired).toBe(false);
+    expect(again.wireState).toBe('wired'); // the primary hook decides the state
+  });
+
   it('treats Cursor as MCP-only — no hook file, protection comes from MCP', () => {
     // Even if a stray hooks.json exists, Cursor is not hook-wired by node9.
     writeJson('.cursor/hooks.json', { hooks: { preToolUse: [NODE9_HOOK] } });

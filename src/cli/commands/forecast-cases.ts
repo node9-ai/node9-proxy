@@ -96,7 +96,8 @@ export type ProfileNeed =
   | 'egress-deny-list'
   | 'organisation-domain'
   | 'hold-action-checks'
-  | 'injection-scan';
+  | 'injection-scan'
+  | 'agent-handoff-check';
 
 export const PROFILE_NEEDS: Readonly<Record<string, ProfileNeed | null>> = {
   clean: null,
@@ -111,6 +112,8 @@ export const PROFILE_NEEDS: Readonly<Record<string, ProfileNeed | null>> = {
   'exposure-org': 'organisation-domain',
   'ask-before-dangerous-actions': 'hold-action-checks',
   'injection-optin': 'injection-scan',
+  // The brief handed to a subagent (node9Firewall#428): the check is off by default.
+  'handoff-optin': 'agent-handoff-check',
 };
 
 /** The need of a profile. An `egress-deny-*` profile is a gated egress with
@@ -152,6 +155,7 @@ export function homeHas(config: Config): Record<ProfileNeed, boolean> {
     'hold-action-checks':
       held('actions.money') && held('actions.access') && held('actions.publish'),
     'injection-scan': value('behavior.prompt-injection') !== 'off',
+    'agent-handoff-check': value('behavior.agent-handoff') !== 'off',
   };
 }
 

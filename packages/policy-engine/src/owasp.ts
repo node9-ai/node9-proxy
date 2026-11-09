@@ -100,6 +100,7 @@ export const POSTURE_CATEGORY_OWASP: Readonly<Record<string, AsiId>> = {
   'Supply chain': 'ASI04',
   'Instruction files': 'ASI06',
   'Outside content': 'ASI01',
+  'Agent-to-agent': 'ASI07',
   Isolation: 'ASI05',
   Approvals: 'ASI09',
   Cost: 'ASI08',

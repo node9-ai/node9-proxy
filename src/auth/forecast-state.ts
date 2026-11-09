@@ -22,6 +22,8 @@ export class ForecastSessionState {
   exposure: SessionExposureRecord | null = null;
   readonly writtenFiles = new Set<string>();
   loopRecords: ToolCallRecord[] = [];
+  /** Timestamps of the session's subagent spawns (behavior.fanout). */
+  spawnRecords: number[] = [];
   /** True when the caller cannot feed this state (a transcript without tool
    *  results): every state-dependent layer then reports `session-state`. */
   readonly blind: boolean;

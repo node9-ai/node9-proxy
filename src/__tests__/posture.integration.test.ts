@@ -72,7 +72,7 @@ describe('node9 posture (integration)', () => {
     // 8 Phase-0 checks + 5 governed-config dimensions (Report UI v2 · P3):
     // Data, Approvals, Tool governance, Files, Cost; + 3 OWASP phase-1 checks
     // (node9Firewall#320): Agent permissions, Outside content, Instruction files.
-    expect(parsed.checksRun).toBe(16);
+    expect(parsed.checksRun).toBe(17); // Agent-to-agent joined (node9Firewall#428)
     // Every finding names its OWASP risk.
     for (const f of parsed.findings) expect(f.owasp).toMatch(/^ASI(0[1-9]|10)$/);
     // Bare home is not wired → the headline's #1 action is install-aware (a cold

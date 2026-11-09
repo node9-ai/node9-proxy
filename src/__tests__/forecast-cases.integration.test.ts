@@ -614,6 +614,7 @@ describe('forecast-cases helpers', () => {
     expect(profileNeed('egress-lock')).toBe('egress-block');
     expect(profileNeed('egress-deny-ula-v6-brackets')).toBe('egress-deny-list');
     expect(profileNeed('egress-watch')).toBe('egress-gated');
+    expect(profileNeed('handoff-optin')).toBe('agent-handoff-check');
     expect(profileNeed('something-new')).toBeUndefined();
   });
 

@@ -219,6 +219,9 @@ export interface Config {
       threshold: number;
       windowSeconds: number;
     };
+    // behavior.cost-budget (node9Firewall#427): the ceilings, in USD. Either
+    // or both; absent means the check has nothing to judge.
+    costBudget: { sessionUSD?: number; dayUSD?: number };
     // Indirect-prompt-injection scanning of TOOL OUTPUT (gap1 v2). Opt-in:
     // enabled=false by default — shipping it changes no behavior until a user
     // turns it on. `minConfidence` is the actionable threshold (low is by
@@ -600,6 +603,7 @@ export const DEFAULT_CONFIG: Config = {
       ssrfStrict: false,
     },
     loopDetection: { enabled: true, threshold: 5, windowSeconds: 120 },
+    costBudget: {},
     injectionScan: { enabled: false, minConfidence: 'medium', allow: [] },
     packageCheck: {
       enabled: true,
@@ -1049,6 +1053,7 @@ export function getConfig(cwd?: string): Config {
       ssrfAllow: [...(DEFAULT_CONFIG.policy.egress.ssrfAllow ?? [])],
     },
     loopDetection: { ...DEFAULT_CONFIG.policy.loopDetection },
+    costBudget: { ...DEFAULT_CONFIG.policy.costBudget },
     injectionScan: {
       ...DEFAULT_CONFIG.policy.injectionScan,
       allow: [...DEFAULT_CONFIG.policy.injectionScan.allow],
@@ -1277,6 +1282,13 @@ export function getConfig(cwd?: string): Config {
       if (ld.windowSeconds !== undefined)
         mergedPolicy.loopDetection.windowSeconds = ld.windowSeconds;
     }
+    if (p.costBudget && typeof p.costBudget === 'object') {
+      const cb = p.costBudget as Partial<Config['policy']['costBudget']>;
+      if (typeof cb.sessionUSD === 'number' && cb.sessionUSD >= 0)
+        mergedPolicy.costBudget.sessionUSD = cb.sessionUSD;
+      if (typeof cb.dayUSD === 'number' && cb.dayUSD >= 0)
+        mergedPolicy.costBudget.dayUSD = cb.dayUSD;
+    }
     if (p.injectionScan && typeof p.injectionScan === 'object') {
       const is = p.injectionScan as Partial<Config['policy']['injectionScan']>;
       if (is.enabled !== undefined) mergedPolicy.injectionScan.enabled = is.enabled;
@@ -1486,6 +1498,7 @@ export function getConfig(cwd?: string): Config {
             threshold?: unknown;
             windowSeconds?: unknown;
           };
+          costBudget?: { sessionUSD?: unknown; dayUSD?: unknown };
           skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
           untrustedContent?: unknown;
           jailPaths?: { path?: unknown; verdict?: unknown }[];
@@ -1738,6 +1751,17 @@ export function getConfig(cwd?: string): Config {
         if (mc.untrustedContent && typeof mc.untrustedContent === 'object') {
           applyUntrustedContent(mergedPolicy.untrustedContent, mc.untrustedContent, true);
         }
+        if (mc.costBudget && typeof mc.costBudget === 'object') {
+          const c = mc.costBudget;
+          if (
+            typeof c.sessionUSD === 'number' &&
+            Number.isFinite(c.sessionUSD) &&
+            c.sessionUSD >= 0
+          )
+            mergedPolicy.costBudget.sessionUSD = c.sessionUSD;
+          if (typeof c.dayUSD === 'number' && Number.isFinite(c.dayUSD) && c.dayUSD >= 0)
+            mergedPolicy.costBudget.dayUSD = c.dayUSD;
+        }
         if (mc.loopDetection && typeof mc.loopDetection === 'object') {
           const l = mc.loopDetection;
           const cur = mergedPolicy.loopDetection;
@@ -1853,6 +1877,7 @@ export function getConfig(cwd?: string): Config {
           on(mc.untrustedContent) ||
           on(mc.skillPinning) ||
           on(mc.loopDetection) ||
+          on(mc.costBudget) ||
           (!!mc.commandChecks &&
             typeof mc.commandChecks === 'object' &&
             Object.values(mc.commandChecks as Record<string, unknown>).some(

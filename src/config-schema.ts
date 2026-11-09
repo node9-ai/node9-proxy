@@ -194,6 +194,13 @@ export const ConfigFileSchema = z
             windowSeconds: z.number().min(10).optional(),
           })
           .optional(),
+        // behavior.cost-budget (node9Firewall#427): the ceilings, in USD.
+        costBudget: z
+          .object({
+            sessionUSD: z.number().min(0).optional(),
+            dayUSD: z.number().min(0).optional(),
+          })
+          .optional(),
         injectionScan: z
           .object({
             enabled: z.boolean().optional(),
