@@ -142,9 +142,17 @@ function liveDecision(r: AuthResult): { decision: ForecastDecision; enforced: bo
   return logged ? { decision: 'log', enforced: false } : { decision: 'allow', enforced: false };
 }
 
+/** The live check id in the audit's own order (src/audit, src/auth/forecast.ts):
+ *  the result's, the rule's, the review's label, the deny row's, its tag. */
 function liveCheckId(r: AuthResult): string | undefined {
   const deny = [...live.rows].reverse().find((row) => row.decision === 'deny');
-  return r.checkId ?? checkIdForRule(r.ruleHit) ?? deny?.checkId;
+  return (
+    r.checkId ??
+    checkIdForRule(r.ruleHit) ??
+    checkIdForRule(r.blockedByLabel) ??
+    deny?.checkId ??
+    checkIdForCheckedBy(deny?.checkedBy)
+  );
 }
 
 async function both(tool: string, args: unknown, state?: ForecastSessionState) {
@@ -329,6 +337,7 @@ describe('the brief handed to a subagent (behavior.agent-handoff, ASI07, node9Fi
     const r = await both('collaborationspawn_agent', { message: POISONED.prompt });
     expect(r.liveDecision.decision).toBe('review');
     expect(r.liveResult.checkId).toBe('behavior.agent-handoff');
+    expect(liveCheckId(r.liveResult)).toBe(r.forecast.checkId);
     expect(r.forecast.decision).toBe('review');
     expect(r.forecast.enforced).toBe(true);
     expect(r.forecast.checkId).toBe('behavior.agent-handoff');
