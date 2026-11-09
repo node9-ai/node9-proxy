@@ -10,14 +10,17 @@ import { readCostLedger, utcDay } from '../cost-ledger';
 // the ledger still exists, dated today, with no sessions.
 
 let home: string;
-let saved: string | undefined;
+let saved: { home?: string; profile?: string };
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-ledger-sync-'));
-  saved = process.env.HOME;
+  saved = { home: process.env.HOME, profile: process.env.USERPROFILE };
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
 });
 afterEach(() => {
-  process.env.HOME = saved;
+  process.env.HOME = saved.home;
+  process.env.USERPROFILE = saved.profile;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -31,6 +34,7 @@ describe('writeLedgerOnce', () => {
     expect(l!.asOf).toBe(now.toISOString());
     expect(l!.sessions).toEqual({});
     expect(l!.dayUSD).toBe(0);
-    expect(fs.statSync(path.join(home, '.node9', 'cost', 'sessions.json')).mode & 0o077).toBe(0);
+    if (process.platform !== 'win32')
+      expect(fs.statSync(path.join(home, '.node9', 'cost', 'sessions.json')).mode & 0o077).toBe(0);
   });
 });

@@ -7,14 +7,17 @@ import { recordSpawnAndCheck } from '../loop-detector';
 // The fan-out ledger beside the loop state (behavior.fanout, node9Firewall#427).
 
 let home: string;
-let saved: string | undefined;
+let saved: { home?: string; profile?: string };
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-fanout-'));
-  saved = process.env.HOME;
+  saved = { home: process.env.HOME, profile: process.env.USERPROFILE };
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
 });
 afterEach(() => {
-  process.env.HOME = saved;
+  process.env.HOME = saved.home;
+  process.env.USERPROFILE = saved.profile;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
