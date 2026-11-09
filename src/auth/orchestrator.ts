@@ -35,6 +35,7 @@ import {
   argumentLeavesText,
   checkValue,
   isSpawnTool,
+  isSubagentSpawn,
   isRecordOnly,
   holdsSendsWithoutDaemon,
 } from '@node9/policy-engine';
@@ -95,7 +96,8 @@ import {
   notifySessionTaint,
 } from './daemon';
 import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
-import { recordAndCheck } from '../loop-detector';
+import { recordAndCheck, recordSpawnAndCheck } from '../loop-detector';
+import { judgeBudget, readCostLedger } from '../cost-ledger';
 import { runPackageCheck } from '../supply-chain/check';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
@@ -106,6 +108,12 @@ import { approvalUnavailable, authResultFromRecord, recordFromAuthResult } from 
 
 /** The label of the handoff review; a legacy name of behavior.agent-handoff. */
 const HANDOFF_LABEL = '🛡️ Node9 Agent Handoff';
+/** Cascading failures (node9Firewall#427): the labels, legacy names of the checks. */
+const FANOUT_LABEL = '🛡️ Node9 Fan-out';
+const COST_LABEL = '🛡️ Node9 Cost Budget';
+/** The fan-out limit of this stage: more than this many spawns in the window. */
+const FANOUT_THRESHOLD = 8;
+const FANOUT_WINDOW_MS = 10 * 60_000;
 
 /** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
  *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
@@ -642,6 +650,8 @@ export async function _authorizeHeadlessCore(
   let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
   let packageReview: string | null = null; // the package check asked for review
   let handoffReview: string | null = null; // the brief to a subagent carries an instruction
+  let fanoutReview: string | null = null; // subagents spawned past the limit
+  let costReview: string | null = null; // the session or the day is past its budget
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   // The engine verdict behind a review, for the inline-ask result and the
@@ -959,11 +969,9 @@ export async function _authorizeHeadlessCore(
   // scanner at the bar of the write scan above (medium: two signals, no
   // origin booster). Log records the spawn and taints the session, so the
   // next send or write is held by the taint gate; Review holds the spawn.
+  const settingsNow = catalogSettingsFromConfig(config.settings, config.policy);
   if (!isManual && isSpawnTool(toolName)) {
-    const handoff = checkValue(
-      catalogSettingsFromConfig(config.settings, config.policy),
-      'behavior.agent-handoff'
-    );
+    const handoff = checkValue(settingsNow, 'behavior.agent-handoff');
     if (handoff !== 'off') {
       const m = scanInjection(argumentLeavesText(args), { untrusted: false });
       if (m && (m.confidence === 'medium' || m.confidence === 'high')) {
@@ -988,6 +996,109 @@ export async function _authorizeHeadlessCore(
           );
           await notifySessionTaint(meta?.sessionId ?? '', `handoff-injection:${signals}`);
         }
+      }
+    }
+  }
+
+  // ── SUBAGENTS SPAWNED PAST A LIMIT (ASI08, node9Firewall#427) ────────────
+  // A task that splits into subagents which split again. The limit of this
+  // stage is fixed (FANOUT_THRESHOLD in FANOUT_WINDOW_MS); the ledger lives
+  // beside the loop state, keyed by session. A handoff review on the same
+  // spawn wins: it names the content, this names the count.
+  if (!isManual && isSubagentSpawn(toolName)) {
+    const fanout = checkValue(settingsNow, 'behavior.fanout');
+    if (fanout !== 'off') {
+      const fan = recordSpawnAndCheck(meta?.sessionId ?? '', FANOUT_THRESHOLD, FANOUT_WINDOW_MS);
+      if (fan.over) {
+        const rowMeta = {
+          ...meta,
+          ruleName: 'fanout',
+          checkId: 'behavior.fanout',
+          loopCount: fan.count,
+        };
+        if (fanout === 'review' && !handoffReview) {
+          appendLocalAudit(toolName, args, 'allow', 'fanout-review', rowMeta, hashAuditArgs);
+          fanoutReview =
+            `⚠️ node9: ${fan.count} subagents spawned in this session in the last ` +
+            `${FANOUT_WINDOW_MS / 60_000} minutes. Approve only if the task needs that many.`;
+          explainableLabel = FANOUT_LABEL;
+          policyReviewRule = 'fanout';
+          policyReviewCheckId = 'behavior.fanout';
+        } else {
+          appendLocalAudit(
+            toolName,
+            args,
+            'allow',
+            'fanout',
+            { ...rowMeta, logged: true },
+            hashAuditArgs
+          );
+        }
+      }
+    }
+  }
+
+  // ── SPEND PAST THE BUDGET (ASI08, node9Firewall#427) ─────────────────────
+  // The figure is the daemon's ledger of today's sessions (cost-ledger.ts),
+  // up to one sync behind; a forecast reads the same file. No trusted figure,
+  // no judgement, and the forecast says the cost state was unknown.
+  const budget = config.policy.costBudget;
+  const budgetValue = checkValue(settingsNow, 'behavior.cost-budget');
+  if (
+    !isManual &&
+    budgetValue !== 'off' &&
+    (budget.sessionUSD !== undefined || budget.dayUSD !== undefined)
+  ) {
+    const now = forecast ? forecast.now : Date.now();
+    const verdict = judgeBudget(readCostLedger(), meta?.sessionId ?? '', budget, now);
+    if (verdict === 'unknown') {
+      if (forecast) noteForecastUnknown('cost-state');
+    } else if (verdict) {
+      const text =
+        `this ${verdict.over === 'day' ? 'machine' : 'session'} has spent ` +
+        `$${verdict.spent.toFixed(2)} of its $${verdict.ceiling.toFixed(2)} ${verdict.over} budget`;
+      const rowMeta = { ...meta, ruleName: 'cost-budget', checkId: 'behavior.cost-budget' };
+      if (budgetValue === 'block') {
+        appendLocalAudit(
+          toolName,
+          args,
+          isObserveMode ? 'allow' : 'deny',
+          isObserveMode ? 'observe-mode-cost-budget-would-block' : 'cost-budget-block',
+          rowMeta,
+          hashAuditArgs
+        );
+        if (isObserveMode) {
+          return {
+            approved: true,
+            checkedBy: 'audit',
+            observeWouldBlock: true,
+            blockedByLabel: COST_LABEL,
+          };
+        }
+        return {
+          approved: false,
+          reason: `🛑 node9: ${text}. Raise the budget or start a new session.`,
+          blockedBy: 'local-config',
+          blockedByLabel: COST_LABEL,
+          ruleHit: 'cost-budget',
+          checkId: 'behavior.cost-budget',
+        };
+      }
+      if (budgetValue === 'review') {
+        appendLocalAudit(toolName, args, 'allow', 'cost-budget-review', rowMeta, hashAuditArgs);
+        costReview = `⚠️ node9: ${text}. Approve to continue past it.`;
+        explainableLabel = COST_LABEL;
+        policyReviewRule = 'cost-budget';
+        policyReviewCheckId = 'behavior.cost-budget';
+      } else {
+        appendLocalAudit(
+          toolName,
+          args,
+          'allow',
+          'cost-budget',
+          { ...rowMeta, logged: true },
+          hashAuditArgs
+        );
       }
     }
   }
@@ -1706,6 +1817,8 @@ export async function _authorizeHeadlessCore(
     !!taintWarning ||
     !!exposureReview ||
     !!handoffReview ||
+    !!fanoutReview ||
+    !!costReview ||
     !!packageReview;
   /** A trust session may answer this call. ONE definition for the two places
    *  that must agree: the trust guard that honours a session, and the native
@@ -2337,6 +2450,10 @@ export async function _authorizeHeadlessCore(
       'agent-handoff'
     );
     riskMetadata.ruleDescription = handoffReview.slice(0, 1024);
+  } else if (fanoutReview || costReview) {
+    const rule = fanoutReview ? 'fanout' : 'cost-budget';
+    riskMetadata = computeRiskMetadata(args, 5, explainableLabel, undefined, undefined, rule);
+    riskMetadata.ruleDescription = (fanoutReview ?? costReview ?? '').slice(0, 1024);
   }
 
   // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────
@@ -2377,6 +2494,8 @@ export async function _authorizeHeadlessCore(
         taintWarning ||
         packageReview ||
         handoffReview ||
+        fanoutReview ||
+        costReview ||
         exposureReview ||
         explainableLabel ||
         'Node9 flagged this action for review.',

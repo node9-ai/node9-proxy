@@ -155,11 +155,19 @@ describe('checkFiles + checkCost', () => {
     expect(f.coverageProbe?.kind).toBe('fileRead');
   });
 
-  it('Cost is an advisory AVAILABLE opportunity (no budget field yet)', () => {
+  it('Cost is an advisory AVAILABLE opportunity while no ceiling is set', () => {
+    getConfig.mockReturnValue({ policy: { costBudget: {} } });
     const f = checkCost(ctx)[0];
     expect(f.category).toBe('Cost');
     expect(f.severity).toBe('advisory');
     expect(f.node9Reduces).toBe(true);
     expect(f.scoreWeight).toBeGreaterThan(0);
+  });
+
+  it('Cost is covered once a ceiling is set (behavior.cost-budget, node9Firewall#427)', () => {
+    getConfig.mockReturnValue({ policy: { costBudget: { sessionUSD: 5 } } });
+    expect(checkCost(ctx)).toEqual([]);
+    getConfig.mockReturnValue({ policy: { costBudget: { dayUSD: 20 } } });
+    expect(checkCost(ctx)).toEqual([]);
   });
 });

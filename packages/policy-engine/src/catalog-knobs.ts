@@ -27,6 +27,8 @@ export interface LegacyPolicyKnobs {
     ssrfAllow?: string[];
   };
   loopDetection?: { enabled?: boolean; threshold?: number; windowSeconds?: number };
+  /** The spend ceilings of behavior.cost-budget (node9Firewall#427); no value, no judgement. */
+  costBudget?: { sessionUSD?: number; dayUSD?: number };
   injectionScan?: { enabled?: boolean; minConfidence?: string; allow?: string[] };
   skillPinning?: { enabled?: boolean; mode?: string; roots?: string[] };
   packageCheck?: {
@@ -68,6 +70,8 @@ export const TUNING_FIELDS: readonly TuningField[] = [
   { checkId: 'data.secrets', name: 'scanIgnoredTools', legacy: ['dlp', 'scanIgnoredTools'] },
   { checkId: 'behavior.loops', name: 'threshold', legacy: ['loopDetection', 'threshold'] },
   { checkId: 'behavior.loops', name: 'windowSeconds', legacy: ['loopDetection', 'windowSeconds'] },
+  { checkId: 'behavior.cost-budget', name: 'sessionUSD', legacy: ['costBudget', 'sessionUSD'] },
+  { checkId: 'behavior.cost-budget', name: 'dayUSD', legacy: ['costBudget', 'dayUSD'] },
   {
     checkId: 'behavior.prompt-injection',
     name: 'minConfidence',
@@ -371,6 +375,9 @@ export function knobStatedChecks(policy: LegacyPolicyKnobs): Set<string> {
 export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   // The brief handed to a subagent (node9Firewall#428): the detector reads the map.
   'behavior.agent-handoff',
+  // Cascading failures (node9Firewall#427): both detectors read the map.
+  'behavior.fanout',
+  'behavior.cost-budget',
   'files.shell-startup',
   'files.password-hashes',
   'files.system-dirs',

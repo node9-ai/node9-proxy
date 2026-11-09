@@ -190,6 +190,7 @@ export interface ManagedConfigCache {
   approvalTimeoutMs?: number;
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
+  costBudget?: { sessionUSD?: number; dayUSD?: number };
   skillPinning?: { enabled: boolean; mode: string; roots: string[] };
   untrustedContent?: {
     enabled?: boolean;
@@ -251,6 +252,7 @@ export interface CloudPolicyBody {
     approvalTimeoutMs?: unknown;
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
+    costBudget?: { sessionUSD?: unknown; dayUSD?: unknown };
     skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
     untrustedContent?: {
       enabled?: unknown;
@@ -780,6 +782,18 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
       windowSeconds: coerceInt(l.windowSeconds, 1, 3600, 120),
     };
   }
+  // behavior.cost-budget (node9Firewall#427): the ceilings, non-negative USD.
+  if (mc.costBudget && typeof mc.costBudget === 'object') {
+    const c = mc.costBudget;
+    const usd = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(v, 1_000_000) : undefined;
+    const budget: NonNullable<ManagedConfigCache['costBudget']> = {};
+    const s = usd(c.sessionUSD);
+    const d = usd(c.dayUSD);
+    if (s !== undefined) budget.sessionUSD = s;
+    if (d !== undefined) budget.dayUSD = d;
+    if (Object.keys(budget).length > 0) out.costBudget = budget;
+  }
   if (mc.skillPinning && typeof mc.skillPinning === 'object') {
     const sk = mc.skillPinning;
     out.skillPinning = {
@@ -908,6 +922,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.approvalTimeoutMs !== undefined ||
     out.injectionScan !== undefined ||
     out.loopDetection !== undefined ||
+    out.costBudget !== undefined ||
     out.skillPinning !== undefined ||
     out.untrustedContent !== undefined ||
     out.packageCheck !== undefined ||

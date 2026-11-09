@@ -560,6 +560,26 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     legacy: ['🔄 Loop Detected'],
   },
   {
+    id: 'behavior.fanout',
+    group: 'behavior',
+    owasp: 'ASI08',
+    title: 'Subagents spawned past a limit',
+    catches: 'more than eight subagents spawned in one session within ten minutes',
+    values: ['off', 'log', 'review'],
+    defaultValue: 'log',
+    legacy: ['fanout', '🛡️ Node9 Fan-out'],
+  },
+  {
+    id: 'behavior.cost-budget',
+    group: 'behavior',
+    owasp: 'ASI08',
+    title: 'Spend past the budget',
+    catches: 'a call made after the session or the day passed the spend ceiling the user set',
+    values: ['off', 'log', 'review', 'block'],
+    defaultValue: 'off',
+    legacy: ['cost-budget', '🛡️ Node9 Cost Budget'],
+  },
+  {
     id: 'behavior.prompt-injection',
     group: 'behavior',
     owasp: 'ASI01',
@@ -885,6 +905,13 @@ export function checkIdForCheckedBy(checkedBy: string | undefined): string | und
     case 'agent-handoff':
     case 'agent-handoff-review':
       return 'behavior.agent-handoff';
+    case 'fanout':
+    case 'fanout-review':
+      return 'behavior.fanout';
+    case 'cost-budget':
+    case 'cost-budget-review':
+    case 'cost-budget-block':
+      return 'behavior.cost-budget';
     default:
       return undefined;
   }

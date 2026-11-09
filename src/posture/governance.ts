@@ -159,23 +159,24 @@ export function checkFiles(ctx: CheckContext): Finding[] {
   ];
 }
 
-/** COST — spend budgets (not yet a config field; an AVAILABLE hardening). */
-export function checkCost(_ctx: CheckContext): Finding[] {
-  // No budget field exists yet (cost governance is designed, unbuilt). Surface
-  // it as a low-weight AVAILABLE opportunity, not a genuine exposure.
+/** COST — a spend ceiling (behavior.cost-budget, node9Firewall#427): set, the
+ *  finding is covered; unset, an AVAILABLE hardening at low weight. */
+export function checkCost(ctx: CheckContext): Finding[] {
+  const budget = getConfig(ctx.cwd)?.policy?.costBudget ?? {};
+  if (budget.sessionUSD !== undefined || budget.dayUSD !== undefined) return [];
   return [
     {
       category: 'Cost',
       severity: 'advisory',
       title: 'No spend budget — a runaway agent’s cost is uncapped',
-      what: "node9 sees per-agent spend but can't yet stop a runaway loop by dollar/token budget.",
-      why: 'Budget enforcement is not configured (it ships with cost governance).',
+      what: 'node9 sees per-agent spend; without a ceiling nothing stops a runaway session by cost.',
+      why: 'behavior.cost-budget has no ceiling (tuning sessionUSD or dayUSD).',
       who: 'A looping agent can burn cost with nothing to cap it.',
       detail: [],
       owner: 'node9',
       node9Reduces: true,
       scoreWeight: 4,
-      fix: 'Cost budgets are on the roadmap; loop detection caps the worst runaways today.',
+      fix: 'Set a ceiling for behavior.cost-budget (tuning sessionUSD or dayUSD, in ~/.node9/config.json or on the dashboard) and the check to review or block; loop detection caps the worst runaways today.',
     },
   ];
 }

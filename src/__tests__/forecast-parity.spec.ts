@@ -347,6 +347,104 @@ describe('the brief handed to a subagent (behavior.agent-handoff, ASI07, node9Fi
   });
 });
 
+describe('cascading failures (behavior.fanout and behavior.cost-budget, ASI08, node9Firewall#427)', () => {
+  const BRIEF = {
+    description: 'one part',
+    prompt: 'Summarize one file in one line.',
+    subagent_type: 'general-purpose',
+  };
+  const ledgerFile = () => path.join(home(), '.node9', 'cost', 'sessions.json');
+  const plantLedger = (usd: number, ageMs = 0) => {
+    const now = new Date(Date.now() - ageMs);
+    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    fs.mkdirSync(path.dirname(ledgerFile()), { recursive: true });
+    fs.writeFileSync(
+      ledgerFile(),
+      JSON.stringify({
+        asOf: now.toISOString(),
+        day,
+        sessions: { [SESSION]: { usd, tokens: 1000 } },
+        dayUSD: usd,
+      })
+    );
+  };
+
+  it('the ninth spawn in a session is logged with the check id on both paths; the eighth passes', async () => {
+    writeConfig({ checks: { 'behavior.fanout': 'log' } });
+    const state = new ForecastSessionState(SESSION);
+    for (let i = 0; i < 8; i++) {
+      const r = await both('Agent', BRIEF, state);
+      expect(r.forecast.decision, `spawn ${i + 1}`).toBe('allow');
+      expect(live.rows.some((x) => x.checkedBy.startsWith('fanout'))).toBe(false);
+    }
+    const ninth = await both('Agent', BRIEF, state);
+    expect(ninth.liveDecision.decision).toBe('log');
+    expect(live.rows.find((x) => x.checkedBy === 'fanout')?.checkId).toBe('behavior.fanout');
+    expect(ninth.forecast.decision).toBe('log');
+    expect(ninth.forecast.checkId).toBe('behavior.fanout');
+    expect(ninth.forecast.layer).toBe('fanout');
+  });
+
+  it('at review the ninth spawn is reviewed on both paths', async () => {
+    writeConfig({ checks: { 'behavior.fanout': 'review' } });
+    const state = new ForecastSessionState(SESSION);
+    // Distinct briefs: identical ones would trip the loop check first.
+    for (let i = 0; i < 8; i++)
+      await both('collaborationspawn_agent', { message: `part ${i + 1} of the task` }, state);
+    const ninth = await both('collaborationspawn_agent', { message: 'part 9 of the task' }, state);
+    expect(ninth.liveDecision.decision).toBe('review');
+    expect(ninth.liveResult.checkId).toBe('behavior.fanout');
+    expect(ninth.forecast.decision).toBe('review');
+    expect(ninth.forecast.checkId).toBe('behavior.fanout');
+    expect(ninth.forecast.layer).toBe('fanout');
+  });
+
+  it('a session past its ceiling: review holds the next call on both paths; under it passes', async () => {
+    writeConfig({
+      checks: { 'behavior.cost-budget': 'review' },
+      tuning: { 'behavior.cost-budget': { sessionUSD: 5 } },
+    });
+    plantLedger(6.2);
+    const over = await both('Bash', { command: 'ls -la' });
+    expect(over.liveDecision.decision).toBe('review');
+    expect(over.liveResult.checkId).toBe('behavior.cost-budget');
+    expect(over.forecast.decision).toBe('review');
+    expect(over.forecast.checkId).toBe('behavior.cost-budget');
+    expect(over.forecast.layer).toBe('cost-budget');
+    plantLedger(4.1);
+    const under = await both('Bash', { command: 'ls -la' });
+    expect(under.liveDecision.decision).toBe('allow');
+    expect(under.forecast.decision).toBe('allow');
+  });
+
+  it('block stops the call; a stale ledger judges nothing and the forecast says the cost state was unknown', async () => {
+    writeConfig({
+      checks: { 'behavior.cost-budget': 'block' },
+      tuning: { 'behavior.cost-budget': { dayUSD: 10 } },
+    });
+    plantLedger(12);
+    const over = await both('Bash', { command: 'ls -la' });
+    expect(over.liveDecision.decision).toBe('block');
+    expect(over.forecast.decision).toBe('block');
+    expect(over.forecast.enforced).toBe(true);
+    expect(over.forecast.checkId).toBe('behavior.cost-budget');
+    plantLedger(12, 2 * 60 * 60 * 1000);
+    const stale = await both('Bash', { command: 'ls -la' });
+    expect(stale.liveDecision.decision).toBe('allow');
+    expect(stale.forecast.decision).toBe('allow');
+    expect(stale.forecast.unknown).toContain('cost-state');
+  });
+
+  it('with no ceiling the check judges nothing, whatever the ledger says', async () => {
+    writeConfig({ checks: { 'behavior.cost-budget': 'block' } });
+    plantLedger(999);
+    const r = await both('Bash', { command: 'ls -la' });
+    expect(r.liveDecision.decision).toBe('allow');
+    expect(r.forecast.decision).toBe('allow');
+    expect(r.forecast.unknown).not.toContain('cost-state');
+  });
+});
+
 describe('outside the test environment', () => {
   it('a hard block stays a block in a forecast on a desktop (no daemon, no human)', async () => {
     // isTestEnv is false and a display is present: on the live path a reachable

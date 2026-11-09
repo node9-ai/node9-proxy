@@ -320,6 +320,19 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
     advice:
       'Keep it on; it saves time and money. Raise the threshold if a legitimate workflow repeats a call.',
   },
+  'behavior.fanout': {
+    plain: 'The agent keeps spawning subagents: more than eight in one session within ten minutes.',
+    example: 'A task that splits into subagents which split again, until dozens run at once',
+    advice:
+      'Log records it and marks the session. Set Review when one person should confirm a task that needs that many.',
+  },
+  'behavior.cost-budget': {
+    plain:
+      'The session, or the whole day, has spent more than the ceiling you set, and the agent keeps going.',
+    example: 'A session at $12 of a $10 budget running one more search',
+    advice:
+      'Set a ceiling (sessionUSD or dayUSD) and Review or Block. The figure is the one cost sync reads, up to ten minutes behind.',
+  },
   'behavior.prompt-injection': {
     plain:
       'Text the agent read (a web page, a file, a tool result) contains instructions aimed at the AI.',

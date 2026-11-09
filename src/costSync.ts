@@ -4,6 +4,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { buildCostLedger, writeCostLedger } from './cost-ledger';
 import { getCredentials } from './config';
 import { HOOK_DEBUG_LOG } from './audit';
 
@@ -378,9 +379,23 @@ async function syncCost(): Promise<void> {
   await postCostBatches(creds.apiUrl, creds.apiKey, machineId, entries);
 }
 
+/** Today's spend per session, for behavior.cost-budget (node9Firewall#427).
+ *  Written whether or not a dashboard is connected: a budget is local. */
+export function writeLedgerOnce(now = new Date()): void {
+  try {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    writeCostLedger(buildCostLedger(collectEntries(start.getTime()), now));
+  } catch {
+    /* best effort: the check reads nothing and judges nothing */
+  }
+}
+
 export function startCostSync(): void {
+  writeLedgerOnce();
   syncCost().catch(() => {});
   const timer = setInterval(() => {
+    writeLedgerOnce();
     syncCost().catch(() => {});
   }, SYNC_INTERVAL_MS);
   timer.unref();

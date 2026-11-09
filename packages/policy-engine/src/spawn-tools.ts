@@ -16,3 +16,11 @@ const SPAWN_TOOLS: ReadonlySet<string> = new Set([
 export function isSpawnTool(toolName: string): boolean {
   return SPAWN_TOOLS.has(toolName);
 }
+
+/** The subset that starts a new subagent (a message to a running one is not
+ *  a spawn): what the fan-out limit counts. */
+const SUBAGENT_SPAWNS: ReadonlySet<string> = new Set(['Task', 'Agent', 'collaborationspawn_agent']);
+
+export function isSubagentSpawn(toolName: string): boolean {
+  return SUBAGENT_SPAWNS.has(toolName);
+}

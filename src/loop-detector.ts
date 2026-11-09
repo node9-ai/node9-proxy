@@ -75,6 +75,80 @@ export function recordAndCheck(
 }
 
 /** Deletes the loop state file. Exported for testing. */
+// ── Fan-out: subagents spawned per session (behavior.fanout, node9Firewall#427)
+// The same shape as the loop window, keyed by session: timestamps of the
+// spawns in the last window. A forecast keeps them in the replayed session.
+
+const FANOUT_MAX_RECORDS = 200;
+
+function fanoutStateFile(): string {
+  return path.join(os.homedir(), '.node9', 'fanout-state.json');
+}
+
+function readFanoutState(): Record<string, number[]> {
+  try {
+    if (!fs.existsSync(fanoutStateFile())) return {};
+    const parsed: unknown = JSON.parse(fs.readFileSync(fanoutStateFile(), 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, number[]>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeFanoutState(state: Record<string, number[]>): void {
+  const dir = path.dirname(fanoutStateFile());
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = `${fanoutStateFile()}.${os.hostname()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(state));
+  fs.renameSync(tmpPath, fanoutStateFile());
+}
+
+export interface FanoutCheckResult {
+  /** Spawns in the window, this one included. */
+  count: number;
+  /** More than `threshold` spawns in the window. */
+  over: boolean;
+}
+
+/** Record a spawn in `sessionId` and say whether the window now holds more than `threshold`. */
+export function recordSpawnAndCheck(
+  sessionId: string,
+  threshold: number,
+  windowMs: number
+): FanoutCheckResult {
+  const forecast = forecastRun();
+  const now = forecast ? forecast.now : Date.now();
+  const cutoff = now - windowMs;
+  if (forecast) {
+    const fresh = forecast.session.spawnRecords.filter((ts) => ts >= cutoff);
+    fresh.push(now);
+    forecast.session.spawnRecords = fresh.slice(-FANOUT_MAX_RECORDS);
+    return { count: fresh.length, over: fresh.length > threshold };
+  }
+  try {
+    const state = readFanoutState();
+    const key = sessionId || 'no-session';
+    const fresh = (Array.isArray(state[key]) ? state[key] : []).filter(
+      (ts) => typeof ts === 'number' && ts >= cutoff
+    );
+    fresh.push(now);
+    // Other sessions' records older than the window are dropped too, so the file stays small.
+    const next: Record<string, number[]> = {};
+    for (const [k, v] of Object.entries(state)) {
+      if (k === key || !Array.isArray(v)) continue;
+      const kept = v.filter((ts) => typeof ts === 'number' && ts >= cutoff);
+      if (kept.length > 0) next[k] = kept;
+    }
+    next[key] = fresh.slice(-FANOUT_MAX_RECORDS);
+    writeFanoutState(next);
+    return { count: fresh.length, over: fresh.length > threshold };
+  } catch {
+    return { count: 1, over: false };
+  }
+}
+
 export function resetLoopState(): void {
   try {
     fs.unlinkSync(loopStateFile());
