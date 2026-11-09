@@ -212,12 +212,6 @@ export interface Summary {
   /** The same for node9's own cases (the vendor section), kept apart: a
    *  risk with vendor cases only shows what passed and why. */
   passedVendor: Record<string, PassedHeadline>;
-  /** Superseded by `passedHeadline` (both sections, keyed by check alone, so
-   *  a reader files a case under the check's risk): kept one release for
-   *  servers that read stored summaries of older runs. */
-  passedByCheck: Record<string, { value: string; count: number }>;
-  /** Superseded by `passedHeadline[risk].unattributed` (this one sums both sections). */
-  passedUnattributed: Record<string, number>;
   notApplicableBy: Record<ProfileNeed, number>;
 }
 
@@ -243,8 +237,6 @@ const emptyCell = (): Cell => ({
 export function summarize(results: CaseResult[], config: Config): Summary {
   const settings = catalogSettingsFrom(config.settings, config.policy);
   const byRisk: Summary['byRisk'] = {};
-  const passedByCheck: Summary['passedByCheck'] = {};
-  const passedUnattributed: Summary['passedUnattributed'] = {};
   const passedHeadline: Summary['passedHeadline'] = {};
   const passedVendor: Summary['passedVendor'] = {};
   // An attack the policy let through, under its own risk, by section; an
@@ -307,19 +299,8 @@ export function summarize(results: CaseResult[], config: Config): Summary {
     c.attacks++;
     if (!stopped) notePassed(r);
     if (stopped) c.stopped++;
-    else if (recorded) {
-      c.loggedOnly++;
-      if (r.checkId) {
-        const e = (passedByCheck[r.checkId] ??= {
-          value: checkValue(settings, r.checkId),
-          count: 0,
-        });
-        e.count++;
-      } else passedUnattributed[r.owasp] = (passedUnattributed[r.owasp] ?? 0) + 1;
-    } else {
-      c.passed++;
-      passedUnattributed[r.owasp] = (passedUnattributed[r.owasp] ?? 0) + 1;
-    }
+    else if (recorded) c.loggedOnly++;
+    else c.passed++;
   }
   return {
     engineVersion: PROXY_VERSION,
@@ -329,8 +310,6 @@ export function summarize(results: CaseResult[], config: Config): Summary {
     byRisk,
     passedHeadline,
     passedVendor,
-    passedByCheck,
-    passedUnattributed,
     notApplicableBy,
   };
 }

@@ -18,6 +18,8 @@ import { checkIdForRule, checkIdForCheckedBy } from '@node9/policy-engine';
 
 const live = vi.hoisted(() => ({
   sessionTaint: false,
+  /** What the live daemon answers to "is this session exposed". */
+  sessionExposed: false,
   rows: [] as Array<{
     decision: string;
     checkedBy: string;
@@ -53,7 +55,7 @@ vi.mock('../auth/daemon', async (original) => {
             }
           : { tainted: false },
     checkSessionExposure: async (id: string) =>
-      forecastRun() ? real.checkSessionExposure(id) : { exposed: false },
+      forecastRun() ? real.checkSessionExposure(id) : { exposed: live.sessionExposed },
     notifyTaint: async (...a: Parameters<typeof real.notifyTaint>) =>
       forecastRun() ? real.notifyTaint(...a) : undefined,
     notifyWritten: async (...a: Parameters<typeof real.notifyWritten>) =>
@@ -168,6 +170,7 @@ async function both(tool: string, args: unknown, state?: ForecastSessionState) {
 
 beforeEach(() => {
   live.sessionTaint = false;
+  live.sessionExposed = false;
   live.rows = [];
   fs.rmSync(path.join(home(), '.node9'), { recursive: true, force: true });
   writeConfig();
@@ -331,6 +334,7 @@ describe('the brief handed to a subagent (behavior.agent-handoff, ASI07, node9Fi
     expect(clean.forecast.decision).toBe('allow');
 
     markSessionExposed(SESSION);
+    live.sessionExposed = true;
     const state = new ForecastSessionState(SESSION);
     state.noteOutsideContent({ tool: 'WebFetch', word: 'web page', at: Date.now() });
     const r = await both('Agent', ONE_SIGN, state);
@@ -340,9 +344,19 @@ describe('the brief handed to a subagent (behavior.agent-handoff, ASI07, node9Fi
     expect(r.forecast.checkId).toBe('behavior.agent-handoff');
   });
 
+  it('Strict: a marker the daemon has no record for (a restart) does not boost', async () => {
+    writeConfig({ mode: 'strict' });
+    markSessionExposed(SESSION);
+    live.sessionExposed = false;
+    const r = await both('Agent', ONE_SIGN, new ForecastSessionState(SESSION));
+    expect(r.liveDecision.decision).toBe('allow');
+    expect(r.forecast.decision).toBe('allow');
+  });
+
   it("the booster is Strict's: at Standard one sign passes even after outside content", async () => {
     writeConfig();
     markSessionExposed(SESSION);
+    live.sessionExposed = true;
     const state = new ForecastSessionState(SESSION);
     state.noteOutsideContent({ tool: 'WebFetch', word: 'web page', at: Date.now() });
     const r = await both('Agent', ONE_SIGN, state);

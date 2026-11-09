@@ -974,9 +974,15 @@ export async function _authorizeHeadlessCore(
   if (!isManual && isSpawnTool(toolName)) {
     const handoff = checkValue(settingsNow, 'behavior.agent-handoff');
     if (handoff !== 'off') {
-      const untrusted =
-        boostsHandoffAfterExposure(config.settings.mode) &&
-        maybeSessionExposed(meta?.sessionId ?? '');
+      // The marker only skips the round trip in a session that never read
+      // outside content; the daemon's record decides. Without a daemon,
+      // Strict assumes exposure, as it does for a send (holdsSendsWithoutDaemon).
+      let untrusted = false;
+      const sid = meta?.sessionId ?? '';
+      if (boostsHandoffAfterExposure(config.settings.mode) && maybeSessionExposed(sid)) {
+        const exposure = await checkSessionExposure(sid);
+        untrusted = exposure.exposed || exposure.daemonUnavailable === true;
+      }
       const m = scanInjection(argumentLeavesText(args), { untrusted });
       if (m && (m.confidence === 'medium' || m.confidence === 'high')) {
         const signals = m.signals.join(', ');

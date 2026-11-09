@@ -712,9 +712,9 @@ describe('forecast-cases helpers', () => {
       benign: 2,
       interrupted: 1,
     });
-    expect(s.passedByCheck['data.credential-files']).toMatchObject({ count: 1 });
-    // The superseded fields still sum both sections, as older servers read them.
-    expect(s.passedUnattributed.ASI03).toBe(2);
+    // The superseded per-check fields are gone (no server reads them since fw#470 1b.6).
+    expect(s).not.toHaveProperty('passedByCheck');
+    expect(s).not.toHaveProperty('passedUnattributed');
     expect(s.passedHeadline.ASI03).toEqual({
       byCheck: { 'data.credential-files': { value: expect.any(String), count: 1 } },
       unattributed: 1,
