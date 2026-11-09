@@ -38,6 +38,7 @@ import {
   isSubagentSpawn,
   isRecordOnly,
   holdsSendsWithoutDaemon,
+  boostsHandoffAfterExposure,
 } from '@node9/policy-engine';
 import {
   extractShellDestinations,
@@ -965,13 +966,24 @@ export async function _authorizeHeadlessCore(
   // What one agent hands another is content like a tool result: a brief that
   // carries an instruction aimed at the model starts the subagent poisoned.
   // `behavior.agent-handoff` reads the spawn tool's input with the injection
-  // scanner at the bar of the write scan above (medium: two signals, no
-  // origin booster). Log records the spawn and taints the session, so the
-  // next send or write is held by the taint gate; Review holds the spawn.
+  // scanner at the bar of the write scan above (medium: two signals). At
+  // Strict and Block all, a session that read outside content gets the
+  // origin booster: the brief may carry what the agent read, so one sign is
+  // enough (fw#470 1b.4). Log records the spawn and taints the session, so
+  // the next send or write is held by the taint gate; Review holds the spawn.
   if (!isManual && isSpawnTool(toolName)) {
     const handoff = checkValue(settingsNow, 'behavior.agent-handoff');
     if (handoff !== 'off') {
-      const m = scanInjection(argumentLeavesText(args), { untrusted: false });
+      // The marker only skips the round trip in a session that never read
+      // outside content; the daemon's record decides. Without a daemon,
+      // Strict assumes exposure, as it does for a send (holdsSendsWithoutDaemon).
+      let untrusted = false;
+      const sid = meta?.sessionId ?? '';
+      if (boostsHandoffAfterExposure(config.settings.mode) && maybeSessionExposed(sid)) {
+        const exposure = await checkSessionExposure(sid);
+        untrusted = exposure.exposed || exposure.daemonUnavailable === true;
+      }
+      const m = scanInjection(argumentLeavesText(args), { untrusted });
       if (m && (m.confidence === 'medium' || m.confidence === 'high')) {
         const signals = m.signals.join(', ');
         const rowMeta = { ...meta, ruleName: 'agent-handoff', checkId: 'behavior.agent-handoff' };

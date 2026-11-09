@@ -58,6 +58,15 @@ export function holdsSendsWithoutDaemon(mode: string | undefined): boolean {
   return level === 'strict' || level === 'block-all';
 }
 
+/** Strict and Block all read the brief handed to a subagent with the
+ *  outside-origin booster once the session read outside content: one sign of
+ *  an instruction is enough there. Standard keeps the plain two-sign rule
+ *  (fw#470 1b.4: the booster raised 3 alarms on 64 real briefs). */
+export function boostsHandoffAfterExposure(mode: string | undefined): boolean {
+  const level = levelOf(mode);
+  return level === 'strict' || level === 'block-all';
+}
+
 /** Block all: ask before any call no check recognised (the catch-all,
  *  `commands.unknown`) and about a binary of unknown origin. This is what
  *  `strict` meant before the levels. */
@@ -109,8 +118,9 @@ const STRICT: Readonly<Record<string, Verdict>> = {
   'network.unknown-host': 'review',
   'network.internal-addresses': 'block',
   'behavior.prompt-injection': 'log',
-  // The brief handed to a subagent is content too (node9Firewall#428).
-  'behavior.agent-handoff': 'log',
+  // The brief handed to a subagent is content too (node9Firewall#428):
+  // Standard records it (catalog default), Strict asks (fw#470 1b.4).
+  'behavior.agent-handoff': 'review',
   'loading.skill-tamper': 'block',
   // Standard records money moves (catalog default log); Strict asks.
   'actions.money': 'review',

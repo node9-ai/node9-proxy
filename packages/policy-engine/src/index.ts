@@ -208,6 +208,7 @@ export {
   isRecordOnly,
   reviewsEveryInline,
   holdsSendsWithoutDaemon,
+  boostsHandoffAfterExposure,
   isBlockAll,
   levelCheckValue,
   levelChecks,
