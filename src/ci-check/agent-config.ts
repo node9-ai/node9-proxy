@@ -5,6 +5,8 @@
 
 import { explainGrant } from './explain';
 import path from 'path';
+import { createHash } from 'node:crypto';
+import { DLP_SCAN_LIMITS, matchArgumentText } from '@node9/policy-engine';
 import type { CiFinding } from './types';
 import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 import { SCRIPT_EXT_RE, isHookScript } from './instructions';
@@ -13,8 +15,92 @@ import { safeText } from './suppress';
 import { sanitizedListing } from './listing';
 
 interface Settings {
-  permissions?: { allow?: unknown[]; deny?: unknown[] };
+  permissions?: { allow?: unknown[]; allowedTools?: unknown[]; deny?: unknown[]; ask?: unknown[] };
   hooks?: Record<string, unknown[]>;
+}
+
+/** Claude Code's per-machine settings file. It is written by "don't ask again" and meant to
+ *  stay out of git (Claude Code adds it to the global excludes on first write). */
+const LOCAL_SETTINGS_RE = /(^|\/)\.claude\/settings\.local\.json$/;
+
+/** The permission lists a settings file carries, in the order a reader meets them. */
+const PERMISSION_LISTS = ['allow', 'allowedTools', 'deny', 'ask'] as const;
+
+const UNTRACK_LOCAL =
+  'Untrack the file (`git rm --cached .claude/settings.local.json`), add it to `.gitignore`, and keep shared rules in `.claude/settings.json`.';
+
+/** node9Firewall#465: the file is in the repository at all. One per file, whatever it holds. */
+function localSettingsCommitted(path: string): CiFinding {
+  return {
+    check: 'CI-1',
+    rule: 'CI-1.local-settings-committed',
+    dimension: 'toolRules',
+    severity: 'advisory',
+    title: "Claude Code's local settings file is committed",
+    file: path,
+    signals: [
+      '`.claude/settings.local.json` is the per-machine file Claude Code writes when a person picks "don\'t ask again": the approved command is saved word for word, secrets included',
+      'the file is meant to stay out of git; a committed copy shares every approval with every clone and keeps it in the history',
+    ],
+    fix: UNTRACK_LOCAL,
+  };
+}
+
+/** The finding's identity within the file: the list and a short digest of the entry. Content
+ *  only (types.ts), stable when entries above it are added or reordered, and not the entry
+ *  itself, which may carry the secret. */
+function permissionLocator(list: string, entry: string): string {
+  return `permissions.${list}:${createHash('sha256').update(entry).digest('hex').slice(0, 12)}`;
+}
+
+/** node9Firewall#465: a secret inside a permission rule. The entry is a command the agent may run
+ *  without asking, read with the gate's argument scanner (every pattern, the assignment boost,
+ *  the placeholder and reference suppressions), under the gate's own length cap: the entry is
+ *  a stranger's text. The entry never enters the finding: only the list, the index, a digest
+ *  and the engine's masked sample. */
+function permissionCredentials(path: string, content: string, cfg: Settings): CiFinding[] {
+  const findings: CiFinding[] = [];
+  const local = LOCAL_SETTINGS_RE.test(path);
+  for (const list of PERMISSION_LISTS) {
+    const entries = asStrings(cfg.permissions?.[list]);
+    if (entries.length === 0) continue;
+    // Lines are searched from the list's key onwards, and past the previous hit, so the same
+    // string in two lists (or twice in one) anchors at its own line.
+    const listKey = new RegExp(`"${list}"\\s*:`).exec(content);
+    let from = listKey ? listKey.index : 0;
+    for (let i = 0; i < entries.length; i++) {
+      const at = jsonValueIndex(content, entries[i], from);
+      if (at >= 0) from = at + 1;
+      const text =
+        entries[i].length > DLP_SCAN_LIMITS.maxStringBytes
+          ? entries[i].slice(0, DLP_SCAN_LIMITS.maxStringBytes)
+          : entries[i];
+      const where = `permissions.${list}[${i}]`;
+      const hit = matchArgumentText(text, where);
+      if (!hit) continue;
+      const approved = list === 'allow' || list === 'allowedTools';
+      findings.push({
+        ...(at >= 0 ? { line: lineAtIndex(content, at) } : {}),
+        check: 'CI-1',
+        rule: 'CI-1.allow-rule-credential',
+        locator: permissionLocator(list, entries[i]),
+        dimension: 'data',
+        // The engine's `block` is a shape it is sure of (a vendor token, a connection string,
+        // an assignment); `review` is a name-based or bare-bearer match a person confirms.
+        severity: hit.severity === 'block' ? 'high' : 'medium',
+        title: `${approved ? 'An approved command' : 'A permission rule'} in ${path} contains a ${hit.patternName}`,
+        file: path,
+        signals: [
+          `${where} matches ${hit.patternName}: ${hit.redactedSample}`,
+          "the file is committed, so the value is in the repository's history for everyone who can read it",
+        ],
+        fix:
+          'Remove the rule and rotate the secret (the history keeps it); approve the command without the value, or pass it through an environment variable.' +
+          (local ? ' ' + UNTRACK_LOCAL : ''),
+      });
+    }
+  }
+  return findings;
 }
 
 function asStrings(v: unknown): string[] {
@@ -232,13 +318,14 @@ function cmdLine(content: string, cmd: string): number | undefined {
 }
 
 export function analyzeAgentConfig(path: string, content: string, tree?: TreeListing): CiFinding[] {
+  const findings: CiFinding[] = [];
+  if (LOCAL_SETTINGS_RE.test(path)) findings.push(localSettingsCommitted(path));
   let cfg: Settings;
   try {
     cfg = JSON.parse(content) as Settings;
   } catch {
-    return [];
+    return findings;
   }
-  const findings: CiFinding[] = [];
 
   // Hooks that fetch+run third-party code on every agent action.
   for (const cmd of hookCommands(cfg.hooks)) {
@@ -354,6 +441,8 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       }),
     });
   }
+  findings.push(...permissionCredentials(path, content, cfg));
+
   const escapes = allow.filter(execEscape);
   if (escapes.length) {
     const at = jsonValueIndex(content, escapes[0]);

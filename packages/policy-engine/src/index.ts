@@ -39,6 +39,7 @@ export {
   DLP_PATTERNS,
   DLP_SCAN_LIMITS,
   scanArgs,
+  matchArgumentText,
   scanText,
   redactText,
   scanInjection,

@@ -27,6 +27,9 @@ export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   if (rule === 'CI-1.skill-allowed-tools') return 'review';
   // Founder decision (round-2 review): `find` and `make -n` grants are listed, never counted.
   if (rule === 'CI-1.exec-escape-grant') return 'review';
+  // A tracked per-machine file is hygiene, not an exposure by itself (node9Firewall#465); a
+  // secret inside it is CI-1.allow-rule-credential, an alert.
+  if (rule === 'CI-1.local-settings-committed') return 'review';
   // T.5 (founder, node9Firewall#337): counted at the lowest level.
   if (
     rule === 'CI-2.trusted-trigger-reader' ||
@@ -74,6 +77,8 @@ export function reviewQuestion(rule: string): string {
     return 'Why does this script hold invisible characters? A list of them to detect is fine.';
   if (/exec-escape/.test(rule))
     return 'Does the agent need this command with any arguments, or only one exact form?';
+  if (/local-settings-committed/.test(rule))
+    return 'Is this file meant to be committed? Claude Code writes approved commands here, secrets included.';
   if (/unscanned/.test(rule))
     return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
   return 'Is this an instruction the agent follows, or text for a person?';
