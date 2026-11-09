@@ -122,6 +122,8 @@ const SCAN_REPO_RULE_OWASP: readonly (readonly [prefix: string, risk: AsiId])[] 
   // CI-1: tool rules and hooks in agent config
   ['CI-1.broad-allow', 'ASI02'],
   ['CI-1.exec-escape-grant', 'ASI02'],
+  ['CI-1.allow-rule-credential', 'ASI03'],
+  ['CI-1.local-settings-committed', 'ASI02'],
   ['CI-1.codex-unsafe-defaults', 'ASI02'],
   ['CI-1.skill-allowed-tools', 'ASI02'],
   ['CI-1.skill-untrusted-input', 'ASI01'],

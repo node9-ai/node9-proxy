@@ -183,6 +183,8 @@ describe('scan-repo rules', () => {
     expect(scanRepoRuleOwasp('CI-1.skill-untrusted-input')).toBe('ASI01');
     expect(scanRepoRuleOwasp('CI-2.injectable-workflow')).toBe('ASI01');
     expect(scanRepoRuleOwasp('CI-3.mcp-inline-credential')).toBe('ASI03');
+    expect(scanRepoRuleOwasp('CI-1.allow-rule-credential')).toBe('ASI03');
+    expect(scanRepoRuleOwasp('CI-1.local-settings-committed')).toBe('ASI02');
     expect(scanRepoRuleOwasp('CI-3.mcp-unpinned')).toBe('ASI04');
     expect(scanRepoRuleOwasp('CI-4.agent-reachable-secret')).toBe('ASI03');
     expect(scanRepoRuleOwasp('CI-6.prompt-override')).toBe('ASI06');
