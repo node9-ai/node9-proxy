@@ -28,6 +28,7 @@ export type ForecastLayer =
   | 'taint-egress'
   | 'session-taint'
   | 'exposure'
+  | 'handoff'
   | 'canary'
   | 'ssrf'
   | 'dlp'
@@ -98,6 +99,7 @@ const LAYER_BY_TAG: ReadonlyArray<readonly [string, ForecastLayer]> = [
   ['package', 'package'],
   ['app-permission', 'app-permission'],
   ['loop-detected', 'loop'],
+  ['agent-handoff', 'handoff'],
   ['smart-rule', 'policy'],
   ['local-policy', 'policy'],
   ['persistent', 'persistent'],
@@ -132,6 +134,7 @@ function layerOfReview(result: AuthResult, rows: ForecastRow[]): ForecastLayer {
   if (/taint service|was flagged by|flagged this session/i.test(label)) return 'session-taint';
   if (/outside content|exposure|after reading/i.test(label)) return 'exposure';
   if (/package check/i.test(label)) return 'package';
+  if (/Agent Handoff|handed to the subagent/i.test(label)) return 'handoff';
   if (/DLP/i.test(label)) return 'dlp';
   if (/file|path/i.test(label) && rows.some((r) => r.checkedBy.startsWith('file-protection')))
     return 'file-protection';

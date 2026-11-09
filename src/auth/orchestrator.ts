@@ -33,6 +33,8 @@ import { resolveSessionScript, recordSessionWrites, type SessionScript } from '.
 import {
   scanInjection,
   argumentLeavesText,
+  checkValue,
+  isSpawnTool,
   isRecordOnly,
   holdsSendsWithoutDaemon,
 } from '@node9/policy-engine';
@@ -90,6 +92,7 @@ import {
   approveSessionExposure,
   notifyActivitySocket,
   checkStatePredicates,
+  notifySessionTaint,
 } from './daemon';
 import { initNode9SaaS, pollNode9SaaS, resolveNode9SaaS } from './cloud';
 import { recordAndCheck } from '../loop-detector';
@@ -100,6 +103,9 @@ import { safeMessage } from '../utils/safe-text';
 import { asApprovalRequest } from '../policy/negotiation';
 import { recordFromLegacyWait, type Channel, type DecidedBy } from './decision-record';
 import { approvalUnavailable, authResultFromRecord, recordFromAuthResult } from './card-result';
+
+/** The label of the handoff review; a legacy name of behavior.agent-handoff. */
+const HANDOFF_LABEL = '🛡️ Node9 Agent Handoff';
 
 /** The pattern name the DLP gate gives a sensitive-PATH hit, read off the
  *  engine rather than copied, so a rename there cannot silently skip MSG-1. */
@@ -635,6 +641,7 @@ export async function _authorizeHeadlessCore(
   let explainableLabel = 'Local Config';
   let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
   let packageReview: string | null = null; // the package check asked for review
+  let handoffReview: string | null = null; // the brief to a subagent carries an instruction
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   // The engine verdict behind a review, for the inline-ask result and the
@@ -941,6 +948,46 @@ export async function _authorizeHeadlessCore(
         taintWarning =
           `⚠️ node9: the content this call ${isWriteTool(toolName) ? 'writes' : 'sends'} carries ` +
           `instructions aimed at an AI model (${m.signals.join(', ')}). Approve only if that is what you meant.`;
+      }
+    }
+  }
+
+  // ── THE BRIEF HANDED TO A SUBAGENT (ASI07, node9Firewall#428) ────────────
+  // What one agent hands another is content like a tool result: a brief that
+  // carries an instruction aimed at the model starts the subagent poisoned.
+  // `behavior.agent-handoff` reads the spawn tool's input with the injection
+  // scanner at the bar of the write scan above (medium: two signals, no
+  // origin booster). Log records the spawn and taints the session, so the
+  // next send or write is held by the taint gate; Review holds the spawn.
+  if (!isManual && isSpawnTool(toolName)) {
+    const handoff = checkValue(
+      catalogSettingsFromConfig(config.settings, config.policy),
+      'behavior.agent-handoff'
+    );
+    if (handoff !== 'off') {
+      const m = scanInjection(argumentLeavesText(args), { untrusted: false });
+      if (m && (m.confidence === 'medium' || m.confidence === 'high')) {
+        const signals = m.signals.join(', ');
+        const rowMeta = { ...meta, ruleName: 'agent-handoff', checkId: 'behavior.agent-handoff' };
+        if (handoff === 'review') {
+          appendLocalAudit(toolName, args, 'allow', 'agent-handoff-review', rowMeta, hashAuditArgs);
+          handoffReview =
+            `⚠️ node9: the brief handed to the subagent carries instructions aimed at an AI model ` +
+            `(${signals}). Approve only if that is what you meant.`;
+          explainableLabel = HANDOFF_LABEL;
+          policyReviewRule = 'agent-handoff';
+          policyReviewCheckId = 'behavior.agent-handoff';
+        } else {
+          appendLocalAudit(
+            toolName,
+            args,
+            'allow',
+            'agent-handoff',
+            { ...rowMeta, logged: true },
+            hashAuditArgs
+          );
+          await notifySessionTaint(meta?.sessionId ?? '', `handoff-injection:${signals}`);
+        }
       }
     }
   }
@@ -1658,6 +1705,7 @@ export async function _authorizeHeadlessCore(
     !!appPermReview ||
     !!taintWarning ||
     !!exposureReview ||
+    !!handoffReview ||
     !!packageReview;
   /** A trust session may answer this call. ONE definition for the two places
    *  that must agree: the trust guard that honours a session, and the native
@@ -2277,6 +2325,18 @@ export async function _authorizeHeadlessCore(
       undefined,
       packageReview
     );
+  } else if (handoffReview) {
+    // The signals ride as the rule text so every approval surface says what
+    // the brief carried; the brief itself never leaves the machine.
+    riskMetadata = computeRiskMetadata(
+      args,
+      5,
+      explainableLabel,
+      undefined,
+      undefined,
+      'agent-handoff'
+    );
+    riskMetadata.ruleDescription = handoffReview.slice(0, 1024);
   }
 
   // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────
@@ -2316,6 +2376,7 @@ export async function _authorizeHeadlessCore(
       reason:
         taintWarning ||
         packageReview ||
+        handoffReview ||
         exposureReview ||
         explainableLabel ||
         'Node9 flagged this action for review.',

@@ -362,6 +362,7 @@ export {
 // daemon watermark and the canonical extractor.
 export type { PiiPattern } from './scan/pii';
 export { argumentLeavesText } from './scan/pii';
+export { isSpawnTool } from './spawn-tools';
 export { detectPii, detectArgsPii, REALTIME_PII_PATTERNS } from './scan/pii';
 
 // Canonical extractor — single detection pipeline every JSONL-scanning

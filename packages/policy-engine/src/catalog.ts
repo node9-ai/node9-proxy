@@ -569,6 +569,16 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     defaultValue: 'off',
   },
   {
+    id: 'behavior.agent-handoff',
+    group: 'behavior',
+    owasp: 'ASI07',
+    title: 'Instruction in a brief to a subagent',
+    catches: 'instructions aimed at the model inside the brief one agent hands another',
+    values: ['off', 'log', 'review'],
+    defaultValue: 'off',
+    legacy: ['agent-handoff', '🛡️ Node9 Agent Handoff'],
+  },
+  {
     id: 'behavior.session-taint',
     group: 'behavior',
     owasp: 'ASI01',
@@ -872,6 +882,9 @@ export function checkIdForCheckedBy(checkedBy: string | undefined): string | und
       return 'loading.malicious-package';
     case 'ssrf-destination':
       return 'network.metadata';
+    case 'agent-handoff':
+    case 'agent-handoff-review':
+      return 'behavior.agent-handoff';
     default:
       return undefined;
   }

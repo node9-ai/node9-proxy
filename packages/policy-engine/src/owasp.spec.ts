@@ -121,10 +121,10 @@ describe('OWASP risk on every check', () => {
     expect(CHECK_BY_ID.get('behavior.loops')!.owasp).toBe('ASI08');
   });
 
-  it('every risk with a check today is covered; ASI07 has none and says so', () => {
+  it('every risk has a check, ASI07 since behavior.agent-handoff (node9Firewall#428)', () => {
     const covered = new Set(CHECKS.map((c) => c.owasp));
-    for (const id of ASI_IDS.filter((x) => x !== 'ASI07')) expect(covered.has(id), id).toBe(true);
-    expect(covered.has('ASI07')).toBe(false);
+    for (const id of ASI_IDS) expect(covered.has(id), id).toBe(true);
+    expect(CHECK_BY_ID.get('behavior.agent-handoff')!.owasp).toBe('ASI07');
   });
 });
 

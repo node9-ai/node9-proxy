@@ -9,6 +9,7 @@ import { checkEgress } from './egress';
 import { checkGate } from './gate';
 import { checkAgentPermissions } from './agent-permissions';
 import { checkOutsideContent } from './outside-content';
+import { checkAgentToAgent } from './agent-to-agent';
 import { checkInstructionFiles } from './instruction-files';
 import { checkSupplyChain } from './supply-chain';
 import { checkPrivilege } from './privilege';
@@ -33,6 +34,7 @@ export const POSTURE_CHECKS: PostureCheck[] = [
   { category: 'Approval gate', run: checkGate },
   { category: 'Agent permissions', run: checkAgentPermissions },
   { category: 'Outside content', run: checkOutsideContent },
+  { category: 'Agent-to-agent', run: checkAgentToAgent },
   { category: 'Supply chain', run: checkSupplyChain },
   { category: 'Instruction files', run: checkInstructionFiles },
   { category: 'Privilege', run: checkPrivilege },

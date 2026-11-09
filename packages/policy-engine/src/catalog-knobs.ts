@@ -369,6 +369,8 @@ export function knobStatedChecks(policy: LegacyPolicyKnobs): Set<string> {
  * catalog row offers works. Pack rows (`packs.*`) qualify too.
  */
 export const MAP_GOVERNED: ReadonlySet<string> = new Set([
+  // The brief handed to a subagent (node9Firewall#428): the detector reads the map.
+  'behavior.agent-handoff',
   'files.shell-startup',
   'files.password-hashes',
   'files.system-dirs',
