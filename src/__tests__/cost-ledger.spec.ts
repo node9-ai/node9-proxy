@@ -7,14 +7,14 @@ import {
   judgeBudget,
   readCostLedger,
   writeCostLedger,
-  localDay,
+  utcDay,
   LEDGER_STALE_MS,
 } from '../cost-ledger';
 
 // The spend ledger behind behavior.cost-budget (node9Firewall#427).
 
 const now = new Date('2026-11-09T10:00:00');
-const day = localDay(now);
+const day = utcDay(now);
 const entry = (o: Partial<Parameters<typeof buildCostLedger>[0][number]>) => ({
   date: day,
   costUSD: 1,

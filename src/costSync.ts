@@ -383,9 +383,9 @@ async function syncCost(): Promise<void> {
  *  Written whether or not a dashboard is connected: a budget is local. */
 export function writeLedgerOnce(now = new Date()): void {
   try {
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
-    writeCostLedger(buildCostLedger(collectEntries(start.getTime()), now));
+    // UTC midnight: the entries' day is the transcript's UTC date.
+    const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    writeCostLedger(buildCostLedger(collectEntries(start), now));
   } catch {
     /* best effort: the check reads nothing and judges nothing */
   }

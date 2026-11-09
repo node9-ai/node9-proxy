@@ -18,8 +18,8 @@ import type { CheckContext, Finding } from './types';
 
 export const CATEGORY = 'Agent-to-agent';
 
-/** A server name that says it runs agents. */
-const AGENT_NAME_RE = /(^|[-_.])(agent|agents|a2a|crew|swarm|autogen|langgraph)([-_.]|$)/i;
+/** A server name that says it runs agents: the word first, so `coding-agent-docs` is not one. */
+const AGENT_NAME_RE = /^(a2a|agents?|crew|swarm|autogen|langgraph)([-_.]|$)/i;
 /** A tool that hands work to another agent. */
 const DELEGATION_TOOL_RE =
   /^(a2a[_-]|spawn_agent$|run_agent$|create_agent$|delegate|send_task$|create_task$|run_task$|submit_task$)/i;

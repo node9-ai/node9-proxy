@@ -645,6 +645,9 @@ export async function _authorizeHeadlessCore(
   // A forecast reports the enforcing verdict and labels it not enforced
   // itself; the checks run as they would at an enforcing level.
   const isObserveMode = isRecordOnly(config.settings.mode) && !forecast;
+  // The resolved check map, once per call: the file-access judge, the
+  // handoff, fan-out and budget layers all read it.
+  const settingsNow = catalogSettingsFromConfig(config.settings, config.policy);
 
   let explainableLabel = 'Local Config';
   let dlpReviewFlagged = false; // a credential was found at DLP 'review' severity
@@ -691,11 +694,7 @@ export async function _authorizeHeadlessCore(
     fileAccess = prepareFileAccesses(toolName, args, options?.cwd, inspectionLayers(config.policy));
     fileFinding = isManual
       ? null
-      : evaluateProtectedFileAccess(
-          fileAccess.accesses,
-          fileAccess,
-          catalogSettingsFromConfig(config.settings, config.policy)
-        );
+      : evaluateProtectedFileAccess(fileAccess.accesses, fileAccess, settingsNow);
   } catch (error) {
     // The hook's outer catch fails open. An operand this analysis cannot
     // evaluate is held for approval instead; legacy path DLP stays in force.
@@ -730,7 +729,7 @@ export async function _authorizeHeadlessCore(
       const inner = evaluateProtectedFileAccess(
         sessionScript.fileAccess.accesses,
         sessionScript.fileAccess,
-        catalogSettingsFromConfig(config.settings, config.policy)
+        settingsNow
       );
       if (
         inner &&
@@ -969,7 +968,6 @@ export async function _authorizeHeadlessCore(
   // scanner at the bar of the write scan above (medium: two signals, no
   // origin booster). Log records the spawn and taints the session, so the
   // next send or write is held by the taint gate; Review holds the spawn.
-  const settingsNow = catalogSettingsFromConfig(config.settings, config.policy);
   if (!isManual && isSpawnTool(toolName)) {
     const handoff = checkValue(settingsNow, 'behavior.agent-handoff');
     if (handoff !== 'off') {
@@ -1042,7 +1040,8 @@ export async function _authorizeHeadlessCore(
   // The figure is the daemon's ledger of today's sessions (cost-ledger.ts),
   // up to one sync behind; a forecast reads the same file. No trusted figure,
   // no judgement, and the forecast says the cost state was unknown.
-  const budget = config.policy.costBudget;
+  // A Config built by hand may lack the block; no ceiling, nothing to judge.
+  const budget = config.policy.costBudget ?? {};
   const budgetValue = checkValue(settingsNow, 'behavior.cost-budget');
   if (
     !isManual &&

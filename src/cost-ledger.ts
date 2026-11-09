@@ -12,7 +12,7 @@ import path from 'path';
 export interface CostLedger {
   /** When the ledger was written (ISO). Older than LEDGER_STALE_MS: not trusted. */
   asOf: string;
-  /** The day the figures cover (YYYY-MM-DD, local). */
+  /** The day the figures cover (YYYY-MM-DD, UTC, as the cost entries date it). */
   day: string;
   sessions: Record<string, { usd: number; tokens: number }>;
   /** Every session of the day together. */
@@ -35,17 +35,17 @@ export function costLedgerFile(home = os.homedir()): string {
   return path.join(home, '.node9', 'cost', 'sessions.json');
 }
 
-export function localDay(now = new Date()): string {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+/** The day as the cost entries carry it: the first ten characters of the
+ *  transcript's UTC timestamp (costSync.ts). Local time would miss the
+ *  hours between the two midnights on any machine not in UTC. */
+export function utcDay(now = new Date()): string {
+  return now.toISOString().slice(0, 10);
 }
 
 /** Today's entries summed per session; entries without a session id count
  *  toward the day only. */
 export function buildCostLedger(entries: LedgerEntry[], now = new Date()): CostLedger {
-  const day = localDay(now);
+  const day = utcDay(now);
   const sessions: CostLedger['sessions'] = {};
   let dayUSD = 0;
   for (const e of entries) {
@@ -108,7 +108,7 @@ export function judgeBudget(
   if (!ledger) return 'unknown';
   const age = now - Date.parse(ledger.asOf);
   if (!Number.isFinite(age) || age > LEDGER_STALE_MS || age < -LEDGER_STALE_MS) return 'unknown';
-  if (ledger.day !== localDay(new Date(now))) return 'unknown';
+  if (ledger.day !== utcDay(new Date(now))) return 'unknown';
   if (budget.dayUSD !== undefined && ledger.dayUSD >= budget.dayUSD)
     return { over: 'day', spent: ledger.dayUSD, ceiling: budget.dayUSD };
   if (budget.sessionUSD !== undefined) {
