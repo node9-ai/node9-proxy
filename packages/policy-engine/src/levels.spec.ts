@@ -13,6 +13,7 @@ import {
   reviewsEveryInline,
   isBlockAll,
   isModeValue,
+  boostsHandoffAfterExposure,
 } from './levels';
 import { CHECK_BY_ID, resolveCheck, resolveCheckMap, CHECKS } from './catalog';
 import { configurableValues, checksFromLegacyPolicy } from './catalog-knobs';
@@ -156,6 +157,17 @@ describe('the level table', () => {
       expect(levelCheckValue(level, 'commands.reverse-shell')).toBeUndefined();
     }
     expect(levelCheckValue('strict', 'network.unknown-host')).toBe('review');
+    // fw#470 1b.4: the brief to a subagent is recorded from Standard (the
+    // catalog default, the plain two-sign rule) and asked about at Strict,
+    // where a session that read outside content needs one sign.
+    expect(CHECK_BY_ID.get('behavior.agent-handoff')!.defaultValue).toBe('log');
+    expect(levelCheckValue('standard', 'behavior.agent-handoff')).toBeUndefined();
+    expect(levelCheckValue('strict', 'behavior.agent-handoff')).toBe('review');
+    expect(levelCheckValue('block-all', 'behavior.agent-handoff')).toBe('review');
+    for (const level of ['audit', 'soft', 'standard'])
+      expect(boostsHandoffAfterExposure(level)).toBe(false);
+    expect(boostsHandoffAfterExposure('strict')).toBe(true);
+    expect(boostsHandoffAfterExposure('block-all')).toBe(true);
     expect(levelCheckValue('strict', 'network.internal-addresses')).toBe('block');
     // Fixed checks keep today's value at every level.
     for (const level of LEVELS) {

@@ -595,7 +595,8 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     title: 'Instruction in a brief to a subagent',
     catches: 'instructions aimed at the model inside the brief one agent hands another',
     values: ['off', 'log', 'review'],
-    defaultValue: 'off',
+    // fw#470 1b.4: recorded from Standard; 0 alarms on 64 real briefs.
+    defaultValue: 'log',
     legacy: ['agent-handoff', '🛡️ Node9 Agent Handoff'],
   },
   {
