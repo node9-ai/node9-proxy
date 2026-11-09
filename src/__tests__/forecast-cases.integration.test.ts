@@ -724,6 +724,9 @@ describe('forecast-cases helpers', () => {
       unattributed: 0,
     });
     expect(s.byRisk.ASI03.vendor).toMatchObject({ attacks: 1, passed: 1 });
+    // The vendor pass is in passedVendor, under its own risk, and not in passedHeadline (1b.3).
+    expect(s.passedVendor.ASI03).toEqual({ byCheck: {}, unattributed: 1 });
+    expect(s.passedVendor.ASI01).toBeUndefined();
     expect(s.cases).toBe(11);
     expect(s.byRisk.ASI04.headline).toMatchObject({ notApplicable: 1, volatile: 1, attacks: 0 });
     expect(s.byRisk.ASI01.headline.notSimulated).toBe(1);

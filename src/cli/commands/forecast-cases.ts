@@ -209,6 +209,9 @@ export interface Summary {
    *  case's own risk: by the check that saw them, with its value, and the
    *  count no check named. Vendor cases never enter it. */
   passedHeadline: Record<string, PassedHeadline>;
+  /** The same for node9's own cases (the vendor section), kept apart: a
+   *  risk with vendor cases only shows what passed and why. */
+  passedVendor: Record<string, PassedHeadline>;
   /** Superseded by `passedHeadline` (both sections, keyed by check alone, so
    *  a reader files a case under the check's risk): kept one release for
    *  servers that read stored summaries of older runs. */
@@ -243,10 +246,14 @@ export function summarize(results: CaseResult[], config: Config): Summary {
   const passedByCheck: Summary['passedByCheck'] = {};
   const passedUnattributed: Summary['passedUnattributed'] = {};
   const passedHeadline: Summary['passedHeadline'] = {};
-  // A headline attack the policy let through, under its own risk.
+  const passedVendor: Summary['passedVendor'] = {};
+  // An attack the policy let through, under its own risk, by section; an
+  // unknown section enters neither.
   const notePassed = (r: CaseResult) => {
-    if (r.section !== 'headline') return;
-    const p = (passedHeadline[r.owasp] ??= { byCheck: {}, unattributed: 0 });
+    const by =
+      r.section === 'headline' ? passedHeadline : r.section === 'vendor' ? passedVendor : null;
+    if (!by) return;
+    const p = (by[r.owasp] ??= { byCheck: {}, unattributed: 0 });
     if (r.checkId) {
       const e = (p.byCheck[r.checkId] ??= { value: checkValue(settings, r.checkId), count: 0 });
       e.count++;
@@ -321,6 +328,7 @@ export function summarize(results: CaseResult[], config: Config): Summary {
     cases: results.length,
     byRisk,
     passedHeadline,
+    passedVendor,
     passedByCheck,
     passedUnattributed,
     notApplicableBy,
