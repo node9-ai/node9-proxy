@@ -534,3 +534,20 @@ describe('managed commandChecks (floor + per-key locks)', () => {
     expect(out.rmAdvisory).toBe('block');
   });
 });
+
+describe('extractManagedConfig: the monthly budget status (node9Firewall#427)', () => {
+  it('keeps a valid status and drops a malformed one', () => {
+    const status = {
+      month: '2026-11',
+      level: 90,
+      limitUSD: 150,
+      coveredProviders: ['OPENAI', 'x'],
+    };
+    const ok = extractManagedConfig({ managedConfig: { spendBudget: status } } as never);
+    expect(ok?.spendBudget).toEqual({ ...status, coveredProviders: ['OPENAI'] });
+    const bad = extractManagedConfig({
+      managedConfig: { spendBudget: { ...status, level: 50 } },
+    } as never);
+    expect(bad?.spendBudget).toBeUndefined();
+  });
+});

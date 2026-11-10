@@ -247,6 +247,48 @@ describe('the session level notice at the real hook (fw#420)', () => {
   });
 });
 
+describe('the monthly budget line at the real hook (node9Firewall#427)', () => {
+  const MONTH = new Date().toISOString().slice(0, 7);
+  function plantStatus(home: string, level: number, coveredProviders: string[] = []) {
+    fs.writeFileSync(
+      path.join(home, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: new Date().toISOString(),
+        rules: [],
+        managedConfig: { spendBudget: { month: MONTH, level, limitUSD: 150, coveredProviders } },
+      })
+    );
+  }
+
+  itUnix('rides with the session notice on the first allowed call, then once per level', () => {
+    const where = makeHome('budget');
+    plantStatus(where.home, 90);
+    const first = check(where, 'sess-budget', 'ls');
+    expect(first.status).toBe(0);
+    expect(first.json?.systemMessage).toContain(STANDARD);
+    expect(first.json?.systemMessage).toContain('90% of this month');
+    expect(first.json?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    // Same session, same level: nothing more.
+    expect(check(where, 'sess-budget', 'pwd').out).toBe('');
+    // The level rises: the budget line alone.
+    plantStatus(where.home, 100);
+    const next = check(where, 'sess-budget', 'pwd');
+    expect(next.status).toBe(0);
+    expect(next.json?.systemMessage).toContain('is used up');
+    expect(next.json?.systemMessage).not.toContain(STANDARD);
+  });
+
+  itUnix('says nothing when a plan covers the agent, and nothing to a subagent', () => {
+    const where = makeHome('budget-covered');
+    plantStatus(where.home, 90, ['ANTHROPIC']);
+    const r = check(where, 'sess-covered', 'ls');
+    expect(r.json?.systemMessage).toBe(STANDARD);
+    const sub = makeHome('budget-sub');
+    plantStatus(sub.home, 90);
+    expect(check(sub, 'sess-sub', 'ls', undefined, { agent_id: 'a1' }).out).toBe('');
+  });
+});
+
 describe('claimSessionNotice', () => {
   it('is true once per session id', () => {
     const home = fs.mkdtempSync(path.join(room, 'claim-'));

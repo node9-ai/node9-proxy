@@ -3,6 +3,7 @@ import type { ToolInspection } from '@node9/policy-engine';
 // Config types, constants, and runtime config loading.
 // Kept separate from core.ts policy logic so tests can import config types
 // without pulling in the full authorization stack.
+import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -222,6 +223,9 @@ export interface Config {
     // behavior.cost-budget (node9Firewall#427): the ceilings, in USD. Either
     // or both; absent means the check has nothing to judge.
     costBudget: { sessionUSD?: number; dayUSD?: number };
+    // behavior.spend-budget (node9Firewall#427): the owner's monthly budget
+    // status, from the managed config only (the server computes it).
+    spendBudget?: SpendBudgetStatus;
     // Indirect-prompt-injection scanning of TOOL OUTPUT (gap1 v2). Opt-in:
     // enabled=false by default — shipping it changes no behavior until a user
     // turns it on. `minConfidence` is the actionable threshold (low is by
@@ -1499,6 +1503,7 @@ export function getConfig(cwd?: string): Config {
             windowSeconds?: unknown;
           };
           costBudget?: { sessionUSD?: unknown; dayUSD?: unknown };
+          spendBudget?: unknown;
           skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
           untrustedContent?: unknown;
           jailPaths?: { path?: unknown; verdict?: unknown }[];
@@ -1762,6 +1767,8 @@ export function getConfig(cwd?: string): Config {
           if (typeof c.dayUSD === 'number' && Number.isFinite(c.dayUSD) && c.dayUSD >= 0)
             mergedPolicy.costBudget.dayUSD = c.dayUSD;
         }
+        const spendBudget = sanitizeSpendBudget(mc.spendBudget);
+        if (spendBudget) mergedPolicy.spendBudget = spendBudget;
         if (mc.loopDetection && typeof mc.loopDetection === 'object') {
           const l = mc.loopDetection;
           const cur = mergedPolicy.loopDetection;

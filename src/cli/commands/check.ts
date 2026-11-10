@@ -10,7 +10,13 @@ import os from 'os';
 import { authorizeHeadless } from '../../auth/orchestrator';
 import { checkPause } from '../../auth/state';
 import { isDaemonRunning, notifyUserMentions } from '../../auth/daemon';
-import { extractContentDestinations, levelOf } from '@node9/policy-engine';
+import {
+  extractContentDestinations,
+  levelOf,
+  catalogSettingsFromConfig,
+  checkValue,
+} from '@node9/policy-engine';
+import { budgetNoticeLine, claimBudgetNotice, judgeSpendBudget } from '../../auth/spend-budget';
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import {
@@ -55,6 +61,7 @@ import {
   sessionNoticeEnabled,
   sessionNoticeClosedOutput,
   sessionNoticeOutput,
+  budgetNoticeOutput,
   NO_DAEMON_SUFFIX,
 } from '../../notices/session-notice';
 
@@ -1075,11 +1082,40 @@ export function registerCheckCommand(program: Command): void {
                     levelOf(config.settings.mode) + (daemonStaysDown ? NO_DAEMON_SUFFIX : '')
                   )
                 : null;
-            if (notice) {
+            // node9Firewall#427: past 75%, 90% or 100% of the person's monthly
+            // budget, one line per session and level on an allowed call (a
+            // stop at 100% is the orchestrator's). Same audience as the
+            // notice above: the user of a Claude Code session, not a subagent.
+            let budgetLine: string | null = null;
+            if (
+              checkedBy !== 'paused' &&
+              agent === 'Claude Code' &&
+              !isSubagentCall &&
+              sessionNoticeEnabled()
+            ) {
+              try {
+                const spend = judgeSpendBudget(
+                  config.policy.spendBudget,
+                  checkValue(
+                    catalogSettingsFromConfig(config.settings, config.policy),
+                    'behavior.spend-budget'
+                  ),
+                  agent,
+                  Date.now()
+                );
+                if (spend && claimBudgetNotice(safeSessionId, `${spend.month}:${spend.level}`))
+                  budgetLine = budgetNoticeLine(spend);
+              } catch {
+                /* UX only */
+              }
+            }
+            if (notice || budgetLine) {
               try {
                 fs.writeSync(
                   1,
-                  sessionNoticeOutput(config.settings.mode, notice, daemonStaysDown) + '\n'
+                  (notice
+                    ? sessionNoticeOutput(config.settings.mode, notice, daemonStaysDown, budgetLine)
+                    : budgetNoticeOutput(budgetLine!)) + '\n'
                 );
               } catch {
                 /* UX only */
