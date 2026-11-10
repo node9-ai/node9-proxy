@@ -224,6 +224,29 @@ describe('Codex block output (node9Firewall#473)', () => {
     expect(codexPromptBlockReason(r)).toBe(r.stderr.trim());
   });
 
+  it('Codex review with no approver ends in a block on stderr (approval timeout path)', () => {
+    fs.writeFileSync(
+      path.join(home, '.node9', 'config.json'),
+      JSON.stringify({
+        settings: {
+          mode: 'standard',
+          autoStartDaemon: false,
+          approvalTimeoutMs: 0,
+          approvers: { native: false, browser: false, cloud: false, terminal: false },
+          reviewChannel: 'approver',
+        },
+        policy: { dangerousWords: ['mkfs'] },
+      })
+    );
+    const r = runCheck(codexPreToolUse('mkfs.ext4 /dev/sda'), home);
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(2);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim()).not.toBe('');
+    expect(r.stderr).not.toMatch(ANSI);
+    expect(codexPreToolUseBlockReason(r)).toBe(r.stderr.trim());
+  });
+
   it('Claude Code block is unchanged: exit 2, JSON on stdout, empty stderr', () => {
     const r = runCheck(claudePreToolUse(BLOCKED_COMMAND), home);
     expect(r.error).toBeUndefined();

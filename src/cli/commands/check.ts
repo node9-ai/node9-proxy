@@ -688,7 +688,8 @@ export function registerCheckCommand(program: Command): void {
             // output as a hook error and fails open, allowing the tool to proceed
             // regardless of the JSON block payload. Write directly to /dev/tty so
             // the message appears on the developer's screen without touching the
-            // Claude Code pipe.
+            // Claude Code pipe. (Codex is the one agent that reads its block
+            // reason from stderr; step 5 writes only that reason there.)
             let ttyFd: number | null = null;
             try {
               ttyFd = fs.openSync('/dev/tty', 'w');
@@ -1190,9 +1191,7 @@ export function registerCheckCommand(program: Command): void {
                   process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);
                 allowExit(retry.checkedBy);
               }
-              // Denials communicate via exit code (non-zero) and JSON on stdout —
-              // stderr is intentionally unused so Claude Code never treats a block
-              // as a "hook error" (it does so on any stderr output regardless of exit code).
+              // sendBlock speaks each agent's block contract (Codex: stderr).
               sendBlock(retry.reason ?? `Node9 blocked "${toolName}".`, {
                 ...retry,
                 blockedByLabel: retry.blockedByLabel,
@@ -1201,9 +1200,7 @@ export function registerCheckCommand(program: Command): void {
             }
           }
 
-          // Denials communicate via exit code (non-zero) and JSON on stdout —
-          // stderr is intentionally unused so Claude Code never treats a block
-          // as a "hook error" (it does so on any stderr output regardless of exit code).
+          // sendBlock speaks each agent's block contract (Codex: stderr).
           sendBlock(result.reason ?? `Node9 blocked "${toolName}".`, {
             ...result,
             blockedByLabel: result.blockedByLabel,

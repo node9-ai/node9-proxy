@@ -14,7 +14,8 @@
  *   1. verbatim  — the captured payload as-is → must be ALLOWED (exit 0, no output)
  *   2. cred-read — the SAME envelope with only the command/path swapped to a
  *      credential read (or a secret injected into args) → must be BLOCKED with
- *      that agent's exact live-verified output contract (see sendBlock in check.ts).
+ *      that agent's block output contract (see sendBlock in check.ts; Codex reads
+ *      the reason from stderr on exit 2, node9Firewall#473).
  *
  * Agents with no real capture available (Copilot, Antigravity, Hermes) are
  * deliberately visible as todo rows — DO NOT hand-write their fixtures. Capture
