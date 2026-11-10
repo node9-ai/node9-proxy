@@ -105,6 +105,10 @@ export function canonicalToolName(name: string): string {
  * (`hook_event_name: "PreToolUse"`, `tool_name`, `tool_input`), so it
  * cannot be told apart by fingerprint — the flag is the only reliable
  * signal.
+ *
+ * `codex` is for Codex's SessionStart hook: that payload has no `turn_id`
+ * (the Codex fingerprint) and does have `permission_mode`, so it would be
+ * fingerprinted as Claude Code (node9Firewall#473 follow-up, session notice).
  */
 export function agentLabelFromFlag(flag: unknown): string | undefined {
   if (typeof flag !== 'string') return undefined;
@@ -114,6 +118,8 @@ export function agentLabelFromFlag(flag: unknown): string | undefined {
       return 'Antigravity';
     case 'copilot':
       return 'GitHub Copilot';
+    case 'codex':
+      return 'Codex';
     default:
       return undefined;
   }

@@ -1862,6 +1862,20 @@ interface CodexHooksFile {
 //   mcp__*       — MCP tool gating (mirrors Claude Code)
 const CODEX_PRE_TOOL_MATCHERS = ['^Bash$', '^apply_patch$', '^mcp__.*'];
 
+// Codex's SessionStart payload has no turn_id (the Codex fingerprint), so the
+// command names the agent. It carries the session notice only: UX, short timeout.
+const CODEX_SESSION_START_SUBCOMMAND = 'check --agent codex';
+
+/** Every command node9 writes into ~/.codex/hooks.json: the set `node9 init`
+ *  asks Codex to trust (byte-identical commands only, see selectHooksToTrust). */
+export function codexHookCommands(): string[] {
+  return [
+    fullPathCommand('check'),
+    fullPathCommand('log'),
+    fullPathCommand(CODEX_SESSION_START_SUBCOMMAND),
+  ];
+}
+
 function readToml<T>(filePath: string): T | null {
   try {
     if (fs.existsSync(filePath)) {
@@ -1972,6 +1986,34 @@ export async function setupCodex(): Promise<void> {
         const cmd = h.command ?? '';
         if (isNode9Hook(cmd) && needsRewrite(cmd)) {
           h.command = fullPathCommand('log');
+          hooksChanged = true;
+        }
+      }
+    }
+  }
+
+  // SessionStart — the session notice ("node9 is on", at which level).
+  if (!hooksFile.hooks.SessionStart) hooksFile.hooks.SessionStart = [];
+  const hasStartHook = hooksFile.hooks.SessionStart.some((m) =>
+    m.hooks.some((h) => isNode9Hook(h.command))
+  );
+  if (!hasStartHook) {
+    hooksFile.hooks.SessionStart.push({
+      hooks: [
+        {
+          type: 'command',
+          command: fullPathCommand(CODEX_SESSION_START_SUBCOMMAND),
+          timeout: 30,
+        },
+      ],
+    });
+    hooksChanged = true;
+  } else {
+    for (const m of hooksFile.hooks.SessionStart) {
+      for (const h of m.hooks) {
+        const cmd = h.command ?? '';
+        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
+          h.command = fullPathCommand(CODEX_SESSION_START_SUBCOMMAND);
           hooksChanged = true;
         }
       }
@@ -2103,7 +2145,7 @@ export async function setupCodex(): Promise<void> {
   // succeeds, because the hooks ARE installed and MCP/network protection is
   // already live — only shell gating waits on trust.
   const ensureCodexTrust = async (): Promise<void> => {
-    const outcome = await establishCodexTrust([fullPathCommand('check'), fullPathCommand('log')]);
+    const outcome = await establishCodexTrust(codexHookCommands());
     if (outcome.ok) {
       console.log(chalk.green('  ✅ Trusted with Codex'));
       return;
@@ -2149,7 +2191,7 @@ export function teardownCodex(): void {
   const hooksFile = readJson<CodexHooksFile>(hooksPath);
   if (hooksFile?.hooks) {
     let hooksChanged = false;
-    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const) {
+    for (const event of ['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'SessionStart']) {
       const before = hooksFile.hooks[event]?.length ?? 0;
       hooksFile.hooks[event] = hooksFile.hooks[event]?.filter(
         (m) => !m.hooks.some((h) => isNode9Hook(h.command))

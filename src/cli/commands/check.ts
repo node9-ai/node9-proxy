@@ -299,6 +299,56 @@ export function registerCheckCommand(program: Command): void {
             process.exit(0);
           }
 
+          // A Codex session starts: tell the user, once per session, that node9
+          // is on and at which level, before the first prompt (Claude Code gets
+          // the same line on its first allowed call). The payload has no
+          // turn_id, so the hook is registered with --agent codex. UX only:
+          // always exit 0, nothing on stderr, never `continue` (Codex would
+          // stop the session).
+          if (payload.hook_event_name === 'SessionStart') {
+            try {
+              const start = payload as Record<string, unknown>;
+              const isSubagent = typeof start.agent_id === 'string' && start.agent_id !== '';
+              if (
+                (agentOverride ?? detectAiAgent(payload)) === 'Codex' &&
+                start.source !== 'compact' &&
+                !isSubagent &&
+                sessionNoticeEnabled() &&
+                process.env.NODE9_PAUSED !== '1' &&
+                !checkPause().paused
+              ) {
+                const startCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                const config = getConfig(startCwd);
+                const daemonStaysDown =
+                  !isDaemonRunning() && config.settings.autoStartDaemon === false;
+                const kind = claimSessionNotice(
+                  typeof payload.session_id === 'string' ? payload.session_id : undefined,
+                  os.homedir(),
+                  levelOf(config.settings.mode) + (daemonStaysDown ? NO_DAEMON_SUFFIX : ''),
+                  true
+                );
+                if (kind) {
+                  fs.writeSync(
+                    1,
+                    sessionNoticeOutput(
+                      config.settings.mode,
+                      kind,
+                      daemonStaysDown,
+                      null,
+                      'SessionStart'
+                    ) + '\n'
+                  );
+                }
+              }
+            } catch {
+              /* UX only */
+            }
+            process.exit(0);
+          }
+
           // UserPromptSubmit — paste-into-prompt DLP. The payload has `prompt`
           // but no tool_name / tool_input, so the tool-call codepath below
           // would reach the "tool name missing" sendBlock. Handle it here:
@@ -1075,7 +1125,7 @@ export function registerCheckCommand(program: Command): void {
             }
           }
 
-          // fw#420: once per Claude Code session, the first ALLOWED call tells
+          // fw#420: once per Claude Code or Codex session, the first ALLOWED call tells
           // the user node9 is on and at which level (Audit says nothing is
           // blocked). Never on a block or a review, never with a decision, and a
           // failure here only drops the notice.
@@ -1086,6 +1136,10 @@ export function registerCheckCommand(program: Command): void {
           const isSubagentCall =
             typeof (payload as { agent_id?: unknown }).agent_id === 'string' &&
             (payload as { agent_id: string }).agent_id !== '';
+          // Codex accepts this output on an allowed PreToolUse (systemMessage and
+          // additionalContext are in its schema); after its SessionStart notice
+          // this says nothing unless the level changes.
+          const noticeAgent = agent === 'Claude Code' || agent === 'Codex';
           // A paused node9 checks nothing: no "is on" notice, and the flag stays
           // free for the first checked call after the pause.
           const allowExit = (checkedBy?: string): never => {
@@ -1094,10 +1148,7 @@ export function registerCheckCommand(program: Command): void {
             // call already started the daemon; node9Firewall#445 follow-up).
             const daemonStaysDown = daemonDown && config.settings.autoStartDaemon === false;
             const notice =
-              checkedBy !== 'paused' &&
-              agent === 'Claude Code' &&
-              !isSubagentCall &&
-              sessionNoticeEnabled()
+              checkedBy !== 'paused' && noticeAgent && !isSubagentCall && sessionNoticeEnabled()
                 ? claimSessionNotice(
                     safeSessionId,
                     os.homedir(),
@@ -1107,11 +1158,11 @@ export function registerCheckCommand(program: Command): void {
             // node9Firewall#427: past 75%, 90% or 100% of the person's monthly
             // budget, one line per session and level on an allowed call (a
             // stop at 100% is the orchestrator's). Same audience as the
-            // notice above: the user of a Claude Code session, not a subagent.
+            // notice above: the user of a Claude Code or Codex session, not a subagent.
             let budgetLine: string | null = null;
             if (
               checkedBy !== 'paused' &&
-              agent === 'Claude Code' &&
+              noticeAgent &&
               !isSubagentCall &&
               sessionNoticeEnabled()
             ) {

@@ -51,6 +51,18 @@ export const SESSION_NOTICE_DONE =
  *  prompt has not closed the ask yet. A flag without it is closed. */
 const OPEN_MARK = '+open';
 
+/** Flag suffix for a notice given at session start (Codex SessionStart), before
+ *  the user's first prompt: that prompt must not close it, since the agent has
+ *  not replied yet. It turns the flag into OPEN_MARK; the prompt after closes. */
+const START_MARK = '+start';
+
+/** The level a flag tells, without its mark. */
+function toldLevel(content: string): string {
+  for (const mark of [OPEN_MARK, START_MARK])
+    if (content.endsWith(mark)) return content.slice(0, -mark.length);
+  return content;
+}
+
 /** What the hook says this call: the first notice of the session, a notice
  *  that the level changed, one that the daemon stopped or came back
  *  (node9Firewall#445 follow-up), or nothing. */
@@ -102,20 +114,23 @@ function levelLine(mode: string | undefined, kind: 'first' | 'changed'): string 
   return `${ICON} Node9 is on (${name}). Every action in this session is checked.`;
 }
 
-/** The PreToolUse hook output that carries the notice on an ALLOWED call. No
- *  permissionDecision: the agent's own permission flow is untouched. */
+/** The hook output that carries the notice: on an ALLOWED call (PreToolUse),
+ *  or when a Codex session starts (SessionStart). No permissionDecision: the
+ *  agent's own permission flow is untouched. Only keys Codex also accepts
+ *  (it rejects unknown ones). */
 export function sessionNoticeOutput(
   mode: string | undefined,
   kind: SessionNoticeKind = 'first',
   daemonDown = false,
   /** A budget line due on the same call (node9Firewall#427), told with it. */
-  extraLine: string | null = null
+  extraLine: string | null = null,
+  event: 'PreToolUse' | 'SessionStart' = 'PreToolUse'
 ): string {
   const line = sessionNoticeLine(mode, kind, daemonDown);
   const shown = extraLine ? `${line}\n${extraLine}` : line;
   return JSON.stringify({
     hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
+      hookEventName: event,
       additionalContext: `${shown}\n${SESSION_NOTICE_ASK}`,
     },
     systemMessage: shown,
@@ -172,8 +187,11 @@ const FLAG_MAX_BYTES = 32;
 export function claimSessionNotice(
   sessionId: string | undefined,
   home = os.homedir(),
-  level: string = 'standard'
+  level: string = 'standard',
+  /** The notice is given at session start, before the first prompt. */
+  atStart = false
 ): SessionNoticeKind | null {
+  const mark = atStart ? START_MARK : OPEN_MARK;
   if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) return null;
   const dir = path.join(home, '.node9', 'notice-sessions');
   // The agent can reach ~/.node9 with mv and ln: a link here would point the
@@ -187,7 +205,7 @@ export function claimSessionNotice(
     const fd = fs.openSync(flag, 'wx', 0o600);
     created = true;
     try {
-      fs.writeSync(fd, level + OPEN_MARK);
+      fs.writeSync(fd, level + mark);
     } finally {
       fs.closeSync(fd);
     }
@@ -203,7 +221,7 @@ export function claimSessionNotice(
       return null;
     }
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null;
-    return levelChange(dir, seen, flag, level);
+    return levelChange(dir, seen, flag, level, mark);
   }
   removeOldFlags(dir, seen);
   return 'first';
@@ -215,17 +233,18 @@ function levelChange(
   dir: string,
   seen: OwnDir,
   flag: string,
-  level: string
+  level: string,
+  mark: string
 ): 'changed' | 'daemon' | null {
   try {
     const content = readFlag(flag);
     if (content === null) return null;
-    const told = content.endsWith(OPEN_MARK) ? content.slice(0, -OPEN_MARK.length) : content;
+    const told = toldLevel(content);
     if (told === level) return null;
     if (!isSameOwnDir(dir, seen)) return null;
     // A 2.48.0 flag (empty) records the level without a notice, so it stays
     // closed; every notice below asks for the line and waits for the close.
-    atomicWriteSync(flag, told === '' ? level : level + OPEN_MARK, { mode: 0o600 });
+    atomicWriteSync(flag, told === '' ? level : level + mark, { mode: 0o600 });
     if (told === '') return null;
     // Only the daemon part moved (a flag of 2.48.1 to 2.51 holds the level alone).
     const levelPart = (v: string) => v.split(':')[0];
@@ -238,8 +257,10 @@ function levelChange(
 /**
  * The user's next prompt after a notice: true when the session's flag was open,
  * which it now no longer is. Called on UserPromptSubmit, so the agent is told
- * the line was shown before it writes the next reply. Any problem returns false:
- * at worst the agent shows the line once more.
+ * the line was shown before it writes the next reply. A notice from session
+ * start is only moved to open here (false): the first prompt is the one its
+ * reply answers. Any problem returns false: at worst the agent shows the line
+ * once more.
  */
 export function closeSessionNotice(sessionId: string | undefined, home = os.homedir()): boolean {
   if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) return false;
@@ -251,10 +272,14 @@ export function closeSessionNotice(sessionId: string | undefined, home = os.home
     if (!seen) return false;
     const flag = path.join(dir, sessionId + SESSION_FLAG_SUFFIX);
     const content = readFlag(flag);
-    if (content === null || !content.endsWith(OPEN_MARK)) return false;
+    if (content === null) return false;
+    const atStart = content.endsWith(START_MARK);
+    if (!atStart && !content.endsWith(OPEN_MARK)) return false;
     if (!isSameOwnDir(dir, seen)) return false;
-    atomicWriteSync(flag, content.slice(0, -OPEN_MARK.length), { mode: 0o600 });
-    return true;
+    // A notice from session start: this is the prompt the agent answers with
+    // the line, so the ask stays open until the next one.
+    atomicWriteSync(flag, toldLevel(content) + (atStart ? OPEN_MARK : ''), { mode: 0o600 });
+    return !atStart;
   } catch {
     return false;
   }
