@@ -189,6 +189,29 @@ function agentSupportsAsk(agent: string): boolean {
   return agent === 'Claude Code' || agent === 'GitHub Copilot';
 }
 
+// node9Firewall#473: Codex reads a hook's exit 2 as a block only when stderr
+// carries the reason; it ignores stdout on exit 2, and with an empty stderr it
+// marks the hook failed and runs the tool. Verified in openai/codex
+// rust-v0.154.0 (hooks/src/events/pre_tool_use.rs and user_prompt_submit.rs,
+// parse_completed); the same rule since at least rust-v0.120.0. The reason is
+// written synchronously so process.exit cannot cut it off (pipes are
+// asynchronous on macOS), in a loop because a pipe write can be partial.
+function exitCodexBlock(reason: string): never {
+  try {
+    const buf = Buffer.from(reason + '\n', 'utf-8');
+    let off = 0;
+    while (off < buf.length) {
+      const n = fs.writeSync(2, buf, off, buf.length - off);
+      if (n <= 0) break;
+      off += n;
+    }
+  } catch {
+    // Exit 2 regardless: an unread reason makes Codex mark the hook failed, but
+    // node9 must never turn its own block into an allow.
+  }
+  process.exit(2);
+}
+
 // Whether a `review` verdict for this call is deferred to the agent's inline
 // prompt (true) vs. node9's own approver (false). Precedence (v2 — the cloud
 // carve-out is deleted, see review-ask-inline-v2-spec.md: cloud is the record,
@@ -440,26 +463,22 @@ export function registerCheckCommand(program: Command): void {
               // /dev/tty unavailable (CI, non-interactive) — skip visual output.
             }
 
-            // Both Codex and Claude read JSON-on-stdout with decision="block".
-            // The only shape difference is hookSpecificOutput.permissionDecision:
-            // Claude requires it ('deny'); Codex's UserPromptSubmit schema
-            // explicitly does not define it (additionalProperties: false).
-            const isCodex = agent === 'Codex';
+            // Codex ignores stdout on exit 2 and reads the reason from stderr
+            // only; the prompt is not submitted (#473).
+            if (agent === 'Codex') exitCodexBlock(reason);
             process.stdout.write(
               JSON.stringify({
                 decision: 'block',
                 reason,
                 systemMessage: reason,
-                hookSpecificOutput: isCodex
-                  ? { hookEventName: 'UserPromptSubmit' }
-                  : {
-                      hookEventName: 'UserPromptSubmit',
-                      permissionDecision: 'deny',
-                      permissionDecisionReason: reason,
-                    },
+                hookSpecificOutput: {
+                  hookEventName: 'UserPromptSubmit',
+                  permissionDecision: 'deny',
+                  permissionDecisionReason: reason,
+                },
               }) + '\n'
             );
-            // Non-zero exit signals block to both agents.
+            // Exit 2 signals a block to Claude Code.
             process.exit(2);
           }
 
@@ -669,7 +688,8 @@ export function registerCheckCommand(program: Command): void {
             // output as a hook error and fails open, allowing the tool to proceed
             // regardless of the JSON block payload. Write directly to /dev/tty so
             // the message appears on the developer's screen without touching the
-            // Claude Code pipe.
+            // Claude Code pipe. (Codex is the one agent that reads its block
+            // reason from stderr; step 5 writes only that reason there.)
             let ttyFd: number | null = null;
             try {
               ttyFd = fs.openSync('/dev/tty', 'w');
@@ -756,6 +776,8 @@ export function registerCheckCommand(program: Command): void {
               );
               process.exit(0);
             }
+            // Codex: the reason on stderr, exit 2, nothing on stdout (#473).
+            if (agent === 'Codex') exitCodexBlock(aiFeedbackMessage);
             // fw#420: the CLI shows systemMessage to the user directly, so a
             // Claude Code user sees node9's own line even if the agent does not
             // quote it. Claude Code only: other agents' schemas are unverified,
@@ -1169,9 +1191,7 @@ export function registerCheckCommand(program: Command): void {
                   process.stderr.write(`✓ node9 [${retry.checkedBy}]: "${toolName}" allowed\n`);
                 allowExit(retry.checkedBy);
               }
-              // Denials communicate via exit code (non-zero) and JSON on stdout —
-              // stderr is intentionally unused so Claude Code never treats a block
-              // as a "hook error" (it does so on any stderr output regardless of exit code).
+              // sendBlock speaks each agent's block contract (Codex: stderr).
               sendBlock(retry.reason ?? `Node9 blocked "${toolName}".`, {
                 ...retry,
                 blockedByLabel: retry.blockedByLabel,
@@ -1180,9 +1200,7 @@ export function registerCheckCommand(program: Command): void {
             }
           }
 
-          // Denials communicate via exit code (non-zero) and JSON on stdout —
-          // stderr is intentionally unused so Claude Code never treats a block
-          // as a "hook error" (it does so on any stderr output regardless of exit code).
+          // sendBlock speaks each agent's block contract (Codex: stderr).
           sendBlock(result.reason ?? `Node9 blocked "${toolName}".`, {
             ...result,
             blockedByLabel: result.blockedByLabel,
