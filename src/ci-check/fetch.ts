@@ -12,7 +12,7 @@ import { createGunzip } from 'node:zlib';
 import { Writable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { request } from 'undici';
-import { TarReader } from './tar';
+import { TarReader, TarError } from './tar';
 import type { RepoTree, RepoFile, UnfollowedLink } from './types';
 import { routeOf, type Route, ISSUE_FORM_RE } from './route';
 import {
@@ -1186,8 +1186,16 @@ class ApiSession {
   /** Distinct archive blobs a read actually used. */
   readonly archiveUsed = new Set<string>();
 
-  useArchive(blobs: Map<string, string>): void {
+  /** With the archive in use: how many files it lacked may still be read one by one. The
+   *  archive lifts the 200-file cap only for files it proves; a repository whose archive
+   *  omits its files (export-ignore) must not turn into a thousand API reads. */
+  private fallbackLeft: number | null = null;
+  /** Files the archive lacked that were not read because the fallback ran out. */
+  archiveMissed = 0;
+
+  useArchive(blobs: Map<string, string>, fallbackLimit: number): void {
     this.archive = blobs;
+    this.fallbackLeft = fallbackLimit;
   }
 
   blob(sha: string, size: number): Promise<BlobResult> {
@@ -1198,6 +1206,13 @@ class ApiSession {
     }
     const hit = this.cache.get(sha);
     if (hit) return hit;
+    if (this.fallbackLeft !== null) {
+      if (this.fallbackLeft <= 0) {
+        this.archiveMissed++;
+        return Promise.resolve({ error: 'budget' });
+      }
+      this.fallbackLeft--;
+    }
     if (this.requests >= API_BUDGET.requests || this.bytes + size > API_BUDGET.bytes) {
       this.budgetHit = true;
       return Promise.resolve({ error: 'budget' });
@@ -1212,6 +1227,10 @@ class ApiSession {
   /** The notes that make a partial API read visible. */
   closingNotes(): string[] {
     const out: string[] = [];
+    if (this.archiveMissed)
+      out.push(
+        `${this.archiveMissed} file(s) missing from the repository archive were not read (at most ${API_CAPS.files} are read one by one): results ${INCOMPLETE}.`
+      );
     if (this.failed.length)
       out.push(
         `${this.failed.length} file(s) could not be fetched from GitHub (e.g. ${this.failed.slice(0, 3).join(', ')}): results ${INCOMPLETE}.`
@@ -1270,7 +1289,13 @@ export function gitBlobSha(data: Buffer): string {
   return createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
 }
 
-type ArchiveResult = { blobs: Map<string, string> } | { error: string };
+/** Why an archive was dropped, when a retry could succeed: the scan then carries the same
+ *  note a rate limit or a network failure gives, so the hosted refresh scans it again. */
+type Transient = 'rate' | 'network';
+type ArchiveResult = { blobs: Map<string, string> } | { error: string; transient?: Transient };
+
+/** A size limit of the archive reader: not transient, the same archive hits it again. */
+class ArchiveLimit extends Error {}
 
 /** Stream the default branch's archive and keep the bytes of `wanted` paths (path -> listed
  *  sha) whose git hash matches the listing. Nothing is written to disk and no path is used as
@@ -1291,7 +1316,9 @@ async function loadArchive(
       signal,
     });
     await first.body.dump();
-    if (first.statusCode === 403 || first.statusCode === 429) return { error: 'rate limit' };
+    if (first.statusCode === 403 || first.statusCode === 429)
+      return { error: 'rate limit', transient: 'rate' };
+    if (first.statusCode >= 500) return { error: `HTTP ${first.statusCode}`, transient: 'network' };
     const location = first.headers.location;
     if (first.statusCode < 300 || first.statusCode >= 400 || typeof location !== 'string')
       return { error: `HTTP ${first.statusCode}` };
@@ -1312,7 +1339,12 @@ async function loadArchive(
     });
     if (res.statusCode !== 200) {
       await res.body.dump();
-      return { error: `archive HTTP ${res.statusCode}` };
+      return {
+        error: `archive HTTP ${res.statusCode}`,
+        ...(res.statusCode >= 500 || res.statusCode === 429
+          ? { transient: 'network' as const }
+          : {}),
+      };
     }
     const declared = Number(res.headers['content-length']);
     if (Number.isFinite(declared) && declared > limits.compressedBytes) {
@@ -1337,7 +1369,8 @@ async function loadArchive(
         const rel = relOf(e.path);
         if (rel === null || e.size > RAW_LIMIT) return false;
         kept += e.size;
-        if (kept > limits.keptBytes) throw new Error('archive keeps more than the memory limit');
+        if (kept > limits.keptBytes)
+          throw new ArchiveLimit('archive keeps more than the memory limit');
         return true;
       },
       (e, data) => {
@@ -1355,7 +1388,8 @@ async function loadArchive(
       new Transform({
         transform(chunk: Buffer, _enc, cb) {
           compressed += chunk.length;
-          if (compressed > limits.compressedBytes) cb(new Error('archive over the size limit'));
+          if (compressed > limits.compressedBytes)
+            cb(new ArchiveLimit('archive over the size limit'));
           else cb(null, chunk);
         },
       }),
@@ -1364,7 +1398,7 @@ async function loadArchive(
         write(chunk: Buffer, _enc, cb) {
           decompressed += chunk.length;
           if (decompressed > limits.decompressedBytes)
-            return cb(new Error('archive unpacks past the size limit'));
+            return cb(new ArchiveLimit('archive unpacks past the size limit'));
           try {
             tar.push(chunk);
             cb();
@@ -1385,8 +1419,15 @@ async function loadArchive(
     );
     return { blobs };
   } catch (e) {
-    if (signal.aborted) return { error: 'archive took longer than the time limit' };
-    return { error: (e as Error)?.message || 'archive could not be read' };
+    if (signal.aborted)
+      return { error: 'archive took longer than the time limit', transient: 'network' };
+    const message = (e as Error)?.message || 'archive could not be read';
+    // A limit, a malformed tar or a corrupt gzip stream is the archive itself: the same bytes
+    // fail the same way. Anything else (a reset, a socket timeout) may pass on a retry.
+    const code = (e as { code?: unknown })?.code;
+    const corrupt = typeof code === 'string' && code.startsWith('Z_');
+    if (e instanceof ArchiveLimit || e instanceof TarError || corrupt) return { error: message };
+    return { error: message, transient: 'network' };
   }
 }
 
@@ -1462,10 +1503,17 @@ export async function fetchGitHubTree(
       session.requests++;
       const archive = await loadArchive(owner, repo, wanted);
       if ('blobs' in archive) {
-        session.useArchive(archive.blobs);
+        session.useArchive(archive.blobs, API_CAPS.files);
         nestedCap = undefined;
       } else {
         archiveNote = `the repository archive could not be used (${archive.error}); files were read one by one.`;
+        const transientNote =
+          archive.transient === 'rate'
+            ? RATE_LIMIT_NOTE
+            : archive.transient === 'network'
+              ? NETWORK_NOTE
+              : null;
+        if (transientNote && !notes.includes(transientNote)) notes.push(transientNote);
       }
     }
     // Link texts are fetched as the resolver asks for them, a round per link depth.

@@ -106,11 +106,6 @@ export class TarReader {
     private readonly done: (e: TarEntry, data: Buffer) => void
   ) {}
 
-  /** True once the end-of-archive block was seen. */
-  get ended(): boolean {
-    return this.finished;
-  }
-
   push(chunk: Buffer): void {
     let off = 0;
     while (off < chunk.length) {

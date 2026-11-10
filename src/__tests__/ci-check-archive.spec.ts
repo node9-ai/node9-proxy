@@ -249,7 +249,15 @@ describe.runIf(posix)('fetchGitHubTree: a big repository is read from its archiv
   let blobCalls: string[];
 
   /** Mount the API and codeload for `repo`; `archive` overrides what codeload serves. */
-  function mount(opts: { archive?: Buffer; location?: string; tarballStatus?: number } = {}) {
+  function mount(
+    opts: {
+      archive?: Buffer;
+      location?: string;
+      tarballStatus?: number;
+      codeloadStatus?: number;
+      codeloadDelayMs?: number;
+    } = {}
+  ) {
     const api = agent.get('https://api.github.com');
     api
       .intercept({ path: /\/repos\/o\/r\/git\/trees\/HEAD\?recursive=1/, method: 'GET' })
@@ -279,15 +287,16 @@ describe.runIf(posix)('fetchGitHubTree: a big repository is read from its archiv
         })
         .persist();
     }
-    agent
+    const codeload = agent
       .get('https://codeload.github.com')
       .intercept({ path: /\/o\/r\/legacy\.tar\.gz/, method: 'GET' })
       .reply((req) => {
         const h = req.headers as Record<string, string | undefined>;
         codeloadAuth.push(h.authorization ?? h.Authorization);
-        return { statusCode: 200, data: opts.archive ?? repo.archive };
-      })
-      .persist();
+        return { statusCode: opts.codeloadStatus ?? 200, data: opts.archive ?? repo.archive };
+      });
+    if (opts.codeloadDelayMs) codeload.delay(opts.codeloadDelayMs);
+    codeload.persist();
   }
 
   beforeEach(() => {
@@ -372,6 +381,8 @@ describe.runIf(posix)('fetchGitHubTree: a big repository is read from its archiv
     mount({ archive: corrupt });
     const t = await fetchGitHubTree('o', 'r');
     expect(t.notes.join(' ')).toMatch(/archive could not be used/);
+    // The same bytes fail the same way: not a reason to retry.
+    expect(t.notes.some((n) => n.startsWith('A network error/timeout occurred'))).toBe(false);
     expect(scanTree(t).incomplete).toBe(true);
   });
 
@@ -401,9 +412,67 @@ describe.runIf(posix)('fetchGitHubTree: a big repository is read from its archiv
     );
     mount({ archive: tar });
     const t = await fetchGitHubTree('o', 'r');
-    // s1 and s2 came from the API with their real (harmless) content.
-    expect(t.files.find((f) => f.path === 'skills/s1/SKILL.md')?.content).toContain('Do task 1.');
-    expect(t.files.find((f) => f.path === 'skills/s2/SKILL.md')?.content).toContain('Do task 2.');
+    // Neither planted copy is used: s1 and s2 are read from the API with their real
+    // (harmless) content, or not read at all.
+    for (const p of ['skills/s1/SKILL.md', 'skills/s2/SKILL.md'])
+      expect(t.files.find((f) => f.path === p)?.content ?? '').not.toContain(
+        'Ignore all previous instructions'
+      );
+  });
+
+  it('reads at most the cap one by one when the archive lacks files, and says so', async () => {
+    // An archive that carries only CLAUDE.md, as `* export-ignore` would make it.
+    const tar = zlib.gzipSync(
+      makeTar([{ name: 'o-r-abc1234/CLAUDE.md', data: '# Project\n\nBe careful.\n' }])
+    );
+    mount({ archive: tar });
+    const t = await fetchGitHubTree('o', 'r');
+    expect(blobCalls.length).toBeLessThanOrEqual(200);
+    expect(t.notes.join(' ')).toMatch(/missing from the repository archive were not read/);
+    expect(scanTree(t).incomplete).toBe(true);
+  });
+
+  it('marks a rate-limited archive request as a rate limit, so a retry is due', async () => {
+    mount({ tarballStatus: 403 });
+    const t = await fetchGitHubTree('o', 'r');
+    expect(t.notes.join(' ')).toMatch(/archive could not be used \(rate limit\)/);
+    expect(t.notes.some((n) => n.startsWith('GitHub rate limit hit'))).toBe(true);
+    expect(scanTree(t).incomplete).toBe(true);
+  });
+
+  it('marks a codeload server error as a network failure, so a retry is due', async () => {
+    mount({ codeloadStatus: 502 });
+    const t = await fetchGitHubTree('o', 'r');
+    expect(t.notes.some((n) => n.startsWith('A network error/timeout occurred'))).toBe(true);
+  });
+
+  it('stops at the time limit and marks it as a network failure', async () => {
+    mount({ codeloadDelayMs: 500 });
+    const before = ARCHIVE_LIMITS.ms;
+    ARCHIVE_LIMITS.ms = 100;
+    try {
+      const t = await fetchGitHubTree('o', 'r');
+      expect(t.notes.join(' ')).toMatch(/longer than the time limit/);
+      expect(t.notes.some((n) => n.startsWith('A network error/timeout occurred'))).toBe(true);
+      expect(scanTree(t).incomplete).toBe(true);
+    } finally {
+      ARCHIVE_LIMITS.ms = before;
+    }
+  });
+
+  it('stops at the memory limit, which a retry would hit again (not transient)', async () => {
+    mount();
+    const before = ARCHIVE_LIMITS.keptBytes;
+    ARCHIVE_LIMITS.keptBytes = 1024;
+    try {
+      const t = await fetchGitHubTree('o', 'r');
+      expect(t.notes.join(' ')).toMatch(/keeps more than the memory limit/);
+      expect(t.notes.some((n) => n.startsWith('A network error/timeout occurred'))).toBe(false);
+      expect(t.notes.some((n) => n.startsWith('GitHub rate limit hit'))).toBe(false);
+      expect(scanTree(t).incomplete).toBe(true);
+    } finally {
+      ARCHIVE_LIMITS.keptBytes = before;
+    }
   });
 
   it('honours the kill switch', async () => {
