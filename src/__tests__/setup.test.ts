@@ -11,6 +11,7 @@ import {
   setupCopilot,
   setupCursor,
   setupCodex,
+  codexHookCommands,
   setupOpencode,
   setupPi,
   setupHermes,
@@ -1574,6 +1575,12 @@ describe('setupCodex', () => {
 
     // PostToolUse for audit logging.
     expect(written.hooks.PostToolUse[0].hooks[0].command).toBe('node9 log');
+
+    // SessionStart: the session notice. Its payload has no turn_id, so the
+    // command names the agent.
+    expect(written.hooks.SessionStart).toEqual([
+      { hooks: [{ type: 'command', command: 'node9 check --agent codex', timeout: 30 }] },
+    ]);
   });
 
   it('does not re-add hooks that already point to node9', async () => {
@@ -1587,6 +1594,7 @@ describe('setupCodex', () => {
           ],
           UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node9 check' }] }],
           PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          SessionStart: [{ hooks: [{ type: 'command', command: 'node9 check --agent codex' }] }],
         },
       },
       configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
@@ -1594,6 +1602,41 @@ describe('setupCodex', () => {
 
     await setupCodex();
     expect(writtenTo(hooksPath)).toBeNull();
+  });
+
+  it('adds the SessionStart hook to an install that predates it, without asking', async () => {
+    withExistingCodexFiles({
+      hooksJson: {
+        hooks: {
+          PreToolUse: [
+            { matcher: '^Bash$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^apply_patch$', hooks: [{ type: 'command', command: 'node9 check' }] },
+            { matcher: '^mcp__.*', hooks: [{ type: 'command', command: 'node9 check' }] },
+          ],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node9 check' }] }],
+          PostToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: 'node9 log' }] }],
+          SessionStart: [{ hooks: [{ type: 'command', command: '/usr/bin/other-tool start' }] }],
+        },
+      },
+      configToml: { mcp_servers: { node9: { command: 'node9', args: ['mcp-server'] } } },
+    });
+    const confirm = await getConfirm();
+
+    await setupCodex();
+
+    expect(confirm).not.toHaveBeenCalled();
+    const written = writtenTo(hooksPath);
+    // The user's own SessionStart hook stays; node9's is added beside it.
+    expect(written.hooks.SessionStart).toEqual([
+      { hooks: [{ type: 'command', command: '/usr/bin/other-tool start' }] },
+      { hooks: [{ type: 'command', command: 'node9 check --agent codex', timeout: 30 }] },
+    ]);
+    // The entries that were there are untouched.
+    expect(written.hooks.PreToolUse).toHaveLength(3);
+  });
+
+  it('asks Codex to trust every command it writes, the SessionStart one included', () => {
+    expect(codexHookCommands()).toEqual(['node9 check', 'node9 log', 'node9 check --agent codex']);
   });
 
   it('adds node9 to a matcher owned by a foreign command instead of skipping it', async () => {
@@ -1834,6 +1877,29 @@ describe('setupCodex', () => {
 
 describe('teardownCodex', () => {
   const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+
+  it('removes the node9 SessionStart hook and keeps a foreign one', () => {
+    const hooksPath = path.join(os.homedir(), '.codex', 'hooks.json');
+    const hooksJson = JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: '/usr/bin/other-tool start' }] },
+          { hooks: [{ type: 'command', command: 'node9 check --agent codex' }] },
+        ],
+      },
+    });
+    vi.mocked(fs.existsSync).mockImplementation((p) => String(p) === hooksPath);
+    vi.mocked(fs.readFileSync).mockImplementation((p) => {
+      if (String(p) === hooksPath) return hooksJson;
+      throw new Error('not found');
+    });
+
+    teardownCodex();
+
+    expect(writtenTo(hooksPath).hooks.SessionStart).toEqual([
+      { hooks: [{ type: 'command', command: '/usr/bin/other-tool start' }] },
+    ]);
+  });
 
   it('removes node9 MCP server entry', () => {
     withExistingTomlFile(configPath, {

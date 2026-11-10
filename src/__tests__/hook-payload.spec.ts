@@ -244,6 +244,11 @@ describe('agentLabelFromFlag', () => {
     expect(agentLabelFromFlag('Copilot')).toBe('GitHub Copilot');
   });
 
+  it('maps codex: its SessionStart payload carries no turn_id fingerprint', () => {
+    expect(agentLabelFromFlag('codex')).toBe('Codex');
+    expect(agentLabelFromFlag('Codex')).toBe('Codex');
+  });
+
   it('ignores unknown or non-string values (falls back to fingerprinting)', () => {
     // The label selects block-response shapes, so arbitrary strings must
     // not be trusted verbatim.

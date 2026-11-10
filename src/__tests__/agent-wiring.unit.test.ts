@@ -191,6 +191,22 @@ describe('agent-wiring registry', () => {
     expect(again.wireState).toBe('wired'); // the primary hook decides the state
   });
 
+  it('lists Codex SessionStart (the session notice) so a missing one shows', () => {
+    writeJson('.codex/hooks.json', {
+      hooks: {
+        PreToolUse: [matcher],
+        SessionStart: [{ hooks: [{ command: 'node9 check --agent codex' }] }],
+      },
+    });
+    const codex = getAgentWiring(home).find((a) => a.id === 'codex')!;
+    expect(codex.hooks.find((h) => h.label.startsWith('SessionStart'))?.wired).toBe(true);
+    // An install that predates it: the row shows, not wired; the state holds.
+    writeJson('.codex/hooks.json', { hooks: { PreToolUse: [matcher] } });
+    const again = getAgentWiring(home).find((a) => a.id === 'codex')!;
+    expect(again.hooks.find((h) => h.label.startsWith('SessionStart'))?.wired).toBe(false);
+    expect(again.wireState).toBe('wired');
+  });
+
   it('treats Cursor as MCP-only — no hook file, protection comes from MCP', () => {
     // Even if a stray hooks.json exists, Cursor is not hook-wired by node9.
     writeJson('.cursor/hooks.json', { hooks: { preToolUse: [NODE9_HOOK] } });

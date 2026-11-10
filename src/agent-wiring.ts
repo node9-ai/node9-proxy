@@ -237,8 +237,9 @@ export const AGENT_SPECS: AgentSpec[] = [
     hookFile: (h) => path.join(h, '.codex', 'hooks.json'),
     hookFormat: 'matcher',
     // PostToolUse (`node9 log`, matcher `.*`) is written by setup.ts; listed
-    // here so status and doctor see it and a broken one is noticed.
-    hookEvents: [ck('PreToolUse'), lg('PostToolUse'), ck('UserPromptSubmit')],
+    // here so status and doctor see it and a broken one is noticed. Same for
+    // SessionStart (`node9 check --agent codex`, the session notice).
+    hookEvents: [ck('PreToolUse'), lg('PostToolUse'), ck('UserPromptSubmit'), ck('SessionStart')],
     mcpFile: (h) => path.join(h, '.codex', 'config.toml'),
     mcpFormat: 'toml',
     present: (h) => exists(path.join(h, '.codex')),
