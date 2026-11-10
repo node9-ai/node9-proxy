@@ -378,6 +378,8 @@ export const MAP_GOVERNED: ReadonlySet<string> = new Set([
   // Cascading failures (node9Firewall#427): both detectors read the map.
   'behavior.fanout',
   'behavior.cost-budget',
+  // Usage & budgets (fw#427): the detector reads the map.
+  'behavior.spend-budget',
   'files.shell-startup',
   'files.password-hashes',
   'files.system-dirs',

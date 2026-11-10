@@ -464,16 +464,18 @@ describe('cascading failures (behavior.fanout and behavior.cost-budget, ASI08, n
     expect(ninth.forecast.layer).toBe('fanout');
   });
 
-  it('a session past its ceiling: review holds the next call on both paths; under it passes', async () => {
+  it('a session past its ceiling: log records the next call on both paths; under it passes', async () => {
     writeConfig({
-      checks: { 'behavior.cost-budget': 'review' },
+      checks: { 'behavior.cost-budget': 'log' },
       tuning: { 'behavior.cost-budget': { sessionUSD: 5 } },
     });
     plantLedger(6.2);
     const over = await both('Bash', { command: 'ls -la' });
-    expect(over.liveDecision.decision).toBe('review');
-    expect(over.liveResult.checkId).toBe('behavior.cost-budget');
-    expect(over.forecast.decision).toBe('review');
+    expect(over.liveDecision.decision).toBe('log');
+    expect(live.rows.find((x) => x.checkedBy === 'cost-budget')?.checkId).toBe(
+      'behavior.cost-budget'
+    );
+    expect(over.forecast.decision).toBe('log');
     expect(over.forecast.checkId).toBe('behavior.cost-budget');
     expect(over.forecast.layer).toBe('cost-budget');
     plantLedger(4.1);
@@ -507,6 +509,63 @@ describe('cascading failures (behavior.fanout and behavior.cost-budget, ASI08, n
     expect(r.liveDecision.decision).toBe('allow');
     expect(r.forecast.decision).toBe('allow');
     expect(r.forecast.unknown).not.toContain('cost-state');
+  });
+});
+
+describe('usage past the monthly budget (behavior.spend-budget, node9Firewall#427)', () => {
+  const MONTH = new Date().toISOString().slice(0, 7);
+  /** The managed status as the sync writes it to the cache. */
+  function plantStatus(status: Record<string, unknown>): void {
+    fs.writeFileSync(
+      path.join(home(), '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: new Date().toISOString(),
+        rules: [],
+        managedConfig: { spendBudget: status },
+      })
+    );
+    _resetConfigCache();
+  }
+  const over = { month: MONTH, level: 100, limitUSD: 150, coveredProviders: [] as string[] };
+
+  it('at 100% and block, the live call is stopped with the check id; the forecast does not judge it', async () => {
+    writeConfig({ checks: { 'behavior.spend-budget': 'block' } });
+    plantStatus(over);
+    const r = await both('Bash', { command: 'ls -la' });
+    expect(r.liveDecision.decision).toBe('block');
+    expect(r.liveResult.checkId).toBe('behavior.spend-budget');
+    expect(r.liveResult.reason).toContain('$150.00');
+    expect(r.forecast.checkId).not.toBe('behavior.spend-budget');
+  });
+
+  it('by default (log) the call passes and is recorded with the check id', async () => {
+    writeConfig();
+    plantStatus(over);
+    const r = await both('Bash', { command: 'ls -la' });
+    expect(r.liveDecision.decision).toBe('log');
+    expect(live.rows.find((x) => x.checkedBy === 'spend-budget')?.checkId).toBe(
+      'behavior.spend-budget'
+    );
+  });
+
+  it('an agent whose provider a plan covers is not stopped; another month, or under 100%, stops nothing', async () => {
+    writeConfig({ checks: { 'behavior.spend-budget': 'block' } });
+    // META's agent is claude: covered by a Claude plan.
+    plantStatus({ ...over, coveredProviders: ['ANTHROPIC'] });
+    expect((await both('Bash', { command: 'ls -la' })).liveDecision.decision).toBe('allow');
+    plantStatus({ ...over, month: '2001-01' });
+    expect((await both('Bash', { command: 'ls -la' })).liveDecision.decision).toBe('allow');
+    plantStatus({ ...over, level: 90 });
+    expect((await both('Bash', { command: 'ls -la' })).liveDecision.decision).toBe('allow');
+  });
+
+  it('off judges nothing, and a malformed status is ignored', async () => {
+    writeConfig({ checks: { 'behavior.spend-budget': 'off' } });
+    plantStatus(over);
+    expect((await both('Bash', { command: 'ls -la' })).liveDecision.decision).toBe('allow');
+    writeConfig({ checks: { 'behavior.spend-budget': 'block' } });
+    plantStatus({ ...over, level: 99 });
+    expect((await both('Bash', { command: 'ls -la' })).liveDecision.decision).toBe('allow');
   });
 });
 

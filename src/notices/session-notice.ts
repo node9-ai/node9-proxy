@@ -107,13 +107,28 @@ function levelLine(mode: string | undefined, kind: 'first' | 'changed'): string 
 export function sessionNoticeOutput(
   mode: string | undefined,
   kind: SessionNoticeKind = 'first',
-  daemonDown = false
+  daemonDown = false,
+  /** A budget line due on the same call (node9Firewall#427), told with it. */
+  extraLine: string | null = null
 ): string {
   const line = sessionNoticeLine(mode, kind, daemonDown);
+  const shown = extraLine ? `${line}\n${extraLine}` : line;
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      additionalContext: `${line}\n${SESSION_NOTICE_ASK}`,
+      additionalContext: `${shown}\n${SESSION_NOTICE_ASK}`,
+    },
+    systemMessage: shown,
+  });
+}
+
+/** A budget line alone on an allowed call (node9Firewall#427): shown to the
+ *  user, and given to the agent so it can wind down. No permissionDecision. */
+export function budgetNoticeOutput(line: string): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: line,
     },
     systemMessage: line,
   });

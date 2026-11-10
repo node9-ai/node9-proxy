@@ -575,9 +575,22 @@ const PRODUCT_CHECKS: readonly CheckDef[] = [
     owasp: 'ASI08',
     title: 'Spend past the budget',
     catches: 'a call made after the session or the day passed the spend ceiling the user set',
-    values: ['off', 'log', 'review', 'block'],
+    // No review (fw#427): past a ceiling every call would ask again.
+    values: ['off', 'log', 'block'],
     defaultValue: 'off',
     legacy: ['cost-budget', '🛡️ Node9 Cost Budget'],
+  },
+  {
+    id: 'behavior.spend-budget',
+    group: 'behavior',
+    owasp: 'ASI08',
+    title: 'Usage past the monthly budget',
+    catches:
+      "a call by an agent no plan covers, after the person's monthly budget for usage beyond plans is used up",
+    // The budget and the status come from the dashboard (Usage & budgets,
+    // fw#427); log records the calls past it, block stops them.
+    values: ['off', 'log', 'block'],
+    defaultValue: 'log',
   },
   {
     id: 'behavior.prompt-injection',
@@ -913,6 +926,9 @@ export function checkIdForCheckedBy(checkedBy: string | undefined): string | und
     case 'cost-budget-review':
     case 'cost-budget-block':
       return 'behavior.cost-budget';
+    case 'spend-budget':
+    case 'spend-budget-block':
+      return 'behavior.spend-budget';
     default:
       return undefined;
   }

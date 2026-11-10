@@ -103,6 +103,7 @@ import { runPackageCheck } from '../supply-chain/check';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
+import { judgeSpendBudget } from './spend-budget';
 import { asApprovalRequest } from '../policy/negotiation';
 import { recordFromLegacyWait, type Channel, type DecidedBy } from './decision-record';
 import { approvalUnavailable, authResultFromRecord, recordFromAuthResult } from './card-result';
@@ -112,6 +113,8 @@ const HANDOFF_LABEL = '🛡️ Node9 Agent Handoff';
 /** Cascading failures (node9Firewall#427): the labels, legacy names of the checks. */
 const FANOUT_LABEL = '🛡️ Node9 Fan-out';
 const COST_LABEL = '🛡️ Node9 Cost Budget';
+/** The label of a stop by the monthly budget (node9Firewall#427). */
+const SPEND_LABEL = '🛡️ Node9 Monthly Budget';
 /** The fan-out limit of this stage: more than this many spawns in the window. */
 const FANOUT_THRESHOLD = 8;
 const FANOUT_WINDOW_MS = 10 * 60_000;
@@ -655,7 +658,6 @@ export async function _authorizeHeadlessCore(
   let packageReview: string | null = null; // the package check asked for review
   let handoffReview: string | null = null; // the brief to a subagent carries an instruction
   let fanoutReview: string | null = null; // subagents spawned past the limit
-  let costReview: string | null = null; // the session or the day is past its budget
   let policyMatchedField: string | undefined;
   let policyMatchedWord: string | undefined;
   // The engine verdict behind a review, for the inline-ask result and the
@@ -1095,23 +1097,71 @@ export async function _authorizeHeadlessCore(
           checkId: 'behavior.cost-budget',
         };
       }
-      if (budgetValue === 'review') {
-        appendLocalAudit(toolName, args, 'allow', 'cost-budget-review', rowMeta, hashAuditArgs);
-        costReview = `⚠️ node9: ${text}. Approve to continue past it.`;
-        explainableLabel = COST_LABEL;
-        policyReviewRule = 'cost-budget';
-        policyReviewCheckId = 'behavior.cost-budget';
-      } else {
+      // No review (fw#427): past a ceiling, every call would ask again.
+      appendLocalAudit(
+        toolName,
+        args,
+        'allow',
+        'cost-budget',
+        { ...rowMeta, logged: true },
+        hashAuditArgs
+      );
+    }
+  }
+
+  // ── USAGE PAST THE MONTHLY BUDGET (node9Firewall#427) ────────────────────
+  // The server computes the person's month (usage no plan covers, against
+  // their budget) and sends the status in the managed config; the heartbeat
+  // makes the device fetch it within minutes of a crossing. A call by an
+  // agent whose provider a plan covers adds nothing to that usage and is not
+  // judged. A status of another month is stale: a new month starts clean.
+  // The forecast has no budget state and skips the layer.
+  const spendValue = checkValue(settingsNow, 'behavior.spend-budget');
+  const spend = forecast
+    ? null
+    : judgeSpendBudget(config.policy.spendBudget, spendValue, meta?.agent, Date.now());
+  if (!isManual && spend) {
+    const rowMeta = { ...meta, ruleName: 'spend-budget', checkId: 'behavior.spend-budget' };
+    const limit = `$${spend.limitUSD.toFixed(2)}`;
+    if (spend.level === 100) {
+      const text = `this person's monthly budget of ${limit} for usage beyond plans is used up`;
+      if (spendValue === 'block') {
         appendLocalAudit(
           toolName,
           args,
-          'allow',
-          'cost-budget',
-          { ...rowMeta, logged: true },
+          isObserveMode ? 'allow' : 'deny',
+          isObserveMode ? 'observe-mode-spend-budget-would-block' : 'spend-budget-block',
+          rowMeta,
           hashAuditArgs
         );
+        if (isObserveMode) {
+          return {
+            approved: true,
+            checkedBy: 'audit',
+            observeWouldBlock: true,
+            blockedByLabel: SPEND_LABEL,
+          };
+        }
+        return {
+          approved: false,
+          reason: `🛑 node9: ${text}. An owner or admin can raise it on Usage & budgets.`,
+          blockedBy: 'local-config',
+          blockedByLabel: SPEND_LABEL,
+          ruleHit: 'spend-budget',
+          checkId: 'behavior.spend-budget',
+        };
       }
+      appendLocalAudit(
+        toolName,
+        args,
+        'allow',
+        'spend-budget',
+        { ...rowMeta, logged: true },
+        hashAuditArgs
+      );
     }
+    // At 75% and 90% nothing is decided here: the hook tells the user once
+    // per session and level on an allowed call (check.ts, budgetNotice).
   }
 
   // ── SESSION EXPOSURE (fw#318 layer 4) ─────────────────────────────────────
@@ -1829,7 +1879,6 @@ export async function _authorizeHeadlessCore(
     !!exposureReview ||
     !!handoffReview ||
     !!fanoutReview ||
-    !!costReview ||
     !!packageReview;
   /** A trust session may answer this call. ONE definition for the two places
    *  that must agree: the trust guard that honours a session, and the native
@@ -2461,10 +2510,9 @@ export async function _authorizeHeadlessCore(
       'agent-handoff'
     );
     riskMetadata.ruleDescription = handoffReview.slice(0, 1024);
-  } else if (fanoutReview || costReview) {
-    const rule = fanoutReview ? 'fanout' : 'cost-budget';
-    riskMetadata = computeRiskMetadata(args, 5, explainableLabel, undefined, undefined, rule);
-    riskMetadata.ruleDescription = (fanoutReview ?? costReview ?? '').slice(0, 1024);
+  } else if (fanoutReview) {
+    riskMetadata = computeRiskMetadata(args, 5, explainableLabel, undefined, undefined, 'fanout');
+    riskMetadata.ruleDescription = fanoutReview.slice(0, 1024);
   }
 
   // ── INLINE-ASK DEFER (review → caller renders the prompt) ────────────────
@@ -2506,7 +2554,6 @@ export async function _authorizeHeadlessCore(
         packageReview ||
         handoffReview ||
         fanoutReview ||
-        costReview ||
         exposureReview ||
         explainableLabel ||
         'Node9 flagged this action for review.',

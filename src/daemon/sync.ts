@@ -5,6 +5,7 @@
 // cloudSyncIntervalHours, else the 5h default — see resolveSyncIntervalMs).
 // The proxy reads rules-cache.json via getConfig() to enforce cloud-defined rules
 // even when offline.
+import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import { readAppsFile } from '../apps/state.js';
 import fs from 'fs';
 import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
@@ -191,6 +192,8 @@ export interface ManagedConfigCache {
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
   costBudget?: { sessionUSD?: number; dayUSD?: number };
+  /** The owner's monthly budget status (node9Firewall#427). */
+  spendBudget?: SpendBudgetStatus;
   skillPinning?: { enabled: boolean; mode: string; roots: string[] };
   untrustedContent?: {
     enabled?: boolean;
@@ -253,6 +256,7 @@ export interface CloudPolicyBody {
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
     costBudget?: { sessionUSD?: unknown; dayUSD?: unknown };
+    spendBudget?: unknown;
     skillPinning?: { enabled?: unknown; mode?: unknown; roots?: unknown };
     untrustedContent?: {
       enabled?: unknown;
@@ -794,6 +798,9 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     if (d !== undefined) budget.dayUSD = d;
     if (Object.keys(budget).length > 0) out.costBudget = budget;
   }
+  // Usage & budgets (node9Firewall#427): the owner's status, server-computed.
+  const spend = sanitizeSpendBudget(mc.spendBudget);
+  if (spend) out.spendBudget = spend;
   if (mc.skillPinning && typeof mc.skillPinning === 'object') {
     const sk = mc.skillPinning;
     out.skillPinning = {
@@ -923,6 +930,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.injectionScan !== undefined ||
     out.loopDetection !== undefined ||
     out.costBudget !== undefined ||
+    out.spendBudget !== undefined ||
     out.skillPinning !== undefined ||
     out.untrustedContent !== undefined ||
     out.packageCheck !== undefined ||

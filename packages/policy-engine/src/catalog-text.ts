@@ -331,7 +331,14 @@ export const CHECK_TEXT: Readonly<Record<string, CheckText>> = {
       'The session, or the whole day, has spent more than the ceiling you set, and the agent keeps going.',
     example: 'A session at $12 of a $10 budget running one more search',
     advice:
-      'Set a ceiling (sessionUSD or dayUSD) and Review or Block. The figure is the one cost sync reads, up to ten minutes behind.',
+      'Set a ceiling per session or per day and choose Log or Block. It counts API value on every plan, so it also catches a runaway agent on a flat plan. The figure is the one cost sync reads, up to ten minutes behind.',
+  },
+  'behavior.spend-budget': {
+    plain:
+      "The person's monthly budget for usage beyond plans is used up, and an agent no plan covers keeps going.",
+    example: 'A Codex session paid by API key after $150 of a $150 monthly budget',
+    advice:
+      'Set budgets on Usage & budgets. Log records the calls past a budget; Block stops them until an owner raises it. Agents a plan covers keep working.',
   },
   'behavior.prompt-injection': {
     plain:
