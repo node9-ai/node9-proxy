@@ -311,18 +311,11 @@ describe('ignored tools fast-path', () => {
       tmpHome
     );
 
-    expect(r.status).not.toBe(0);
-    // Codex output schema: decision="block", reason, hookEventName.
-    // No `permissionDecision` field (that's Claude-only per output schemas).
-    const body = JSON.parse(r.stdout) as {
-      decision: string;
-      reason: string;
-      hookSpecificOutput: { hookEventName: string; permissionDecision?: string };
-    };
-    expect(body.decision).toBe('block');
-    expect(body.reason).toMatch(/DLP|credential|secret|access key/i);
-    expect(body.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
-    expect(body.hookSpecificOutput.permissionDecision).toBeUndefined();
+    // Codex reads a block on exit 2 from stderr only and ignores stdout
+    // (node9Firewall#473; exact contract in codex-block-output.integration.test.ts).
+    expect(r.status).toBe(2);
+    expect(r.stdout).toBe('');
+    expect(r.stderr).toMatch(/DLP|credential|secret|access key/i);
 
     // No secret value in any output stream.
     expect(r.stdout).not.toContain(fakeAwsKey);

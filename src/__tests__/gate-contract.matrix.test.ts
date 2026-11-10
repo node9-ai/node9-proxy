@@ -162,17 +162,25 @@ describe.each(MATRIX)('gate contract: $fixture', ({ fixture, agent, toBlocked })
     toBlocked(payload);
     const r = runGate(payload);
 
-    // Claude / Gemini / Codex share the live-verified block contract:
-    // stdout JSON {decision:'block', hookSpecificOutput.permissionDecision:'deny'}
-    // + exit 2 (see sendBlock in check.ts — Antigravity/Copilot differ, but we
-    // have no real captures for those yet; see todos below).
     expect(r.status, `expected a BLOCK exit.\nstdout: ${r.stdout}\nstderr: ${r.stderr}`).toBe(2);
-    const body = JSON.parse(r.stdout) as {
-      decision: string;
-      hookSpecificOutput: { permissionDecision?: string };
-    };
-    expect(body.decision).toBe('block');
-    expect(body.hookSpecificOutput.permissionDecision).toBe('deny');
+    if (agent === 'Codex') {
+      // Codex reads a block on exit 2 from stderr only and ignores stdout; an
+      // empty stderr makes it mark the hook failed and run the tool
+      // (node9Firewall#473, openai/codex rust-v0.154.0 pre_tool_use.rs).
+      expect(r.stdout).toBe('');
+      expect(r.stderr.trim()).not.toBe('');
+    } else {
+      // Claude / Gemini: stdout JSON {decision:'block',
+      // hookSpecificOutput.permissionDecision:'deny'} + exit 2 (see sendBlock
+      // in check.ts; Antigravity/Copilot differ, but we have no real captures
+      // for those yet; see todos below).
+      const body = JSON.parse(r.stdout) as {
+        decision: string;
+        hookSpecificOutput: { permissionDecision?: string };
+      };
+      expect(body.decision).toBe('block');
+      expect(body.hookSpecificOutput.permissionDecision).toBe('deny');
+    }
 
     // Attribution: the audit row must identify the agent from payload shape alone.
     expect(lastAuditRow().agent).toBe(agent);
