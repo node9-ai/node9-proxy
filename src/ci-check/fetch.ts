@@ -7,7 +7,12 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createGunzip } from 'node:zlib';
+import { Writable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { request } from 'undici';
+import { TarReader, TarError } from './tar';
 import type { RepoTree, RepoFile, UnfollowedLink } from './types';
 import { routeOf, type Route, ISSUE_FORM_RE } from './route';
 import {
@@ -765,15 +770,18 @@ function planReads(
 
 /** Root surface files and root workflows are never capped; nested reads are, where each costs
  *  a request. */
+const ROOT_SET = new Set<string>(SURFACE_FILES);
+/** A path the cap never counts: root surface files, root workflows, issue forms, manifests. */
+const isRootRead = (rel: string): boolean =>
+  ROOT_SET.has(rel) ||
+  ROOT_WORKFLOW_RE.test(rel) ||
+  ISSUE_FORM_RE.test(rel) ||
+  rel === 'package.json' ||
+  rel === 'pyproject.toml';
+
 function capNested(reads: PlannedRead[], cap: number | undefined, notes: string[]): PlannedRead[] {
   if (cap === undefined) return reads;
-  const rootSet = new Set<string>(SURFACE_FILES);
-  const isRoot = (r: PlannedRead) =>
-    rootSet.has(r.rel) ||
-    ROOT_WORKFLOW_RE.test(r.rel) ||
-    ISSUE_FORM_RE.test(r.rel) ||
-    r.rel === 'package.json' ||
-    r.rel === 'pyproject.toml';
+  const isRoot = (r: PlannedRead) => isRootRead(r.rel);
   const nested = reads.filter((r) => !isRoot(r));
   if (nested.length < cap) return reads;
   const keep = new Set(nested.slice(0, cap));
@@ -1173,9 +1181,38 @@ class ApiSession {
     private readonly notes: string[]
   ) {}
 
+  /** Blobs read from the repository archive, each already proven by its git hash. */
+  private archive = new Map<string, string>();
+  /** Distinct archive blobs a read actually used. */
+  readonly archiveUsed = new Set<string>();
+
+  /** With the archive in use: how many files it lacked may still be read one by one. The
+   *  archive lifts the 200-file cap only for files it proves; a repository whose archive
+   *  omits its files (export-ignore) must not turn into a thousand API reads. */
+  private fallbackLeft: number | null = null;
+  /** Files the archive lacked that were not read because the fallback ran out. */
+  archiveMissed = 0;
+
+  useArchive(blobs: Map<string, string>, fallbackLimit: number): void {
+    this.archive = blobs;
+    this.fallbackLeft = fallbackLimit;
+  }
+
   blob(sha: string, size: number): Promise<BlobResult> {
+    const text = this.archive.get(sha);
+    if (text !== undefined) {
+      this.archiveUsed.add(sha);
+      return Promise.resolve({ text });
+    }
     const hit = this.cache.get(sha);
     if (hit) return hit;
+    if (this.fallbackLeft !== null) {
+      if (this.fallbackLeft <= 0) {
+        this.archiveMissed++;
+        return Promise.resolve({ error: 'budget' });
+      }
+      this.fallbackLeft--;
+    }
     if (this.requests >= API_BUDGET.requests || this.bytes + size > API_BUDGET.bytes) {
       this.budgetHit = true;
       return Promise.resolve({ error: 'budget' });
@@ -1190,6 +1227,10 @@ class ApiSession {
   /** The notes that make a partial API read visible. */
   closingNotes(): string[] {
     const out: string[] = [];
+    if (this.archiveMissed)
+      out.push(
+        `${this.archiveMissed} file(s) missing from the repository archive were not read (at most ${API_CAPS.files} are read one by one): results ${INCOMPLETE}.`
+      );
     if (this.failed.length)
       out.push(
         `${this.failed.length} file(s) could not be fetched from GitHub (e.g. ${this.failed.slice(0, 3).join(', ')}): results ${INCOMPLETE}.`
@@ -1228,6 +1269,183 @@ async function fetchBlob(
   return {
     text: b.encoding === 'base64' ? Buffer.from(b.content, 'base64').toString('utf8') : b.content,
   };
+}
+
+// ── the repository archive (design: scan-big-repos-tarball-design.md §3) ───────────────────
+
+/** A repository with this many nested surface files is read from its archive (one request)
+ *  instead of file by file, which would stop at API_CAPS. */
+export const ARCHIVE_LIMITS = {
+  compressedBytes: 300 * 1024 * 1024,
+  decompressedBytes: 1024 * 1024 * 1024,
+  /** Bytes kept in memory: above the largest real surface measured (48.7 MB of workflows). */
+  keptBytes: 128 * 1024 * 1024,
+  ms: 90_000,
+};
+const ARCHIVE_HOST = 'codeload.github.com';
+
+/** Git's object id of a blob: what the Trees API lists as `sha`. Equal ids = equal bytes. */
+export function gitBlobSha(data: Buffer): string {
+  return createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
+}
+
+/** Why an archive was dropped, when a retry could succeed: the scan then carries the same
+ *  note a rate limit or a network failure gives, so the hosted refresh scans it again. */
+type Transient = 'rate' | 'network';
+type ArchiveResult = { blobs: Map<string, string> } | { error: string; transient?: Transient };
+
+/** A size limit of the archive reader: not transient, the same archive hits it again. */
+class ArchiveLimit extends Error {}
+
+/** Stream the default branch's archive and keep the bytes of `wanted` paths (path -> listed
+ *  sha) whose git hash matches the listing. Nothing is written to disk and no path is used as
+ *  a filesystem path. Never throws: any failure or limit drops the whole archive. */
+async function loadArchive(
+  owner: string,
+  repo: string,
+  wanted: Map<string, string>,
+  limits = ARCHIVE_LIMITS
+): Promise<ArchiveResult> {
+  const signal = AbortSignal.timeout(limits.ms);
+  try {
+    // The API answers with a redirect to codeload; the token is sent to api.github.com only.
+    const first = await request(`https://api.github.com/repos/${owner}/${repo}/tarball`, {
+      headers: ghHeaders(),
+      headersTimeout: 10_000,
+      bodyTimeout: 10_000,
+      signal,
+    });
+    await first.body.dump();
+    if (first.statusCode === 403 || first.statusCode === 429)
+      return { error: 'rate limit', transient: 'rate' };
+    if (first.statusCode >= 500) return { error: `HTTP ${first.statusCode}`, transient: 'network' };
+    const location = first.headers.location;
+    if (first.statusCode < 300 || first.statusCode >= 400 || typeof location !== 'string')
+      return { error: `HTTP ${first.statusCode}` };
+    let target: URL;
+    try {
+      target = new URL(location);
+    } catch {
+      return { error: 'malformed redirect' };
+    }
+    if (target.protocol !== 'https:' || target.hostname !== ARCHIVE_HOST)
+      return { error: `redirect to ${target.hostname} refused` };
+
+    const res = await request(target, {
+      headers: { 'User-Agent': 'node9-scan-repo' },
+      headersTimeout: 10_000,
+      bodyTimeout: 30_000,
+      signal,
+    });
+    if (res.statusCode !== 200) {
+      await res.body.dump();
+      return {
+        error: `archive HTTP ${res.statusCode}`,
+        ...(res.statusCode >= 500 || res.statusCode === 429
+          ? { transient: 'network' as const }
+          : {}),
+      };
+    }
+    const declared = Number(res.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limits.compressedBytes) {
+      res.body.destroy();
+      return { error: 'archive over the size limit' };
+    }
+
+    const blobs = new Map<string, string>();
+    let kept = 0;
+    let top: string | null = null;
+    const relOf = (p: string): string | null => {
+      const cut = p.indexOf('/');
+      if (cut <= 0) return null;
+      const head = p.slice(0, cut);
+      top ??= head;
+      if (head !== top) return null;
+      const rel = p.slice(cut + 1);
+      return wanted.has(rel) ? rel : null;
+    };
+    const tar = new TarReader(
+      (e) => {
+        const rel = relOf(e.path);
+        if (rel === null || e.size > RAW_LIMIT) return false;
+        kept += e.size;
+        if (kept > limits.keptBytes)
+          throw new ArchiveLimit('archive keeps more than the memory limit');
+        return true;
+      },
+      (e, data) => {
+        const rel = relOf(e.path);
+        if (rel === null) return;
+        const bytes = e.kind === 'link' ? Buffer.from(e.linkname, 'utf8') : data;
+        const sha = gitBlobSha(bytes);
+        if (wanted.get(rel) === sha) blobs.set(sha, bytes.toString('utf8'));
+      }
+    );
+    let compressed = 0;
+    let decompressed = 0;
+    await pipeline(
+      res.body,
+      new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          compressed += chunk.length;
+          if (compressed > limits.compressedBytes)
+            cb(new ArchiveLimit('archive over the size limit'));
+          else cb(null, chunk);
+        },
+      }),
+      createGunzip(),
+      new Writable({
+        write(chunk: Buffer, _enc, cb) {
+          decompressed += chunk.length;
+          if (decompressed > limits.decompressedBytes)
+            return cb(new ArchiveLimit('archive unpacks past the size limit'));
+          try {
+            tar.push(chunk);
+            cb();
+          } catch (e) {
+            cb(e as Error);
+          }
+        },
+        final(cb) {
+          try {
+            tar.end();
+            cb();
+          } catch (e) {
+            cb(e as Error);
+          }
+        },
+      }),
+      { signal }
+    );
+    return { blobs };
+  } catch (e) {
+    if (signal.aborted)
+      return { error: 'archive took longer than the time limit', transient: 'network' };
+    const message = (e as Error)?.message || 'archive could not be read';
+    // A limit, a malformed tar or a corrupt gzip stream is the archive itself: the same bytes
+    // fail the same way. Anything else (a reset, a socket timeout) may pass on a retry.
+    const code = (e as { code?: unknown })?.code;
+    const corrupt = typeof code === 'string' && code.startsWith('Z_');
+    if (e instanceof ArchiveLimit || e instanceof TarError || corrupt) return { error: message };
+    return { error: message, transient: 'network' };
+  }
+}
+
+/** D1: only a repository the cap would cut is read from its archive. The decision counts the
+ *  nested surface candidates in the listing, before any link is resolved. */
+function archiveWanted(entries: TreeEntry[], truncated: boolean): Map<string, string> | null {
+  if (process.env.NODE9_SCAN_TARBALL === '0') return null;
+  const blobs = entries.filter((e) => e.type === 'blob');
+  const candidates = planSurface(
+    blobs.map((e) => e.path).filter((p) => !isUnwalked(p)),
+    [],
+    truncated
+  );
+  if (candidates.filter((p) => !isRootRead(p)).length < API_CAPS.files) return null;
+  const want = new Set(candidates);
+  const wanted = new Map<string, string>();
+  for (const e of blobs) if (want.has(e.path) || e.mode === '120000') wanted.set(e.path, e.sha);
+  return wanted;
 }
 
 const FETCH_CONCURRENCY = 8;
@@ -1275,11 +1493,34 @@ export async function fetchGitHubTree(
       [...entries].map(([p, e]) => [p, e.type === 'blob' ? kindOfMode(e.mode) : 'dir'] as const)
     );
     const session = new ApiSession(owner, repo, notes);
+    // A repository the cap would cut is read from its archive; every blob it gives is proven
+    // by its git hash, and whatever it lacks is still read file by file below.
+    let nestedCap: number | undefined = API_CAPS.files;
+    let archiveNote: string | null = null;
+    const wanted = archiveWanted(listed.entries, listed.truncated);
+    if (wanted) {
+      onProgress?.({ phase: 'reading the repository archive', done: 0, total: 1 });
+      session.requests++;
+      const archive = await loadArchive(owner, repo, wanted);
+      if ('blobs' in archive) {
+        session.useArchive(archive.blobs, API_CAPS.files);
+        nestedCap = undefined;
+      } else {
+        archiveNote = `the repository archive could not be used (${archive.error}); files were read one by one.`;
+        const transientNote =
+          archive.transient === 'rate'
+            ? RATE_LIMIT_NOTE
+            : archive.transient === 'network'
+              ? NETWORK_NOTE
+              : null;
+        if (transientNote && !notes.includes(transientNote)) notes.push(transientNote);
+      }
+    }
     // Link texts are fetched as the resolver asks for them, a round per link depth.
     const linkText = new Map<string, string | null>();
     const listing = entriesListing(kinds, (p) => (linkText.has(p) ? linkText.get(p)! : undefined));
     const R = new Resolver(listing);
-    const opts = { nestedCap: API_CAPS.files, truncated: listed.truncated };
+    const opts = { nestedCap, truncated: listed.truncated };
     let plan = planReads(listing, R, opts);
     while ('need' in plan) {
       await pooled(plan.need, FETCH_CONCURRENCY, async (p) => {
@@ -1320,6 +1561,11 @@ export async function fetchGitHubTree(
         return { path: rel, content, route };
       }
     );
+    if (archiveNote) notes.push(archiveNote);
+    else if (wanted)
+      notes.push(
+        `read ${session.archiveUsed.size} file(s) from the repository archive, each checked against GitHub's tree by its git hash.`
+      );
     notes.push(...session.closingNotes());
     return {
       source: `${owner}/${repo}`,
