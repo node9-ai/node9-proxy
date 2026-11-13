@@ -155,6 +155,8 @@ export function classifyDecision(a: unknown, b?: unknown): DecisionView {
     // The PostToolUse hook records that a tool RAN. It isn't a verdict — the
     // gate already decided, earlier, in its own row.
     if (src === 'post-hook') return { outcome: 'allow', label: 'Ran', raw };
+    // node9 blocked the call and the agent ran it anyway (blocked-calls.ts).
+    if (src === 'ran-after-block') return { outcome: 'allow', label: 'Not enforced', raw };
     if (HUMAN_SOURCES.has(src)) {
       return { outcome: 'allow', label: 'Approved', raw };
     }

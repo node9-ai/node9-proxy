@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyDecision } from '../audit/decision';
+import { classifyDecision, decisionTag } from '../audit/decision';
 
 /**
  * Fixtures are the EXACT (decision, checkedBy) pairs present in a real 101k-row
@@ -136,6 +136,15 @@ describe('robustness', () => {
  * of one real log, so a human APPROVING an action rendered "Auto-allowed" and a
  * human REFUSING one rendered "Blocked".
  */
+describe('a blocked call the agent ran anyway', () => {
+  it('reads "Not enforced", never as an ordinary allow', () => {
+    const view = classifyDecision({ decision: 'allow', checkedBy: 'ran-after-block' });
+    expect(view).toMatchObject({ outcome: 'allow', label: 'Not enforced' });
+    // Fits the fixed-width tag of the CLI and MCP readers.
+    expect(decisionTag(view)).toHaveLength(14);
+  });
+});
+
 describe('row form — attribution comes from checkedBy OR source', () => {
   // Shapes taken from the live log, with their real row counts.
   const LIVE_ROWS: Array<[Record<string, unknown>, string, string]> = [

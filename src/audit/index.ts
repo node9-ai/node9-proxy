@@ -167,6 +167,22 @@ export function filePathFromArgs(args: unknown): string | undefined {
   return undefined;
 }
 
+/** What the last `deny` row this process wrote recorded: the check, the rule
+ *  and whether its arguments are sensitive (a credential or personal data
+ *  matched, so no later row may carry them). The before-run hook reads it when
+ *  it notes a blocked call (blocked-calls.ts). */
+export interface LastDenyAudit {
+  eid: string;
+  checkedBy: string;
+  checkId?: string;
+  ruleName?: string;
+  sensitive: boolean;
+}
+let lastDeny: LastDenyAudit | null = null;
+export function lastDenyAudit(): LastDenyAudit | null {
+  return lastDeny;
+}
+
 export function appendLocalAudit(
   toolName: string,
   args: unknown,
@@ -348,6 +364,15 @@ export function appendLocalAudit(
   // eid is captured here (not generated inline) so the caller can use it as the
   // SOURCE of a taint edge — see notifyTaint(path, source, eid) at the DLP block.
   const eid = generateEventId();
+  if (decision === 'deny') {
+    lastDeny = {
+      eid,
+      checkedBy,
+      ...(checkId && { checkId }),
+      ...(meta?.ruleName && { ruleName: meta.ruleName }),
+      sensitive: isDlpRow || /taint|canary/i.test(checkedBy),
+    };
+  }
   appendToLog(LOCAL_AUDIT_LOG, {
     // eid first: the outbox shipper dedups on it, and a fixed leading field
     // makes the JSONL easy to eyeball.

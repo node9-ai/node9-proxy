@@ -33,13 +33,14 @@ import {
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
-import { appendLocalAudit } from '../../audit';
+import { appendLocalAudit, lastDenyAudit } from '../../audit';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
   reviewCorrelationKey,
   recordPendingReview,
   discardPendingReview,
 } from '../../review-pending';
+import { blockedCallKey, noteBlockedCall } from '../../blocked-calls';
 import {
   extractToolName,
   extractToolInput,
@@ -718,6 +719,29 @@ export function registerCheckCommand(program: Command): void {
               redirect?: string;
             }
           ) => {
+            // Proof that the block held (blocked-calls.ts): note this call, so
+            // its after-run hook, should one ever fire, records that the agent
+            // ran it anyway. Before any output; never able to change the block.
+            try {
+              const blockedKey = blockedCallKey(payload as Record<string, unknown>, agent);
+              if (blockedKey) {
+                const stop = lastDenyAudit();
+                const sid = (payload as Record<string, unknown>).session_id;
+                noteBlockedCall({
+                  key: blockedKey,
+                  tool: toolName || 'unknown',
+                  agent,
+                  ...(typeof sid === 'string' && sid && { sessionId: sid }),
+                  ...(stop?.checkId && { checkId: stop.checkId }),
+                  ...(stop?.ruleName && { ruleName: stop.ruleName }),
+                  ...(stop?.sensitive && { sensitive: true }),
+                  ts: Date.now(),
+                });
+              }
+            } catch {
+              /* the proof is best-effort; the block is not */
+            }
+
             // 1. Determine the context (User vs Policy). I6: the fallback
             // names where the verdict came from — on a workspace-governed
             // machine that is the workspace policy, not a local one.
