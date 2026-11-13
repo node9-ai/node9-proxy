@@ -7,18 +7,20 @@
 // On 2026-11-10 this is what 34 of 40 Codex blocks on one machine did
 // (node9Firewall#473): the decision was right and its delivery was ignored.
 //
-// Every operation is best-effort and MUST NOT throw into a hook path: losing
-// a marker loses the proof, never the block.
+// One file per call under ~/.node9/blocked-calls/, named by a hash of the
+// call's key: hooks of parallel tool calls never rewrite each other's marker,
+// and the after-run hook claims a marker by removing its file, so two hooks
+// for one call write one row. Every operation is best-effort and MUST NOT
+// throw into a hook path: losing a marker loses the proof, never the block.
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 // Resolved at call time so HOME and the test seam take effect in a hook
-// subprocess. Production always uses ~/.node9/blocked-calls.json.
-function storePath(): string {
-  return (
-    process.env.NODE9_BLOCKED_CALLS_STORE || path.join(os.homedir(), '.node9', 'blocked-calls.json')
-  );
+// subprocess. Production always uses ~/.node9/blocked-calls.
+function storeDir(): string {
+  return process.env.NODE9_BLOCKED_CALLS_DIR || path.join(os.homedir(), '.node9', 'blocked-calls');
 }
 
 /** A blocked call that runs, runs at once; a day covers the longest tool run
@@ -43,21 +45,21 @@ export interface BlockedCall {
   /** The catalog check and the rule behind the block, for the audit row. */
   checkId?: string;
   ruleName?: string;
-  /** The block matched a credential or personal data in the arguments: the
-   *  row written for a run of this call must not carry them. */
-  sensitive?: boolean;
+  /** The block's own row is a test call's and stays on the machine; so does
+   *  the row written for a run of this call. */
+  testRun?: boolean;
   ts: number;
 }
 
-interface Store {
-  entries: BlockedCall[];
-}
-
-/** The per-call id both hook payloads of one call carry, as a store key. */
+/**
+ * The per-call id both hook payloads of one call carry, within its session.
+ * The session is part of the key: a model provider that numbers calls from
+ * zero would otherwise match a block in one session to a call in another.
+ */
 function callKey(payload: Record<string, unknown>): string | null {
-  return typeof payload.tool_use_id === 'string' && payload.tool_use_id
-    ? `tuid:${payload.tool_use_id}`
-    : null;
+  if (typeof payload.tool_use_id !== 'string' || !payload.tool_use_id) return null;
+  const session = typeof payload.session_id === 'string' ? payload.session_id : '';
+  return `tuid:${session}|${payload.tool_use_id}`;
 }
 
 /**
@@ -73,59 +75,61 @@ export function blockedCallKey(
   return callKey(payload);
 }
 
-function read(): Store {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(storePath(), 'utf-8')) as Partial<Store> | null;
-    if (parsed && Array.isArray(parsed.entries)) {
-      return {
-        entries: parsed.entries.filter(
-          (e) => !!e && typeof e.key === 'string' && typeof e.ts === 'number'
-        ),
-      };
-    }
-  } catch {
-    /* missing or corrupt: empty */
-  }
-  return { entries: [] };
+/** A hash, so nothing an agent wrote into its call id reaches a file name. */
+function fileOf(key: string): string {
+  return path.join(storeDir(), `${createHash('sha256').update(key).digest('hex')}.json`);
 }
 
-function write(store: Store): void {
+/** Removes expired markers and, past the cap, the oldest. Run on a block
+ *  only: a rare event, and the after-run hook never lists the directory. */
+function sweep(now: number): void {
   try {
-    const p = storePath();
-    if (store.entries.length === 0) {
-      fs.rmSync(p, { force: true });
-      return;
+    const dir = storeDir();
+    const live: Array<{ file: string; mtime: number }> = [];
+    for (const name of fs.readdirSync(dir)) {
+      const file = path.join(dir, name);
+      let mtime: number;
+      try {
+        mtime = fs.statSync(file).mtimeMs;
+      } catch {
+        continue;
+      }
+      // A marker past its day, or a temporary file a crashed hook left.
+      if (now - mtime >= BLOCKED_CALL_TTL_MS || (!name.endsWith('.json') && now - mtime > 60_000))
+        fs.rmSync(file, { force: true });
+      else if (name.endsWith('.json')) live.push({ file, mtime });
     }
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    // tmp + rename: a concurrent hook never reads a half-written file.
-    const tmp = `${p}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(store), { mode: 0o600 });
-    fs.renameSync(tmp, p);
+    live.sort((a, b) => a.mtime - b.mtime);
+    for (const old of live.slice(0, Math.max(0, live.length - MAX_ENTRIES)))
+      fs.rmSync(old.file, { force: true });
   } catch {
     /* best-effort */
   }
 }
 
-function prune(entries: BlockedCall[], now: number): BlockedCall[] {
-  const fresh = entries.filter((e) => now - e.ts < BLOCKED_CALL_TTL_MS);
-  return fresh.length > MAX_ENTRIES ? fresh.slice(fresh.length - MAX_ENTRIES) : fresh;
-}
-
 /** Note that node9 delivered a block for this call. */
 export function noteBlockedCall(entry: BlockedCall): void {
   try {
-    const store = read();
-    write({ entries: prune([...store.entries, entry], entry.ts) });
+    const dir = storeDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = fileOf(entry.key);
+    // tmp + rename: the after-run hook never reads a half-written marker.
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(entry), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    fs.utimesSync(file, entry.ts / 1000, entry.ts / 1000);
+    sweep(entry.ts);
   } catch {
     /* never affect the block */
   }
 }
 
 /**
- * The after-run event of a call: its block marker, removed, or null when the
- * call was never blocked (the ordinary case). No agent check here: a marker
- * exists only for an agent `blockedCallKey` accepted. With no store on disk
- * this is one failed stat and no write.
+ * The after-run event of a call: its block marker, claimed, or null when the
+ * call was never blocked (the ordinary case, one failed stat). Claiming is
+ * the removal of the file: of two after-run hooks for one call, one gets the
+ * marker. No agent check here: a marker exists only for an agent
+ * `blockedCallKey` accepted.
  */
 export function resolveBlockedCall(
   payload: Record<string, unknown>,
@@ -133,13 +137,23 @@ export function resolveBlockedCall(
 ): BlockedCall | null {
   try {
     const key = callKey(payload);
-    if (!key || !fs.existsSync(storePath())) return null;
-    const store = read();
-    const live = prune(store.entries, now);
-    const match = live.find((e) => e.key === key) ?? null;
-    const kept = match ? live.filter((e) => e.key !== key) : live;
-    if (kept.length !== store.entries.length) write({ entries: kept });
-    return match;
+    if (!key) return null;
+    const file = fileOf(key);
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<BlockedCall> | null;
+    fs.unlinkSync(file); // throws when another hook claimed it first
+    if (!parsed || parsed.key !== key || typeof parsed.ts !== 'number') return null;
+    if (now - parsed.ts >= BLOCKED_CALL_TTL_MS) return null;
+    return {
+      key,
+      tool: typeof parsed.tool === 'string' ? parsed.tool : 'unknown',
+      ...(typeof parsed.agent === 'string' && { agent: parsed.agent }),
+      ...(typeof parsed.sessionId === 'string' && { sessionId: parsed.sessionId }),
+      ...(typeof parsed.checkId === 'string' && { checkId: parsed.checkId }),
+      ...(typeof parsed.ruleName === 'string' && { ruleName: parsed.ruleName }),
+      ...(parsed.testRun === true && { testRun: true }),
+      ts: parsed.ts,
+    };
   } catch {
     return null;
   }

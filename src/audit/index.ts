@@ -31,7 +31,7 @@ export function generateEventId(): string {
 const TEST_COMMAND_RE =
   /(?:^|\s)(npm\s+(?:run\s+)?test|npx\s+(?:vitest|jest|mocha)|yarn\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|vitest|jest|mocha|pytest|py\.test|cargo\s+test|go\s+test|bundle\s+exec\s+rspec|rspec|phpunit|dotnet\s+test)\b/i;
 
-function isTestCall(toolName: string, args: unknown): boolean {
+export function isTestCall(toolName: string, args: unknown): boolean {
   if (toolName !== 'Bash' && toolName !== 'bash') return false;
   const cmd = (args as Record<string, unknown> | null)?.command;
   return typeof cmd === 'string' && TEST_COMMAND_RE.test(cmd);
@@ -167,16 +167,14 @@ export function filePathFromArgs(args: unknown): string | undefined {
   return undefined;
 }
 
-/** What the last `deny` row this process wrote recorded: the check, the rule
- *  and whether its arguments are sensitive (a credential or personal data
- *  matched, so no later row may carry them). The before-run hook reads it when
- *  it notes a blocked call (blocked-calls.ts). */
+/** What the last `deny` row this process wrote recorded: its check and rule.
+ *  The before-run hook reads it when it notes a blocked call
+ *  (blocked-calls.ts). Null when the block wrote no stop row here. */
 export interface LastDenyAudit {
   eid: string;
   checkedBy: string;
   checkId?: string;
   ruleName?: string;
-  sensitive: boolean;
 }
 let lastDeny: LastDenyAudit | null = null;
 export function lastDenyAudit(): LastDenyAudit | null {
@@ -264,6 +262,9 @@ export function appendLocalAudit(
     decidedBy?: string;
     channel?: string;
     cardId?: string;
+    /** The row belongs to a test call although its own arguments do not say
+     *  so: the `ran-after-block` row carries none, and follows its stop row. */
+    testRun?: boolean;
   },
   auditHashArgsEnabled?: boolean
 ): string {
@@ -293,7 +294,9 @@ export function appendLocalAudit(
     ? { argsHash: hashArgs(args), ...(preview ? { argsPreview: preview } : {}) }
     : { args: args ? redactAuditArgs(args) : {} };
   const testRun =
-    isTestCall(toolName, args) || process.env.NODE9_TESTING === '1' ? { testRun: true } : {};
+    isTestCall(toolName, args) || meta?.testRun === true || process.env.NODE9_TESTING === '1'
+      ? { testRun: true }
+      : {};
   const ruleNameField = meta?.ruleName ? { ruleName: meta.ruleName } : {};
   // The catalog check this row counts against. Lets the dashboard show, per
   // check, how often it fired and how often a human approved, without a
@@ -370,7 +373,6 @@ export function appendLocalAudit(
       checkedBy,
       ...(checkId && { checkId }),
       ...(meta?.ruleName && { ruleName: meta.ruleName }),
-      sensitive: isDlpRow || /taint|canary/i.test(checkedBy),
     };
   }
   appendToLog(LOCAL_AUDIT_LOG, {

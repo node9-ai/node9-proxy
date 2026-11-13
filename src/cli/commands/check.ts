@@ -33,7 +33,7 @@ import {
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
-import { appendLocalAudit, lastDenyAudit } from '../../audit';
+import { appendLocalAudit, isTestCall, lastDenyAudit } from '../../audit';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
   reviewCorrelationKey,
@@ -717,24 +717,30 @@ export function registerCheckCommand(program: Command): void {
               decidedBy?: string;
               /** A person's instruction to the agent instead of the call. */
               redirect?: string;
+              /** The gate's own naming of the block, when it wrote no stop row. */
+              checkId?: string;
+              ruleHit?: string;
             }
           ) => {
             // Proof that the block held (blocked-calls.ts): note this call, so
             // its after-run hook, should one ever fire, records that the agent
             // ran it anyway. Before any output; never able to change the block.
+            // The marker holds the block's check and rule, never an argument.
             try {
               const blockedKey = blockedCallKey(payload as Record<string, unknown>, agent);
               if (blockedKey) {
                 const stop = lastDenyAudit();
                 const sid = (payload as Record<string, unknown>).session_id;
+                const checkId = stop?.checkId ?? result?.checkId;
+                const ruleName = stop?.ruleName ?? result?.ruleHit;
                 noteBlockedCall({
                   key: blockedKey,
                   tool: toolName || 'unknown',
                   agent,
                   ...(typeof sid === 'string' && sid && { sessionId: sid }),
-                  ...(stop?.checkId && { checkId: stop.checkId }),
-                  ...(stop?.ruleName && { ruleName: stop.ruleName }),
-                  ...(stop?.sensitive && { sensitive: true }),
+                  ...(checkId && { checkId }),
+                  ...(ruleName && { ruleName }),
+                  ...(isTestCall(toolName, toolInput) && { testRun: true }),
                   ts: Date.now(),
                 });
               }
