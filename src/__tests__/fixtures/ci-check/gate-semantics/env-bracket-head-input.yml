@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.REVIEW_HEAD_SHA }}
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: Review the checked-out change.

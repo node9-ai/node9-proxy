@@ -1,0 +1,18 @@
+# The Codex CLI in a run step has no actor check of its own.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TITLE: ${{ github.event.issue.title }}
+        run: |
+          codex exec --dangerously-bypass-approvals-and-sandbox "Triage: ${{ github.event.issue.title }} ${{ github.event.issue.body }}"

@@ -14,7 +14,7 @@ jobs:
       DIFF_FILE: .git/review-policy.diff
     steps:
       - uses: actions/checkout@v4
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           sandbox: read-only

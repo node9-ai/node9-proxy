@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: agent
-        uses: openai/codex-action@v1
+        uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: Classify this issue. ${{ github.event.issue.title }} ${{ github.event.issue.body }}

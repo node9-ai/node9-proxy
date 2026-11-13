@@ -1,0 +1,29 @@
+# The same script step, but the agent step does not read its output: no gate.
+name: Helper
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - id: guard
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const who = context.payload.comment.user.login;
+            const res = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo,
+              username: who,
+            });
+            core.setOutput("denied", ["admin", "write"].includes(res.data.permission) ? "false" : "true");
+      - uses: actions/checkout@v4
+      - name: Agent
+        uses: example/helper-claude@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Answer: ${{ github.event.comment.body }}"
+          claude_args: '--allowedTools "Bash"'

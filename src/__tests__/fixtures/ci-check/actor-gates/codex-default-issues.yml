@@ -1,0 +1,19 @@
+name: Issue bot
+on:
+  issues:
+    types: [opened]
+jobs:
+  respond:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: openai/codex-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: danger-full-access
+          prompt-file: .github/prompts/respond.md

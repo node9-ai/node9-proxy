@@ -12,7 +12,7 @@ jobs:
       - run: gh pr checkout ${{ github.event.issue.number }}
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: "Fix the failing tests on this branch."
