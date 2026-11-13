@@ -55,6 +55,11 @@ export interface ForecastRun {
    *  --online-packages`), whose package cases need the lookup to agree with
    *  the hook. */
   onlinePackages?: boolean;
+  /** The call is replayed from the start of its session: nothing was spent,
+   *  so the cost ceiling judges nothing and the cost state is known (the
+   *  benchmark replay, `forecast-cases`). Absent, the gate reads the machine's
+   *  ledger and notes `cost-state` unknown when it has no fresh one. */
+  freshSpend?: boolean;
 }
 
 const als = new AsyncLocalStorage<ForecastRun>();

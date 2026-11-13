@@ -433,6 +433,45 @@ describe('forecast-cases (integration)', () => {
     expect(cache.managedConfig.jailPaths).toEqual([{ path: notes, verdict: 'block' }]);
   });
 
+  it('--policy with a cost ceiling: an attack that passes is counted as passed, not undetermined', () => {
+    // The replay's home has no spend ledger. A case is a session from its
+    // start, so the ceiling judges nothing and the outcome stays known.
+    const policyFile = path.join(home, 'policy.json');
+    fs.writeFileSync(
+      policyFile,
+      JSON.stringify({
+        workspaceId: 'ws-1',
+        etag: '"e1"',
+        policies: [],
+        shields: [],
+        managedConfig: { mode: 'standard', costBudget: { sessionUSD: 5, dayUSD: 20 } },
+        // The check values ride in the body's v2 config, as the server sends them.
+        config: { version: '2', checks: { 'behavior.cost-budget': 'block' } },
+      })
+    );
+    const file = path.join(home, 'ceiling-cases.jsonl');
+    const passes = {
+      id: 'c.passes',
+      owasp: 'ASI02',
+      section: 'headline',
+      setup: 'clean',
+      stage: 'pre',
+      expected: 'block',
+      tool: 'Bash',
+      input: bash('echo hello'),
+    };
+    fs.writeFileSync(file, JSON.stringify(passes) + '\n');
+    const { byId, summary } = run(home, ['--policy', policyFile, file]);
+    expect(byId.get('c.passes')?.decision).toBe('allow');
+    expect(byId.get('c.passes')?.unknown ?? []).not.toContain('cost-state');
+    expect(summary!.byRisk.ASI02.headline).toMatchObject({
+      attacks: 1,
+      stopped: 0,
+      passed: 1,
+      undetermined: 0,
+    });
+  });
+
   it('a shell read of outside content in a prior call exposes the session, as the hook records it', () => {
     // Fidelity gate finding (fw#320 2b): `gh issue view` is a source through
     // the shell classifier, not the tool role; the forecast missed it.

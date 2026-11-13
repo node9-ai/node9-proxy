@@ -382,6 +382,7 @@ export async function runCase(
       session: judge.session(sessionId),
       at: Date.parse(at),
       ...(online && { onlinePackages: true }),
+      freshSpend: true,
     });
   }
   const payload = (materialize(rec.input, env) ?? {}) as HookPayload;
@@ -391,6 +392,9 @@ export async function runCase(
     session: judge.session(sessionId),
     at: Date.parse(at),
     ...(online && { onlinePackages: true }),
+    // A case is a session from its start: no spend, so a cost ceiling in the
+    // replayed policy leaves the outcome known.
+    freshSpend: true,
   });
   return {
     ...base,
