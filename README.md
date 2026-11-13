@@ -17,9 +17,120 @@
 
 Works with **Claude Code · Codex CLI · Antigravity (agy) · GitHub Copilot CLI · Gemini CLI · Cursor · Windsurf · VSCode · Claude Desktop · Opencode · Pi · Hermes Agent · any MCP server**.
 
-## What it looks like
+## Three ways in
 
-A real Claude Code session with node9 installed. Every tool call is checked
+|           |                                                                                            |                                                     |
+| --------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| **See**   | Scan a repository on every pull request, or check this machine. Nothing to install.        | [Scan every pull request](#scan-every-pull-request) |
+| **Guard** | Put node9 in front of every tool call your agents make: allowed, blocked, or held for you. | [Guard your agents](#guard-your-agents)             |
+| **Prove** | One OWASP Agentic Top 10 report across every agent and every machine your team runs.       | [Prove it to your team](#prove-it-to-your-team)     |
+
+## Scan every pull request
+
+This repository is also the GitHub Action
+**[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**.
+It reads the agent configuration committed to a repository (workflows, agent settings, MCP
+servers, instruction files) and reports what a pull request could turn against you. Nothing
+runs, no agent is installed, and it needs no account and no secret: the job token is enough.
+
+Add one file, `.github/workflows/agent-security.yml`:
+
+```yaml
+name: node9 agent-security
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: node9-ai/node9-proxy@v2
+        with:
+          fail-on: high # never | medium | high | critical
+          fail-on-scope: introduced # judge only what this PR added or made worse
+```
+
+Every pull request then gets:
+
+- **A check** that passes or fails at the severity you choose.
+- **One comment** that leads with the worst finding in plain words and how to fix it, updated in place on every push.
+- **Annotations** on the lines that caused them.
+
+### What it looks for
+
+|                                    |                                                                                                                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Workflows a stranger can steer** | a workflow that hands the text of an issue or a pull request to an agent that holds secrets or can run commands, or that runs the agent inside a fork's code |
+| **Agent settings**                 | allow rules that cover credentials or any command, hooks that fetch remote code, local settings committed by mistake                                         |
+| **MCP servers and plugins**        | a server installed at whatever version is newest, a credential written into the config                                                                       |
+| **Secrets in reach**               | secrets an agent in a workflow can read, and the ways it could leak them                                                                                     |
+| **Instruction files and skills**   | hidden characters, text that tells the agent to drop its instructions, to fetch and obey a page, or to send data out                                         |
+
+The comment, on a repository where anyone can open an issue that an agent reads:
+
+> **🛡️ node9 agent-security · 🔴 High: action needed**
+>
+> **Anyone can make this repository's AI agent act with its permissions**
+>
+> A stranger opens an issue with instructions for the agent. The agent follows them with this
+> repository's permissions.
+>
+> **What we saw** in `.github/workflows/triage.yml:13`:
+>
+> - Anyone can start the agent (`allowed_non_write_users: "*"`).
+> - It reads the text of the pull request or issue.
+> - It can run any command (`Bash`).
+>
+> **✅ How to fix:**
+>
+> 1. Let only people with write access start it: remove `allowed_non_write_users: "*"`.
+> 2. Give the agent only the tools the job needs.
+>
+> **Also found:**
+>
+> - 🟡 MCP server `files` installs whatever version is newest, every time (`.mcp.json`)
+
+### Inputs
+
+| Input              | Default  |                                                                                                                                                                                                                                                                       |
+| ------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fail-on`          | `never`  | The severity that fails the check: `never` comments without gating, `medium`, `high` or `critical`.                                                                                                                                                                   |
+| `fail-on-scope`    | `all`    | `introduced` judges only what the pull request added or made worse, so a repository that already has findings can turn the gate on today.                                                                                                                             |
+| `comment`          | `true`   | Post the comment on the pull request.                                                                                                                                                                                                                                 |
+| `annotate`         | `true`   | Annotate the findings on the diff.                                                                                                                                                                                                                                    |
+| `node9-version`    | `latest` | The `node9-ai` version that scans. Pin it for reproducible runs.                                                                                                                                                                                                      |
+| `node9-upload-key` | empty    | Optional. Sends each push scan to your node9 workspace, which keeps the history per repository. Empty sends nothing.                                                                                                                                                  |
+| `telemetry`        | `true`   | An anonymous usage count per run: the scanner version, the operating system, the worst severity, whether the scan finished, and a hash of the repository's numeric id that node9 keeps only inside a count. Never the repository name, a path, a finding or any code. |
+
+Under `pull_request_target` the Action does not scan and says so: there it would read the base
+branch, not the pull request. The full reference is in the
+[repository scanning docs](https://node9.ai/docs/repo-scanning).
+
+### Check a repository or this machine now
+
+No workflow, no install and no account. `scan-repo` sends the same anonymous usage count as the
+Action (no repository name, no code); set `NODE9_NO_TELEMETRY=1` to turn it off.
+
+```bash
+npx node9-ai scan-repo owner/repo   # the same scan as the Action, on any public repository
+npx node9-ai posture                # scores this machine 0-100: what a compromised agent could read, reach and run
+npx node9-ai scan                   # every past agent session on this machine
+```
+
+The hosted scan at **[node9.ai/scan](https://node9.ai/scan)** does the first one in the browser.
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="node9 scan scorecard" />
+</p>
+
+## Guard your agents
+
+node9 sits between an agent and every tool it calls: files, commands, the network and every
+app it reaches. Each call is allowed, blocked, or held for you.
+
+Below, a real Claude Code session with node9 installed. Every tool call is checked
 before it runs. Building a page and editing a button run. A request to the cloud
 metadata address is blocked, and the agent gets the reason and carries on.
 Deleting files waits for your approval, right in the chat.
@@ -28,7 +139,7 @@ Deleting files waits for your approval, right in the chat.
   <img src="https://github.com/user-attachments/assets/be4e7037-3cbb-41d8-9f1a-985067914c1f" width="760" alt="node9 in a Claude Code session: node9 is on, a .env read is blocked, a force push waits for approval" />
 </p>
 
-## Install
+### Install
 
 ```bash
 brew tap node9-ai/node9 && brew install node9   # macOS / Linux
@@ -65,6 +176,12 @@ and approve held actions from a dashboard or Slack. Skip it and node9 works exac
 the same, alone, offline. `node9 logout` disconnects again and local enforcement
 keeps running.
 
+Every release artifact is signed. To check one yourself:
+
+```bash
+gh attestation verify cli.js --repo node9-ai/node9-proxy
+```
+
 ### Use as an MCP server
 
 node9 also runs as an MCP server, so an agent can read its status, posture, audit
@@ -77,6 +194,16 @@ claude mcp add --transport stdio node9 -- npx -y node9-ai mcp-server
 Any MCP client works the same way: the command is `npx -y node9-ai mcp-server`
 over stdio, with no API key. It is listed in the official MCP Registry as
 `io.github.node9-ai/node9`.
+
+## Prove it to your team
+
+Once machines are connected with `node9 login`, the dashboard reads them as one report on the
+**OWASP Top 10 for Agentic Applications**, for every agent and every team. For each of the ten
+risks it shows which devices and repositories are exposed now, what happened, and what your
+policy stopped. Each number opens to the device, the repository or the check behind it.
+
+- **[A sample report](https://node9.ai/owasp-report)**: the report as a team sees it, readable before you install anything
+- **[How to read the report](https://node9.ai/docs/owasp-report)**: what each column counts
 
 ## The problem
 
@@ -118,21 +245,6 @@ it stays blocked. Everything else is allowed and written to the record.
 **What it does not do:** with egress control off, which is the default, a command that hands a
 file straight to the network, such as `curl -d @~/.aws/credentials`, is not treated as a read of
 that file. `node9 egress protect` gates destinations as well, and it covers shell commands only.
-
-## Verify it yourself
-
-Nothing below needs an account or uploads your code. `scan-repo` sends an anonymous usage count
-(no repository name, no code); set `NODE9_NO_TELEMETRY=1` to turn it off.
-
-```bash
-npx node9-ai scan                                        # every past agent session on this machine
-npx node9-ai scan-repo node9-ai/agent-security-demo      # a public repo with a real, hijackable agent workflow
-gh attestation verify cli.js --repo node9-ai/node9-proxy # every release artifact is signed
-```
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/7c5b30f1-1ca1-40b4-bfd5-d6671002e98e" width="720" alt="node9 scan scorecard" />
-</p>
 
 ## What it governs
 
@@ -178,7 +290,6 @@ Background reading, written to stand on its own. Each page says what node9 does 
 ## Related projects
 
 - **[node9-python](https://github.com/node9-ai/node9-python)**: Python SDK
-- **[node9 Agent Security](https://github.com/marketplace/actions/node9-agent-security)**: the GitHub Action, `uses: node9-ai/node9-proxy@v2`, gates every PR with the same engine (it sends the same anonymous usage count; `telemetry: false` turns it off)
 
 ## Enterprise
 
