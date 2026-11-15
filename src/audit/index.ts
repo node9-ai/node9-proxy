@@ -368,11 +368,23 @@ export function appendLocalAudit(
   // SOURCE of a taint edge — see notifyTaint(path, source, eid) at the DLP block.
   const eid = generateEventId();
   if (decision === 'deny') {
+    // A hook process judges one call. When a later deny row carries no check
+    // (the person denying a review: 'local-decision'), the check that raised
+    // the review is still the reason for the stop, so it is kept.
+    const carry = !checkId && lastDeny?.checkId ? lastDeny : null;
     lastDeny = {
       eid,
       checkedBy,
-      ...(checkId && { checkId }),
-      ...(meta?.ruleName && { ruleName: meta.ruleName }),
+      ...(checkId
+        ? { checkId, ...(meta?.ruleName && { ruleName: meta.ruleName }) }
+        : carry
+          ? {
+              checkId: carry.checkId,
+              ...(carry.ruleName && { ruleName: carry.ruleName }),
+            }
+          : meta?.ruleName
+            ? { ruleName: meta.ruleName }
+            : {}),
     };
   }
   appendToLog(LOCAL_AUDIT_LOG, {
