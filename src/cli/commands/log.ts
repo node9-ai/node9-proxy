@@ -14,6 +14,7 @@ import {
 } from '../../audit';
 import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
+import { resolveBlockedCall } from '../../blocked-calls';
 import {
   notifyTaintPropagate,
   notifyTaint,
@@ -457,6 +458,35 @@ export function registerLogCommand(program: Command): void {
                 error: err instanceof Error ? err.message : String(err),
               });
             }
+          }
+
+          // Proof that a block held (blocked-calls.ts): node9 blocked this
+          // call in the before-run hook and its after-run hook fired, so the
+          // agent ran it anyway (node9Firewall#473 was this). One shipped row
+          // says so, under the check of the block it follows. The row never
+          // carries the call's arguments: what its stop row was allowed to
+          // show (a credential match, a protected file, hash mode) is not
+          // known here, and the stop row beside it in the session shows it.
+          try {
+            const ranBlocked = resolveBlockedCall(payload as Record<string, unknown>);
+            if (ranBlocked) {
+              appendLocalAudit(tool, undefined, 'allow', 'ran-after-block', {
+                agent: agent ?? ranBlocked.agent,
+                ...(ranBlocked.ruleName ? { ruleName: ranBlocked.ruleName } : {}),
+                ...(ranBlocked.checkId ? { checkId: ranBlocked.checkId } : {}),
+                ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
+                ...(safeCwd ? { workingDir: safeCwd } : {}),
+                ...(ranBlocked.testRun ? { testRun: true } : {}),
+              });
+            }
+          } catch (err) {
+            appendToLog(HOOK_DEBUG_LOG, {
+              ts: new Date().toISOString(),
+              event: 'ran-after-block-row-fail',
+              tool,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
 
           // ── gap1: response-channel DLP — scan what the tool RETURNED ─────────

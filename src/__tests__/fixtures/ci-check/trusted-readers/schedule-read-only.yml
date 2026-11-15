@@ -10,7 +10,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: List open issues with `gh issue list` and draft a summary.

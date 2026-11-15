@@ -17,7 +17,7 @@ jobs:
           BODY: ${{ github.event.comment.body }}
         run: |
           echo "final_prompt=Do this: $BODY" >> "$GITHUB_OUTPUT"
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: ${{ steps.ctx.outputs.final_prompt }}

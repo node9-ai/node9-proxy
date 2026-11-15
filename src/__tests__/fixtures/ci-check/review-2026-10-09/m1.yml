@@ -5,7 +5,7 @@ jobs:
     needs: b
     runs-on: x
     steps:
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with: just-a-string
       - uses: 12
   b:
@@ -13,7 +13,7 @@ jobs:
     runs-on: x
     steps:
       - run: [1, 2]
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           prompt_file: [a]
           allowed_tools: {x: 1}

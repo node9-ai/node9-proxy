@@ -30,6 +30,8 @@ export interface WorkflowFacts {
   severity: Severity;
   /** `allowed_non_write_users: "*"` with github_token: anyone can start the agent. */
   anyone: boolean;
+  /** The input that opens it: Claude's `allowed_non_write_users` or Codex's `allow-users`. */
+  anyoneInput?: 'allowed_non_write_users' | 'allow-users';
   /** Nothing checks who starts the agent, and untrusted input reaches it. */
   ungated: boolean;
   /** Every agent job is held by an actor check. */
@@ -74,7 +76,8 @@ function strangerAction(triggers: string[]): string {
 export function explainWorkflow(f: WorkflowFacts): Explain {
   const withSecrets = f.secretTriggers.length > 0 || f.pat;
   const saw: string[] = [];
-  if (f.anyone) saw.push('Anyone can start the agent (`allowed_non_write_users: "*"`).');
+  const open = `\`${f.anyoneInput ?? 'allowed_non_write_users'}: "*"\``;
+  if (f.anyone) saw.push(`Anyone can start the agent (${open}).`);
   else if (f.ungated) saw.push('Nothing checks who starts the agent.');
   else if (f.gated) saw.push('Only people with write access can start it.');
   // Where a stranger can start it, "What can happen" already names how; the trigger list
@@ -96,8 +99,7 @@ export function explainWorkflow(f: WorkflowFacts): Explain {
     saw.push('Its shell holds your keys (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is off).');
 
   const fix: string[] = [];
-  if (f.anyone)
-    fix.push('Let only people with write access start it: remove `allowed_non_write_users: "*"`.');
+  if (f.anyone) fix.push(`Let only people with write access start it: remove ${open}.`);
   else if (f.ungated) fix.push('Let only people with write access start it.');
   if (f.head === 'root' && f.secretTriggers.length)
     fix.push("Do not check out the pull request's files in this workflow.");

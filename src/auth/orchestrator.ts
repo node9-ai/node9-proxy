@@ -1063,7 +1063,10 @@ export async function _authorizeHeadlessCore(
     (budget.sessionUSD !== undefined || budget.dayUSD !== undefined)
   ) {
     const now = forecast ? forecast.now : Date.now();
-    const verdict = judgeBudget(readCostLedger(), meta?.sessionId ?? '', budget, now);
+    // A session replayed from its start (the benchmark) has spent nothing.
+    const verdict = forecast?.freshSpend
+      ? null
+      : judgeBudget(readCostLedger(), meta?.sessionId ?? '', budget, now);
     if (verdict === 'unknown') {
       if (forecast) noteForecastUnknown('cost-state');
     } else if (verdict) {

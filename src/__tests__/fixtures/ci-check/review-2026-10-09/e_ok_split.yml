@@ -10,7 +10,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'issues' || github.actor == 'owner'
     runs-on: ubuntu-latest
     steps:
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           prompt: "Handle ${{ github.event.comment.body }} ${{ github.event.issue.body }}"
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}

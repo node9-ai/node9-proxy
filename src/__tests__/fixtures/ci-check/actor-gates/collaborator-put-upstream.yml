@@ -1,0 +1,35 @@
+# The first job ADDS the actor as a collaborator: a write, not a check.
+name: Reviewer
+on:
+  pull_request_target:
+    types: [opened, reopened]
+jobs:
+  who:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      known: ${{ steps.ask.outputs.known }}
+    steps:
+      - id: ask
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WHO: ${{ github.actor }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/collaborators/$WHO" --silent && echo "known=yes" >> "$GITHUB_OUTPUT"
+  agent:
+    needs: who
+    if: needs.who.outputs.known == 'yes'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_non_write_users: ${{ github.actor }}
+          prompt: "Review PR ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          claude_args: "--allowedTools 'Read,Write,Bash(gh:*)'"

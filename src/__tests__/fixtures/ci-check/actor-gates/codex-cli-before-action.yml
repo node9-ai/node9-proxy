@@ -1,0 +1,21 @@
+# The Codex CLI runs on the issue text BEFORE the action step: the action's check comes after.
+name: Two agents
+on:
+  issues:
+    types: [opened]
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          codex exec --dangerously-bypass-approvals-and-sandbox "Triage: ${{ github.event.issue.title }} ${{ github.event.issue.body }}"
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: "Summarise the triage."

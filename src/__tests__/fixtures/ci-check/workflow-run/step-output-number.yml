@@ -11,7 +11,7 @@ jobs:
     steps:
       - id: n
         run: echo "num=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt: Say hello to issue ${{ steps.n.outputs.num }}.

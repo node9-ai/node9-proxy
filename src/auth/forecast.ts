@@ -87,6 +87,8 @@ export interface ForecastOptions {
   sessionTaintGated?: boolean;
   /** Let the package check go online, as the hook does (ForecastRun). */
   onlinePackages?: boolean;
+  /** A session replayed from its start has spent nothing (ForecastRun). */
+  freshSpend?: boolean;
 }
 
 /** Audit tag → the layer that produced it. Tags are matched by prefix after
@@ -168,6 +170,7 @@ export async function forecastDecision(
     unknown: new Set(),
     now: opts.at ?? Date.now(),
     ...(opts.onlinePackages && { onlinePackages: true }),
+    ...(opts.freshSpend && { freshSpend: true }),
   };
   const result = await runForecast(run, () =>
     _authorizeHeadlessCore(toolName, args, meta, {

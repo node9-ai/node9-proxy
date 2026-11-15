@@ -5,7 +5,7 @@ jobs:
     runs-on: x
     steps:
       - run: echo ${{ github.event.issue.body }} > p
-      - uses: openai/codex-action@v1
+      - uses: acme/codex-action@v1
         with: {prompt_file: p}
   b: ~
   c:

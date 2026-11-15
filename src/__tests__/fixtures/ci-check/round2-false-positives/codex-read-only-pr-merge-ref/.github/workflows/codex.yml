@@ -19,7 +19,7 @@ jobs:
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/merge
       - id: run_codex
-        uses: openai/codex-action@v1
+        uses: acme/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           sandbox: read-only

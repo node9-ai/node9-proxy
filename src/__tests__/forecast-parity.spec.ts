@@ -502,6 +502,30 @@ describe('cascading failures (behavior.fanout and behavior.cost-budget, ASI08, n
     expect(stale.forecast.unknown).toContain('cost-state');
   });
 
+  it('a replay from the start of a session has spent nothing: the ceiling judges nothing and the cost state is known', async () => {
+    // The server replays the benchmark in a throwaway home with no ledger;
+    // without this, a workspace that sets a ceiling had every attack that
+    // passed counted as undetermined.
+    writeConfig({
+      checks: { 'behavior.cost-budget': 'block' },
+      tuning: { 'behavior.cost-budget': { sessionUSD: 5, dayUSD: 10 } },
+    });
+    const noLedger = await forecastDecision('Bash', { command: 'ls -la' }, META, {
+      freshSpend: true,
+    });
+    expect(noLedger.decision).toBe('allow');
+    expect(noLedger.unknown).not.toContain('cost-state');
+    // The machine's own spend is not the replayed session's.
+    plantLedger(12);
+    const overOnDisk = await forecastDecision('Bash', { command: 'ls -la' }, META, {
+      freshSpend: true,
+    });
+    expect(overOnDisk.decision).toBe('allow');
+    expect(overOnDisk.unknown).not.toContain('cost-state');
+    // Without the option the forecast still reads the ledger.
+    expect((await forecastDecision('Bash', { command: 'ls -la' }, META)).decision).toBe('block');
+  });
+
   it('with no ceiling the check judges nothing, whatever the ledger says', async () => {
     writeConfig({ checks: { 'behavior.cost-budget': 'block' } });
     plantLedger(999);

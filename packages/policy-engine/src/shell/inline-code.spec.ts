@@ -325,7 +325,11 @@ describe('the gate', () => {
     inlineExecReview(command, ['/usr']);
     const without = cost([]);
     const withJail = cost(['/usr', '~/.gmail-mcp']);
-    expect(withJail).toBeLessThan(without * 3 + 50);
+    // The quadratic trim costs about 800 ms here against about 40 ms without a
+    // jail. Windows CI is noisier (110 ms against 16 ms on a fixed build), so
+    // it gets more slack; 300 ms still sits far below the quadratic cost.
+    const slack = process.platform === 'win32' ? 300 : 50;
+    expect(withJail).toBeLessThan(without * 3 + slack);
   });
 });
 

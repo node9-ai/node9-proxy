@@ -51,7 +51,36 @@ const EGRESS_TOOL_RE =
 // step, that's a fail-closed actor gate expressed as a step. (Review R4-round2 #2:
 // tightened to memberships/USER, collaborators/USER/permission — not `.../members`.)
 const MEMBERSHIP_CHECK_RE =
-  /orgs\/[^/'"\s]+\/memberships\/|teams\/[^/'"\s]+\/memberships\/|getCollaboratorPermissionLevel|collaborators\/[^/'"\s]+\/permission|checkMembershipForUser|getMembershipForUser/i;
+  /orgs\/[^/'"\s]+\/memberships\/|teams\/[^/'"\s]+\/memberships\/|getCollaboratorPermissionLevel|collaborators\/[^/'"\s]+\/permission|checkMembershipForUser|getMembershipForUser|\bcheckCollaborator\b/i;
+// The plain collaborator CHECK, `GET repos/<repo>/collaborators/<user>`: 204 for a collaborator,
+// 404 for anyone else. The user is the LAST path segment, so a listing (`…/collaborators`) is
+// not a check, and `…/<user>/permission` stays with the pattern above. A collaborator may hold
+// read access only: the same trust as an OWNER/MEMBER/COLLABORATOR association, which is
+// already a gate; a stranger is never one.
+const COLLABORATOR_CHECK_RE = /collaborators\/[^/'"\s)`;|&]{1,200}(?=['"\s)`;|&]|$)/gi;
+// The same path with a write method, or with request fields (`gh api -f` sends a POST), adds or
+// removes the collaborator: `-X PUT`, `--method`/`--request`, octokit's `'PUT /repos/…'`.
+const API_WRITE_METHOD_RE =
+  /(?:-X|--method|--request)[=\s]{0,3}["']?(?:PUT|DELETE|PATCH|POST)\b|\s(?:-[fF]|--field|--raw-field)[=\s]|\b(?:PUT|DELETE|PATCH|POST)\s+\/?repos\b/i;
+// octokit's object form names the method on a line of its own, next to the url.
+const API_WRITE_OPTION_RE = /\bmethod\s*:\s*["'`](?:PUT|DELETE|PATCH|POST)\b/i;
+
+/** Does this script ask GitHub whether ONE user is a member, a collaborator or a writer? */
+function isMembershipCheck(code: string): boolean {
+  if (MEMBERSHIP_CHECK_RE.test(code)) return true;
+  if (code.length > 200_000) return false;
+  for (const m of code.matchAll(COLLABORATOR_CHECK_RE)) {
+    const at = m.index ?? 0;
+    // The command the path sits in: its own line, bounded.
+    const from = Math.max(code.lastIndexOf('\n', at) + 1, at - 300);
+    const nl = code.indexOf('\n', at);
+    const to = Math.min(nl < 0 ? code.length : nl, at + 300);
+    if (API_WRITE_METHOD_RE.test(code.slice(from, to))) continue;
+    if (API_WRITE_OPTION_RE.test(code.slice(Math.max(0, at - 300), at + 300))) continue;
+    return true;
+  }
+  return false;
+}
 
 // R4-1: activity types a STRANGER (an issue/PR author with no repo permission) can
 // fire on their OWN issue/PR. Everything else (labeled/assigned/milestoned/pinned/
@@ -1075,21 +1104,35 @@ function hasStepMembershipGate(job: Job): boolean {
   // Gate steps: a per-user membership/permission CHECK that has an `id` (so a later
   // `if:` can reference its output). Review R4-round2 #2: a bare member-listing or an
   // id-less step is NOT a gate.
+  // The check is a `run:` command or the body of an `actions/github-script` step.
   const gateIds = steps
-    .filter((s) => s.id && MEMBERSHIP_CHECK_RE.test(str(s.run)))
+    .filter((s) => s.id && isMembershipCheck(str(s.run) + ' ' + str(s.with?.['script'])))
     .map((s) => s.id as string);
   if (!gateIds.length) return false;
   // The agent step must be guarded by ONE OF THOSE gate steps' outputs specifically —
-  // referencing an unrelated `steps.build.outputs.*` does not count.
-  return steps.some(
-    (s) =>
-      isAgentStep(s) &&
-      gateIds.some((id) =>
-        new RegExp(`steps\\.${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.outputs\\.`).test(
-          str(s.if)
-        )
-      )
-  );
+  // referencing an unrelated `steps.build.outputs.*` does not count — and it must run on the
+  // check's YES: `outputs.is_member != 'true'` runs the agent for everyone else.
+  return steps.some((s) => isAgentStep(s) && gateIds.some((id) => stepOutputAllows(str(s.if), id)));
+}
+
+// An output that says NO when it is true (`should_skip`, `denied`, `blocked`): the agent runs on
+// its false.
+const SKIP_OUTPUT_NAME_RE =
+  /skip|den(?:y|ied)|block|reject|unauthor|forbid|not[_-]?allowed|no[_-]?access|outsider|external/i;
+
+/** Does this `if:` run on a YES of gate step `id`? One of its outputs must be read as an allow:
+ *  positively, or negatively when the output's name is a refusal. */
+function stepOutputAllows(readerIf: string, id: string): boolean {
+  if (readerIf.length > IF_MAX_LEN) return false;
+  const base = `steps\\.${escapeRe(id)}\\.outputs\\.`;
+  const seen = new Set<string>();
+  for (const m of readerIf.matchAll(new RegExp(`${base}([\\w-]{1,100})`, 'g'))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    const positive = readsRefPositively(readerIf, `${base}${escapeRe(m[1])}(?![\\w-])`);
+    if (positive !== SKIP_OUTPUT_NAME_RE.test(m[1])) return true;
+  }
+  return false;
 }
 
 // ─── `if:` expressions (S.2/S.5, rewritten after the 2026-10-09 pre-release review) ─────
@@ -1352,7 +1395,11 @@ function scriptAllowsByActor(code: string): boolean {
 /** Does the dependent's `if:` run on a YES from upstream job `name`? `!needs.x.outputs.ok`,
  *  `!= 'true'` and `== 'false'` run on a NO. */
 function readsOutputPositively(readerIf: string, name: string): boolean {
-  const ref = `needs\\.${escapeRe(name)}\\.outputs\\.[\\w-]{1,100}`;
+  return readsRefPositively(readerIf, `needs\\.${escapeRe(name)}\\.outputs\\.[\\w-]{1,100}`);
+}
+
+/** The same for any output reference, given as a regex source. */
+function readsRefPositively(readerIf: string, ref: string): boolean {
   if (!new RegExp(ref).test(readerIf)) return false;
   const no = `'(?:false|no|0|)'(?![\\w'])`;
   // `!= 'none'` admits `read`, which every stranger has: only `!=` a "no" word runs on a yes.
@@ -1397,7 +1444,7 @@ function upstreamJobGates(
     readsOutputPositively(readerIf, name) &&
     steps.some((st) => {
       const code = str(st.run) + ' ' + str(st.with?.['script']);
-      return MEMBERSHIP_CHECK_RE.test(code) || scriptAllowsByActor(code);
+      return isMembershipCheck(code) || scriptAllowsByActor(code);
     })
   )
     return true;
@@ -1406,7 +1453,7 @@ function upstreamJobGates(
   const stepGated =
     ifsAreGated(stepIfText(steps), label) ||
     hasStepMembershipGate(dep) ||
-    steps.some((st) => MEMBERSHIP_CHECK_RE.test(str(st.with?.['script'])));
+    steps.some((st) => isMembershipCheck(str(st.with?.['script'])));
   if (!stepGated) return false;
   if (
     steps.some(
@@ -1455,11 +1502,112 @@ function jobGated(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean
  *  was added, #550, 2025-09-07). `"*"` alone leaves the default write gate ON. Measured against
  *  live workflows 2026-09-24: 4 of 114 medium "gate-off" findings had `"*"` and no token, and
  *  were really gated. A step may also set the env var the action reads directly. */
+function claudeBypassArmed(s: Step): boolean {
+  return (
+    nonWriteOpen(str(s.with?.['allowed_non_write_users'])) &&
+    (!!str(s.with?.['github_token']) || !!str(s.env?.['OVERRIDE_GITHUB_TOKEN']))
+  );
+}
+
+/** `<owner>/codex-action@<ref>` → who built it; null for anything else. */
+function codexActionBuild(uses?: string): { official: boolean; owner: string } | null {
+  const m = /^\s*([\w.-]{1,100})\/codex-action@\S/i.exec(uses ?? '');
+  return m ? { official: m[1].toLowerCase() === 'openai', owner: m[1] } : null;
+}
+
+/** codex-action checks that the actor has write access before it starts Codex (its "Check
+ *  repository write access" step, in every release since v1.0: GITHUB_ACTOR must hold admin,
+ *  write or maintain, and any error rejects). `allow-users: "*"` approves every actor; so does a
+ *  value bound to whoever fired the event. No token is involved, unlike the Claude bypass. */
+function codexOpen(s: Step): boolean {
+  return !!codexActionBuild(s.uses) && nonWriteOpen(str(s.with?.['allow-users']));
+}
+
 function bypassArmed(steps: Step[]): boolean {
-  return steps.some(
-    (s) =>
-      nonWriteOpen(str(s.with?.['allowed_non_write_users'])) &&
-      (!!str(s.with?.['github_token']) || !!str(s.env?.['OVERRIDE_GITHUB_TOKEN']))
+  return steps.some((s) => claudeBypassArmed(s) || codexOpen(s));
+}
+
+// Commands that read or move files and talk to git or GitHub, and run nothing from the
+// checkout. Anything else in a `run:` step (an install, a build, a test, a script, an
+// interpreter, `eval`, `source`, `xargs`) may run the checked-out code, and is not listed.
+const INERT_COMMAND_RE =
+  /^(?:git|gh|echo|printf|mkdir|cd|export|set|unset|test|\[\[?|jq|cat|ls|pwd|true|false|sleep|date|rm|cp|mv|touch|tee|head|tail|grep|wc|sort|uniq|cut|tr|exit|:)(?=[\s"'=);]|$)/;
+// Words that only introduce a command (`if npm test; then`): the command after them is judged.
+const SHELL_LEAD_RE = /^(?:if|elif|while|until|then|do|else|time|!|\{|\()(?:\s+|$)/;
+const SHELL_CLOSE_RE = /^(?:fi|done|esac|\}|;;)?$/;
+// A bare assignment with nothing after it (`SHA=`, `X="a b"`); `X=1 npm ci` is a command.
+const BARE_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']*)$/;
+const LOOP_HEAD_RE = /^(?:for\s+[A-Za-z_]\w*\s+in\b|case\s[^\n]{0,200}\sin$)/;
+// A step that sets the environment or the search path of LATER steps (the action's own check
+// runs `node`), plants a file in the home directory, or reconfigures git, can make a harmless
+// command run the checkout's code.
+const RUN_REDIRECTS_LATER_RE =
+  /GITHUB_(?:ENV|PATH)\b|\bBASH_ENV\b|\bPATH=|\bNODE_OPTIONS\b|(?:~|\$HOME|\$\{HOME\})\/|\bgit\s+config\b/;
+
+/** Is every command of this `run:` script one that cannot execute the checked-out files? Read
+ *  conservatively: a command substitution is judged like a command of its own, and an unknown
+ *  first word means "may run code". */
+function runIsInert(run: string): boolean {
+  if (run.length > 20_000 || RUN_REDIRECTS_LATER_RE.test(run)) return false;
+  for (const raw of run.replace(/\\\r?\n/g, ' ').split(/\r?\n/)) {
+    const line = raw.trim().replace(/\d*>&\d*-?|&>>?/g, ' '); // `2>&1`, `&>` are redirections
+    if (!line || line.startsWith('#')) continue;
+    for (const part of line.split(/&&?|\|\|?|[;`]|\$\(|[<>]\(/)) {
+      let cmd = part.trim();
+      for (let n = 0; n < 6 && cmd && SHELL_LEAD_RE.test(cmd); n++)
+        cmd = cmd.replace(SHELL_LEAD_RE, '');
+      cmd = cmd.replace(/\)+$/, '').trim(); // the close of a `$( … )`
+      if (SHELL_CLOSE_RE.test(cmd) || BARE_ASSIGN_RE.test(cmd) || LOOP_HEAD_RE.test(cmd)) continue;
+      if (!INERT_COMMAND_RE.test(cmd)) return false;
+    }
+  }
+  return true;
+}
+
+// Actions that prepare the runner and execute nothing from the checkout. Any other `uses:` step
+// between the checkout and the agent may (a dependency install, an image build, a script step
+// that requires a local file), like the checkout's own `./` action.
+const INERT_ACTION_RE =
+  /^\s*actions\/(?:checkout|setup-(?:node|python|go|java|dotnet)|cache(?:\/restore|\/save)?|upload-artifact|download-artifact|create-github-app-token)@/i;
+
+/** Has the job checked out the untrusted head into the workspace root AND run something that
+ *  may execute it, before this agent step? An action's own actor check starts with its step:
+ *  whatever ran before it (an install, a build, the head's local action) has already run for a
+ *  stranger. A `git fetch` or an `echo` between the two runs nothing of the head. */
+function headUsedBefore(job: Job, agentStep: Step): boolean {
+  const steps = job.steps ?? [];
+  const k = steps.indexOf(agentStep);
+  if (k < 0) return false;
+  const i = steps.findIndex((st, n) => n < k && untrustedHeadCheckout([st]) === 'root');
+  if (i < 0) return false;
+  return steps
+    .slice(i + 1, k)
+    .some((st) =>
+      st.uses
+        ? !INERT_ACTION_RE.test(str(st.uses))
+        : typeof st.run === 'string' && !!st.run.trim() && !runIsInert(st.run)
+    );
+}
+
+/** `allow-bots: true` approves `github-actions[bot]`, and `allow-bot-users` the bots it names.
+ *  A bot is the actor of a run that another workflow starts with a dispatch, whoever started
+ *  that workflow. */
+function codexAdmitsBots(s: Step): boolean {
+  return (
+    /^\s*["']?true["']?\s*$/i.test(str(s.with?.['allow-bots'])) ||
+    !!str(s.with?.['allow-bot-users']).trim()
+  );
+}
+
+/** Can another workflow (or an API call) start this one? Its actor is then the caller's token. */
+function dispatchable(wf: Workflow, raw: Record<string, unknown>): boolean {
+  return triggerKeys(wf, raw).some((k) => /^(?:workflow_dispatch|repository_dispatch)$/i.test(k));
+}
+
+/** An official codex-action step whose own write check is on but comes too late (see above). */
+function codexCheckTooLate(job: Job): boolean {
+  return (job.steps ?? []).some(
+    (s) => !!codexActionBuild(s.uses)?.official && !codexOpen(s) && headUsedBefore(job, s)
   );
 }
 
@@ -1486,10 +1634,21 @@ function nonWriteOpen(v: string): boolean {
 function hasImplicitActorGate(
   agentSteps: Step[],
   bypassActive: boolean,
-  workflowRun = false
+  workflowRun = false,
+  /** The job the steps belong to, in step order, and whether the workflow can be started by a
+   *  dispatch. Without it (the whole-workflow wording call) every step is read on its own. */
+  scope?: { job: Job; dispatchable: boolean }
 ): boolean {
   if (bypassActive) return false; // bypass on (and reachable) → the default gate is off
-  return agentSteps.some((s) => {
+  const held = (s: Step): boolean => {
+    // The official codex-action checks the actor on every event, in every release. Not a
+    // third-party build (its own code decides), not when the job has already run the PR's code
+    // by the time the check starts, and not when a dispatched run's bot actor is let through.
+    if (codexActionBuild(s.uses)?.official)
+      return !(
+        scope &&
+        (headUsedBefore(scope.job, s) || (scope.dispatchable && codexAdmitsBots(s)))
+      );
     const build = claudeActionBuild(s.uses);
     if (!build) return false;
     // A third-party build's own code decides whether any gate exists (founder decision, round-2
@@ -1500,7 +1659,28 @@ function hasImplicitActorGate(
     // S.4 (2026-10-09): on workflow_run the official action checks the actor only from
     // v1.0.185 (#1590).
     return workflowRunChecked(build.ref);
-  });
+  };
+  if (!scope) return agentSteps.some(held);
+  // Per job: the check of an action guards the steps AFTER it (its failure ends the job), not
+  // an agent that ran before, and nothing at all when its failure is ignored
+  // (`continue-on-error`). Walk the job's agents in order:
+  //  · only a step that certainly starts an agent counts (an action, or the CLI invoked to do
+  //    work): the looser "an agent word next to github.event" reading of a `run:` step also
+  //    matches a step that merely prepares the prompt;
+  //  · an agent with an `if:` of its own is skipped: who it runs for is decided by that
+  //    condition (often a step output), which is not read here, so it neither holds nor opens.
+  const starts = agentSteps.filter((s) => (s.uses ? true : isRunAgent(s)));
+  let sawHeld = false;
+  for (const s of starts) {
+    if (!held(s)) {
+      if (str(s.if).trim()) continue;
+      return false; // an unconditional agent that no effective check precedes
+    }
+    const ignored = str((s as { 'continue-on-error'?: unknown })['continue-on-error']);
+    if (!/^\s*["']?true["']?\s*$/i.test(ignored)) return true;
+    sawHeld = true;
+  }
+  return sawHeld;
 }
 
 /** `<owner>/claude-code-action@<ref>` → who built it and which ref; null for anything else
@@ -1511,6 +1691,17 @@ function claudeActionBuild(
   const m = /^\s*([\w.-]{1,100})\/claude-code-action@(\S{1,200})/i.exec(uses ?? '');
   if (!m) return null;
   return { official: m[1].toLowerCase() === 'anthropics', owner: m[1], ref: m[2] };
+}
+
+/** Which official action's own write check holds these agent steps, for the report's wording. */
+function defaultGateOwner(agentSteps: Step[]): string {
+  const claude = agentSteps.some((s) => claudeActionBuild(s.uses)?.official);
+  const codex = agentSteps.some((s) => codexActionBuild(s.uses)?.official);
+  return claude && codex
+    ? 'claude-code-action and codex-action'
+    : codex
+      ? 'codex-action'
+      : 'claude-code-action';
 }
 
 const WORKFLOW_RUN_CHECK_MIN = 185; // claude-code-action v1.0.185, #1590 (2026-08-04)
@@ -1544,7 +1735,10 @@ function injectableJobs(
     const jobStar = bypassArmed(a);
     if (
       jobGated(job, wf, raw) ||
-      hasImplicitActorGate(a, jobStar && untrustedTrigger, jobOnWorkflowRun(job, workflowRun))
+      hasImplicitActorGate(a, jobStar && untrustedTrigger, jobOnWorkflowRun(job, workflowRun), {
+        job,
+        dispatchable: dispatchable(wf, raw),
+      })
     )
       continue;
     out.push(job);
@@ -1779,9 +1973,14 @@ function analyzeWorkflowInner(
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
   const nonWriteStar = bypassArmed(agentSteps);
+  const claudeOpen = agentSteps.some(claudeBypassArmed);
   // "*" written but no github_token on that step: the action ignores it and keeps its gate.
-  const starWithoutToken = nonWriteOpen(nonWrite) && !nonWriteStar;
-  const nonWriteList = !!nonWrite && !nonWriteOpen(nonWrite);
+  const starWithoutToken = nonWriteOpen(nonWrite) && !claudeOpen;
+  const codexOpenStep = agentSteps.find(codexOpen);
+  const codexList =
+    !codexOpenStep &&
+    agentSteps.some((s) => !!codexActionBuild(s.uses) && !!str(s.with?.['allow-users']).trim());
+  const nonWriteList = (!!nonWrite && !nonWriteOpen(nonWrite)) || codexList;
   const nonWriteActor = nonWrite.trim() !== '*' && nonWriteOpen(nonWrite);
 
   // reusable (workflow_call) is scored as potentially-untrusted — its caller may wire an
@@ -1832,7 +2031,14 @@ function analyzeWorkflowInner(
   const elevated =
     hasCodeWritePerm(wf, powerJobs) || (hasIdTokenWrite(wf, powerJobs) && egressTool);
   const pat = usesPatIn(powerJobs);
-  const power = (broadTools ? 2 : 0) + (bypassActive ? 1 : 0) + (elevated ? 1 : 0) + (pat ? 1 : 0);
+  // The Claude bypass needs the job's token handed to the action (`github_token`), which is the
+  // extra power counted here. The Codex switch hands the agent nothing: it opens the door
+  // (reach) and no more, so a read-only labeler anyone can start stays a note.
+  const power =
+    (broadTools ? 2 : 0) +
+    (bypassActive && claudeOpen ? 1 : 0) +
+    (elevated ? 1 : 0) +
+    (pat ? 1 : 0);
 
   // Jobs that run on a stranger-firable workflow_run (review finding 5: decided per job).
   const workflowRunJobs = agentJobs.filter((j) => jobOnWorkflowRun(j, workflowRun));
@@ -1975,6 +2181,17 @@ function analyzeWorkflowInner(
     signals.push(
       `third-party build of claude-code-action (\`${safeText(thirdParty.owner, 40)}\`): not assumed to check the actor's write access like the official action`
     );
+  const thirdPartyCodex = agentSteps
+    .map((st) => codexActionBuild(st.uses))
+    .find((b) => b !== null && !b.official);
+  if (thirdPartyCodex && !implicitGate)
+    signals.push(
+      `third-party build of codex-action (\`${safeText(thirdPartyCodex.owner, 40)}\`): not assumed to check the actor's write access like the official action`
+    );
+  if (reach > 0 && injJobs.some(codexCheckTooLate))
+    signals.push(
+      "codex-action's own write check runs after the job has checked out and used the PR's code"
+    );
   if (workflowRunJobs.length) {
     const builds = workflowRunJobs
       .flatMap((j) => (j.steps ?? []).filter(isAgentStep))
@@ -2015,11 +2232,17 @@ function analyzeWorkflowInner(
         : 'agent has broad/write-capable tool grants'
     );
   }
-  if (bypassActive)
+  if (bypassActive && claudeOpen)
     signals.push(
       nonWriteActor
         ? "allowed_non_write_users is the triggering user's own login, with github_token, so any user can trigger the agent"
         : 'allowed_non_write_users: "*" with github_token, so any user can trigger the agent'
+    );
+  if (bypassActive && codexOpenStep)
+    signals.push(
+      str(codexOpenStep.with?.['allow-users']).trim() === '*'
+        ? 'allow-users: "*", so any user can trigger the agent'
+        : "allow-users is the triggering user's own login, so any user can trigger the agent"
     );
   if (elevated) signals.push('elevated permissions (contents/id-token: write)');
   if (pat) signals.push('a static PAT is exposed to the agent (recoverable via injection)');
@@ -2044,10 +2267,13 @@ function analyzeWorkflowInner(
     const explicit = siblings.filter((j) => jobGated(j, wf, raw)).length;
     const byDefault = siblings.length - explicit;
     const n = (k: number) => `${k} other agent job${k === 1 ? '' : 's'}`;
+    const defaultSteps = siblings
+      .filter((j) => !jobGated(j, wf, raw))
+      .flatMap((j) => (j.steps ?? []).filter(isAgentStep));
     const parts = [
       explicit ? `${n(explicit)} ${explicit === 1 ? 'is' : 'are'} actor-gated` : '',
       byDefault
-        ? `${n(byDefault)} ${byDefault === 1 ? 'is' : 'are'} held by claude-code-action's default write-access gate`
+        ? `${n(byDefault)} ${byDefault === 1 ? 'is' : 'are'} held by ${defaultGateOwner(defaultSteps)}'s default write-access gate`
         : '',
     ].filter(Boolean);
     signals.push(
@@ -2068,8 +2294,21 @@ function analyzeWorkflowInner(
   const mitigations: string[] = [];
   if (gate && (membershipGated || agentJobs.some((j) => jobGated(j, wf, raw))))
     mitigations.push('actor-gated (maintainer/label/write-user required)');
-  else if (gate && implicitGate)
-    mitigations.push('claude-code-action gates the agent to write-access users by default');
+  else if (
+    gate &&
+    implicitGate &&
+    // Not when the switch that removes the check is set (on a trigger no stranger fires).
+    agentSteps.some(
+      (s) =>
+        (!!codexActionBuild(s.uses)?.official && !codexOpen(s)) ||
+        (!!claudeActionBuild(s.uses)?.official && !claudeBypassArmed(s))
+    )
+  ) {
+    const owner = defaultGateOwner(agentSteps);
+    mitigations.push(
+      `${owner} ${owner.includes(' and ') ? 'gate' : 'gates'} the agent to write-access users by default`
+    );
+  }
   if (head === 'subdir') mitigations.push('untrusted head isolated in a subdir, not root');
   if (envDeny) mitigations.push('secrets env-denied from the agent subprocess');
   if (pinned) mitigations.push('agent action pinned to a commit SHA');
@@ -2109,7 +2348,9 @@ function analyzeWorkflowInner(
         ? 'Do not check out the untrusted PR head into the workspace root under a privileged trigger (pull_request_target/workflow_run): check out the base ref, or isolate the head in a subdir (--add-dir). Add an actor gate and scope the agent tools.'
         : head === 'root'
           ? 'This runs under `pull_request` (fork PRs get a read-only token), so the head checkout is low-risk today: keep it on `pull_request` (not `pull_request_target`) and keep the actor gate + scoped tools.'
-          : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
+          : bypassActive && codexOpenStep && !claudeOpen
+            ? 'Remove `allow-users: "*"` so that only people with write access start Codex. To keep it open, give the Codex step no write token: read-only job permissions, a read-only sandbox, and a separate step that posts the result. See the codex-action security doc.'
+            : 'Add/verify an actor gate, scope the agent tools to read-only, and env-deny secrets. See Anthropic’s claude-code-action security doc.',
   };
   const extraFix = [
     fullOutput
@@ -2123,6 +2364,7 @@ function analyzeWorkflowInner(
   finding.explain = explainWorkflow({
     severity,
     anyone: bypassActive && !gate,
+    anyoneInput: codexOpenStep && !claudeOpen ? 'allow-users' : 'allowed_non_write_users',
     ungated: !gate && reach > 0,
     gated: gate,
     triggers,
@@ -2249,7 +2491,8 @@ function evalAgentJob(
     hasImplicitActorGate(
       jobAgentSteps,
       bypassActive,
-      jobOnWorkflowRun(job, triggerReach(wf, raw).workflowRun)
+      jobOnWorkflowRun(job, triggerReach(wf, raw).workflowRun),
+      { job, dispatchable: dispatchable(wf, raw) }
     );
   const injectable = untrustedTrigger && !gate && reach > 0;
   const canReadEnv = EXFIL_RCE_RE.test(collectTools(jobAgentSteps)); // bare shell = read env + exfil
