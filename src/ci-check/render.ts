@@ -295,9 +295,7 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
   }
 
   if (n === 0 && !res.incomplete) {
-    L.push(
-      chalk.gray('   No committed agent hooks, injectable workflows, or unpinned MCP servers.')
-    );
+    L.push(chalk.gray('   No counted alerts in agent hooks, workflows or MCP servers.'));
     L.push('');
   }
 

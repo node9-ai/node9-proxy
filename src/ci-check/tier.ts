@@ -30,6 +30,8 @@ export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   // A tracked per-machine file is hygiene, not an exposure by itself (node9Firewall#465); a
   // secret inside it is CI-1.allow-rule-credential, an alert.
   if (rule === 'CI-1.local-settings-committed') return 'review';
+  // A9: a folder-open task is normal (build watchers); listed so a reviewer knows it starts by itself.
+  if (rule === 'CI-1.folder-open-task') return 'review';
   // T.5 (founder, node9Firewall#337): counted at the lowest level.
   if (
     rule === 'CI-2.trusted-trigger-reader' ||

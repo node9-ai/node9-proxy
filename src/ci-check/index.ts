@@ -21,6 +21,14 @@ import { analyzeMcp, ownPackageNames } from './mcp';
 import { analyzeCodexConfig } from './codex';
 import { analyzeInstructionFile, appSkillDirsOf, namedDocs, skillDirsOf } from './instructions';
 import { routeOf } from './route';
+import {
+  analyzeStartup,
+  claudeHookTriggers,
+  inspectStartupScript,
+  vscodeTaskTriggers,
+  type StartupScriptInfo,
+  type StartupTrigger,
+} from './startup';
 import { tierOf, isAlert } from './tier';
 import { testPathKind } from './harmless';
 import { analyzeScript } from './scripts';
@@ -155,6 +163,10 @@ export function scanTree(tree: RepoTree): ScanResult {
       /* unreadable: the main loop reports it */
     }
   }
+  // A9: start-up triggers and the scripts directly inside `.claude/` / `.vscode/`, judged
+  // together after the loop (a trigger and its loader are different files).
+  const startupTriggers: StartupTrigger[] = [];
+  const startupScripts = new Map<string, StartupScriptInfo>();
   for (const file of tree.files) {
     // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
     let route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
@@ -208,6 +220,13 @@ export function scanTree(tree: RepoTree): ScanResult {
         }
         case 'agent-config':
           findings.push(...analyzeAgentConfig(file.path, content, listing));
+          startupTriggers.push(...claudeHookTriggers(file.path, content));
+          break;
+        case 'vscode-tasks':
+          startupTriggers.push(...vscodeTaskTriggers(file.path, content));
+          break;
+        case 'startup-script':
+          startupScripts.set(file.path, inspectStartupScript(content));
           break;
         case 'hook-script':
           findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
@@ -236,6 +255,14 @@ export function scanTree(tree: RepoTree): ScanResult {
       const kept = findings.splice(before).filter((f) => tierOf(f) === 'alert');
       findings.push(...kept);
     }
+  }
+
+  try {
+    findings.push(...analyzeStartup(startupTriggers, startupScripts, listing));
+  } catch (err) {
+    notes.push(
+      `checker degraded on start-up triggers: ${(err as Error)?.message ?? 'error'}; results may be INCOMPLETE`
+    );
   }
 
   // K.4: a symlink where agent configuration can live that the scan does not follow is itself

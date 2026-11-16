@@ -6,6 +6,7 @@
 // name.
 
 import { isAppDoc, isHookScript, isInstructionFile, isSkillScript } from './instructions';
+import { isStartupScript, VSCODE_TASKS_RE } from './startup';
 import { SUPPRESSIONS_FILE } from './suppress';
 
 /** T.3: every committed MCP server config the scanner reads (Claude, Cursor, VS Code, Kiro,
@@ -20,7 +21,11 @@ export type Route =
   | 'suppressions'
   | 'workflow'
   | 'agent-config'
+  /** A9: `.vscode/tasks.json`, read for tasks that run when the folder is opened. */
+  | 'vscode-tasks'
   | 'hook-script'
+  /** A9: a script directly inside `.claude/` or `.vscode/`, read only for the worm loader. */
+  | 'startup-script'
   | 'skill-script'
   | 'mcp'
   | 'codex'
@@ -45,6 +50,8 @@ export function routeOf(
   if (/\.claude\/settings(\.local)?\.json$/.test(path)) return 'agent-config';
   if (isHookScript(path)) return 'hook-script';
   if (isSkillScript(path, skillDirs)) return 'skill-script';
+  if (VSCODE_TASKS_RE.test(path)) return 'vscode-tasks';
+  if (isStartupScript(path)) return 'startup-script';
   if (MCP_CONFIG_RE.test(path)) return 'mcp';
   if (/(^|\/)\.codex\/config\.toml$/.test(path)) return 'codex';
   if (isInstructionFile(path, skillDirs, appDirs)) return 'instruction';

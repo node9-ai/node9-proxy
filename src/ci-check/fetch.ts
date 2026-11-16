@@ -15,6 +15,7 @@ import { request } from 'undici';
 import { TarReader, TarError } from './tar';
 import type { RepoTree, RepoFile, UnfollowedLink } from './types';
 import { routeOf, type Route, ISSUE_FORM_RE } from './route';
+import { isStartupScript } from './startup';
 import {
   isInstructionFile,
   isSkillSupportFile,
@@ -63,6 +64,8 @@ export const SURFACE_FILES = [
   '.mcp.json',
   '.cursor/mcp.json',
   '.vscode/mcp.json',
+  // A9: tasks that run when the folder is opened (the worm's VS Code trigger).
+  '.vscode/tasks.json',
   '.kiro/settings/mcp.json',
   '.gemini/settings.json',
   'opencode.json',
@@ -87,7 +90,7 @@ const WORKFLOW_DIR = '.github/workflows';
 // Instruction files come from the ONE definition in instructions.ts; only the config shapes
 // are spelled here. Adding a surface type means one edit, and the dispatcher sees it too.
 const CONFIG_FILE_RE =
-  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$|(^|\/)\.vscode\/mcp\.json$|(^|\/)\.kiro\/settings\/mcp\.json$|(^|\/)\.gemini\/settings\.json$|(^|\/)opencode\.json$|(^|\/)\.opencode\/config\.json$/;
+  /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)\.mcp\.json$|(^|\/)\.cursor\/mcp\.json$|(^|\/)\.codex\/config\.toml$|(^|\/)\.vscode\/mcp\.json$|(^|\/)\.vscode\/tasks\.json$|(^|\/)\.kiro\/settings\/mcp\.json$|(^|\/)\.gemini\/settings\.json$|(^|\/)opencode\.json$|(^|\/)\.opencode\/config\.json$/;
 /** Every agent-surface path in a tree, entry points and configs first and a skill's
  *  supporting files last, so a cap never drops a SKILL.md to make room for its own
  *  reference docs. The ONE selector: the GitHub Trees path, the local walk and the git-ref
@@ -101,7 +104,8 @@ export function selectSurface(paths: string[]): string[] {
   const isSupport = (p: string) => isSkillSupportFile(p, skillDirs, appDirs);
   // Scripts sort with the supporting files: a cap must never drop a SKILL.md for its own
   // helper, and a hook's settings.json before the hook it names.
-  const isLate = (p: string) => isSupport(p) || isHookScript(p) || isSkillScript(p, skillDirs);
+  const isLate = (p: string) =>
+    isSupport(p) || isHookScript(p) || isSkillScript(p, skillDirs) || isStartupScript(p);
   // An app's other docs come last of all (§N): they are graded only if its SKILL.md names them,
   // so under a cap they must never displace a file that is always graded.
   const rank = (p: string) => (isAppDoc(p, skillDirs, appDirs) ? 2 : Number(isLate(p)));
@@ -112,6 +116,7 @@ export function selectSurface(paths: string[]): string[] {
         CONFIG_FILE_RE.test(p) ||
         isHookScript(p) ||
         isSkillScript(p, skillDirs) ||
+        isStartupScript(p) ||
         isAppDoc(p, skillDirs, appDirs)
     )
     .sort((a, b) => rank(a) - rank(b));
