@@ -118,6 +118,28 @@ describe('C6-b: a gate that covers every privileged event', () => {
   });
 });
 
+// A10 (fw#481): `Bash(gh:*)` runs any gh subcommand, including `gh extension install` (downloads
+// and runs code) and `gh api` writes; `Bash(gh api:*)` is the whole REST API.
+describe('A10: unrestricted gh grants are broad tools', () => {
+  it('Bash(gh:*) with an issue-write token on any issue: high', () => {
+    expect(rank('a10-gh-any.yml')).toBe(SEVERITY_RANK.high);
+    expect(signals('a10-gh-any.yml')).toMatch(/broad\/write-capable tools: `Bash\(gh:\*\)`/);
+  });
+
+  it('Bash(gh api:*) is broad, but with only an issue-write token it stays medium', () => {
+    expect(rank('a10-gh-api.yml')).toBe(SEVERITY_RANK.medium);
+    expect(signals('a10-gh-api.yml')).toMatch(/broad\/write-capable tools: `Bash\(gh api:\*\)`/);
+  });
+
+  it('gh api scoped to one endpoint is not counted as the whole API', () => {
+    expect(signals('a10-gh-api-endpoint.yml')).not.toMatch(/broad\/write-capable tools/);
+  });
+
+  it('read-only gh subcommands are not broad', () => {
+    expect(signals('a10-gh-read.yml')).not.toMatch(/broad\/write-capable tools/);
+  });
+});
+
 // C6-c: a job environment that requires a reviewer holds every run until someone approves it.
 // The rule lives in the repository settings; the hosted scan and the Action ask GitHub.
 describe('C6-c: protected environments', () => {

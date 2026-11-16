@@ -21,16 +21,23 @@ const AGENT_ACTION_RE =
   /(anthropics\/claude-code(-base)?-action|anthropics\/claude-code|^\s*[\w.-]{1,100}\/claude-code-action@|openai\/codex|codex-action|run-?aider|aider-?action|google-github-actions\/run-gemini)/i;
 
 // Broad, write/exfil-capable tool grants (bare or dangerous verbs).
+// A10 (fw#481): `gh` with no fixed subcommand (`Bash(gh:*)`, `Bash(gh *)`, `Bash(gh)`) runs any
+// subcommand, `gh extension install` and `gh api` writes included; `gh api` with no fixed endpoint
+// (`Bash(gh api:*)`, `Bash(gh api *)`) is the whole REST API with the job's token. A grant that
+// names an endpoint (`Bash(gh api repos/o/r/pulls/1/comments:*)`) is not counted here.
 const BROAD_TOOL_RE =
-  /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)/i;
+  /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)|Bash\(\s*gh\s*(?::|\*|\))|Bash\(\s*gh\s+api\s*(?::\s*\*|\*|\))/i;
 
 // EXFIL/RCE tools: genuinely arbitrary shell or network egress — the tools that
 // let an injected agent steal secrets or run code. Deliberately NARROWER than
 // BROAD_TOOL_RE: it EXCLUDES scoped script invocations (`Bash(bash scripts/x.sh)`,
 // `Bash(python3 x.py *)`, `Bash(gh api *)`) and bare `Write`/`Edit` (which write
 // files but can't exfil on their own). Used by the F11 damage-capability cap.
+// A10: an unrestricted `gh` grant runs code (`gh extension install` downloads and runs an
+// extension), so it is here. `Bash(gh api…)` is not: it reaches only GitHub, and its damage is
+// judged by the token (GH_WRITE_TOOL_RE, EGRESS_TOOL_RE).
 const EXFIL_RCE_RE =
-  /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)/i;
+  /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)|Bash\(\s*gh\s*(?::|\*|\))/i;
 
 // A tool that can MODIFY GitHub — needed (alongside a write token) to abuse write
 // permissions. `Bash(gh api …)` is arbitrary API; the enumerated pr/issue verbs
