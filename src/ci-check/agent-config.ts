@@ -108,7 +108,7 @@ function asStrings(v: unknown): string[] {
 }
 
 /** Walk the hooks tree and collect every hook `command` string. */
-function hookCommands(hooks: Record<string, unknown[]> | undefined): string[] {
+export function hookCommandsOf(hooks: Record<string, unknown[]> | undefined): string[] {
   const out: string[] = [];
   for (const groups of Object.values(hooks ?? {})) {
     for (const g of Array.isArray(groups) ? groups : []) {
@@ -328,7 +328,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   }
 
   // Hooks that fetch+run third-party code on every agent action.
-  for (const cmd of hookCommands(cfg.hooks)) {
+  for (const cmd of hookCommandsOf(cfg.hooks)) {
     // fetch-and-run: a `curl|wget … | sh/bash` or a bare fetch tool → remote code that CANNOT be
     // pinned; an npx invocation is remote but pinnable.
     const remoteExec = /\|\s*(sh|bash|zsh)\b/.test(cmd) || /\b(curl|wget|iwr|irm)\b/.test(cmd);
@@ -365,7 +365,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
 
   // The script a hook names: three states, never two. Decided only from a complete listing.
   if (tree?.complete) {
-    for (const cmd of hookCommands(cfg.hooks)) {
+    for (const cmd of hookCommandsOf(cfg.hooks)) {
       const script = hookScriptPath(cmd);
       if (!script || tree.unknown?.(script)) continue;
       if (!tree.paths.has(script)) {

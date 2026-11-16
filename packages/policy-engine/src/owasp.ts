@@ -130,6 +130,11 @@ const SCAN_REPO_RULE_OWASP: readonly (readonly [prefix: string, risk: AsiId])[] 
   ['CI-1.hook-remote-code', 'ASI05'],
   ['CI-1.hook-script', 'ASI05'],
   ['CI-1.unfollowable-symlink', 'ASI04'],
+  // A9: a worm's start-up trigger or loader is a compromised supply chain; a plain
+  // folder-open task is code that runs by itself.
+  ['CI-1.worm-startup', 'ASI04'],
+  ['CI-1.worm-loader', 'ASI04'],
+  ['CI-1.folder-open-task', 'ASI05'],
   // CI-2: workflows that run agents on outside content
   ['CI-2.', 'ASI01'],
   // CI-3: MCP servers and plugins
