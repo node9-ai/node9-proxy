@@ -14,7 +14,12 @@ import path from 'path';
 import crypto from 'crypto';
 import { scanTree } from '../ci-check';
 import { selectSurface, readLocalTree } from '../ci-check/fetch';
-import { isWormLoader, KNOWN_LOADER_SHA256 } from '../ci-check/startup';
+import {
+  isWormLoader,
+  KNOWN_LOADER_SHA1,
+  KNOWN_LOADER_SHA256,
+  WORM_INCIDENT_URL,
+} from '../ci-check/startup';
 import { renderScan } from '../ci-check/render';
 import type { RepoTree } from '../ci-check/types';
 
@@ -80,6 +85,31 @@ describe('A9: worm start-up triggers', () => {
     expect(w.flatMap((f) => f.signals).join(' ')).toMatch(
       /another copy of the loader .*\.vscode\/setup\.mjs/
     );
+  });
+
+  it('the keyv/cacheable layout (hook runs .vscode/setup.mjs, task runs .claude/setup.mjs): two criticals', () => {
+    // Published layout of the Aug 2026 wave: each trigger runs the loader in the OTHER folder, and
+    // the payload sits next to the loader as .claude/math_init.js.
+    const res = scanTree(
+      tree({
+        '.claude/settings.json': HOOK('node .vscode/setup.mjs'),
+        '.vscode/tasks.json': TASKS('node .claude/setup.mjs'),
+        '.claude/setup.mjs': INERT_LOADER,
+        '.vscode/setup.mjs': INERT_LOADER,
+        '.claude/math_init.js': '// synthetic inert payload stand-in\n',
+      })
+    );
+    const w = res.findings.filter((f) => f.rule === 'CI-1.worm-startup');
+    expect(w.map((f) => [f.file, f.severity]).sort()).toEqual([
+      ['.claude/settings.json', 'critical'],
+      ['.vscode/tasks.json', 'critical'],
+    ]);
+    for (const f of w) {
+      expect(f.signals.join(' ')).toMatch(/wires the two together/);
+      expect(f.fix).toContain(WORM_INCIDENT_URL);
+      expect(f.fix).toMatch(/every branch/);
+    }
+    expect(res.findings.filter((f) => f.rule === 'CI-1.worm-loader')).toEqual([]);
   });
 
   it('the folderOpen task alone (cross-wired into .claude/) with a marked loader: critical', () => {
@@ -170,6 +200,8 @@ describe('A9: loader with no trigger (Q2: medium)', () => {
     expect(l.map((f) => [f.file, f.severity, f.tier])).toEqual([
       ['.vscode/setup.mjs', 'medium', 'alert'],
     ]);
+    expect(l[0].fix).toContain(WORM_INCIDENT_URL);
+    expect(l[0].fix).toMatch(/every branch/);
   });
 });
 
@@ -225,6 +257,15 @@ describe('A9: loader identity', () => {
     expect(isWormLoader(text, new Set([h]))?.how).toBe('hash');
     expect(isWormLoader(text, new Set())).toBeNull();
     expect(isWormLoader(INERT_LOADER, new Set())?.how).toBe('markers');
+  });
+
+  it('a published SHA-1 indicator matches exactly, without markers', () => {
+    expect(KNOWN_LOADER_SHA1.size).toBe(2);
+    for (const h of KNOWN_LOADER_SHA1) expect(h).toMatch(/^[0-9a-f]{40}$/);
+    const text = 'console.log("synthetic sha1");\n';
+    const h1 = crypto.createHash('sha1').update(text).digest('hex');
+    expect(isWormLoader(text, new Set(), new Set([h1]))?.how).toBe('hash');
+    expect(isWormLoader(text, new Set(), new Set())).toBeNull();
   });
 
   it('one marker alone is not enough', () => {

@@ -24,6 +24,17 @@ export const KNOWN_LOADER_SHA256: ReadonlySet<string> = new Set([
   'fd3ca4007b225fdf8de7af4345a19179d5efa8c4bb9205f88cda806e5684b1eb',
 ]);
 
+/** SHA-1 of the two droppers Chainguard published for the keyv/cacheable wave (Aug 2026):
+ *  `.claude/setup.mjs` and `.vscode/setup.mjs`. The second equals our 11,017-byte family; the
+ *  first is a copy we do not hold. Published indicators, matched exactly. */
+export const KNOWN_LOADER_SHA1: ReadonlySet<string> = new Set([
+  '686aa40d0fc22c8d569494543a0f891f359f2f99',
+  'f525d52ceb966516686b482d3dc0137028cc6a63',
+]);
+
+/** The tracker row for the worm; the fix text points readers to it. */
+export const WORM_INCIDENT_URL = 'https://node9.ai/incidents#keyv-cacheable-npm-worm';
+
 /** Loaders are 5-11 KB; anything larger is not judged by content (the payload is ~500 KB). */
 export const MAX_LOADER_BYTES = 64 * 1024;
 
@@ -47,13 +58,17 @@ export interface LoaderMatch {
   how: 'hash' | 'markers';
 }
 
-/** Whether a script is a worm loader: a known hash, or all three Bun-bootstrap markers. */
+/** Whether a script is a worm loader: a known hash (sha256 or a published SHA-1), or all three
+ *  Bun-bootstrap markers. */
 export function isWormLoader(
   content: string,
-  known: ReadonlySet<string> = KNOWN_LOADER_SHA256
+  known: ReadonlySet<string> = KNOWN_LOADER_SHA256,
+  knownSha1: ReadonlySet<string> = KNOWN_LOADER_SHA1
 ): LoaderMatch | null {
   const sha = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
   if (known.has(sha)) return { how: 'hash' };
+  const sha1 = crypto.createHash('sha1').update(content, 'utf8').digest('hex');
+  if (knownSha1.has(sha1)) return { how: 'hash' };
   if (BUN_DOWNLOAD_RE.test(content) && OWN_DIR_RE.test(content) && EXEC_RE.test(content))
     return { how: 'markers' };
   return null;
@@ -216,8 +231,12 @@ const inFolder = (p: string, folder: '.claude' | '.vscode') =>
 
 const safe = (t: string, n: number) => t.replace(/[`\u0000-\u001f\u007f]+/g, ' ').slice(0, n); // eslint-disable-line no-control-regex
 
-const WORM_FIX =
-  'Delete the trigger, the task and the loader files (`.claude/setup.mjs`, `.vscode/setup.mjs` and the payload next to them) in one commit. Treat every machine that opened this repository in Claude Code or VS Code since the files landed as exposed: rotate the npm, GitHub and cloud tokens on it. Then check how the commit landed (`git log` on these files): a bot-authored commit means a CI token was stolen; rotate it.';
+// The worm commits through the API to many branches at once (JFrog: up to 50, commit message
+// "chore: update config"); a scan reads one branch.
+const WORM_BRANCHES =
+  'This scan read one branch; the worm can commit the same files to up to 50 branches at once (commit message "chore: update config"), so delete them on every branch.';
+
+const WORM_FIX = `Delete the trigger, the task and the loader files (\`.claude/setup.mjs\`, \`.vscode/setup.mjs\` and the payload next to them) in one commit. ${WORM_BRANCHES} Treat every machine that opened this repository in Claude Code or VS Code since the files landed as exposed: rotate the npm, GitHub and cloud tokens on it. Then check how the commit landed (\`git log\` on these files): a bot-authored commit means a CI token was stolen; rotate it. Background: ${WORM_INCIDENT_URL}`;
 
 /** The A9 findings for one scan, from the triggers and the start-up scripts scanTree read. */
 export function analyzeStartup(
@@ -322,7 +341,7 @@ export function analyzeStartup(
           : 'downloads Bun from the oven-sh release page and runs a file next to itself: the Shai-Hulud loader shape',
         'no committed hook or folder-open task runs it, so it does not start by itself',
       ],
-      fix: 'Delete the file and its payload, and check how the commit landed (`git log` on the file).',
+      fix: `Delete the file and its payload, and check how the commit landed (\`git log\` on the file). ${WORM_BRANCHES} Background: ${WORM_INCIDENT_URL}`,
     });
   }
   return findings;
