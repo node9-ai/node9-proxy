@@ -1,0 +1,27 @@
+# Any new issue drives Gemini with an issue-write token and a gh write command.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          settings: |-
+            {
+              "coreTools": [
+                "run_shell_command(gh label list)",
+                "run_shell_command(gh issue edit)"
+              ]
+            }
+          prompt: |-
+            Label issue ${ISSUE_NUMBER}. Read it with the tools you have.

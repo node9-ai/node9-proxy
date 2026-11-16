@@ -1,0 +1,29 @@
+# Only a literal list of author IDs reaches the agent.
+name: Auto review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+permissions: {}
+jobs:
+  review:
+    if: >-
+      contains(fromJSON('[1001,1002,1003]'), github.event.pull_request.user.id) &&
+      github.event.sender.id == github.event.pull_request.user.id
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: openai/codex-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: danger-full-access
+          allow-users: "*"
+          prompt: |
+            Review pull request ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}

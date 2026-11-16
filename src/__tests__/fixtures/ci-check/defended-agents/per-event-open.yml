@@ -1,0 +1,28 @@
+# Same, but anyone's comment starts it: the privileged event is open.
+name: Review
+on:
+  pull_request:
+    types: [opened]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: |
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: "*"
+          prompt: |
+            Review: ${{ github.event.pull_request.title }}${{ github.event.issue.title }}
+          claude_args: --allowedTools "Read,Grep,Bash(gh pr comment:*)"

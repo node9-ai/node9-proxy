@@ -1,0 +1,27 @@
+# Anyone's PR drives Codex with a full shell and a PR-write token, inside an environment.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+permissions: {}
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    environment: external-review
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: openai/codex-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: danger-full-access
+          allow-users: "*"
+          prompt: |
+            Review pull request ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}

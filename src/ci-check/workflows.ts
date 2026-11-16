@@ -21,16 +21,23 @@ const AGENT_ACTION_RE =
   /(anthropics\/claude-code(-base)?-action|anthropics\/claude-code|^\s*[\w.-]{1,100}\/claude-code-action@|openai\/codex|codex-action|run-?aider|aider-?action|google-github-actions\/run-gemini)/i;
 
 // Broad, write/exfil-capable tool grants (bare or dangerous verbs).
+// A10 (fw#481): `gh` with no fixed subcommand (`Bash(gh:*)`, `Bash(gh *)`, `Bash(gh)`) runs any
+// subcommand, `gh extension install` and `gh api` writes included; `gh api` with no fixed endpoint
+// (`Bash(gh api:*)`, `Bash(gh api *)`) is the whole REST API with the job's token. A grant that
+// names an endpoint (`Bash(gh api repos/o/r/pulls/1/comments:*)`) is not counted here.
 const BROAD_TOOL_RE =
-  /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)/i;
+  /(^|["\s,])(Bash|Write|Edit)(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|git push|git commit|git config|git:|rm|sh|bash|eval|npx|pip)|Bash\(\s*gh\s*(?::|\*|\))|Bash\(\s*gh\s+api\s*(?::\s*\*|\*|\))/i;
 
 // EXFIL/RCE tools: genuinely arbitrary shell or network egress — the tools that
 // let an injected agent steal secrets or run code. Deliberately NARROWER than
 // BROAD_TOOL_RE: it EXCLUDES scoped script invocations (`Bash(bash scripts/x.sh)`,
 // `Bash(python3 x.py *)`, `Bash(gh api *)`) and bare `Write`/`Edit` (which write
 // files but can't exfil on their own). Used by the F11 damage-capability cap.
+// A10: an unrestricted `gh` grant runs code (`gh extension install` downloads and runs an
+// extension), so it is here. `Bash(gh api…)` is not: it reaches only GitHub, and its damage is
+// judged by the token (GH_WRITE_TOOL_RE, EGRESS_TOOL_RE).
 const EXFIL_RCE_RE =
-  /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)/i;
+  /(^|["\s,])Bash(\s|,|"|$)|Bash\(\s*\*|Bash\((curl|wget|sh[\s):]|eval|rm[\s):]|git push)|Bash\(\s*gh\s*(?::|\*|\))/i;
 
 // A tool that can MODIFY GitHub — needed (alongside a write token) to abuse write
 // permissions. `Bash(gh api …)` is arbitrary API; the enumerated pr/issue verbs
@@ -120,6 +127,8 @@ interface Job {
   permissions?: Record<string, string> | string;
   steps?: Step[];
   env?: Record<string, unknown>;
+  /** A GitHub environment: a name, `{ name }`, or an expression that picks one. */
+  environment?: unknown;
 }
 interface Workflow {
   on?: unknown;
@@ -272,6 +281,10 @@ const CALLERS = new WeakMap<Workflow, LocalCaller[]>();
  *    trusted internal trigger and scores nothing (Review R4-round2 #7).
  *  - secretExposed / privileged: ONLY over stranger-firable triggers.
  *  Returns `keys` so callers don't re-parse (Review R4-round2 #9). */
+/** F14: a stranger-firable event that runs with the base repository's token and secrets. */
+const PRIVILEGED_EVENT_RE =
+  /pull_request_target|pull_request_review|workflow_run|issue|discussion/i;
+
 function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
   const on = onObject(wf, raw) ?? {};
   const keys = triggerKeys(wf, raw);
@@ -307,13 +320,9 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
     };
   }
   const secretExposed = firable.some((t) => /pull_request_target|workflow_run/i.test(t));
-  const privileged =
-    untrusted &&
-    firable.some((t) =>
-      /pull_request_target|pull_request_review|workflow_run|issue|discussion/i.test(t)
-    );
+  const privileged = untrusted && firable.some((t) => PRIVILEGED_EVENT_RE.test(t));
   const workflowRun = firable.some((t) => /^workflow_run$/i.test(t));
-  return { keys, untrusted, reusable, secretExposed, privileged, workflowRun };
+  return { keys, untrusted, reusable, secretExposed, privileged, workflowRun, firable };
 }
 
 /** Job values, dropping null entries. An empty job block (`notify:` with no body) parses
@@ -674,6 +683,58 @@ function allowedToolsFromSettings(settings: string): string {
   return out;
 }
 
+const GEMINI_ACTION_RE = /(?:^|\/)run-?gemini-cli(?:@|$)/i;
+
+function isGeminiStep(st: Step): boolean {
+  return GEMINI_ACTION_RE.test(str(st.uses).trim());
+}
+
+// C4-a: run-gemini-cli's built-in tools, mapped to the Claude names the tool rules read.
+const GEMINI_TOOL_NAMES: Record<string, string> = {
+  write_file: 'Write',
+  replace: 'Edit',
+  web_fetch: 'WebFetch',
+  google_web_search: 'WebSearch',
+};
+
+/** C4-a: the tool list in run-gemini-cli `settings` (`coreTools`, or `tools.core`), as grants
+ *  the tool rules read: `run_shell_command(gh issue edit)` becomes `Bash(gh issue edit:*)`, a
+ *  bare `run_shell_command` becomes `Bash`, read tools add nothing. null when the settings
+ *  hold no list: the tool policy is then unknown, not empty. */
+function geminiToolGrants(settings: string): string | null {
+  if (!settings.trim() || settings.length > 100_000) return null;
+  let cfg: unknown;
+  try {
+    cfg = JSON.parse(settings);
+  } catch {
+    return null; // an expression or malformed JSON: unknown, none invented
+  }
+  if (!cfg || typeof cfg !== 'object') return null;
+  const c = cfg as Record<string, unknown>;
+  const tools =
+    c['tools'] && typeof c['tools'] === 'object' ? (c['tools'] as Record<string, unknown>) : {};
+  const list = Array.isArray(c['coreTools'])
+    ? c['coreTools']
+    : Array.isArray(tools['core'])
+      ? tools['core']
+      : null;
+  if (!list) return null;
+  const out: string[] = [];
+  for (const raw of list.slice(0, 500)) {
+    if (typeof raw !== 'string') continue;
+    const t = raw.trim();
+    const shell = /^run_shell_command(?:\(([^)]*)\))?$/i.exec(t);
+    if (shell) {
+      const cmd = (shell[1] ?? '').trim();
+      out.push(cmd ? `Bash(${cmd}:*)` : 'Bash');
+      continue;
+    }
+    const name = GEMINI_TOOL_NAMES[t.toLowerCase()];
+    if (name) out.push(name);
+  }
+  return out.join(' ');
+}
+
 /** All tool grants declared for the agent steps — ONLY from real tool-grant sources
  *  (`--allowedTools`, the `allowed_tools`/`allowedTools` keys, `settings.allowedTools`),
  *  never prose. See G-c. */
@@ -686,6 +747,7 @@ function collectTools(steps: Step[]): string {
     // `with:` keys are lower-cased by normalizeWorkflow.
     s += ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedtools']);
     s += ' ' + allowedToolsFromSettings(str(w['settings']));
+    if (isGeminiStep(st)) s += ' ' + (geminiToolGrants(str(w['settings'])) ?? '');
     // T.2a: skipping permissions makes any allow list moot: an unrestricted shell.
     if (PERMISSION_BYPASS_RE.test(args) || /^danger-full-access$/i.test(str(w['sandbox'])))
       s += ' Bash';
@@ -859,6 +921,62 @@ const RUN_ARTIFACT_RE =
 let TRUSTED_RUN_SOURCES: ReadonlySet<string> = new Set();
 let UPSTREAM_TRUSTED = false;
 
+/** C6-c: which GitHub environments of this repository require a reviewer, when the reader could
+ *  ask GitHub (hosted scan, Action). null = not read: the scan cannot see the rule. */
+export interface EnvironmentInfo {
+  protected: ReadonlySet<string>;
+}
+let ENVIRONMENTS: EnvironmentInfo | null = null;
+
+const ENV_BY_EVENT_RE =
+  /^\$\{\{\s*github\.event_name\s*==\s*'([\w-]{1,60})'\s*&&\s*'([^']{0,200})'\s*\|\|\s*'([^']{0,200})'\s*\}\}$/i;
+
+/** C6-c: the environment a job runs in on event `ev`. A literal name, or the name an expression of
+ *  the form `github.event_name == 'x' && 'name' || 'other'` picks for that event. '' = none,
+ *  null = an expression the scan cannot read. */
+function jobEnvironmentOn(job: Job, ev: string): string | null {
+  const e = job.environment;
+  const v = e && typeof e === 'object' ? (e as Record<string, unknown>)['name'] : e;
+  if (v == null) return '';
+  const s = str(v).trim();
+  if (!s.includes('${{')) return s;
+  const m = ENV_BY_EVENT_RE.exec(s);
+  if (!m) return null;
+  return m[1].toLowerCase() === ev ? m[2].trim() : m[3].trim();
+}
+
+/** C6-c: on event `ev`, does this job wait for a reviewer's approval before it runs? */
+function environmentHoldsOn(job: Job, ev: string): boolean {
+  if (!ENVIRONMENTS) return false;
+  const name = jobEnvironmentOn(job, ev);
+  return !!name && ENVIRONMENTS.protected.has(name);
+}
+
+/** C6-c: every environment name an agent job of this workflow may run in (literal names, and the
+ *  quoted names inside an environment expression), for the reader to ask GitHub about. */
+export function agentJobEnvironmentNames(content: string): string[] {
+  let wf: Workflow;
+  try {
+    wf = loadWorkflow(content).wf;
+  } catch {
+    return [];
+  }
+  const out = new Set<string>();
+  for (const job of jobList(wf))
+    if ((job.steps ?? []).some(isAgentStep)) for (const n of jobEnvironmentNames(job)) out.add(n);
+  return [...out].slice(0, 50);
+}
+
+/** The environment names a job may run in: a literal, or both names of an event expression. */
+function jobEnvironmentNames(job: Job): string[] {
+  const e = job.environment;
+  const v = str(e && typeof e === 'object' ? (e as Record<string, unknown>)['name'] : e).trim();
+  if (!v) return [];
+  if (!v.includes('${{')) return [v];
+  const m = ENV_BY_EVENT_RE.exec(v);
+  return m ? [m[2].trim(), m[3].trim()].filter(Boolean) : [];
+}
+
 /** Does every workflow this one runs after (`workflow_run.workflows`) belong to the tree and run
  *  on no stranger-firable trigger? */
 function upstreamRunTrusted(wf: Workflow, raw: Record<string, unknown>): boolean {
@@ -1009,6 +1127,23 @@ const CONTAINS_GATE_RE =
 const NEGATED_CONTAINS_RE =
   /!\s*\(?\s*contains\((?:[^()]|\([^()]*\))*(login|actor|association|OWNER|MEMBER|COLLABORATOR)/i;
 
+// C6-a: an allow-list of numeric user IDs (or the triggering actor) written as a LITERAL list:
+// `contains(fromJSON('[1001,1002]'), github.event.pull_request.user.id)`. Read on masked text,
+// so the list is `fromJSON('_')`. A list in `vars.*` can hold anything and is not credited.
+const ID_ALLOWLIST_G =
+  /contains\(\s*fromJSON\(\s*'[^']*'\s*\)\s*,\s*github\.(?:event\.(?:pull_request|issue|comment|review|sender)(?:\.user)?\.id|actor_id|triggering_actor)\s*\)/gi;
+// The same identity compared with a number: `github.actor_id == 1001`.
+const ID_EQUALS_RE = /\b(?:actor_id|user\.id|sender\.id)\s*==\s*\d{1,20}\b/i;
+
+function idAllowListGate(masked: string): boolean {
+  if (ID_EQUALS_RE.test(masked)) return true;
+  for (const m of masked.matchAll(ID_ALLOWLIST_G)) {
+    const before = masked.slice(Math.max(0, (m.index ?? 0) - 10), m.index ?? 0);
+    if (!/!\s*\(?\s*$/.test(before)) return true; // `!contains(…)` admits everyone else
+  }
+  return false;
+}
+
 /** Which label gates a workflow's triggers make meaningful. F14a: a PR label counts on
  *  pull_request_target OR pull_request with `types: [labeled]` (a backport resolver gates a
  *  `pull_request: types:[labeled]` job on the label name). T.6.9: an issue's labels are set by
@@ -1083,7 +1218,7 @@ function ifsAreGated(ifs: string, label: LabelConfig): boolean {
   // Credit a contains() inclusion ONLY when it is not negated (`!contains(…)` = anti-gate).
   const containsGate =
     CONTAINS_GATE_RE.test(m) && !NEGATED_CONTAINS_RE.test(m) && !NONWRITE_SET_RE.test(ifs);
-  const gated = NONCONTAINS_GATE_RE.test(m) || containsGate;
+  const gated = NONCONTAINS_GATE_RE.test(m) || containsGate || idAllowListGate(m);
   // A label already on the PR (`contains(github.event.pull_request.labels.*.name, 'x')`) was put
   // there by someone with triage access, like the `label.name` of a labeled event. Only a
   // POSITIVE test counts (second review): see PR_LABEL_GATE_RE.
@@ -1316,6 +1451,33 @@ function exprAllowsEvent(x: IfExpr, ev: string): boolean {
     case 'or':
       return x.c.some((c) => exprAllowsEvent(c, ev));
   }
+}
+
+/** C6-b: can this expression be true on event `ev` with no actor gate holding it? An atom that
+ *  pins another event, or that is a gate, cannot; `!x` is read as open (as in exprGated). */
+function ungatedOn(x: IfExpr, ev: string, label: LabelConfig): boolean {
+  switch (x.k) {
+    case 'atom':
+      if (!exprAllowsEvent(x, ev)) return false;
+      if (CHAINED_COMPARE_RE.test(maskLiterals(x.t))) return true;
+      return !(gatedText(x.t, label) || TRUSTED_EVENT_ATOM_RE.test(x.t));
+    case 'not':
+      return true;
+    case 'and':
+      return x.c.every((c) => ungatedOn(c, ev, label));
+    case 'or':
+      return x.c.some((c) => ungatedOn(c, ev, label));
+  }
+}
+
+/** C6-b: does this job run on event `ev` without its own `if:` gating it? No `if:`, or one
+ *  that does not parse, is open. */
+function jobRunsUngatedOn(job: Job, ev: string, label: LabelConfig): boolean {
+  if (environmentHoldsOn(job, ev.toLowerCase())) return false; // C6-c: a reviewer approves each run
+  const src = str(job.if).trim();
+  if (!src) return true;
+  const x = parseIf(src);
+  return x === null || ungatedOn(x, ev.toLowerCase(), label);
 }
 
 /** Review finding 5: does THIS job run on a stranger-firable workflow_run? A job whose `if:`
@@ -1693,6 +1855,87 @@ function claudeActionBuild(
   return { official: m[1].toLowerCase() === 'anthropics', owner: m[1], ref: m[2] };
 }
 
+const CLAUDE_BASE_ACTION_RE = /^\s*anthropics\/claude-code-base-action@\S/i;
+
+/** C4-c: can the scan read this agent step's whole tool policy? Only these:
+ *  - official codex-action in a read-only sandbox (`sandbox: read-only` or `:read-only`);
+ *  - official claude-code-action / claude-code-base-action given a prompt (agent mode, not the
+ *    tag mode that adds its own tools) and an explicit allowed-tools list;
+ *  - run-gemini-cli with an explicit core-tools list.
+ *  Anything else (no list, a named profile, a CLI run, a slash command that grants its own
+ *  tools) is unknown, and an unknown policy is never read as "no tools". */
+function toolPolicyKnown(st: Step, job: Job): boolean {
+  const w = st.with ?? {};
+  if (codexActionBuild(st.uses)?.official) return readOnlySandbox(st);
+  // Claude Code and Gemini CLI also load the checked-out repository's own settings
+  // (`.claude/settings.json`, `.gemini/settings.json`), whose allow lists add tools. The list in
+  // the workflow is the whole policy only when nothing is checked out at the workspace root, or
+  // when Claude is told not to load project settings.
+  const projectSettings = rootCheckout(job) && !settingSourcesSkipProject(str(w['claude_args']));
+  if (claudeActionBuild(st.uses)?.official || CLAUDE_BASE_ACTION_RE.test(str(st.uses))) {
+    const prompt = str(w['prompt']).trim() || str(w['direct_prompt']).trim();
+    // A slash command (`/name`) takes the tools its command file grants, which is not read here.
+    if (!prompt || prompt.startsWith('/')) return false;
+    const explicit =
+      allowedToolsFromArgs(str(w['claude_args'])).trim() ||
+      str(w['allowed_tools']).trim() ||
+      str(w['allowedtools']).trim();
+    return !!explicit && !PERMISSION_BYPASS_RE.test(str(w['claude_args'])) && !projectSettings;
+  }
+  if (isGeminiStep(st)) return geminiToolGrants(str(w['settings'])) !== null && !rootCheckout(job);
+  return false;
+}
+
+/** Does the job check a repository out into the workspace root (an `actions/checkout` with no
+ *  `path:`, or a `gh pr checkout` / `git clone` run)? Its settings files are then in the agent's
+ *  working directory. */
+function rootCheckout(job: Job): boolean {
+  return (job.steps ?? []).some((s) => {
+    if (/^\s*actions\/checkout@/i.test(str(s.uses))) {
+      const p = str(s.with?.['path'])
+        .trim()
+        .replace(/^\.\/?$/, '');
+      return p === '';
+    }
+    return /\bgh\s+pr\s+checkout\b|\bgit\s+clone\b/.test(str(s.run));
+  });
+}
+
+/** `--setting-sources user` (no `project`, no `local`): Claude ignores the repository's settings. */
+function settingSourcesSkipProject(claudeArgs: string): boolean {
+  const m = /--setting-sources[=\s]+["']?([\w,\s]{1,60})/i.exec(claudeArgs);
+  return !!m && !/\b(project|local)\b/i.test(m[1]);
+}
+
+const SECRET_REF_G = /\bsecrets\.([A-Za-z_][\w-]{0,100})/g;
+
+/** C4-c: does the agent step's environment (workflow, job and step `env:`) hold a secret? The
+ *  model key handed to the action through its own input is not counted: codex-action keeps it in
+ *  its proxy, and the other actions pass it to the model client. The job token counts unless the
+ *  job's permissions are explicitly read-only. Claude actions export the token they are given
+ *  (or mint one), so for them a token that can write, or `id-token: write`, always counts. */
+function agentEnvHoldsSecret(wf: Workflow, job: Job, st: Step): boolean {
+  const perms = jobPerms(wf, job);
+  const readOnlyToken = perms.trim() !== '' && !/write/i.test(perms);
+  const claude = !!claudeActionBuild(st.uses) || CLAUDE_BASE_ACTION_RE.test(str(st.uses));
+  if (claude && !readOnlyToken) return true;
+  const env = { ...(st.scopeEnv ?? {}), ...(st.env ?? {}) };
+  for (const v of Object.values(env)) {
+    const s = str(v);
+    for (const m of s.matchAll(SECRET_REF_G)) {
+      if (m[1].toUpperCase() === 'GITHUB_TOKEN' && readOnlyToken) continue;
+      // `secrets.X != ''` yields true or false, never the value.
+      const at = m.index ?? 0;
+      const after = s.slice(at + m[0].length, at + m[0].length + 8);
+      const before = s.slice(Math.max(0, at - 8), at);
+      if (/^\s*[=!]=/.test(after) || /[=!]=\s*$/.test(before)) continue;
+      return true;
+    }
+    if (/\bgithub\.token\b/.test(s) && !readOnlyToken) return true;
+  }
+  return false;
+}
+
 /** Which official action's own write check holds these agent steps, for the report's wording. */
 function defaultGateOwner(agentSteps: Step[]): string {
   const claude = agentSteps.some((s) => claudeActionBuild(s.uses)?.official);
@@ -1914,16 +2157,19 @@ export function analyzeWorkflow(
   content: string,
   callers?: LocalCaller[],
   autoLabels?: ReadonlySet<string>,
-  trustedRunSources?: ReadonlySet<string>
+  trustedRunSources?: ReadonlySet<string>,
+  environments?: EnvironmentInfo | null
 ): CiFinding | null {
   AUTO_LABELS = autoLabels ?? new Set();
   TRUSTED_RUN_SOURCES = trustedRunSources ?? new Set();
+  ENVIRONMENTS = environments ?? null;
   try {
     return analyzeWorkflowInner(path, content, callers);
   } finally {
     AUTO_LABELS = new Set();
     TRUSTED_RUN_SOURCES = new Set();
     UPSTREAM_TRUSTED = false;
+    ENVIRONMENTS = null;
   }
 }
 
@@ -1962,14 +2208,10 @@ function analyzeWorkflowInner(
   // label IS the gate). `workflow_call` with no stranger trigger is `reusable` (scored
   // as potentially-untrusted, capped at medium below). F14: privileged = runs the
   // untrusted actor with the base-repo write token + secrets. See triggerReach.
-  const {
-    keys: triggers,
-    untrusted: forkInput,
-    secretExposed,
-    reusable,
-    privileged,
-    workflowRun,
-  } = triggerReach(wf, raw);
+  const reachOf = triggerReach(wf, raw);
+  const { keys: triggers, untrusted: forkInput, reusable, workflowRun } = reachOf;
+  // Narrowed below (C6-b) to the events an injectable job runs on without a gate.
+  let { secretExposed, privileged } = reachOf;
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
   const nonWriteStar = bypassArmed(agentSteps);
@@ -1996,7 +2238,26 @@ function analyzeWorkflowInner(
   // G-d / R4-2 / R4-round2#1: reach AND power come only from the INJECTABLE job(s) — a
   // gated sibling job's tools/perms/PAT can't be reached by the untrusted trigger, and
   // must NOT downgrade (mask) an ungated sibling either. Compute injectable jobs FIRST.
-  const injJobs = injectableJobs(wf, raw, untrustedTrigger);
+  let injJobs = injectableJobs(wf, raw, untrustedTrigger);
+  // C6-b: a job `if:` can gate some events and not others (`pull_request` open, the comment
+  // command gated to members). Keep only the stranger-firable events an injectable job runs on
+  // WITHOUT a gate, and judge privilege and base secrets by those. Only for the workflow's own
+  // triggers: a reusable template takes its events from its callers.
+  const firable = 'firable' in reachOf ? reachOf.firable : undefined;
+  if (forkInput && !reusable && firable?.length && injJobs.length) {
+    const label = labelTypeConfigured(wf, raw);
+    const openOn = (j: Job) => firable.filter((ev) => jobRunsUngatedOn(j, ev, label));
+    const open = [...new Set(injJobs.flatMap(openOn))];
+    if (open.length < firable.length) {
+      injJobs = injJobs.filter((j) => openOn(j).length > 0);
+      // Every event gated: the jobs are held, and the finding stays a hardening note about the
+      // privileged trigger (as for any gated job). Some open: judge by those events only.
+      if (open.length) {
+        privileged = open.some((t) => PRIVILEGED_EVENT_RE.test(t));
+        secretExposed = open.some((t) => /pull_request_target|workflow_run/i.test(t));
+      }
+    }
+  }
   // Fallback to all agent jobs only matters for the signal strings when NO job is
   // injectable — in that case reach is 0 (below), so the fallback never drives severity.
   const powerJobs = injJobs.length ? injJobs : agentJobs;
@@ -2135,6 +2396,25 @@ function analyzeWorkflowInner(
   const reusableLoadedGun = reusable && (head === 'root' || promptUntrusted);
   if (reusable && !reusableLoadedGun && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
     severity = 'medium';
+  // C4-c: an agent that can only produce text. Every reachable agent step has a tool policy the
+  // scan can read, and together they give no shell, no write or egress tool, no PAT, and no
+  // secret in the agent's environment. Anyone may start it; the worst it does is write untrusted
+  // text, which the output rules (CI-2 output-to-env, trusted readers) judge on their own.
+  const reachableAgents = injJobs.flatMap((j) =>
+    (j.steps ?? []).filter(isAgentStep).map((st) => ({ job: j, st }))
+  );
+  const textOnly =
+    reach > 0 &&
+    reachableAgents.length > 0 &&
+    reachableAgents.every(
+      ({ job, st }) => toolPolicyKnown(st, job) && !agentEnvHoldsSecret(wf, job, st)
+    ) &&
+    !broadTools &&
+    !exfilOrRce &&
+    !egressTool &&
+    !githubWriteTool &&
+    !pat;
+  if (textOnly && severity && severity !== 'advisory') severity = 'advisory';
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.
@@ -2232,6 +2512,17 @@ function analyzeWorkflowInner(
         : 'agent has broad/write-capable tool grants'
     );
   }
+  if (!broadTools && githubWriteTool) {
+    const writers = toolTokens(toolsBlob).filter((t) => GH_WRITE_TOOL_RE.test(t));
+    if (writers.length)
+      signals.push(
+        `agent can write to GitHub with: ${writers.map((n) => `\`${safeText(n, 80)}\``).join(', ')}`
+      );
+  }
+  if (textOnly)
+    signals.push(
+      'the agent can only produce text: read-only tools, no write token it can use, no secret in its environment'
+    );
   if (bypassActive && claudeOpen)
     signals.push(
       nonWriteActor
@@ -2313,6 +2604,19 @@ function analyzeWorkflowInner(
   if (envDeny) mitigations.push('secrets env-denied from the agent subprocess');
   if (pinned) mitigations.push('agent action pinned to a commit SHA');
   if (nonWriteList) mitigations.push('non-write users scoped to a list, not "*"');
+  // C6-c: the GitHub environment an agent job runs in. Read from GitHub when the reader could ask.
+  const envNames = [...new Set(agentJobs.flatMap(jobEnvironmentNames))].slice(0, 3);
+  for (const n of envNames) {
+    const name = `\`${safeText(n, 60)}\``;
+    if (ENVIRONMENTS?.protected.has(n))
+      mitigations.push(
+        `runs in environment ${name}, which requires a reviewer to approve each run`
+      );
+    else if (!ENVIRONMENTS)
+      mitigations.push(
+        `runs in environment ${name}: if it requires reviewers, a stranger's run waits for approval (not visible to this scan)`
+      );
+  }
   if (starWithoutToken)
     mitigations.push(
       'allowed_non_write_users: "*" is set without github_token, so the action keeps its default write gate'
@@ -2904,10 +3208,15 @@ function headRefEvents(heads: Step[]): string[] | null {
   return evs.size ? [...evs] : null;
 }
 
-/** A codex step whose sandbox is read-only and not bypassed by its args. */
+/** A codex step whose sandbox is read-only and not bypassed by its args: the legacy
+ *  `sandbox: read-only`, or the built-in `permission-profile: ":read-only"` (C4-b). A named
+ *  profile is defined in a config file the scan does not read, so it is not credited. */
 function readOnlySandbox(st: Step): boolean {
   const args = str(st.with?.['codex-args']) + ' ' + str(st.with?.['codex_args']);
-  return /^read-only$/i.test(str(st.with?.['sandbox'])) && !PERMISSION_BYPASS_RE.test(args);
+  const readOnly =
+    /^read-only$/i.test(str(st.with?.['sandbox']).trim()) ||
+    /^:read-only$/i.test(str(st.with?.['permission-profile']).trim());
+  return readOnly && !PERMISSION_BYPASS_RE.test(args);
 }
 
 /** Does every way through this `if:` require the PR's AUTHOR to be trusted? (An `||` branch

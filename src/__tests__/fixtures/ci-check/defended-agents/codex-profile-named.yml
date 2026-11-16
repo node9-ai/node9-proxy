@@ -1,0 +1,25 @@
+# Same, but a named profile defined elsewhere: unknown to the scanner.
+name: Review
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+permissions: {}
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+          persist-credentials: false
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: "review"
+          allow-users: "*"
+          prompt: |
+            Review pull request ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}

@@ -25,6 +25,7 @@ import {
   isAppDoc,
 } from './instructions';
 import { readGitRemotes } from '../utils/git-remotes';
+import { agentJobEnvironmentNames } from './workflows';
 
 // gh-CLI token is resolved at most once per process (spawning gh is expensive).
 let cachedGhToken: string | null | undefined;
@@ -1224,6 +1225,13 @@ class ApiSession {
     return p;
   }
 
+  /** One plain API request within the budget (C6-c); false when the budget is spent. */
+  take(): boolean {
+    if (this.requests >= API_BUDGET.requests) return false;
+    this.requests++;
+    return true;
+  }
+
   /** The notes that make a partial API read visible. */
   closingNotes(): string[] {
     const out: string[] = [];
@@ -1567,11 +1575,14 @@ export async function fetchGitHubTree(
         `read ${session.archiveUsed.size} file(s) from the repository archive, each checked against GitHub's tree by its git hash.`
       );
     notes.push(...session.closingNotes());
+    const files = fetched.filter((f): f is RepoFile => !!f);
+    const environments = await readEnvironments(owner, repo, files, () => session.take());
     return {
       source: `${owner}/${repo}`,
       owner,
       repo,
-      files: fetched.filter((f): f is RepoFile => !!f),
+      files,
+      environments,
       notes,
       paths: plan.paths,
       pathsComplete: !listed.truncated && plan.complete,
@@ -1587,9 +1598,66 @@ export async function fetchGitHubTree(
   }
 }
 
+/** C6-c: environment reads per scan. Real workflows name one or two. */
+const MAX_ENVIRONMENT_READS = 10;
+
+/** C6-c: does a `GET /repos/{o}/{r}/environments/{name}` answer require a reviewer? */
+function requiresReviewer(json: unknown): boolean {
+  const rules = (json as { protection_rules?: unknown }).protection_rules;
+  return (
+    Array.isArray(rules) &&
+    rules.some((r) => {
+      const rule = r as { type?: unknown; reviewers?: unknown };
+      return (
+        !!r &&
+        rule.type === 'required_reviewers' &&
+        Array.isArray(rule.reviewers) &&
+        rule.reviewers.length > 0
+      );
+    })
+  );
+}
+
+/** C6-c: ask GitHub which environments of the agent jobs require a reviewer. GitHub answers this
+ *  for a public repository without special rights. One request per name, within `take` (the
+ *  scan's request budget). undefined when any answer is unclear: nothing is credited then.
+ *  A 404 is an environment that does not exist yet; GitHub creates it unprotected on first use. */
+export async function readEnvironments(
+  owner: string,
+  repo: string,
+  files: RepoFile[],
+  take: () => boolean = () => true
+): Promise<{ protected: string[] } | undefined> {
+  const names = [
+    ...new Set(
+      files
+        .filter((f) => (f.route ?? routeOf(f.path, new Set())) === 'workflow')
+        .flatMap((f) => agentJobEnvironmentNames(f.content))
+    ),
+  ];
+  const out: string[] = [];
+  for (const name of names.slice(0, MAX_ENVIRONMENT_READS)) {
+    if (!take()) return undefined;
+    const { status, json } = await ghGet(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/environments/${encodeURIComponent(name)}`
+    );
+    if (status === 404) continue;
+    if (status !== 200 || !json || typeof json !== 'object') return undefined;
+    if (requiresReviewer(json)) out.push(name);
+  }
+  return { protected: out };
+}
+
 /** Resolve any input (URL | owner/repo | local path) to a RepoTree. */
 export async function fetchTree(input: string, onProgress?: OnProgress): Promise<RepoTree> {
-  if (isLocalPath(input)) return readLocalTree(input);
+  if (isLocalPath(input)) {
+    const tree = readLocalTree(input);
+    // C6-c: the Action scans its checkout; it may ask GitHub about environments. A plain local
+    // scan stays offline.
+    if (process.env.NODE9_USAGE_SOURCE === 'action' && tree.owner && tree.repo)
+      tree.environments = await readEnvironments(tree.owner, tree.repo, tree.files);
+    return tree;
+  }
   const parsed = parseRepoUrl(input);
   if (!parsed) {
     return {

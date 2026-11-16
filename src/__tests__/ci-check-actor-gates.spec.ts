@@ -228,10 +228,12 @@ describe('G3a: allow-users on codex-action', () => {
     expect(signals('codex-star-dispatch.yml')).not.toMatch(/any user can trigger/);
   });
 
-  it('"*" with a read-only sandbox and no token: open, but not above medium', () => {
-    const r = rank('codex-star-read-only.yml');
-    expect(r).toBeGreaterThanOrEqual(SEVERITY_RANK.medium);
-    expect(r).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+  // Was medium until fw#481 C4-c (scanner-ci2-c4-c6-design.md, approved 2026-11-16): an agent
+  // that can only produce text is advisory, still reported, with the reach named.
+  it('"*" with a read-only sandbox and no token: open, but the agent can only produce text', () => {
+    expect(rank('codex-star-read-only.yml')).toBe(SEVERITY_RANK.advisory);
+    expect(signals('codex-star-read-only.yml')).toMatch(/any user can trigger/);
+    expect(signals('codex-star-read-only.yml')).toMatch(/can only produce text/);
   });
 
   it('the fix is about the Codex step, not a Claude document', () => {
