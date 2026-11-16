@@ -53,6 +53,10 @@ export function scanTree(tree: RepoTree): ScanResult {
   const skillDirs = skillDirsOf(tree.files.map((f) => f.path));
   // The whole listing, when the reader had one, so the hook check can tell "not committed"
   // from "not read". A listing that is not known to be complete decides nothing.
+  // C6-c: environments that require a reviewer, when the reader could ask GitHub.
+  const environments = tree.environments
+    ? { protected: new Set(tree.environments.protected) }
+    : null;
   const listing = tree.paths
     ? { paths: new Set(tree.paths), complete: tree.pathsComplete === true, unknown: isUnwalked }
     : undefined;
@@ -173,7 +177,14 @@ export function scanTree(tree: RepoTree): ScanResult {
       switch (route) {
         case 'workflow': {
           const callers = callersOf.get(file.path);
-          const f = analyzeWorkflow(file.path, content, callers, autoLabels, trustedRunSources);
+          const f = analyzeWorkflow(
+            file.path,
+            content,
+            callers,
+            autoLabels,
+            trustedRunSources,
+            environments
+          );
           if (f) findings.push(f);
           const s = analyzeWorkflowSecrets(
             file.path,

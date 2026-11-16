@@ -1,0 +1,21 @@
+# Same, with an issue-write token and a gh comment tool: it can write to GitHub.
+name: Triage
+on:
+  issues:
+    types: [opened]
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: "*"
+          prompt: |
+            Classify issue ${{ github.event.issue.number }}: ${{ github.event.issue.title }}
+          claude_args: --allowedTools "Read,Grep,Bash(gh issue comment:*)"

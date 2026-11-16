@@ -155,6 +155,9 @@ export interface RepoTree {
   /** The GitHub repository name, when known: a reusable workflow called by its full path
    *  (`<owner>/<repo>/.github/workflows/<f>@<ref>`) is in this tree when both match (gap 1). */
   repo?: string;
+  /** C6-c: the agent jobs' GitHub environments that require a reviewer, when the reader asked
+   *  GitHub (hosted scan, CLI by URL, the Action). Absent = not read. */
+  environments?: { protected: string[] };
 }
 
 export interface ScanResult {

@@ -1,0 +1,30 @@
+# pull_request runs for same-repository PRs only; fork PRs come in on pull_request_target and
+# wait in the environment. Every path is held.
+name: Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_target:
+    types: [opened, synchronize]
+permissions: {}
+jobs:
+  review:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'pull_request_target' && 'external-review' || '' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          allow-users: "*"
+          prompt: |
+            Review pull request ${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}
