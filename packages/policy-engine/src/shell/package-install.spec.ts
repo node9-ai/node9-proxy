@@ -46,6 +46,38 @@ describe('extractPackageInstalls — npm family', () => {
     ]);
     expect(names('npx --package=typescript tsc --init')).toEqual(['typescript']);
   });
+  it('a package flag AFTER the command is the command argument: the runner still fetches the command', () => {
+    // npm, pnpm, yarn and bun hand every word after the first operand to the command, so a
+    // trailing `-p` must never replace the package that is actually fetched and run.
+    expect(names('npx evil-pkg -p lodash')).toEqual(['evil-pkg']);
+    expect(names('npx evil-pkg --package=lodash')).toEqual(['evil-pkg']);
+    expect(names('bunx evil-pkg --package lodash')).toEqual(['evil-pkg']);
+    expect(names('pnpm dlx evil-pkg -p lodash')).toEqual(['evil-pkg']);
+    expect(names('yarn dlx evil-pkg -p lodash')).toEqual(['evil-pkg']);
+    expect(names('npm exec evil-pkg -- -p lodash')).toEqual(['evil-pkg']);
+    // npm (not npx) parses --package anywhere before `--`: both names are checked
+    expect(names('npm exec eslint --package=evil-pkg')).toEqual(['eslint', 'evil-pkg']);
+    expect(names('npm --package evil-pkg exec cowsay')).toEqual(['evil-pkg']);
+    expect(names('npm --package=evil-pkg exec cowsay')).toEqual(['evil-pkg']);
+    expect(names('npm exec cowsay -- --package=x')).toEqual(['cowsay']);
+    expect(names('npx @scope/cli@latest agent metrics -p 1h')).toEqual(['@scope/cli']);
+    expect(names('npx tsc -p tsconfig.build.json')).toEqual(['tsc']);
+    // before the command they still name the packages
+    expect(names('npm exec -p lodash -- cowsay')).toEqual(['lodash']);
+    expect(names('npx -p=a,b cmd')).toEqual(['a', 'b']);
+    // pnpm's documented form puts --package before dlx; the bare operand is then the command
+    expect(names('pnpm --package=evil-gen dlx yo webapp')).toEqual(['evil-gen']);
+    expect(names('pnpm --package evil-gen --package=b dlx yo')).toEqual(['evil-gen', 'b']);
+    expect(names('pnpm dlx yo')).toEqual(['yo']);
+  });
+  it('uvx, uv run and pipx run: --from / --with / --spec after the tool belong to the tool', () => {
+    expect(names('uvx evil-tool --from requests')).toEqual(['evil-tool']);
+    expect(names('uvx evil-tool --with requests')).toEqual(['evil-tool']);
+    expect(names('uv tool run evil-tool --from requests')).toEqual(['evil-tool']);
+    expect(names('pipx run evil-tool --spec requests')).toEqual(['evil-tool']);
+    expect(names('uv run script.py --with requests')).toEqual([]);
+    expect(names('uv run --with requests script.py')).toEqual(['requests']);
+  });
   it('several packages in one install, in order', () => {
     expect(names('npm i react react-dom@18.2.0 @scope/pkg')).toEqual([
       'react',

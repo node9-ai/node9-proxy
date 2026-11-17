@@ -95,6 +95,7 @@ function parseNpmSpec(raw: string): { name: string; version?: string } | null {
 // errs the other way: its value is looked up as a package name too, which
 // costs a lookup and blocks nothing that is not itself in the index.
 const NPM_VALUE_FLAGS = new Set([
+  '--package', // `npm --package=<pkg> exec <cmd>`: read by the exec branch
   '--registry',
   '--prefix',
   '--cache',
@@ -116,6 +117,7 @@ const NPM_VALUE_FLAGS = new Set([
   '--libc',
 ]);
 const PNPM_VALUE_FLAGS = new Set([
+  '--package', // `pnpm --package=<pkg> dlx <cmd>`: read by the dlx branch
   '--registry',
   '-C',
   '--dir',
@@ -349,9 +351,16 @@ function operands(words: (string | null)[], from: number, valueFlags: Set<string
  * installs. uv takes a comma-separated list there (`--with a,b`), so values
  * are split on commas; a comma never appears in a package spec.
  */
-function flagValues(words: (string | null)[], from: number, names: string[]): string[] {
+function flagValues(
+  words: (string | null)[],
+  from: number,
+  names: string[],
+  /** Stop before this index: a runner hands every word from its command on to that command. */
+  until = words.length
+): string[] {
   const out: string[] = [];
-  for (let i = from; i >= 0 && i < words.length; i++) {
+  const end = until < 0 ? words.length : Math.min(until, words.length);
+  for (let i = from; i >= 0 && i < end; i++) {
     const w = words[i];
     if (w === null) continue;
     for (const n of names) {
@@ -890,9 +899,17 @@ function pushPy(out: PackageInstallRequest[], manager: string, specs: string[], 
   }
 }
 
-/** `npx [flags] [-p pkg]… <pkg|cmd> [args]`: the packages npx would fetch. */
-function npxPackages(words: (string | null)[], from: number): string[] {
-  const explicit = flagValues(words, from, ['-p', '--package']);
+/** `npx [flags] [-p pkg]… <pkg|cmd> [args]`: the packages npx would fetch. Options are
+ *  read only BEFORE the first operand: npm hands every word after it to the command, so in
+ *  `npx evil -p lodash` the package fetched is `evil`, and `-p lodash` is evil's argument. */
+function npxPackages(
+  words: (string | null)[],
+  from: number,
+  /** Packages already named before the runner verb (`pnpm --package=x dlx cmd`). */
+  before: string[] = []
+): string[] {
+  const explicit: string[] = [...before];
+  const take = (v: string) => explicit.push(...v.split(',').filter((x) => x.length > 0));
   for (let i = from; i >= 0 && i < words.length; i++) {
     const w = words[i];
     if (w === null) return explicit; // dynamic — the command is unknowable
@@ -901,8 +918,14 @@ function npxPackages(words: (string | null)[], from: number): string[] {
       return explicit.length > 0 ? explicit : next ? [next] : [];
     }
     if (w.startsWith('-')) {
-      // -p/--package values were collected above; -c/--call takes a shell string.
-      if (w === '-p' || w === '--package' || w === '-c' || w === '--call') i++;
+      if (w === '-p' || w === '--package') {
+        const v = words[i + 1];
+        if (typeof v === 'string') take(v);
+        i++;
+      } else if (w.startsWith('-p=') || w.startsWith('--package='))
+        take(w.slice(w.indexOf('=') + 1));
+      else if (w === '-c' || w === '--call')
+        i++; // a shell string, not a package
       else if (takesValue(w, NPM_VALUE_FLAGS)) i++;
       continue;
     }
@@ -914,9 +937,10 @@ function npxPackages(words: (string | null)[], from: number): string[] {
 
 /** uvx / `uv tool run`: the tool package, plus `--from` / `--with` packages. */
 function uvxPackages(words: (string | null)[], from: number): string[] {
-  const from_ = flagValues(words, from, ['--from']);
-  const withs = flagValues(words, from, ['--with']);
+  // Options after the tool name belong to the tool (`uvx evil --from x` fetches evil).
   const first = verbIndex(words, from, UV_VALUE_FLAGS);
+  const from_ = flagValues(words, from, ['--from'], first);
+  const withs = flagValues(words, from, ['--with'], first);
   const tool = first >= 0 && from_.length === 0 ? [words[first] as string] : [];
   return [...from_, ...tool, ...withs];
 }
@@ -974,7 +998,15 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       const verb = lower(words[v]);
       if (v < 0) return;
       if (NPM_INSTALL_VERBS.has(verb)) pushNpm(out, 'npm', operands(words, v + 1, NPM_VALUE_FLAGS));
-      else if (NPM_EXEC_VERBS.has(verb)) pushNpm(out, 'npm exec', npxPackages(words, v + 1));
+      else if (NPM_EXEC_VERBS.has(verb)) {
+        // Unlike npx, npm parses its own options anywhere up to `--`, so a `--package` after
+        // the command is still fetched (`npm exec eslint --package=x` fetches x). Over-check
+        // the operand too rather than miss either one.
+        const before = flagValues(words, start + 1, ['--package'], v);
+        const sep = words.indexOf('--', v + 1);
+        const after = flagValues(words, v + 1, ['--package'], sep < 0 ? words.length : sep);
+        pushNpm(out, 'npm exec', [...new Set([...npxPackages(words, v + 1, before), ...after])]);
+      }
       return;
     }
     case 'npx':
@@ -986,7 +1018,12 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       if (v < 0) return;
       if (PNPM_INSTALL_VERBS.has(verb))
         pushNpm(out, 'pnpm', operands(words, v + 1, PNPM_VALUE_FLAGS));
-      else if (DLX_VERBS.has(verb)) pushNpm(out, 'pnpm dlx', npxPackages(words, v + 1));
+      else if (DLX_VERBS.has(verb))
+        pushNpm(
+          out,
+          'pnpm dlx',
+          npxPackages(words, v + 1, flagValues(words, start + 1, ['--package'], v))
+        );
       return;
     }
     case 'yarn': {
@@ -1043,7 +1080,13 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       const v = verbIndex(words, start + 1, PIPX_VALUE_FLAGS);
       const verb = lower(words[v]);
       if (v < 0) return;
-      const spec = flagValues(words, v + 1, ['--spec']);
+      // `pipx run app [args]`: words after the app are its own (argparse REMAINDER).
+      const spec = flagValues(
+        words,
+        v + 1,
+        ['--spec'],
+        verb === 'run' ? verbIndex(words, v + 1, PIPX_VALUE_FLAGS) : words.length
+      );
       if (verb === 'install')
         pushPy(out, 'pipx', [...spec, ...operands(words, v + 1, PIPX_VALUE_FLAGS)]);
       else if (verb === 'run')
@@ -1065,7 +1108,16 @@ function fromCall(words: (string | null)[], out: PackageInstallRequest[], depth:
       }
       // `uv run --with pkg script.py` installs pkg into an ephemeral env.
       if (verb === 'run') {
-        pushPy(out, 'uv run', flagValues(words, v + 1, ['--with', '--with-editable']));
+        pushPy(
+          out,
+          'uv run',
+          flagValues(
+            words,
+            v + 1,
+            ['--with', '--with-editable'],
+            verbIndex(words, v + 1, UV_VALUE_FLAGS)
+          )
+        );
         return;
       }
       const v2 = verbIndex(words, v + 1, UV_VALUE_FLAGS);

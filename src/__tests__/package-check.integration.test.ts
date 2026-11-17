@@ -101,6 +101,29 @@ describe('node9 check — package check before install', () => {
     expect(out.hookSpecificOutput.permissionDecisionReason).toContain('MAL-0000-0001');
   });
 
+  itCli('a -p after the npx command is its argument: the fetched package is still checked', () => {
+    // `npx X -p Y` fetches and runs X; Y is X's argument. Reading Y as the package let X through.
+    writeIndex('npm', 'node9-canary-mal', [{ id: 'MAL-0000-0001', all: true }]);
+    for (const cmd of [
+      'npx node9-canary-mal -p node9-canary-clean',
+      'npx node9-canary-mal --package=node9-canary-clean',
+      // npm, unlike npx, parses --package after the command: that is the fetched package
+      'npm exec node9-canary-clean --package=node9-canary-mal',
+    ]) {
+      const r = check(cmd);
+      expect(r.status).toBe(2);
+      expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+      expect(r.stdout).toContain('MAL-0000-0001');
+    }
+  });
+
+  itCli('uvx: --from after the tool is the tool argument: the tool is still checked', () => {
+    writeIndex('PyPI', 'node9-canary-py', [{ id: 'MAL-0000-0002', all: true }]);
+    const r = check('uvx node9-canary-py --from node9-canary-clean');
+    expect(r.status).toBe(2);
+    expect(r.stdout).toContain('MAL-0000-0002');
+  });
+
   itCli('allows a package the fresh index does not list', () => {
     writeIndex('npm', 'node9-canary-mal', [{ id: 'MAL-0000-0001', all: true }]);
     const r = check('npm install node9-canary-clean@1.0.0');
