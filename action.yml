@@ -26,6 +26,14 @@ inputs:
     description: 'Post a sticky comment on the PR with the findings'
     required: false
     default: 'true'
+  package-check:
+    description: >-
+      Ask npm, PyPI and OSV about the packages the agent configuration names and, on a pull
+      request, about the dependencies the PR adds (malicious, not on the registry, removed,
+      look-alike). Only package names are sent, the same names an install sends. "false" turns
+      it off (needs node9-version 2.65.0 or later; older versions do not have the step).
+    required: false
+    default: 'true'
   node9-version:
     description: 'node9-ai version to run (pin for reproducibility; "latest" for newest)'
     required: false
@@ -103,6 +111,7 @@ runs:
       if: steps.guard.outputs.skip == ''
       shell: bash
       env:
+        NODE9_PACKAGE_CHECK_INPUT: ${{ inputs.package-check }}
         NODE9_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         NODE9_VERSION_INPUT: ${{ inputs.node9-version }}
         NODE9_WILL_UPLOAD: ${{ github.event_name == 'push' && inputs.node9-upload-key != '' }}
@@ -132,6 +141,10 @@ runs:
         # failed: an unreadable base must be reported as such, not silently skipped.
         BASE_ARGS=()
         if [ -n "${NODE9_BASE_SHA:-}" ]; then BASE_ARGS=(--base "$NODE9_BASE_SHA"); fi
+        # Only "false" adds the flag, so a pinned older node9-version keeps working.
+        case "$NODE9_PACKAGE_CHECK_INPUT" in
+          [Ff][Aa][Ll][Ss][Ee]) BASE_ARGS+=(--no-package-check) ;;
+        esac
         STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         npx -y "node9-ai@${SPEC}" scan-repo "$GITHUB_WORKSPACE" \
           "${BASE_ARGS[@]}" --json > "${RUNNER_TEMP}/node9-result.json" || true

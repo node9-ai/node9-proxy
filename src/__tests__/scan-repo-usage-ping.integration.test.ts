@@ -94,14 +94,25 @@ describe('scan-repo usage ping, real CLI', () => {
   it.skipIf(!canUnshare)(
     'on, with no network: same stdout and exit code, no notice in --json, never slow',
     () => {
+      // The package step (fw#481 A1) asks npm by design, so with and without a network its
+      // note differs; this test is about the ping, so both runs leave the package step out.
       freshHome();
       const off = run(
-        [process.execPath, CLI, 'scan-repo', repo, '--json'],
+        [process.execPath, CLI, 'scan-repo', repo, '--json', '--no-package-check'],
         userEnv({ NODE9_NO_TELEMETRY: '1' })
       );
       freshHome();
       const on = run(
-        ['unshare', '-rn', process.execPath, CLI, 'scan-repo', repo, '--json'],
+        [
+          'unshare',
+          '-rn',
+          process.execPath,
+          CLI,
+          'scan-repo',
+          repo,
+          '--json',
+          '--no-package-check',
+        ],
         userEnv()
       );
       expect(on.error).toBeUndefined();

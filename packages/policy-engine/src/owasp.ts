@@ -141,6 +141,10 @@ const SCAN_REPO_RULE_OWASP: readonly (readonly [prefix: string, risk: AsiId])[] 
   ['CI-3.mcp-inline-credential', 'ASI03'],
   ['CI-3.mcp-unpinned', 'ASI04'],
   ['CI-3.plugin-unpinned', 'ASI04'],
+  // A1: a package the agent runs, or a dependency a change adds, that is malicious, unowned,
+  // removed or a look-alike: the supply chain.
+  ['CI-3.package-', 'ASI04'],
+  ['CI-3.dependency-added-', 'ASI04'],
   // CI-4: secrets an agent step can reach
   ['CI-4.', 'ASI03'],
   // CI-6: instruction files and skills

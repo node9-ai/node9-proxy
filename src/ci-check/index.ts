@@ -34,6 +34,15 @@ import { testPathKind } from './harmless';
 import { analyzeScript } from './scripts';
 import { SUPPRESSIONS_FILE, parseSuppressions, applySuppressions } from './suppress';
 import { assignOrdinals } from './diff';
+import {
+  codexPackageRefs,
+  declaredNpmNames,
+  mcpPackageRefs,
+  textPackageRefs,
+  triggerPackageRefs,
+  type PackageRef,
+} from './packages';
+import { checkPackageRefs, type PackageCheckOptions } from './package-check';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
 import { SEVERITY_RANK } from './types';
 
@@ -48,6 +57,18 @@ function worstOf(findings: CiFinding[]): Severity | null {
     if (!worst || SEVERITY_RANK[f.severity] > SEVERITY_RANK[worst]) worst = f.severity;
   }
   return worst;
+}
+
+/** What scanTree found for the package step (A1). Kept off the result so its JSON stays small:
+ *  a skills collection names thousands of packages. */
+const packageState = new WeakMap<
+  ScanResult,
+  { refs: PackageRef[]; declared: ReadonlySet<string> }
+>();
+
+/** The package references a scan collected (tests and the A/B read them). */
+export function packageRefsOf(res: ScanResult): PackageRef[] {
+  return packageState.get(res)?.refs ?? [];
 }
 
 /** Run all checks over an already-fetched tree (pure — testable without network). */
@@ -167,6 +188,8 @@ export function scanTree(tree: RepoTree): ScanResult {
   // together after the loop (a trigger and its loader are different files).
   const startupTriggers: StartupTrigger[] = [];
   const startupScripts = new Map<string, StartupScriptInfo>();
+  // A1: the registry packages an agent would fetch, checked online after the scan (scanRepo).
+  const packageRefs: PackageRef[] = [];
   for (const file of tree.files) {
     // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
     let route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
@@ -182,6 +205,14 @@ export function scanTree(tree: RepoTree): ScanResult {
     const testKind = route && CONTENT_ROUTES.has(route) ? testPathKind(file.path, route) : 'none';
     if (testKind === 'skip') continue;
     const before = findings.length;
+    const alertsOnly = testKind === 'alerts-only';
+    // A1: a package named under a test or fixture tree is usually made up on purpose. Every
+    // surface there is treated as text and keeps only counted findings (a known malicious name).
+    const fixture = route ? testPathKind(file.path, route) !== 'none' : false;
+    const addRefs = (refs: PackageRef[]) => {
+      for (const r of refs)
+        packageRefs.push(fixture ? { ...r, autoRun: false, alertsOnly: true } : r);
+    };
     try {
       // Read ONCE: a local reader's content is read on demand and not held (§K), so a second
       // access would read the file again. Everything below uses this one copy.
@@ -220,29 +251,40 @@ export function scanTree(tree: RepoTree): ScanResult {
         }
         case 'agent-config':
           findings.push(...analyzeAgentConfig(file.path, content, listing));
-          startupTriggers.push(...claudeHookTriggers(file.path, content));
+          for (const t of claudeHookTriggers(file.path, content)) {
+            startupTriggers.push(t);
+            addRefs(triggerPackageRefs(t.kind, t.file, t.command, t.line, alertsOnly));
+          }
           break;
         case 'vscode-tasks':
-          startupTriggers.push(...vscodeTaskTriggers(file.path, content));
+          for (const t of vscodeTaskTriggers(file.path, content)) {
+            startupTriggers.push(t);
+            addRefs(triggerPackageRefs(t.kind, t.file, t.command, t.line, alertsOnly));
+          }
           break;
         case 'startup-script':
           startupScripts.set(file.path, inspectStartupScript(content));
           break;
         case 'hook-script':
           findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
+          addRefs(textPackageRefs(file.path, content, 'hook-script', alertsOnly));
           break;
         case 'skill-script':
           findings.push(...analyzeScript(file.path, content, 'CI-6.skill-script'));
+          addRefs(textPackageRefs(file.path, content, 'skill-script', alertsOnly));
           break;
         case 'mcp':
           findings.push(...analyzeMcp(file.path, content, ownPackages));
+          addRefs(mcpPackageRefs(file.path, content, alertsOnly));
           break;
         case 'codex':
           findings.push(...analyzeCodexConfig(file.path, content, ownPackages)); // CI-3 + CI-1 (1c-A)
+          addRefs(codexPackageRefs(file.path, content, alertsOnly));
           break;
         case 'instruction':
           findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
           findings.push(...analyzeSkillGrants(file.path, content)); // CI-1: the grant
+          addRefs(textPackageRefs(file.path, content, 'doc', alertsOnly));
           break;
       }
     } catch (err) {
@@ -328,7 +370,7 @@ export function scanTree(tree: RepoTree): ScanResult {
   // header, Action, SaaS) renders a partial scan as a clean bill of health.
   const incomplete = notes.some((nt) => /may be INCOMPLETE/i.test(nt));
   // `worst` is what the gate judges, so it is computed over the UNSUPPRESSED findings only.
-  return {
+  const result: ScanResult = {
     source: tree.source,
     findings,
     inspected,
@@ -337,13 +379,68 @@ export function scanTree(tree: RepoTree): ScanResult {
     incomplete,
     ...(suppressions ? { suppressions: suppressions.active, suppressedCount } : {}),
   };
+  packageState.set(result, { refs: packageRefs, declared: declaredNpmNames(manifests) });
+  return result;
+}
+
+/**
+ * A1: ask the registries about the packages `scanTree` collected and add the findings, with the
+ * same suppression, tier and `worst` rules as every other finding. Returns a new result; a scan
+ * without package references comes back unchanged.
+ */
+export async function addPackageFindings(
+  res: ScanResult,
+  opts: PackageCheckOptions = {}
+): Promise<ScanResult> {
+  const state = packageState.get(res);
+  if (!state || state.refs.length === 0) return res;
+  const {
+    findings: added,
+    notes,
+    summary,
+  } = await checkPackageRefs(state.refs, {
+    declared: state.declared,
+    ...opts,
+  });
+  const out: ScanResult = { ...mergeFindings(res, added, notes), packages: summary };
+  packageState.set(out, state);
+  return out;
+}
+
+/**
+ * Add findings produced after `scanTree` (the package and dependency steps) under the same rules
+ * as every other finding: the team's suppressions, the tier, the order and `worst`.
+ */
+export function mergeFindings(res: ScanResult, added: CiFinding[], notes: string[]): ScanResult {
+  if (added.length === 0 && notes.length === 0) return res;
+  const suppressedNow = res.suppressions ? applySuppressions(added, res.suppressions) : 0;
+  for (const f of added) f.tier = tierOf(f);
+  const findings = [...res.findings, ...added].sort(
+    (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.file.localeCompare(b.file)
+  );
+  const out: ScanResult = {
+    ...res,
+    findings,
+    notes: [...res.notes, ...notes],
+    worst: worstOf(findings.filter((f) => !f.suppressed && isAlert(f))),
+    ...(res.suppressions ? { suppressedCount: (res.suppressedCount ?? 0) + suppressedNow } : {}),
+  };
+  const state = packageState.get(res);
+  if (state) packageState.set(out, state);
+  return out;
 }
 
 /** Fetch + scan a repo (URL | owner/repo | local path). `onProgress` is a
  *  best-effort UX hook for a CLI spinner — the scan works without it. */
-export async function scanRepo(input: string, onProgress?: OnProgress): Promise<ScanResult> {
+export async function scanRepo(
+  input: string,
+  onProgress?: OnProgress,
+  /** A1 registry lookups; `false` skips them (`scan-repo --no-package-check`). */
+  packages: PackageCheckOptions | false = {}
+): Promise<ScanResult> {
   const tree = await fetchTree(input, onProgress);
-  return scanTree(tree);
+  const res = scanTree(tree);
+  return packages === false ? res : addPackageFindings(res, packages);
 }
 
 export type { OnProgress };

@@ -8,7 +8,21 @@
 
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { scanRepo, scanTree, type OnProgress } from '../../ci-check';
+import {
+  addPackageFindings,
+  mergeFindings,
+  scanRepo,
+  scanTree,
+  type OnProgress,
+} from '../../ci-check';
+import {
+  addedDeps,
+  manifestSetOf,
+  readRefManifests,
+  readWorkingManifests,
+} from '../../ci-check/deps';
+import { checkAddedDeps } from '../../ci-check/package-check';
+import type { NameCheck } from '../../supply-chain/check';
 import { readGitRefTree } from '../../ci-check/fetch';
 import { diffScans } from '../../ci-check/diff';
 import {
@@ -63,18 +77,31 @@ export function registerScanRepoCommand(program: Command): void {
       'also scan this git ref and report what the working tree INTRODUCED (local path targets only)'
     )
     .option(
+      '--no-package-check',
+      'do not ask npm, PyPI and OSV about the packages the agent surfaces name'
+    )
+    .option(
       '--fail-on-introduced',
       'exit non-zero only for findings this change introduced (requires --base)'
     )
     .action(
       async (
         target: string,
-        opts: { json?: boolean; markdown?: boolean; base?: string; failOnIntroduced?: boolean }
+        opts: {
+          json?: boolean;
+          markdown?: boolean;
+          base?: string;
+          failOnIntroduced?: boolean;
+          packageCheck?: boolean;
+        }
       ) => {
         const { onProgress, done } = makeProgress(target, !!(opts.json || opts.markdown));
+        // One lookup per package for the head and the base scan (A1).
+        const memo = new Map<string, NameCheck>();
+        const packages = opts.packageCheck === false ? false : { memo };
         let res;
         try {
-          res = await scanRepo(target, onProgress);
+          res = await scanRepo(target, onProgress, packages);
         } finally {
           done();
         }
@@ -85,7 +112,24 @@ export function registerScanRepoCommand(program: Command): void {
         let diff: ScanDiff | undefined;
         if (opts.base) {
           const baseTree = readGitRefTree(target, opts.base);
-          diff = diffScans(baseTree ? scanTree(baseTree) : null, res);
+          // A1 PR mode: the registry dependencies this change adds. They exist only in the head,
+          // so the diff below reports every one of them as introduced.
+          if (packages !== false) {
+            const headFiles = readWorkingManifests(target);
+            const baseFiles = readRefManifests(target, opts.base);
+            if (headFiles && baseFiles) {
+              const head = manifestSetOf(headFiles);
+              const dep = await checkAddedDeps(addedDeps(manifestSetOf(baseFiles), head), head);
+              res = mergeFindings(res, dep.findings, dep.notes);
+            }
+          }
+          // The base gets the same package step, or every package finding would read as new.
+          const base = baseTree
+            ? packages === false
+              ? scanTree(baseTree)
+              : await addPackageFindings(scanTree(baseTree), packages)
+            : null;
+          diff = diffScans(base, res);
           // ONE truth for every consumer (the JSON the Action reads, the renderers, the exit
           // code): the head as the gate must see it. A suppression added in the same change
           // is not honoured in the default gate either — `worst` is replaced, not just

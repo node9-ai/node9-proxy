@@ -216,6 +216,24 @@ function baseWarning(base: ScanDiff['base']): string {
     : '⚠️ **The base scan could not read every file**, so a finding missing from it would look new. Every finding in this repo is listed instead.';
 }
 
+/** A1: one line on the packages the agent surfaces name, or null when the step did not run. */
+export function packagesLine(res: ScanResult): string | null {
+  const p = res.packages;
+  if (!p || p.names === 0) return null;
+  const count = (rule: string) =>
+    res.findings.filter((f) => f.rule === rule && !f.suppressed).length;
+  const parts = [`${p.names} package(s) named, ${p.checked} checked against npm/PyPI and OSV`];
+  const absent = count('CI-3.package-absent');
+  const removed = count('CI-3.package-removed');
+  const malicious = count('CI-3.package-malicious');
+  const alike = count('CI-3.package-lookalike');
+  if (malicious) parts.push(`${malicious} malicious`);
+  if (absent) parts.push(`${absent} not on the registry`);
+  if (removed) parts.push(`${removed} removed as malicious`);
+  if (alike) parts.push(`${alike} look-alike`);
+  return `packages: ${parts.join(', ')}`;
+}
+
 export function renderScan(res: ScanResult, diff?: ScanDiff): string {
   const L: string[] = [];
   const shown = listed(res.findings);
@@ -239,6 +257,8 @@ export function renderScan(res: ScanResult, diff?: ScanDiff): string {
         (res.suppressedCount ? ` · ${res.suppressedCount} suppressed by .node9-ignore.json` : '')
     )
   );
+  const pkgLine = packagesLine(res);
+  if (pkgLine) L.push(chalk.gray(`   ${pkgLine}`));
   if (diff) {
     const introduced = listed(diff.added).length + diff.escalated.length;
     L.push(
@@ -340,6 +360,8 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
     `Inspected ${res.inspected.length} config file(s) · **${shown.length} finding(s)**` +
       (res.suppressedCount ? ` · ${res.suppressedCount} suppressed by \`.node9-ignore.json\`` : '')
   );
+  const pkgMd = packagesLine(res);
+  if (pkgMd) L.push('', pkgMd.replace(/^packages:/, 'Packages:'));
   L.push('');
   // CI-5: lead with what THIS change is answerable for. A reviewer cannot act on a repo's
   // accumulated history, and burying the one new finding under twelve old ones is how a

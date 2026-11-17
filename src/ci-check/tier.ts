@@ -40,6 +40,10 @@ export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
   )
     return 'alert';
   if (UNREAD_RULES.has(rule)) return 'review';
+  // A1: a package named in agent instructions is listed (a third were true on 775 repositories);
+  // one an auto-run surface starts, or a known malicious one, counts.
+  if (rule.startsWith('CI-3.package-') || rule.startsWith('CI-3.dependency-added-'))
+    return severity === 'advisory' ? 'review' : 'alert';
   // The workflow checks already grade a gated workflow down to advisory (28 of 30 false as alerts).
   if (rule.startsWith('CI-2.') || rule.startsWith('CI-4.'))
     return severity === 'advisory' ? 'note' : 'alert';
