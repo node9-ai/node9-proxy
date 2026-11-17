@@ -258,7 +258,22 @@ export function scanTree(tree: RepoTree): ScanResult {
   }
 
   try {
-    findings.push(...analyzeStartup(startupTriggers, startupScripts, listing));
+    const startup = analyzeStartup(startupTriggers, startupScripts, listing);
+    // A worm finding already says what the hook's script is; the "not graded" review item for
+    // the same hook would contradict it. Same file, same script path (both from hookScriptPath).
+    const wormHooks = new Set(
+      startup
+        .filter((f) => f.rule === 'CI-1.worm-startup')
+        .map((f) => `${f.file}\u0000${f.locator}`)
+    );
+    if (wormHooks.size) {
+      for (let i = findings.length - 1; i >= 0; i--) {
+        const f = findings[i];
+        if (f.rule === 'CI-1.hook-script-unscanned' && wormHooks.has(`${f.file}\u0000${f.locator}`))
+          findings.splice(i, 1);
+      }
+    }
+    findings.push(...startup);
   } catch (err) {
     notes.push(
       `checker degraded on start-up triggers: ${(err as Error)?.message ?? 'error'}; results may be INCOMPLETE`
