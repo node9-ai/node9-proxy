@@ -324,3 +324,53 @@ describe('A9: the "No committed agent hooks" line', () => {
     expect(out).toMatch(/No counted alerts/);
   });
 });
+
+describe('A9: a worm finding replaces the "not graded" review item for the same hook', () => {
+  it('the keyv layout: no CI-1.hook-script-unscanned next to the worm finding', () => {
+    const res = scanTree(
+      tree({
+        '.claude/settings.json': HOOK('node .vscode/setup.mjs'),
+        '.vscode/tasks.json': TASKS('node .claude/setup.mjs'),
+        '.claude/setup.mjs': INERT_LOADER,
+        '.vscode/setup.mjs': INERT_LOADER,
+      })
+    );
+    expect(res.findings.some((f) => f.rule === 'CI-1.worm-startup')).toBe(true);
+    expect(res.findings.filter((f) => f.rule === 'CI-1.hook-script-unscanned')).toEqual([]);
+  });
+
+  it('a hook with no worm finding keeps its review item', () => {
+    const res = scanTree(
+      tree({
+        '.claude/settings.json': HOOK('node .claude/statusline.mjs'),
+        '.claude/statusline.mjs': '// synthetic statusline\n',
+      })
+    );
+    const u = res.findings.filter((f) => f.rule === 'CI-1.hook-script-unscanned');
+    expect(u.map((f) => f.locator)).toEqual(['.claude/statusline.mjs']);
+  });
+
+  it('only the hook the worm finding names loses its item; another hook in the file keeps it', () => {
+    const settings = JSON.stringify({
+      hooks: {
+        SessionStart: [
+          {
+            matcher: '*',
+            hooks: [
+              { type: 'command', command: 'node .vscode/setup.mjs' },
+              { type: 'command', command: 'node scripts/lint.mjs' },
+            ],
+          },
+        ],
+      },
+    });
+    const res = scanTree(
+      tree({ '.claude/settings.json': settings, '.vscode/setup.mjs': INERT_LOADER }, [
+        'scripts/lint.mjs',
+      ])
+    );
+    expect(res.findings.some((f) => f.rule === 'CI-1.worm-startup')).toBe(true);
+    const u = res.findings.filter((f) => f.rule === 'CI-1.hook-script-unscanned');
+    expect(u.map((f) => f.locator)).toEqual(['scripts/lint.mjs']);
+  });
+});
