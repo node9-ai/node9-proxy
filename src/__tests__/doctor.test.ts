@@ -186,7 +186,10 @@ describe('node9 doctor — agent hooks section', () => {
     writeJson(path.join(home, '.claude', 'settings.json'), {
       hooks: {
         PreToolUse: [
-          { matcher: '.*', hooks: [{ command: `"${home}/.bun/bin/node9" check` }] },
+          {
+            matcher: '.*',
+            hooks: [{ command: `"${home.replace(/\\/g, '/')}/.bun/bin/node9" check` }],
+          },
           { matcher: '.*', hooks: [{ command: 'node9 check' }] },
         ],
       },
@@ -202,7 +205,12 @@ describe('node9 doctor — agent hooks section', () => {
     const home = path.join(tmpBase, 'claude-all-dead');
     writeJson(path.join(home, '.claude', 'settings.json'), {
       hooks: {
-        PreToolUse: [{ matcher: '.*', hooks: [{ command: `"${home}/.bun/bin/node9" check` }] }],
+        PreToolUse: [
+          {
+            matcher: '.*',
+            hooks: [{ command: `"${home.replace(/\\/g, '/')}/.bun/bin/node9" check` }],
+          },
+        ],
       },
     });
     const { output, exitCode } = runDoctor(home);

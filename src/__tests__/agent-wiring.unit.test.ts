@@ -135,7 +135,12 @@ describe('agent-wiring registry', () => {
   it('does not count a node9 hook whose binary no longer exists as wired', () => {
     writeJson('.claude/settings.json', {
       hooks: {
-        PreToolUse: [{ matcher: '.*', hooks: [{ command: `"${home}/.bun/bin/node9" check` }] }],
+        PreToolUse: [
+          {
+            matcher: '.*',
+            hooks: [{ command: `"${home.replace(/\\/g, '/')}/.bun/bin/node9" check` }],
+          },
+        ],
       },
     });
     expect(stateOf('claude')).toBe('unwired');
@@ -146,8 +151,11 @@ describe('agent-wiring registry', () => {
     writeJson('.claude/settings.json', {
       hooks: {
         PreToolUse: [
-          { matcher: '.*', hooks: [{ command: `"${home}/.bun/bin/node9" check` }] },
-          { matcher: '.*', hooks: [{ command: `"${live}" check` }] },
+          {
+            matcher: '.*',
+            hooks: [{ command: `"${home.replace(/\\/g, '/')}/.bun/bin/node9" check` }],
+          },
+          { matcher: '.*', hooks: [{ command: `"${live.replace(/\\/g, '/')}" check` }] },
         ],
       },
     });

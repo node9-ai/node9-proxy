@@ -25,6 +25,7 @@ import {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 let home: string;
+const fwd = (p: string): string => p.replace(/\\/g, '/');
 let settingsPath: string;
 
 beforeEach(() => {
@@ -59,10 +60,12 @@ function node9Commands(settings: any, event: string): string[] {
 // The two dead forms from the report: a bun global bin, and node + a bun
 // global cli.js. Both quoted, both pointing at files that no longer exist.
 function staleForms(sub: 'check' | 'log'): string[] {
-  const bun = path.join(home, '.bun');
+  // Forward slashes, the form node9 writes on every platform: the dead-path
+  // check reads `/...` and `C:/...` tokens (a `C:\\...` token is legacy).
+  const bun = fwd(path.join(home, '.bun'));
   return [
     `"${bun}/bin/node9" ${sub}`,
-    `"${process.execPath}" "${bun}/install/global/node_modules/@node9/proxy/dist/cli.js" ${sub}`,
+    `"${fwd(process.execPath)}" "${bun}/install/global/node_modules/@node9/proxy/dist/cli.js" ${sub}`,
   ];
 }
 
