@@ -557,6 +557,11 @@ describe('A1: dependencies a change adds (PR mode)', () => {
       path.join(dir, 'package.json'),
       JSON.stringify({ dependencies: { a: '^1', 'n9-invented': '^1' } })
     );
+    // A manifest that is a link is not read (the target may be outside the repository).
+    if (process.platform !== 'win32') {
+      fs.mkdirSync(path.join(dir, 'linked'));
+      fs.symlinkSync('/etc/hostname', path.join(dir, 'linked', 'package.json'));
+    }
     const base = readRefManifests(dir, 'HEAD');
     const head = readWorkingManifests(dir);
     expect(base && [...base.keys()]).toEqual(['package.json']);

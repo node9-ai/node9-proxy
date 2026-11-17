@@ -40,6 +40,9 @@ const MANIFEST_RE = /(^|\/)(package\.json|pyproject\.toml|requirements[^/]*\.txt
 const NPMRC_RE = /(^|\/)\.npmrc$/;
 const PIPCONF_RE = /(^|\/)(pip\.conf|pip\.ini|uv\.toml|poetry\.toml)$/;
 const MAX_FILES = 400;
+// O_NONBLOCK: a FIFO in place of a manifest must not hang the scan on open.
+const OPEN_READ =
+  fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
 const MAX_BYTES = 1024 * 1024;
 
 const EXACT_NPM_RE = /^=?v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?)$/;
@@ -220,13 +223,17 @@ export function readWorkingManifests(dir: string): Map<string, string> | null {
     .filter(Boolean)
     .filter(wanted)
     .slice(0, MAX_FILES)) {
+    // One handle, links not followed: the checks and the read are about the same file.
+    let fd: number | undefined;
     try {
-      const full = path.join(dir, p);
-      const st = fs.lstatSync(full);
+      fd = fs.openSync(path.join(dir, p), OPEN_READ);
+      const st = fs.fstatSync(fd);
       if (!st.isFile() || st.size > MAX_BYTES) continue;
-      out.set(p, fs.readFileSync(full, 'utf8'));
+      out.set(p, fs.readFileSync(fd, 'utf8'));
     } catch {
-      /* deleted in the working tree: not declared */
+      /* deleted in the working tree, or a link: not declared */
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
     }
   }
   return out;
