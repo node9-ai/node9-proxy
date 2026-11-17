@@ -182,6 +182,9 @@ export interface ScanResult {
   }[];
   /** How many findings above are marked suppressed. `worst` is computed over the rest. */
   suppressedCount?: number;
+  /** A1: how many registry packages the agent surfaces name and how many were checked. Absent
+   *  when the package step did not run (offline unit scans, `--no-package-check`). */
+  packages?: { names: number; checked: number; capped: number; failed: number };
 }
 
 /** Severity rank for comparison / worst-of. Higher = worse. */

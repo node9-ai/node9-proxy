@@ -993,7 +993,7 @@ export const gitEnv = (): NodeJS.ProcessEnv => ({
 /** Many blobs through ONE `git cat-file --batch` process (a process per file took 9.7 s on
  *  a 1,577-file base; one batch takes 0.12 s). Returns sha → raw text; missing objects are
  *  absent. Throws when the batch cannot be run — the caller turns that into "did not run". */
-function catFileBatch(root: string, shas: string[]): Map<string, string> {
+export function catFileBatch(root: string, shas: string[]): Map<string, string> {
   const out = new Map<string, string>();
   if (shas.length === 0) return out;
   const buf = execFileSync('git', [...GIT_SAFE, '-C', root, 'cat-file', '--batch'], {

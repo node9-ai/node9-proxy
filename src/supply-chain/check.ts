@@ -50,6 +50,7 @@ import { npmSourceRepo, pypiSourceRepo, type SourceRepo } from './provenance';
 import { resolveInstalled, LOCAL_FIRST_MANAGERS } from './local-resolve';
 import { configuredRegistryHosts } from './registries';
 import { describeNearMiss, nearMiss } from './lookalike';
+import { endpoints } from './net';
 
 export interface PackageCheckConfig {
   enabled: boolean;
@@ -642,4 +643,98 @@ export async function runPackageCheck(
     // The check itself failed: fail open, and say so.
     return { ...ALLOW, misses: [`package check error: ${(err as Error)?.message ?? err}`] };
   }
+}
+
+/** What a static scan asks of the registries for one package (fw#481 A1). */
+export interface NameCheck {
+  findings: PackageFinding[];
+  misses: string[];
+  /** Whether the registry was asked (false over the network cap or offline). */
+  registryAsked: boolean;
+  /** When the package was first published (epoch ms), when `created` was asked and readable. */
+  createdAtMs?: number;
+}
+
+/**
+ * The package check for a list of packages a repository names, outside any shell command
+ * (`scan-repo`, fw#481 A1). Same lookups as the gate, minus the signals that describe one
+ * version at one moment (age, install script, provenance): a repository scan is not the
+ * moment the agent runs the command, the gate is. A registry 404 is read as "anyone can
+ * register this name"; the caller decides what a private registry setting excuses.
+ *
+ * Never throws. At most `networkCap` packages are looked up online, in the order given;
+ * the rest are checked against the local OSV index only, and say so in `misses`.
+ */
+export async function checkPackageNames(
+  requests: PackageInstallRequest[],
+  opts: { networkCap: number; offline?: boolean; concurrency?: number; created?: boolean } = {
+    networkCap: 100,
+  }
+): Promise<NameCheck[]> {
+  const cfg: PackageCheckConfig = {
+    enabled: true,
+    onMalicious: 'block',
+    newPackage: 'off',
+    maxAgeHours: 0,
+    installScript: 'off',
+    lookalike: 'review',
+    establishedAge: 'off',
+    onlineFallback: true,
+    allow: [],
+  };
+  const ctx: CheckContext = { command: '', publicRegistryOnly: () => true };
+  const out: NameCheck[] = requests.map(() => ({
+    findings: [],
+    misses: [],
+    registryAsked: false,
+  }));
+  // A registry that cannot be reached would cost every remaining name its timeouts: after this
+  // many failed names in a row with no answer, the rest are not asked (they read as capped).
+  const MAX_FAILED_IN_A_ROW = 5;
+  let failedInARow = 0;
+  const ep = endpoints();
+  const hasEndpoint = (eco: PackageEcosystem) =>
+    eco === 'npm' ? !!ep.npmRegistry : eco === 'PyPI' ? !!ep.pypi : false;
+  let next = 0;
+  const worker = async () => {
+    while (next < requests.length) {
+      const i = next++;
+      const capped =
+        opts.offline === true || i >= opts.networkCap || failedInARow >= MAX_FAILED_IN_A_ROW;
+      const misses: string[] = [];
+      try {
+        out[i].findings = await checkOne(requests[i], cfg, misses, capped, ctx);
+      } catch (err) {
+        misses.push(`${label(requests[i])}: ${(err as Error)?.message ?? 'check failed'}`);
+      }
+      // A scan does not judge age, so the version's publish time is not missing for it.
+      out[i].misses = misses.filter(
+        (m) => !/publish time unavailable|age from the package modified time/.test(m)
+      );
+      out[i].registryAsked =
+        !capped &&
+        HAS_REGISTRY_CLIENT.has(requests[i].ecosystem) &&
+        hasEndpoint(requests[i].ecosystem);
+      if (out[i].registryAsked) failedInARow = out[i].misses.length > 0 ? failedInARow + 1 : 0;
+      if (
+        opts.created &&
+        out[i].registryAsked &&
+        !out[i].findings.some((f) => f.kind === 'absent')
+      ) {
+        try {
+          const st = await registryStanding(requests[i].ecosystem, requests[i].name, {
+            created: true,
+            downloads: false,
+          });
+          if (st.createdAtMs !== undefined) out[i].createdAtMs = st.createdAtMs;
+        } catch {
+          /* unknown age: no finding */
+        }
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(opts.concurrency ?? 8, requests.length)) }, worker)
+  );
+  return out;
 }
