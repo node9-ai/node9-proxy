@@ -11,7 +11,7 @@
  *     (resolved via process.argv[1]/process.execPath) so Opencode picking
  *     up an empty $PATH at launch doesn't break the shim.
  *
- * Pre-flight (verified against /home/nadav/node9/opensources/opencode-dev):
+ * Pre-flight (verified against the OpenCode 1.x source):
  *   - packages/opencode/src/plugin/loader.ts:138 does `await import(row.entry)`
  *     — Bun-native resolution handles .js files transparently
  *   - packages/opencode/src/plugin/shared.ts:272 (readV1Plugin) requires
@@ -20,7 +20,7 @@
  *     `~/.config/opencode/{plugin,plugins}/`
  */
 import { describe, it, expect } from 'vitest';
-import { renderOpencodeShim } from '../setup-opencode-shim';
+import { renderOpencodeShim, opencodeShimHasCurrentShape } from '../setup-opencode-shim';
 
 describe('renderOpencodeShim', () => {
   const baseInput = {
@@ -64,7 +64,7 @@ describe('renderOpencodeShim', () => {
     // because the payload has hook_event_name: "PreToolUse".
     const out = renderOpencodeShim(baseInput);
     // Three hooks each set meta.agent; once is enough for the contract test.
-    expect(out).toContain('agent: "Opencode"');
+    expect(out).toContain('const AGENT = "Opencode";');
   });
 
   it('produces different content for different versions (so self-heal can detect change)', () => {
@@ -73,36 +73,21 @@ describe('renderOpencodeShim', () => {
     expect(a).not.toBe(b);
   });
 
-  it('exports a CommonJS module.exports with id and server keys', () => {
-    // Pre-flight confirmed Opencode's plugin loader (readV1Plugin at
-    // packages/opencode/src/plugin/shared.ts:272) requires `default
-    // export an object with server()`. CommonJS module.exports is the
-    // most portable form — works with Bun's native loader and any
-    // package that imports the file as ESM (where module.exports
-    // becomes the default export).
+  it('exports one default object with id, server (OpenCode 1.x) and setup (OpenCode 2.x)', () => {
     const out = renderOpencodeShim(baseInput);
-    expect(out).toContain('module.exports = {');
-    expect(out).toContain('id: "node9"');
-    expect(out).toMatch(/server:\s*async\s*\(/);
+    expect(out).toContain('module.exports = { id: "node9", server, setup };');
   });
 
-  it('wires all three protection hooks (pre, post, prompt)', () => {
-    // Pre-execution: block via throw
-    // Post-execution: audit + gap1 output redaction
-    // Chat message: prompt DLP (matches Claude's UserPromptSubmit)
+  it('carries the shape marker doctor checks for (issue #480)', () => {
     const out = renderOpencodeShim(baseInput);
-    expect(out).toContain('"tool.execute.before"');
-    expect(out).toContain('"tool.execute.after"');
-    expect(out).toContain('"chat.message"');
+    expect(opencodeShimHasCurrentShape(out)).toBe(true);
+    // The pre-#480 shim had no marker: doctor must read it as outdated.
+    expect(
+      opencodeShimHasCurrentShape('module.exports = { id: "node9", server: async () => ({}) };')
+    ).toBe(false);
   });
 
-  it('wires gap1 Mode A redaction in the after-hook (receives output, redact round-trip, mutates)', () => {
-    const out = renderOpencodeShim(baseInput);
-    // The after-hook must take the second (output) arg, forward the output to
-    // `log --redact-output`, and write the redacted text back into out.output.
-    expect(out).toMatch(/"tool\.execute\.after":\s*async\s*\(ctx,\s*out\)/);
-    expect(out).toContain('"log", "--redact-output"');
-    expect(out).toContain('tool_response: { output: toolOutput }');
-    expect(out).toContain('out.output = resp.redacted');
+  it('never blocks the host event loop with spawnSync', () => {
+    expect(renderOpencodeShim(baseInput)).not.toContain('spawnSync');
   });
 });

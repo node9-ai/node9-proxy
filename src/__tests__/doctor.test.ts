@@ -8,6 +8,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { renderOpencodeShim } from '../setup-opencode-shim';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const NODE = process.execPath;
@@ -15,7 +16,13 @@ const NODE = process.execPath;
 /** Run `node9 doctor` with an isolated HOME. Returns stdout+stderr and exit code. */
 function runDoctor(homeDir: string, cwd?: string): { output: string; exitCode: number } {
   const result = spawnSync(NODE, [CLI, 'doctor'], {
-    env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, NODE9_TESTING: '1' },
+    env: {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      NODE9_TESTING: '1',
+      XDG_CONFIG_HOME: '', // OpenCode's config dir must come from the temp HOME
+    },
     cwd: cwd ?? homeDir,
     encoding: 'utf-8',
     timeout: 15000,
@@ -146,6 +153,63 @@ describe('node9 doctor — agent hooks section', () => {
     });
     const { output } = runDoctor(home);
     expect(output).toMatch(/Cursor.*MCP proxy active/);
+  });
+
+  // Issue #480: the file existing is not OpenCode loading it.
+  it('warns, not passes, when the OpenCode shim predates the OpenCode 2 shape', () => {
+    const home = path.join(tmpBase, 'opencode-old-shim');
+    const shim = path.join(home, '.config', 'opencode', 'plugins', 'node9.js');
+    fs.mkdirSync(path.dirname(shim), { recursive: true });
+    // The pre-#480 shim: v1 shape only, no shape marker.
+    fs.writeFileSync(
+      shim,
+      '// NODE9_SHIM_VERSION = "2.64.0"\nmodule.exports = { id: "node9", server: async () => ({}) };\n'
+    );
+    const { output } = runDoctor(home);
+    expect(output).toMatch(/OpenCode: node9 plugin is outdated\. OpenCode 2\.x refuses to load it/);
+    expect(output).toMatch(/node9 agents add opencode/);
+    expect(output).not.toMatch(/✅.*OpenCode/);
+  });
+
+  it('passes OpenCode when the shim carries the current shape', () => {
+    const home = path.join(tmpBase, 'opencode-new-shim');
+    const shim = path.join(home, '.config', 'opencode', 'plugins', 'node9.js');
+    fs.mkdirSync(path.dirname(shim), { recursive: true });
+    fs.writeFileSync(shim, renderOpencodeShim({ node9Argv: ['node9'], version: '0.0.0' }));
+    const { output } = runDoctor(home);
+    expect(output).toMatch(/✅.*OpenCode.*node9 plugin active/);
+  });
+
+  // Issue #480: a node9 hook whose binary is gone still read as "active".
+  it('warns about a dead node9 Claude hook next to a working one', () => {
+    const home = path.join(tmpBase, 'claude-dead-beside-live');
+    writeJson(path.join(home, '.claude', 'settings.json'), {
+      hooks: {
+        PreToolUse: [
+          { matcher: '.*', hooks: [{ command: `"${home}/.bun/bin/node9" check` }] },
+          { matcher: '.*', hooks: [{ command: 'node9 check' }] },
+        ],
+      },
+    });
+    const { output } = runDoctor(home);
+    expect(output).toMatch(
+      /⚠️.*Claude Code: 1 node9 hook\(s\) point at a file that no longer exists/
+    );
+    expect(output).toMatch(/node9 agents add claude/);
+  });
+
+  it('fails when every node9 Claude PreToolUse hook is dead', () => {
+    const home = path.join(tmpBase, 'claude-all-dead');
+    writeJson(path.join(home, '.claude', 'settings.json'), {
+      hooks: {
+        PreToolUse: [{ matcher: '.*', hooks: [{ command: `"${home}/.bun/bin/node9" check` }] }],
+      },
+    });
+    const { output, exitCode } = runDoctor(home);
+    // agent-wiring reads an all-dead install as unwired: no tick, a failure.
+    expect(output).not.toMatch(/✅.*Claude Code/);
+    expect(output).toMatch(/❌.*Claude Code.*hook missing/);
+    expect(exitCode).toBe(1);
   });
 });
 

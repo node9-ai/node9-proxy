@@ -11,6 +11,7 @@ import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
 import { assessCodexTrust, codexTrustInstruction } from '../../codex-trust';
+import { deadClaudeNode9Hooks } from '../../setup';
 import { readSyncHealth, isPolicyStale } from '../../daemon/sync';
 import {
   isDaemonServiceInstalled,
@@ -33,6 +34,15 @@ import { locatorCommand } from '../../utils/platform-shell';
  */
 function keyRejected(health: { consecutiveFailures: number; lastError?: string }): boolean {
   return health.consecutiveFailures > 0 && /\b401\b/.test(health.lastError ?? '');
+}
+
+/** Parsed JSON, or null when the file is missing or invalid. */
+function readJsonFile(filePath: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 export function registerDoctorCommand(program: Command, version: string): void {
@@ -176,7 +186,8 @@ export function registerDoctorCommand(program: Command, version: string): void {
       // and machine-independent (no PATH probing). Absent agents collapse into
       // one summary line so a fresh machine isn't a wall of warnings.
       const notConfigured: string[] = [];
-      for (const a of getAgentWiring(homeDir)) {
+      const wiring = getAgentWiring(homeDir);
+      for (const a of wiring) {
         const anyHookWired = a.hooks.some((h) => h.wired);
         if (a.isProtected && a.id === 'codex' && anyHookWired) {
           // A wired hook is not a running hook. Codex runs a hook only after
@@ -210,6 +221,16 @@ export function registerDoctorCommand(program: Command, version: string): void {
                 codexTrustInstruction()
             );
           }
+        } else if (a.id === 'opencode' && !anyHookWired && fs.existsSync(a.settingsPath)) {
+          // The file existing is not the plugin loading. A shim written before
+          // #480 has only the OpenCode 1.x shape, and OpenCode 2.x refuses to
+          // load it, so OpenCode 2 ran with no node9 checks while this line
+          // printed a tick (issue #480). agent-wiring reads it as unwired, so
+          // status agrees and the daemon's heal nudge fires.
+          warn(
+            `${a.label}: node9 plugin is outdated. OpenCode 2.x refuses to load it (OpenCode 1.x still runs it)`,
+            `Run: ${a.setupCommand}`
+          );
         } else if (a.isProtected) {
           // Protected via hooks OR an MCP proxy entry — name which so an
           // MCP-only agent (Cursor) reads correctly instead of "not configured".
@@ -222,6 +243,20 @@ export function registerDoctorCommand(program: Command, version: string): void {
         } else {
           notConfigured.push(a.label); // absent and not MCP-protected
         }
+      }
+      // Dead node9 hooks next to a live one: Claude Code still checks every
+      // call, but runs the dead entries too and prints an error each time
+      // (#480). With no live PreToolUse hook left, agent-wiring already reads
+      // Claude as unwired and the loop above fails it.
+      const claude = wiring.find((a) => a.id === 'claude');
+      const deadClaudeHooks = deadClaudeNode9Hooks(
+        readJsonFile(path.join(homeDir, '.claude', 'settings.json'))
+      );
+      if (claude?.wireState === 'wired' && deadClaudeHooks.length > 0) {
+        warn(
+          `Claude Code: ${deadClaudeHooks.length} node9 hook(s) point at a file that no longer exists, so Claude Code prints an error on every tool call`,
+          `Run: node9 agents add claude (it repairs or removes them). First one: ${deadClaudeHooks[0]}`
+        );
       }
       if (notConfigured.length > 0) {
         console.log(
@@ -254,10 +289,7 @@ export function registerDoctorCommand(program: Command, version: string): void {
           CURRENT_BUILD
         );
         if (drift) {
-          warn(
-            drift,
-            'Stop the running daemon (pid in ~/.node9/daemon.pid), then: node9 daemon --background'
-          );
+          warn(drift, 'Run: node9 daemon restart');
         }
       } else {
         warn(
