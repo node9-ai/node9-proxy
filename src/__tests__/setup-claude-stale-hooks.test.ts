@@ -27,6 +27,7 @@ import {
 let home: string;
 const fwd = (p: string): string => p.replace(/\\/g, '/');
 let settingsPath: string;
+const realArgv = process.argv;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-claude-stale-'));
@@ -34,9 +35,18 @@ beforeEach(() => {
   vi.spyOn(os, 'homedir').mockReturnValue(home);
   vi.stubEnv('NODE9_TESTING', '');
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  // fullPathCommand builds the hook from process.argv[1], which in production
+  // is node9's dist/cli.js. Under vitest it is the worker script, and on
+  // Windows (no ~/.node9/bin/hook shim) the written hook then names that
+  // worker and is not a node9 command at all. Run as an installed node9 would.
+  const cli = path.join(home, 'install', 'node_modules', '@node9', 'proxy', 'dist', 'cli.js');
+  fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.writeFileSync(cli, '');
+  process.argv = [realArgv[0], cli, ...realArgv.slice(2)];
 });
 
 afterEach(() => {
+  process.argv = realArgv;
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   fs.rmSync(home, { recursive: true, force: true });
