@@ -102,7 +102,7 @@
     "safe-regex2": "^5.1.0",
     "semver": "^7.8.5",
     "smol-toml": "^1.6.1",
-    "string-width": "^8.3.0",
+    "string-width": "^9.0.0",
     "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
