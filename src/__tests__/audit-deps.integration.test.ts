@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'child_process';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 // scripts/audit-deps.sh turns `npm audit` into three outcomes. The stub seams
 // let each branch run without npm or the network, and the "unavailable" branch
@@ -52,6 +54,122 @@ describe.skipIf(process.platform === 'win32')('scripts/audit-deps.sh', () => {
     const r = run({ AUDIT_STUB_RC: '124', AUDIT_STUB_STDOUT: '', AUDIT_STUB_STDERR: '' });
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/DID NOT RUN/);
+  });
+
+  // ── Exemptions: an advisory with no patched version (picomatch, 2026-11-17)
+  describe('exemptions', () => {
+    const GHSA = 'GHSA-fc5q-39xc-vjpf';
+    const exemptFile = (expires: string) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-audit-ex-'));
+      const file = path.join(dir, 'audit-exemptions.json');
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          exemptions: [{ advisory: GHSA, package: 'picomatch', expires, reason: 'test' }],
+        })
+      );
+      return file;
+    };
+    const via = (id: string) => ({ url: `https://github.com/advisories/${id}`, severity: 'high' });
+    const picomatchOnly = report(
+      { high: 1 },
+      { picomatch: { severity: 'high', via: [via(GHSA)], fixAvailable: false } }
+    );
+    const args = ['--omit=dev', '--audit-level=moderate'];
+
+    it('only an exempted, unexpired advisory → exit 0 with a warning that names it', () => {
+      const r = run(
+        {
+          AUDIT_STUB_RC: '1',
+          AUDIT_STUB_STDOUT: picomatchOnly,
+          AUDIT_EXEMPTIONS: exemptFile('2026-12-17'),
+          AUDIT_TODAY: '2026-11-17',
+        },
+        args
+      );
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/EXEMPTED/);
+      expect(r.stdout).toMatch(/::warning/);
+      expect(r.stdout).toContain(`exempted: ${GHSA} (picomatch) until 2026-12-17`);
+      expect(r.stdout).not.toMatch(/no vulnerabilities/);
+    });
+
+    it('an expired exemption no longer applies → exit 1', () => {
+      const r = run(
+        {
+          AUDIT_STUB_RC: '1',
+          AUDIT_STUB_STDOUT: picomatchOnly,
+          AUDIT_EXEMPTIONS: exemptFile('2026-12-17'),
+          AUDIT_TODAY: '2026-12-18',
+        },
+        args
+      );
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toMatch(/expired on 2026-12-17/);
+      expect(r.stdout).toMatch(/picomatch: high/);
+    });
+
+    it('an exemption never covers a second, different advisory → exit 1', () => {
+      const r = run(
+        {
+          AUDIT_STUB_RC: '1',
+          AUDIT_STUB_STDOUT: report(
+            { high: 2 },
+            {
+              picomatch: { severity: 'high', via: [via(GHSA)] },
+              lodash: { severity: 'high', via: [via('GHSA-aaaa-bbbb-cccc')] },
+            }
+          ),
+          AUDIT_EXEMPTIONS: exemptFile('2026-12-17'),
+          AUDIT_TODAY: '2026-11-17',
+        },
+        args
+      );
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toMatch(/lodash: high/);
+      expect(r.stdout).not.toMatch(/picomatch: high/);
+    });
+
+    it('a package vulnerable only through an exempted one is exempt too', () => {
+      const r = run(
+        {
+          AUDIT_STUB_RC: '1',
+          AUDIT_STUB_STDOUT: report(
+            { high: 2 },
+            {
+              picomatch: { severity: 'high', via: [via(GHSA)] },
+              micromatch: { severity: 'high', via: ['picomatch'] },
+            }
+          ),
+          AUDIT_EXEMPTIONS: exemptFile('2026-12-17'),
+          AUDIT_TODAY: '2026-11-17',
+        },
+        args
+      );
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+    });
+
+    it('a missing exemptions file changes nothing → exit 1', () => {
+      const r = run(
+        {
+          AUDIT_STUB_RC: '1',
+          AUDIT_STUB_STDOUT: picomatchOnly,
+          AUDIT_EXEMPTIONS: path.join(os.tmpdir(), 'n9-no-such-exemptions.json'),
+        },
+        args
+      );
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+    });
+
+    it('the checked-in exemptions file is well formed and every entry expires', () => {
+      const file = path.resolve(process.cwd(), 'scripts/audit-exemptions.json');
+      const { exemptions } = JSON.parse(fs.readFileSync(file, 'utf8'));
+      for (const e of exemptions) {
+        expect(e.advisory).toMatch(/^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/);
+        expect(e.expires).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(e.reason.length).toBeGreaterThan(20);
+      }
+    });
   });
 
   it('unknown shape → fails closed', () => {
