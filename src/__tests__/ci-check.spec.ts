@@ -2087,8 +2087,7 @@ describe('CI-6 — agent instruction files (low-FP core)', () => {
   // discovery -- the file was never reachable before). Khmer has
   // no spaces between words; U+200B is a legitimate line-break hint between Khmer syllables.
   it('FP: zero-width space between non-Latin script words (Khmer) → no finding', () => {
-    const md =
-      '# ការណែនាំ\n\n' + 'ចាប់ផ្តើម Jupyter នៅអ្វី' + '​' + 'កំណត់ត្រា\n\njupyter notebook\n';
+    const md = '# ការណែនាំ\n\n' + 'ចាប់ផ្តើម Jupyter នៅអ្វី' + '​' + 'កំណត់ត្រា\n\njupyter notebook\n';
     expect(analyzeInstructionFile('translations/km/AGENTS.md', md)).toEqual([]);
   });
 
