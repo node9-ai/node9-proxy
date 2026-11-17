@@ -212,8 +212,8 @@ describe('status — quoted hook form (post-#185)', () => {
             hooks: [
               {
                 type: 'command',
-                command:
-                  '"/usr/local/bin/node" "/usr/local/lib/node_modules/@node9/proxy/dist/cli.js" check',
+                // Real paths: a node9 hook whose files are gone is not wiring (#480).
+                command: `"${process.execPath}" "${CLI}" check`,
               },
             ],
           },
@@ -224,8 +224,8 @@ describe('status — quoted hook form (post-#185)', () => {
             hooks: [
               {
                 type: 'command',
-                command:
-                  '"/usr/local/bin/node" "/usr/local/lib/node_modules/@node9/proxy/dist/cli.js" log',
+                // Real paths: a node9 hook whose files are gone is not wiring (#480).
+                command: `"${process.execPath}" "${CLI}" log`,
               },
             ],
           },

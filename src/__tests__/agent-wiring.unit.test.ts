@@ -10,6 +10,7 @@ import os from 'os';
 import path from 'path';
 import { getAgentWiring, AGENT_SPECS } from '../agent-wiring';
 import { claudeDesktopConfigPath } from '../setup';
+import { renderOpencodeShim } from '../setup-opencode-shim';
 
 const NODE9_HOOK = { command: 'node9 check' };
 const matcher = { matcher: '*', hooks: [NODE9_HOOK] };
@@ -103,7 +104,7 @@ describe('agent-wiring registry', () => {
     fs.mkdirSync(path.join(home, '.config', 'opencode', 'plugins'), { recursive: true });
     fs.writeFileSync(
       path.join(home, '.config', 'opencode', 'plugins', 'node9.js'),
-      '// node9 shim'
+      renderOpencodeShim({ node9Argv: ['node9'], version: '0.0.0' })
     );
     fs.mkdirSync(path.join(home, '.pi', 'agent', 'extensions'), { recursive: true });
     fs.writeFileSync(path.join(home, '.pi', 'agent', 'extensions', 'node9.js'), '// node9 shim');
@@ -115,6 +116,50 @@ describe('agent-wiring registry', () => {
 
     const pi = getAgentWiring(home).find((a) => a.id === 'pi');
     expect(pi?.isProtected).toBe(true);
+  });
+
+  // Issue #480: OpenCode 2 refuses a shim without the 2.x shape. Reading it as
+  // wired kept status green and the daemon's heal nudge silent.
+  it('reports OpenCode unwired when its shim predates the OpenCode 2 shape', () => {
+    fs.mkdirSync(path.join(home, '.config', 'opencode', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.config', 'opencode', 'plugins', 'node9.js'),
+      'module.exports = { id: "node9", server: async () => ({}) };\n'
+    );
+    const oc = getAgentWiring(home).find((a) => a.id === 'opencode');
+    expect(oc?.wireState).toBe('unwired');
+    expect(oc?.isProtected).toBe(false);
+  });
+
+  // Issue #480: a node9 hook whose binary is gone protects nothing.
+  it('does not count a node9 hook whose binary no longer exists as wired', () => {
+    writeJson('.claude/settings.json', {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: '.*',
+            hooks: [{ command: `"${home.replace(/\\/g, '/')}/.bun/bin/node9" check` }],
+          },
+        ],
+      },
+    });
+    expect(stateOf('claude')).toBe('unwired');
+
+    const live = path.join(home, 'bin', 'node9');
+    fs.mkdirSync(path.dirname(live), { recursive: true });
+    fs.writeFileSync(live, '');
+    writeJson('.claude/settings.json', {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: '.*',
+            hooks: [{ command: `"${home.replace(/\\/g, '/')}/.bun/bin/node9" check` }],
+          },
+          { matcher: '.*', hooks: [{ command: `"${live.replace(/\\/g, '/')}" check` }] },
+        ],
+      },
+    });
+    expect(stateOf('claude')).toBe('wired');
   });
 
   it('reports a shim agent unwired when its config dir exists but the shim is missing', () => {

@@ -171,6 +171,10 @@ describe('task #18 G-A — status/doctor surface build drift (real daemon)', () 
     const out = runCli('doctor', home, '9.9.9+9');
     expect(out.toLowerCase()).toMatch(DRIFT_WARNING);
     expect(out).toContain('1.0.0');
+    // The fix must be a command that works. daemon.pid is JSON, so the old
+    // "pid in ~/.node9/daemon.pid" hint led to `kill $(cat …)` failing (#480).
+    expect(out).toContain('node9 daemon restart');
+    expect(out).not.toContain('daemon.pid');
   });
 
   it('status does NOT warn when the running build matches installed', async (ctx) => {

@@ -15,11 +15,13 @@ import * as yaml from 'yaml';
 import { parse as parseToml } from 'smol-toml';
 import {
   isNode9Hook,
+  isStaleHookCommand,
   hermesConfigPath,
   detectAgents,
   opencodeConfigDir,
   claudeDesktopConfigPath,
 } from './setup';
+import { opencodeShimHasCurrentShape } from './setup-opencode-shim';
 
 // ── Low-level detectors (this module is now the shared home for them) ─────────
 
@@ -37,14 +39,21 @@ type HookMatcher = { hooks?: HookEntry[] };
 
 // True if any matcher in the list carries a node9 hook. Guards against
 // hand-edited/foreign files where `hooks` is missing or not an array.
+// A node9 hook whose binary or cli.js no longer exists is not wiring: the agent
+// runs it, it fails, and nothing is checked (#480: a bun install replaced by an
+// npm one left only dead paths, and status/doctor/heal all read it as wired).
+function liveNode9Hook(command: string | undefined): boolean {
+  return isNode9Hook(command) && !isStaleHookCommand(command ?? '');
+}
+
 function matchersHaveNode9Hook(matchers: HookMatcher[] | undefined): boolean {
-  return (matchers ?? []).some((m) => (m.hooks ?? []).some((h) => isNode9Hook(h.command)));
+  return (matchers ?? []).some((m) => (m.hooks ?? []).some((h) => liveNode9Hook(h.command)));
 }
 
 // Flat-array variant for agents (Copilot, Cursor, Hermes) whose hooks have no
 // matcher level. Array.isArray guards a config where the event key is a non-array.
 function flatHaveNode9Hook(entries: HookEntry[] | undefined): boolean {
-  return (Array.isArray(entries) ? entries : []).some((h) => isNode9Hook(h.command));
+  return (Array.isArray(entries) ? entries : []).some((h) => liveNode9Hook(h.command));
 }
 
 // ── Hook-file model ───────────────────────────────────────────────────────────
@@ -173,6 +182,12 @@ interface AgentSpec {
   // Plugin-shim agents (OpenCode, Pi) — node9 protects them via a node9-authored
   // plugin/extension file rather than hooks or MCP. Presence of this file = wired.
   shimFile?: (home: string) => string;
+  /**
+   * Is the shim text on disk one the agent will actually load? Absent: any
+   * node9-authored file counts. OpenCode 2 refuses a shim without the 2.x
+   * shape, so an outdated file is not wiring (#480).
+   */
+  shimCurrent?: (text: string) => boolean;
   // Deterministic "this agent has a footprint on the machine" — a config file
   // or install dir, NOT a $PATH probe. Drives whether `status` shows the agent.
   present: (home: string) => boolean;
@@ -334,6 +349,7 @@ export const AGENT_SPECS: AgentSpec[] = [
     hookFormat: 'flat',
     hookEvents: [],
     shimFile: (h) => path.join(opencodeConfigDir(h), 'plugins', 'node9.js'),
+    shimCurrent: opencodeShimHasCurrentShape,
     present: (h) =>
       exists(opencodeConfigDir(h)) ||
       exists(path.join(opencodeConfigDir(h), 'plugins', 'node9.js')),
@@ -381,6 +397,15 @@ export interface AgentWiringRow {
   protection: 'hooks' | 'mcp';
 }
 
+function shimIsCurrent(file: string, check: ((text: string) => boolean) | undefined): boolean {
+  if (!check) return true;
+  try {
+    return check(fs.readFileSync(file, 'utf-8'));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve, for every agent in the registry, its install + hook + MCP wiring.
  * One `detectAgents()` call; pure (fs reads only). Deterministic given `home`.
@@ -398,11 +423,12 @@ export function getAgentWiring(home: string = os.homedir()): AgentWiringRow[] {
 
     if (spec.shimFile) {
       // Plugin-shim agent — presence of the node9-authored file is the wiring.
-      const shimWired = exists(spec.shimFile(home));
+      const shimPath = spec.shimFile(home);
+      const shimWired = exists(shimPath) && shimIsCurrent(shimPath, spec.shimCurrent);
       hooks = [{ label: 'node9 plugin (node9 check)', wired: shimWired }];
       wireState = shimWired ? 'wired' : present ? 'unwired' : 'absent';
       hookLabel = 'node9 plugin';
-      settingsPath = spec.shimFile(home);
+      settingsPath = shimPath;
     } else {
       const root: HookRoot = spec.hookFile
         ? readHookRoot(spec.hookFile(home), spec.hookFormat)

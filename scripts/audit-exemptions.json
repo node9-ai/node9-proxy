@@ -1,0 +1,10 @@
+{
+  "exemptions": [
+    {
+      "advisory": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "expires": "2026-12-17",
+      "reason": "ReDoS on repeated extglobs; no patched picomatch exists (all versions <= 4.0.7). node9 compiles agent-controlled patterns but matches them only against its own fixed names and absolute protected paths: no blow-up measured on 2026-11-17. Guarded by packages/policy-engine/src/policy/jail-glob-redos.spec.ts. Remove as soon as picomatch ships a fix."
+    }
+  ]
+}

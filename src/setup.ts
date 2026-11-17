@@ -490,6 +490,13 @@ export function isNode9Hook(cmd: string | undefined): boolean {
   );
 }
 
+/** The subcommand of a node9 hook command ('check' | 'log'), or null when the command is not node9's. */
+export function node9HookSubcommand(cmd: string | undefined): 'check' | 'log' | null {
+  if (!cmd || !isNode9Hook(cmd)) return null;
+  const m = /(?:node9|cli\.js|[/\\]hook)"? (check|log)\b/.exec(cmd);
+  return m ? (m[1] as 'check' | 'log') : null;
+}
+
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
 export function teardownClaude(): void {
@@ -662,6 +669,110 @@ export function teardownCursor(): void {
 
 // ── Claude Code ──────────────────────────────────────────────────────────────
 
+/**
+ * Leave one Claude hook event with working node9 hooks and no duplicates.
+ *
+ * - No node9 hook in the event: add one.
+ * - A node9 hook whose binary or cli.js is gone (or whose shape is legacy):
+ *   rewrite it to the current command.
+ * - A node9 hook that is then identical to an earlier one under the same
+ *   matcher: remove it, and drop a matcher this left empty.
+ *
+ * Detection goes through isNode9Hook, the predicate every other agent uses.
+ * This used a substring test (`includes('node9 check')`) that missed every
+ * quoted form, `"/old/bin/node9" check` and `".../cli.js" check` alike. After
+ * a move from a bun to an npm install the old PreToolUse/PostToolUse entries
+ * were neither recognised nor repaired; new ones were added beside them, and
+ * every Claude Code tool call then failed twice on the dead paths (#480).
+ *
+ * Returns true when the settings object changed.
+ */
+export function wireClaudeNode9Event(
+  settings: ClaudeSettings,
+  event: string,
+  subcommand: 'check' | 'log',
+  addedMessage: string
+): boolean {
+  if (!settings.hooks) settings.hooks = {};
+  const matchers = settings.hooks[event] ?? [];
+
+  // Repair and de-duplicate first, whatever else the event holds: a dead entry
+  // must not survive just because the event also needs a hook added.
+  let repaired = 0;
+  let removed = 0;
+  const emptied = new Set<HookMatcher>();
+  const seen = new Set<string>();
+  for (const m of matchers) {
+    if (!m || !Array.isArray(m.hooks)) continue;
+    const kept: HookEntry[] = [];
+    for (const h of m.hooks) {
+      const own = node9HookSubcommand(h?.command);
+      if (own) {
+        // Keep the hook's own subcommand: a stray `log` must not become a
+        // second `check` (or the reverse) just because of where it sits.
+        if (needsRewrite(h.command)) {
+          h.command = fullPathCommand(own);
+          repaired++;
+        }
+        const key = `${m.matcher}\0${h.command}`;
+        if (seen.has(key)) {
+          removed++;
+          continue;
+        }
+        seen.add(key);
+      }
+      kept.push(h);
+    }
+    if (kept.length === 0 && m.hooks.length > 0) emptied.add(m);
+    m.hooks = kept;
+  }
+  const remaining = matchers.filter((m) => !emptied.has(m));
+  settings.hooks[event] = remaining;
+
+  // Only a node9 hook with THIS event's subcommand counts: a stray `node9 log`
+  // under PreToolUse must not stand in for the `check` that gates the call.
+  const hasNode9 = remaining.some(
+    (m) =>
+      Array.isArray(m?.hooks) && m.hooks.some((h) => node9HookSubcommand(h?.command) === subcommand)
+  );
+  let added = false;
+  if (!hasNode9) {
+    remaining.push({
+      matcher: '.*',
+      hooks: [{ type: 'command', command: fullPathCommand(subcommand), timeout: 600 }],
+    });
+    console.log(chalk.green(addedMessage));
+    added = true;
+  }
+
+  if (repaired > 0) {
+    console.log(chalk.yellow(`  🔧 ${event} hook repaired (stale path → current binary)`));
+  }
+  if (removed > 0) {
+    console.log(chalk.yellow(`  🔧 ${event}: removed ${removed} duplicate node9 hook(s)`));
+  }
+  return added || repaired > 0 || removed > 0;
+}
+
+/**
+ * node9 hook commands in a Claude settings object whose binary or cli.js no
+ * longer exists. Each one makes Claude Code print an error on every tool call
+ * (#480); doctor reports them.
+ */
+export function deadClaudeNode9Hooks(settings: ClaudeSettings | null): string[] {
+  const dead: string[] = [];
+  for (const matchers of Object.values(settings?.hooks ?? {})) {
+    if (!Array.isArray(matchers)) continue;
+    for (const m of matchers) {
+      if (!m || !Array.isArray(m.hooks)) continue;
+      for (const h of m.hooks) {
+        if (h && isNode9Hook(h.command) && isStaleHookCommand(h.command)) dead.push(h.command);
+      }
+    }
+  }
+  return dead;
+}
+
 export async function setupClaude(): Promise<void> {
   // Seed the MCP pin registry (#179) so absence-vs-empty is distinguishable.
   // Idempotent — no-op if file already exists.
@@ -681,90 +792,17 @@ export async function setupClaude(): Promise<void> {
   // ── Step 1: Pure additions — apply immediately, no prompt ────────────────
   if (!settings.hooks) settings.hooks = {};
 
-  const hasPreHook = settings.hooks.PreToolUse?.some((m) =>
-    m.hooks.some((h) => h.command?.includes('node9 check') || h.command?.includes('cli.js check'))
-  );
-  if (!hasPreHook) {
-    if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
-    settings.hooks.PreToolUse.push({
-      matcher: '.*',
-      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
-    });
-    console.log(chalk.green('  ✅ PreToolUse hook added  → node9 check'));
-    hooksChanged = true;
-    anythingChanged = true;
-  } else if (settings.hooks.PreToolUse) {
-    // Self-heal: rewrite Node9 hooks whose absolute paths have vanished.
-    for (const matcher of settings.hooks.PreToolUse) {
-      for (const h of matcher.hooks) {
-        const cmd = h.command ?? '';
-        const isNode9 = cmd.includes('node9 check') || cmd.includes('cli.js check');
-        if (isNode9 && needsRewrite(cmd)) {
-          h.command = fullPathCommand('check');
-          console.log(chalk.yellow('  🔧 PreToolUse hook repaired (stale path → current binary)'));
-          hooksChanged = true;
-          anythingChanged = true;
-        }
-      }
-    }
-  }
-
-  const hasPostHook = settings.hooks.PostToolUse?.some((m) =>
-    m.hooks.some((h) => h.command?.includes('node9 log') || h.command?.includes('cli.js log'))
-  );
-  if (!hasPostHook) {
-    if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
-    settings.hooks.PostToolUse.push({
-      matcher: '.*',
-      hooks: [{ type: 'command', command: fullPathCommand('log'), timeout: 600 }],
-    });
-    console.log(chalk.green('  ✅ PostToolUse hook added → node9 log'));
-    hooksChanged = true;
-    anythingChanged = true;
-  } else if (settings.hooks.PostToolUse) {
-    for (const matcher of settings.hooks.PostToolUse) {
-      for (const h of matcher.hooks) {
-        const cmd = h.command ?? '';
-        const isNode9 = cmd.includes('node9 log') || cmd.includes('cli.js log');
-        if (isNode9 && needsRewrite(cmd)) {
-          h.command = fullPathCommand('log');
-          console.log(chalk.yellow('  🔧 PostToolUse hook repaired (stale path → current binary)'));
-          hooksChanged = true;
-          anythingChanged = true;
-        }
-      }
-    }
-  }
-
-  // UserPromptSubmit — paste-into-prompt DLP. node9 check scans payload.prompt
-  // for credentials and blocks before the prompt ever reaches the model. Same
-  // shim as Codex; the agent-specific block response shape is selected inside
-  // check.ts via detectAiAgent.
-  const hasPromptHook = settings.hooks.UserPromptSubmit?.some((m) =>
-    m.hooks.some((h) => isNode9Hook(h.command))
-  );
-  if (!hasPromptHook) {
-    if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
-    settings.hooks.UserPromptSubmit.push({
-      matcher: '.*',
-      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
-    });
-    console.log(chalk.green('  ✅ UserPromptSubmit hook added → node9 check (prompt DLP)'));
-    hooksChanged = true;
-    anythingChanged = true;
-  } else if (settings.hooks.UserPromptSubmit) {
-    for (const matcher of settings.hooks.UserPromptSubmit) {
-      for (const h of matcher.hooks) {
-        const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
-          h.command = fullPathCommand('check');
-          console.log(
-            chalk.yellow('  🔧 UserPromptSubmit hook repaired (stale path → current binary)')
-          );
-          hooksChanged = true;
-          anythingChanged = true;
-        }
-      }
+  // PreToolUse / PostToolUse / UserPromptSubmit (prompt DLP: node9 check scans
+  // payload.prompt for credentials and blocks before the prompt reaches the
+  // model; the Claude block shape is picked inside check.ts via detectAiAgent).
+  for (const [event, subcommand, added] of [
+    ['PreToolUse', 'check', '  ✅ PreToolUse hook added  → node9 check'],
+    ['PostToolUse', 'log', '  ✅ PostToolUse hook added → node9 log'],
+    ['UserPromptSubmit', 'check', '  ✅ UserPromptSubmit hook added → node9 check (prompt DLP)'],
+  ] as const) {
+    if (wireClaudeNode9Event(settings, event, subcommand, added)) {
+      hooksChanged = true;
+      anythingChanged = true;
     }
   }
 
@@ -2910,7 +2948,9 @@ export async function setupOpencode(): Promise<void> {
       console.log(chalk.yellow('  🔧 Opencode plugin shim updated to current version'));
     } else {
       console.log(
-        chalk.green('  ✅ Opencode plugin installed → tool.execute.before / after, chat.message')
+        chalk.green(
+          '  ✅ Opencode plugin installed → pre/post tool hooks + prompt check (OpenCode 1.x and 2.x)'
+        )
       );
     }
   }
