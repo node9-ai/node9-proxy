@@ -138,7 +138,7 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
     expect(f[0].severity).toBe('medium');
   });
 
-  it('the cap: the same bare Bash is HIGH in settings.json and MEDIUM in a skill (2026-09-27)', () => {
+  it('the cap: the same bare Bash is medium in settings.json and in a skill', () => {
     // settings.json grants apply to every agent action; a skill's only while it runs. The
     // signal still names the unrestricted shell — the cap is on reach, not on honesty.
     const settings = analyzeAgentConfig(
@@ -149,7 +149,7 @@ describe('CI-1.skill-allowed-tools — a skill that pre-authorizes broad tools',
       '.claude/skills/x/SKILL.md',
       '---\nallowed-tools: Bash\n---\n'
     );
-    expect(settings?.severity).toBe('high');
+    expect(settings?.severity).toBe('medium'); // settings joined the cap (fw#481 S1)
     expect(skill).toHaveLength(1);
     expect(skill[0].severity).toBe('medium');
     expect(skill[0].signals.join(' ')).toMatch(/unrestricted `Bash`/);

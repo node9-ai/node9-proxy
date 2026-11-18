@@ -83,6 +83,17 @@ describe('checkAgentPermissions', () => {
     expect(f.fix).toBeTruthy();
   });
 
+  // scan-repo caps a committed allow list at medium (fw#481 S1). The user's own file keeps
+  // both levels: it applies to every project on this machine.
+  it('a broad allow-list with a deny backstop on the shell is medium', () => {
+    write(
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { allow: ['Bash(*)'], deny: ['Bash(rm:*)'] } })
+    );
+    const f = checkAgentPermissions(ctx()).find((x) => x.title.includes('broad tools'))!;
+    expect(f.severity).toBe('medium');
+  });
+
   it('does not report node9 hook lines in the user file as a finding', () => {
     write(
       '.claude/settings.json',

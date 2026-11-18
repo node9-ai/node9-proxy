@@ -10,7 +10,7 @@ import { explainAgentOutputEnv, explainSecrets, explainWorkflow } from './explai
 import { agentOutputSinks } from './env-sink';
 import { parseYamlStrict as parseYaml } from './yaml-strict';
 import { parseFrontmatter } from './frontmatter';
-import { lineOf, lineOfRe, withLine } from './lines';
+import { lineOf, lineOfNth, lineOfRe, withLine } from './lines';
 import type { CiFinding, Severity } from './types';
 import { SEVERITY_RANK } from './types';
 import { safeText } from './suppress';
@@ -585,6 +585,40 @@ const EVENT_CONTEXT_RE = /github\.event|context\.payload/;
 const CLOUD_MODEL_ENV_RE = /^CLAUDE_CODE_USE_(BEDROCK|VERTEX)$/i;
 const CLOUD_AUTH_ACTION_RE =
   /^\s*(aws-actions\/configure-aws-credentials|google-github-actions\/auth)@/i;
+// fw#481 S3: a step that signs the job in to a cloud account. With one, `id-token: write` or a
+// shell reaches that account; without one, `id-token: write` is only what claude-code-action
+// itself asks for to get its GitHub App token.
+const CLOUD_LOGIN_RE =
+  /^\s*(aws-actions\/configure-aws-credentials|google-github-actions\/auth|azure\/login)@/i;
+// Secrets whose loss outlives the job: a cloud key, a token (PAT, registry, publish), a database.
+const LASTING_SECRET_KINDS = new Set(['cloud', 'pat', 'db', 'cloud-file']);
+// fw#481 S4-b: google-github-actions/auth given a service-account key writes it to a
+// `gha-creds-*.json` file in the workspace (unless `create_credentials_file: false`), where an
+// agent with a file-read tool finds it without any shell.
+const GCP_AUTH_RE = /^\s*google-github-actions\/auth@/i;
+const FILE_READ_TOOL_RE = /(^|["\s,])(Read|Grep|Glob|LS|View)(\(|\s|,|"|$)/;
+
+/** The secret a cloud login step leaves as a key file in the workspace before one of `agents`
+ *  runs, or null. A login step whose own `if:` is an actor gate does not run for a stranger. */
+function workspaceKeyFile(job: Job, agents: Step[], label: LabelConfig): string | null {
+  const steps = job.steps ?? [];
+  const last = Math.max(-1, ...agents.map((a) => steps.indexOf(a)));
+  for (let i = 0; i < last; i++) {
+    const st = steps[i];
+    if (!GCP_AUTH_RE.test(str(st.uses))) continue;
+    const key = str(st.with?.['credentials_json']);
+    if (!key.trim()) continue;
+    if (/^\s*["']?false["']?\s*$/i.test(str(st.with?.['create_credentials_file']))) continue;
+    const cond = str(st.if);
+    if (cond.length <= IF_MAX_LEN) {
+      const x = cond.trim() ? parseIf(cond) : null;
+      if (x !== null && exprGated(x, label)) continue;
+    }
+    const name = /secrets\.([A-Za-z_][A-Za-z0-9_]{0,100})/.exec(key)?.[1];
+    return name ?? 'service-account key';
+  }
+  return null;
+}
 
 /** `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` set to anything but an off value. */
 function cloudModelEnv(env: Record<string, unknown>): boolean {
@@ -1658,6 +1692,61 @@ function jobGated(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean
   );
 }
 
+/** fw#481 S4-a: the stranger-firable events `job` runs on with no gate of its own and none it
+ *  inherits. C6-b reads a job `if:` per event (`pull_request` open, the comment command held to
+ *  members), but only on the agent job itself: the same condition one job up, on the job the
+ *  agent job `needs`, was not followed, so a gated dependency-update workflow was graded high.
+ *  GitHub skips a job when any job upstream in its `needs:` chain was skipped, unless the job's
+ *  own `if:` calls a status function (see jobGated). So an event on which an ancestor does not
+ *  run ungated is one this job does not run on for a stranger either. With an explicit status
+ *  function, only a required success of a direct dependency carries the gate. Bounded: at most
+ *  HOLDERS_MAX ancestors are read; the rest are ignored, which credits less, never more. */
+const HOLDERS_MAX = 64;
+// One answer per job and event within one analysis: a job is an ancestor of many agent jobs, and
+// its `if:` (the PR author's, in the Action) would otherwise be parsed once per descendant and
+// event. Cleared at the start of each analysis: the answer depends on that run's label and
+// environment facts.
+let UNGATED_MEMO = new WeakMap<Job, Map<string, boolean>>();
+function ungatedOnMemo(job: Job, ev: string, label: LabelConfig): boolean {
+  let m = UNGATED_MEMO.get(job);
+  if (!m) UNGATED_MEMO.set(job, (m = new Map()));
+  let v = m.get(ev);
+  if (v === undefined) m.set(ev, (v = jobRunsUngatedOn(job, ev, label)));
+  return v;
+}
+function openEventsOf(job: Job, wf: Workflow, firable: string[], label: LabelConfig): string[] {
+  const own = firable.filter((ev) => ungatedOnMemo(job, ev, label));
+  if (!own.length) return own;
+  const ownIf = str(job.if);
+  const holders: Job[] = [];
+  if (STATUS_FN_RE.test(ownIf)) {
+    for (const n of needsOf(job)) {
+      const dep = wf.jobs?.[n];
+      if (
+        dep &&
+        holders.length < HOLDERS_MAX &&
+        new RegExp(`needs\\.${escapeRe(n)}\\.result\\s*==\\s*['"]success['"]`).test(ownIf)
+      )
+        holders.push(dep);
+    }
+  } else {
+    const seen = new Set<string>();
+    const visit = (j: Job) => {
+      for (const n of needsOf(j)) {
+        if (seen.has(n) || holders.length >= HOLDERS_MAX) continue;
+        seen.add(n);
+        const dep = wf.jobs?.[n];
+        if (!dep) continue;
+        holders.push(dep);
+        visit(dep);
+      }
+    };
+    visit(job);
+  }
+  if (!holders.length) return own;
+  return own.filter((ev) => holders.every((h) => ungatedOnMemo(h, ev, label)));
+}
+
 /** claude-code-action bypasses its write-permission gate only when the SAME step also passes
  *  its own `github_token`: action.yml wires `inputs.github_token` to OVERRIDE_GITHUB_TOKEN, and
  *  permissions.ts checks `allowedNonWriteUsers && githubTokenProvided` (present since the input
@@ -1845,6 +1934,30 @@ function hasImplicitActorGate(
   return sawHeld;
 }
 
+/** fw#481 S4-b: the agent steps of a job that a stranger can actually start. A job can hold two
+ *  steps of the official action: one for same-repository PRs that keeps the default write check
+ *  and has the write tools, one for forks with the check switched off and read-only tools. The
+ *  first refuses a stranger, so its tools and secrets are not theirs to use; joining the two
+ *  graded a read-only fork review as a push-capable agent anyone can start. A step is held when
+ *  it is an official claude-code-action or codex-action step whose own switch is not set (and
+ *  that checks the actor on this job's events). When no step is open on its own, all are
+ *  returned: the job-level verdict already decided. */
+function strangerSteps(
+  job: Job,
+  wf: Workflow,
+  raw: Record<string, unknown>,
+  workflowRun: boolean
+): Step[] {
+  const agents = (job.steps ?? []).filter(isAgentStep);
+  if (agents.length < 2) return agents;
+  const scope = { job, dispatchable: dispatchable(wf, raw) };
+  const onRun = jobOnWorkflowRun(job, workflowRun);
+  const open = agents.filter(
+    (s) => claudeBypassArmed(s) || codexOpen(s) || !hasImplicitActorGate([s], false, onRun, scope)
+  );
+  return open.length ? open : agents;
+}
+
 /** `<owner>/claude-code-action@<ref>` → who built it and which ref; null for anything else
  *  (claude-code-base-action included: it has no write gate at all). */
 function claudeActionBuild(
@@ -2012,14 +2125,60 @@ function dropDeadSecretRefs(text: string): string {
 // PAT in a gated job must not be credited to an ungated one.
 function usesPatIn(jobs: Job[]): boolean {
   for (const j of jobs)
-    for (const step of j.steps ?? []) {
-      const gt = dropDeadSecretRefs(str(step.with?.['github_token']));
-      // Any secret other than the default token that can actually be reached is a static PAT.
-      // (Before 2026-09-25 this tested "no GITHUB_TOKEN anywhere in the expression", which
-      // missed `secrets.GH_PAT || secrets.GITHUB_TOKEN` and flagged the reverse.)
-      if (/secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]/i.test(gt)) return true;
-    }
+    for (const step of j.steps ?? [])
+      if (namesOtherSecret(step.with?.['github_token'])) return true;
   return false;
+}
+
+/** Any secret other than the default token that can actually be reached is a static PAT.
+ *  (Before 2026-09-25 this tested "no GITHUB_TOKEN anywhere in the expression", which missed
+ *  `secrets.GH_PAT || secrets.GITHUB_TOKEN` and flagged the reverse.) */
+function namesOtherSecret(v: unknown): boolean {
+  return /secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]/i.test(dropDeadSecretRefs(str(v)));
+}
+
+/** A secret other than the default token handed to these steps as their GitHub token (the
+ *  action's `github_token` input, or `GH_TOKEN` / `GITHUB_TOKEN` in the step env): a PAT by use,
+ *  whatever it is called. fw#481 S3-a: a maintainer PAT whose name did not end in `_TOKEN` or
+ *  `_PAT` was critical only because `id-token: write` stood next to it. */
+function stepsHoldPat(steps: Step[]): boolean {
+  return steps.some(
+    (s) =>
+      namesOtherSecret(s.with?.['github_token']) ||
+      namesOtherSecret(s.env?.['GH_TOKEN']) ||
+      namesOtherSecret(s.env?.['GITHUB_TOKEN'])
+  );
+}
+
+// A GitHub App installation token minted in the job. Its reach is the App's, not the job's
+// `permissions:` block, so like a PAT its scope is not visible here.
+const APP_TOKEN_ACTION_RE = /^\s*(actions\/create-github-app-token|tibdex\/github-app-token)@/i;
+
+/** Is a token minted by an App-token step of `job` handed to one of `steps` (its `with:` or
+ *  `env:`, or the job env)? Read by reference (`steps.<id>.outputs.token`), so a token minted
+ *  only for a later posting step is not counted. */
+function stepsHoldAppToken(job: Job, steps: Step[]): boolean {
+  const ids = (job.steps ?? [])
+    .filter((st) => APP_TOKEN_ACTION_RE.test(str(st.uses)))
+    .map((st) => str((st as { id?: unknown }).id).trim())
+    .filter((id) => /^[\w-]{1,100}$/.test(id));
+  if (!ids.length) return false;
+  const text = steps.map((s) => str(s.with) + ' ' + str(s.env)).join(' ') + ' ' + str(job.env);
+  return ids.some((id) => text.includes(`steps.${id}.outputs.token`));
+}
+
+/** Does the job sign in to a cloud account? A login action step, or the agent itself told to
+ *  use a cloud model (`use_bedrock` / `use_vertex`, or the CLI's own switch in its env): a login
+ *  wrapped in a local composite action is not visible, the cloud model switch is. */
+function jobSignsInToCloud(job: Job, agents: Step[]): boolean {
+  if ((job.steps ?? []).some((st) => CLOUD_LOGIN_RE.test(str(st.uses)))) return true;
+  const on = (v: unknown) => !/^\s*["']?(0|false|no|off)?["']?\s*$/i.test(str(v));
+  return agents.some(
+    (s) =>
+      on(s.with?.['use_bedrock']) ||
+      on(s.with?.['use_vertex']) ||
+      cloudModelEnv({ ...(s.scopeEnv ?? {}), ...(s.env ?? {}) })
+  );
 }
 
 /** Effective permissions text for a job. GitHub REPLACES (not merges) the workflow-level
@@ -2190,6 +2349,7 @@ function analyzeWorkflowInner(
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
   UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
+  UNGATED_MEMO = new WeakMap();
   const steps = allSteps(wf).map((s) => s.step);
   const agentSteps = steps.filter(isAgentStep);
   // The job(s) the agent actually runs in — permission checks scope to these, so
@@ -2246,7 +2406,7 @@ function analyzeWorkflowInner(
   const firable = 'firable' in reachOf ? reachOf.firable : undefined;
   if (forkInput && !reusable && firable?.length && injJobs.length) {
     const label = labelTypeConfigured(wf, raw);
-    const openOn = (j: Job) => firable.filter((ev) => jobRunsUngatedOn(j, ev, label));
+    const openOn = (j: Job) => openEventsOf(j, wf, firable, label); // S4-a: own gate + inherited
     const open = [...new Set(injJobs.flatMap(openOn))];
     if (open.length < firable.length) {
       injJobs = injJobs.filter((j) => openOn(j).length > 0);
@@ -2261,7 +2421,8 @@ function analyzeWorkflowInner(
   // Fallback to all agent jobs only matters for the signal strings when NO job is
   // injectable — in that case reach is 0 (below), so the fallback never drives severity.
   const powerJobs = injJobs.length ? injJobs : agentJobs;
-  const powerSteps = injJobs.flatMap((j) => (j.steps ?? []).filter(isAgentStep));
+  // S4-b: only the steps a stranger can start (a held sibling step's tools are not theirs).
+  const powerSteps = injJobs.flatMap((j) => strangerSteps(j, wf, raw, workflowRun));
   const scopedSteps = powerSteps.length ? powerSteps : agentSteps; // fallback: never blank
   // T.2b: `uses: ./…` after checking out the untrusted head to the workspace root runs the
   // head's own action code with the job's secrets: code execution, whatever the agent does.
@@ -2373,6 +2534,27 @@ function analyzeWorkflowInner(
   // pull-requests/issues:write + Bash(gh api:*)/Bash(git:*), no bare Bash, no PAT — an
   // injected agent manipulates PRs/issues but can't push code (needs contents:write) → high.
   if (canDamage && !rce && !codeWrite && severity === 'critical') severity = 'high';
+  // fw#481 S3-b (founder, 2026-11-18): critical needs reach that outlives the job or touches
+  // what users install. A shell (or the PR's own code) next to only the model key and a comment
+  // token is high: the key and the token can be taken and threads edited, but nothing is pushed,
+  // published or deployed. Lasting reach = a code-write permission the agent can use (a tool
+  // that writes to GitHub, or a shell with the checkout's token), a PAT, a cloud login step in
+  // the job, or a cloud, token or database secret in the agent's environment. Hand review of 61
+  // repositories graded every critical without one of these as high. Not modelled: poisoning
+  // the Actions cache a release workflow later restores.
+  if (severity === 'critical') {
+    const lasting =
+      codeWrite ||
+      (rce && hasCodeWritePerm(wf, powerJobs)) ||
+      stepsHoldPat(scopedSteps) ||
+      powerJobs.some(
+        (j) => stepsHoldAppToken(j, scopedSteps) || jobSignsInToCloud(j, scopedSteps)
+      ) ||
+      agentReachableSecrets(wf, scopedSteps, powerJobs).some((s) =>
+        LASTING_SECRET_KINDS.has(s.kind)
+      );
+    if (!lasting) severity = 'high';
+  }
   // R4-4: issue-only write (issues:write, NO pull-requests:write, NO code-write) is bounded
   // lower than PR-write — an injected agent can comment/label/close ISSUES but cannot approve
   // a malicious PR or push code. That's medium, not high.
@@ -2401,7 +2583,7 @@ function analyzeWorkflowInner(
   // secret in the agent's environment. Anyone may start it; the worst it does is write untrusted
   // text, which the output rules (CI-2 output-to-env, trusted readers) judge on their own.
   const reachableAgents = injJobs.flatMap((j) =>
-    (j.steps ?? []).filter(isAgentStep).map((st) => ({ job: j, st }))
+    strangerSteps(j, wf, raw, workflowRun).map((st) => ({ job: j, st }))
   );
   const textOnly =
     reach > 0 &&
@@ -2629,9 +2811,16 @@ function analyzeWorkflowInner(
         ? 'Agent workflow with a risky pattern (partially mitigated)'
         : 'Agent workflow on a privileged trigger: review the actor gate';
 
-  const agentUses = agentSteps.find((st) => typeof st.uses === 'string')?.uses;
+  // S4-b: anchor at a step a stranger can start, not at the first agent step in the file. Two
+  // steps often share one `uses:` string, so the step's place among them picks the occurrence.
+  // An open job whose agent is a `run:` step has no `uses:` to point at: the first agent action
+  // in the file stays the anchor, as before.
+  const hasUses = (st: Step) => typeof st.uses === 'string';
+  const anchor = powerSteps.find(hasUses) ?? agentSteps.find(hasUses);
+  const agentUses = anchor?.uses;
+  const nth = anchor ? steps.filter((st) => st.uses === agentUses).indexOf(anchor) : 0;
   const line =
-    (agentUses ? lineOf(content, agentUses) : undefined) ??
+    (agentUses ? lineOfNth(content, agentUses, nth) : undefined) ??
     lineOfRe(
       content,
       /^[ \t]*(pull_request_target|issue_comment|issues|workflow_run|pull_request_review_comment|pull_request)[ \t]*:/m
@@ -2762,6 +2951,8 @@ interface JobEval {
   secrets: ReachableSecret[];
   injectable: boolean;
   canReadEnv: boolean;
+  /** No shell, but a file-read tool and a cloud key file in the workspace (S4-b). */
+  readsKeyFile: boolean;
 }
 
 /** Evaluate ONE agent job in isolation. The exfiltratable-secret danger — untrusted
@@ -2780,26 +2971,56 @@ function evalAgentJob(
   const jobAgentSteps = jobSteps.filter(isAgentStep);
   if (jobAgentSteps.length === 0) return null;
 
-  const secrets = agentReachableSecrets(wf, jobAgentSteps, [job]);
-  if (secrets.length === 0) return null;
-
   const bypassActive = bypassArmed(jobAgentSteps) && untrustedTrigger;
   const head = untrustedHeadCheckout(jobSteps);
+  const reachOf = triggerReach(wf, raw);
+  const label = labelTypeConfigured(wf, raw);
+  // S4-c: the same per-event reading CI-2 uses (C6-b), with gates inherited through `needs:`
+  // (S4-a). CI-4 used to call a job open that CI-2, in the same file, called gated.
+  const firable = 'firable' in reachOf ? reachOf.firable : undefined;
+  const heldOnEveryEvent =
+    reachOf.untrusted &&
+    !reusable &&
+    !!firable?.length &&
+    openEventsOf(job, wf, firable, label).length === 0;
+  const gate =
+    heldOnEveryEvent ||
+    jobGated(job, wf, raw) ||
+    hasImplicitActorGate(jobAgentSteps, bypassActive, jobOnWorkflowRun(job, reachOf.workflowRun), {
+      job,
+      dispatchable: dispatchable(wf, raw),
+    });
+  // S4-b: an open job is judged by the steps a stranger can start. A gated one keeps the whole
+  // list, so its hardening note still names every secret in the job.
+  const live = gate ? jobAgentSteps : strangerSteps(job, wf, raw, reachOf.workflowRun);
   const reach = Math.max(
     head === 'root' ? 3 : head === 'subdir' ? 1 : 0,
-    promptTakesUntrusted(jobAgentSteps) || (!reusable && jobReadsUntrustedItem(job)) ? 2 : 0,
+    promptTakesUntrusted(live) || (!reusable && jobReadsUntrustedItem(job)) ? 2 : 0,
     bypassActive ? 2 : 0
   );
-  const gate =
-    jobGated(job, wf, raw) ||
-    hasImplicitActorGate(
-      jobAgentSteps,
-      bypassActive,
-      jobOnWorkflowRun(job, triggerReach(wf, raw).workflowRun),
-      { job, dispatchable: dispatchable(wf, raw) }
-    );
   const injectable = untrustedTrigger && !gate && reach > 0;
-  const canReadEnv = EXFIL_RCE_RE.test(collectTools(jobAgentSteps)); // bare shell = read env + exfil
+  const tools = collectTools(live);
+  const canReadEnv = EXFIL_RCE_RE.test(tools); // bare shell = read env + exfil
+
+  const secrets = agentReachableSecrets(wf, live, [job]);
+  // S4-b: a cloud key written into the workspace by a login step, where a file-read tool finds it.
+  const keyFile = injectable ? workspaceKeyFile(job, live, label) : null;
+  // claude-code-action in tag mode (no `prompt`, or `track_progress`) always allows Read, Glob
+  // and Grep, whatever `--allowedTools` adds.
+  const canReadFiles =
+    FILE_READ_TOOL_RE.test(tools) ||
+    live.some(
+      (s) =>
+        !!claudeActionBuild(s.uses)?.official &&
+        (!str(s.with?.['prompt']).trim() || /^\s*["']?true/i.test(str(s.with?.['track_progress'])))
+    );
+  const readsKeyFile = !!keyFile && !canReadEnv && canReadFiles;
+  if (keyFile && (canReadEnv || readsKeyFile))
+    secrets.push({
+      name: `${keyFile} (key file the cloud login step writes into the workspace)`,
+      kind: 'cloud-file',
+    });
+  if (secrets.length === 0) return null;
 
   // Anti-noise: `id-token:write` (cloud OIDC) is extremely common and, on its own,
   // is only a risk when an injectable agent can actually run a shell to use it. So:
@@ -2808,12 +3029,22 @@ function evalAgentJob(
   //    DB cred, API key…) as a hardening advisory. id-token-ONLY here → null (skip).
   const realSecrets = secrets.filter((s) => s.kind !== 'cloud-oidc');
   const hasOidc = secrets.some((s) => s.kind === 'cloud-oidc');
+  // fw#481 S3-a: `id-token: write` reaches a cloud account only when the job signs in to one.
+  // On its own it is what claude-code-action asks for to get its GitHub App token: 9 of 16
+  // critical findings in the hosted scan named nothing else. Still high with a shell: the token
+  // it mints is accepted by whatever trusts this repository's workflows.
+  const cloudLogin = jobSignsInToCloud(job, live);
   let severity: Severity;
   if (injectable && canReadEnv) {
     severity =
-      hasOidc || realSecrets.some((s) => ['cloud', 'pat', 'db'].includes(s.kind))
+      (hasOidc && cloudLogin) ||
+      realSecrets.some((s) => LASTING_SECRET_KINDS.has(s.kind)) ||
+      stepsHoldPat(live) ||
+      stepsHoldAppToken(job, live)
         ? 'critical'
         : 'high';
+  } else if (injectable && readsKeyFile) {
+    severity = 'high'; // read and repeated in the agent's output: no shell needed
   } else if (realSecrets.length > 0) {
     severity = 'advisory';
   } else {
@@ -2824,7 +3055,7 @@ function evalAgentJob(
   // text, so it is exploitable the moment a caller wires a fork trigger.
   const loadedGun = head === 'root' || promptTakesUntrusted(jobAgentSteps);
   if (reusable && !loadedGun && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
-  return { severity, secrets, injectable, canReadEnv };
+  return { severity, secrets, injectable, canReadEnv, readsKeyFile };
 }
 
 /** CI-4 — secrets an injectable agent could exfiltrate. Sibling of analyzeWorkflow
@@ -2867,6 +3098,7 @@ function analyzeWorkflowSecretsInner(
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
   UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
+  UNGATED_MEMO = new WeakMap();
   const all = allSteps(wf);
   if (!all.some((s) => isAgentStep(s.step))) return null;
 
@@ -2886,9 +3118,14 @@ function analyzeWorkflowSecretsInner(
   if (!worst) return null;
 
   const firstSecret = worst.secrets[0]?.name ?? '';
-  const secretLine = /^id-token/.test(firstSecret)
-    ? lineOfRe(content, /^[ \t]*id-token[ \t]*:[ \t]*write/m)
-    : lineOf(content, `secrets.${firstSecret}`);
+  // A key file is anchored at the login step that writes it (its display name is not a
+  // `secrets.` reference, and it is the reason for the grade when the agent has no shell).
+  const secretLine =
+    worst.readsKeyFile || worst.secrets[0]?.kind === 'cloud-file'
+      ? lineOfRe(content, /^[ \t]*credentials_json[ \t]*:/m)
+      : /^id-token/.test(firstSecret)
+        ? lineOfRe(content, /^[ \t]*id-token[ \t]*:[ \t]*write/m)
+        : lineOf(content, `secrets.${firstSecret}`);
   return {
     ...(secretLine ? { line: secretLine } : {}),
     check: 'CI-4',
@@ -2907,7 +3144,9 @@ function analyzeWorkflowSecretsInner(
         : 'gated / not externally triggerable: latent risk only',
       worst.canReadEnv
         ? 'agent has arbitrary shell (bare Bash) → can read env and exfiltrate'
-        : 'no arbitrary-shell tool: not exfiltratable today, but one tool-add away',
+        : worst.readsKeyFile
+          ? 'agent has a file-read tool: it can read the key file and repeat it in its output, no shell needed'
+          : 'no arbitrary-shell tool: not exfiltratable today, but one tool-add away',
     ],
     fix: 'Move extra secrets to a separate trusted job the agent cannot reach; drop id-token:write if unused; scope the agent tools to read-only and gate the trigger.',
     explain: explainSecrets({
@@ -2915,6 +3154,7 @@ function analyzeWorkflowSecretsInner(
       secrets: worst.secrets.map((s) => s.name),
       injectable: worst.injectable,
       shell: worst.canReadEnv,
+      readsFile: worst.readsKeyFile,
     }),
   };
 }
@@ -3399,6 +3639,7 @@ function analyzeAgentOutputToEnvInner(
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
   UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
+  UNGATED_MEMO = new WeakMap();
   const reach = triggerReach(wf, raw);
   const untrustedTrigger = reach.untrusted || reach.reusable;
   if (!untrustedTrigger) return [];

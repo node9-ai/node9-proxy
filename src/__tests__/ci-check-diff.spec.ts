@@ -145,7 +145,7 @@ describe('CI-5 · classification', () => {
     expect(d.worstIntroduced).toBeNull(); // …and the gate still passes
   });
 
-  it('flags a severity escalation on the SAME finding as erosion, not as unchanged', () => {
+  it('flags the loss of a deny backstop on the SAME finding as erosion, not as unchanged', () => {
     // Removing the deny backstop does not create a new finding — it makes the existing
     // one worse. Classifying that as "unchanged" lets a guardrail removal merge silently.
     const base = scan([
@@ -159,7 +159,9 @@ describe('CI-5 · classification', () => {
     const baseFinding = base.findings.find((f) => f.check === 'CI-1');
     const headFinding = head.findings.find((f) => f.check === 'CI-1');
     expect(baseFinding?.severity).toBe('medium');
-    expect(headFinding?.severity).toBe('high');
+    expect(headFinding?.severity).toBe('medium'); // fw#481 S1: one severity, two forms
+    expect(baseFinding?.widened).toBeUndefined();
+    expect(headFinding?.widened).toBe(true);
     expect(fingerprintOf(headFinding!)).toBe(fingerprintOf(baseFinding!));
 
     const d = diffScans(base, head);
@@ -167,8 +169,8 @@ describe('CI-5 · classification', () => {
     expect(d.unchanged).toHaveLength(0);
     expect(d.escalated).toHaveLength(1);
     expect(d.escalated[0].from).toBe('medium');
-    expect(d.escalated[0].to).toBe('high');
-    expect(d.worstIntroduced).toBe('high'); // erosion must be gateable
+    expect(d.escalated[0].to).toBe('medium');
+    expect(d.worstIntroduced).toBe('medium'); // erosion must be gateable
   });
 
   it('does not call a de-escalation an introduction', () => {

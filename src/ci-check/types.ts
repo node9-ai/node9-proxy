@@ -57,6 +57,15 @@ export interface CiFinding {
   /** Whether it counts (tier.ts): `alert` sets the result; `review` is listed under "Worth a look";
    *  `note` is information. Not part of the finding's identity. */
   tier?: Tier;
+  /** The worse form of the same statement at one severity: a broad allow list with no deny
+   *  backstop, a full-access Codex sandbox. Both forms are medium since fw#481 S1, so severity
+   *  no longer tells them apart; CI-5 reads plain -> widened on the same finding as guardrail
+   *  erosion, as it did when the worse form was high. Not part of the finding's identity. */
+  widened?: boolean;
+  /** The config file sits under a test, fixture or example tree (fw#481 S2): no agent loads it
+   *  when the repository root is opened, so the finding is listed for review, not counted.
+   *  Not part of the finding's identity. */
+  fixtureTree?: boolean;
   /** The finding in plain words (explain.ts), for the kinds most readers meet. `signals` stay
    *  the technical record. Not part of the finding's identity or its evidence. */
   explain?: Explain;

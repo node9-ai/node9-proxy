@@ -335,8 +335,12 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
     const isNpx = /\bnpx\b/.test(cmd);
     if (!remoteExec && !isNpx) continue;
     const unpinned = /@latest\b/.test(cmd) || (isNpx && !/@\d/.test(cmd));
-    // 1d: unpinnable remote-exec (curl|bash) is high regardless of pinning; an unpinned npx is
-    // high; a PINNED npx is a standing supply-chain dependency → medium.
+    // 1d: unpinnable remote-exec (curl|bash) and an unpinned npx are the worse form; a PINNED
+    // npx is a standing supply-chain dependency. Both top out at medium (fw#481 S1, 2026-11-18):
+    // only someone with merge rights can change a committed hook, and no outsider can start it.
+    // Hand review of 61 repositories graded every such hook medium or lower. What does count
+    // higher on this surface is judged by its own rule: a package nobody registered or a known
+    // malicious one (CI-3.package-*), the worm start-up shape, a credential in an allow rule.
     const high = remoteExec || unpinned;
     findings.push({
       check: 'CI-1',
@@ -345,7 +349,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       // severity changes (pinned → unpinned), and two different hooks stay distinct.
       locator: cmd,
       dimension: 'toolRules',
-      severity: high ? 'high' : 'medium',
+      severity: 'medium',
       title: high
         ? 'Agent hook runs UNPINNED/remote third-party code on every action'
         : 'Agent hook runs third-party code in the agent hot path',
@@ -423,7 +427,12 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       // File-level: one finding per config file. Adding a SECOND broad allow makes the
       // same statement about the same file, so it must not read as a new finding.
       dimension: 'toolRules',
-      severity: high ? 'high' : 'medium',
+      // Capped at medium (fw#481 S1, 2026-11-18), like a skill grant: the file changes only by
+      // a merge and no outsider can start the agent it configures, so the exposure is the
+      // contributor who opens the repository. The title and signals still say when there is
+      // no deny backstop.
+      severity: 'medium',
+      ...(high ? { widened: true } : {}),
       title: high
         ? 'Committed agent config pre-authorizes broad tools with no deny backstop'
         : 'Committed agent config pre-authorizes broad tools',

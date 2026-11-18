@@ -91,7 +91,7 @@ describe('Q — only alerts decide the result', () => {
 
   it('a structural alert still sets worst, and every finding carries its tier', () => {
     const res = scanTree(tree({ 'CLAUDE.md': OVERRIDE, '.claude/settings.json': BROAD }));
-    expect(res.worst).toBe('high');
+    expect(res.worst).toBe('medium');
     expect(res.findings.every((x) => x.tier !== undefined)).toBe(true);
   });
 
@@ -114,7 +114,7 @@ describe('Q — only alerts decide the result', () => {
     const base = scanTree(tree({ 'README.md': '# x\n' }));
     const head = scanTree(tree({ '.claude/settings.json': BROAD }));
     for (const x of head.findings) delete (x as { tier?: string }).tier;
-    expect(diffScans(base, head).worstIntroduced).toBe('high');
+    expect(diffScans(base, head).worstIntroduced).toBe('medium');
   });
 });
 

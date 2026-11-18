@@ -380,7 +380,9 @@ export function renderScanMarkdown(res: ScanResult, diff?: ScanDiff): string {
       for (const f of listed(diff.added)) findingMd(f, L);
       for (const e of diff.escalated) {
         L.push(
-          `> _Guardrail erosion: this finding already existed at **${e.from}** and this change widens it to **${e.to}**._`
+          e.from === e.to
+            ? `> _Guardrail erosion: this finding already existed and this change removes a guardrail from it (still **${e.to}**)._`
+            : `> _Guardrail erosion: this finding already existed at **${e.from}** and this change widens it to **${e.to}**._`
         );
         L.push('');
         findingMd(e.finding, L);
