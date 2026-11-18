@@ -196,6 +196,8 @@ export interface SecretFacts {
   injectable: boolean;
   /** It can run any command, so it can print them. */
   shell: boolean;
+  /** No shell, but it can read files, and a cloud key file sits in the workspace. */
+  readsFile?: boolean;
 }
 
 export function explainSecrets(f: SecretFacts): Explain {
@@ -203,7 +205,11 @@ export function explainSecrets(f: SecretFacts): Explain {
   const saw = [
     `It can read ${names}.`,
     f.injectable ? 'Strangers can start it.' : 'Strangers cannot start it.',
-    f.shell ? 'It can run any command, so it can print them.' : 'It cannot run commands.',
+    f.shell
+      ? 'It can run any command, so it can print them.'
+      : f.readsFile
+        ? 'It cannot run commands, but it can read files, and the key is in a file in the workspace.'
+        : 'It cannot run commands.',
   ];
   const idToken = f.secrets.some((s) => /^id-token/.test(s));
   if (f.severity !== 'advisory')
@@ -213,7 +219,9 @@ export function explainSecrets(f: SecretFacts): Explain {
       saw,
       fix: [
         `Move ${f.secrets.length === 1 ? 'it' : 'them'} to a separate job the agent does not run in.`,
-        'Or take away its shell (`Bash`).',
+        f.readsFile && !f.shell
+          ? 'Or sign in to the cloud only after the agent step, or without a key file (workload identity).'
+          : 'Or take away its shell (`Bash`).',
         ...(idToken ? ['Remove `id-token: write` if the agent does not need it.'] : []),
       ],
     };

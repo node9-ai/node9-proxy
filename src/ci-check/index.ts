@@ -48,6 +48,11 @@ import { SEVERITY_RANK } from './types';
 
 // The routes whose findings are about file CONTENT: graded per tier, skipped in fixture trees.
 const CONTENT_ROUTES = new Set(['instruction', 'hook-script', 'skill-script']);
+// fw#481 S2: config an agent loads from the folder it is opened in. Under a test, fixture or
+// example tree it is a test input or a sample, not the repository's own settings.
+const CONFIG_ROUTES = new Set(['agent-config', 'codex', 'mcp', 'vscode-tasks']);
+const FIXTURE_TREE_SIGNAL =
+  'in a test, fixture or example folder: no agent loads this file when the repository root is opened';
 
 export type { RepoTree, CiFinding, ScanResult };
 
@@ -296,6 +301,12 @@ export function scanTree(tree: RepoTree): ScanResult {
     if (testKind === 'alerts-only') {
       const kept = findings.splice(before).filter((f) => tierOf(f) === 'alert');
       findings.push(...kept);
+    }
+    if (fixture && route && CONFIG_ROUTES.has(route)) {
+      for (const f of findings.slice(before)) {
+        f.fixtureTree = true;
+        f.signals = [...f.signals, FIXTURE_TREE_SIGNAL];
+      }
     }
   }
 

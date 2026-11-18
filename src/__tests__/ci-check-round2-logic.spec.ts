@@ -139,12 +139,12 @@ describe('batch 3b: T.5 and T.7 see a template through its callers', () => {
 });
 
 describe('batch 3b: a PowerShell grant is graded like the Bash one', () => {
-  it('`PowerShell(*)` with no deny is high', () => {
+  it('`PowerShell(*)` with no deny is the widened form', () => {
     const f = analyzeAgentConfig(
       '.claude/settings.json',
       JSON.stringify({ permissions: { allow: ['PowerShell(*)'] } })
     ).find((x) => x.rule === 'CI-1.broad-allow');
-    expect(f?.severity).toBe('high');
+    expect(f?.severity).toBe('medium');
   });
 
   it('a skill with `PowerShell(*)` that reads a PR is counted', () => {

@@ -37,9 +37,10 @@ export function analyzeCodexConfig(
   // CI-3 — MCP servers (reuse the exact `.mcp.json` danger model).
   findings.push(...analyzeMcpServers(cfg.mcp_servers ?? {}, path, content, own));
 
-  // CI-1 — autonomy settings. `danger-full-access` (arbitrary cmds, full disk/network) is
-  // catastrophic → high; `never` approval alone is bounded (a sandbox may still constrain
-  // it) → medium; both compound → high.
+  // CI-1 — autonomy settings. `danger-full-access` (arbitrary cmds, full disk/network) is the
+  // worse form; `never` approval alone is bounded (a sandbox may still constrain it). Both are
+  // medium (fw#481 S1, 2026-11-18): a committed Codex config applies to contributors who run
+  // Codex here, changes only by a merge, and gives an outsider nothing to start.
   const sandbox = typeof cfg.sandbox_mode === 'string' ? cfg.sandbox_mode : '';
   const approval = typeof cfg.approval_policy === 'string' ? cfg.approval_policy : '';
   const fullAccess = /danger-full-access/i.test(sandbox);
@@ -63,7 +64,8 @@ export function analyzeCodexConfig(
       // of THIS finding rather than the removal of one and the arrival of another.
       rule: 'CI-1.codex-unsafe-defaults',
       dimension: 'toolRules',
-      severity: fullAccess ? 'high' : 'medium',
+      severity: 'medium',
+      ...(fullAccess ? { widened: true } : {}),
       title: fullAccess
         ? 'Codex config grants a full-access sandbox'
         : 'Codex config never requires approval',

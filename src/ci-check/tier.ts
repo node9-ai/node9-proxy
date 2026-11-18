@@ -21,8 +21,15 @@ const UNREAD_RULES = new Set([
 ]);
 const CONCEALMENT = new Set(['CI-6.unicode-tag-chars', 'CI-6.bidi-override', 'CI-6.homoglyph']);
 
-export function tierOf(f: Pick<CiFinding, 'rule' | 'severity'>): Tier {
+// Counted wherever the file sits: a secret committed in a fixture is still a committed secret.
+const COUNTED_IN_FIXTURES = new Set(['CI-1.allow-rule-credential']);
+
+export function tierOf(f: Pick<CiFinding, 'rule' | 'severity' | 'fixtureTree'>): Tier {
   const { rule, severity } = f;
+  // fw#481 S2: agent, Codex, MCP or task config under a test, fixture or example tree. A linter's
+  // deliberately bad fixtures were graded as the repository's own settings (high). Listed, not
+  // counted. The worm start-up rule is raised from the triggers, not from here, and still counts.
+  if (f.fixtureTree && !COUNTED_IN_FIXTURES.has(rule)) return 'review';
   // Accurate, but for most skills it is what the skill needs: summarized, never counted.
   if (rule === 'CI-1.skill-allowed-tools') return 'review';
   // Founder decision (round-2 review): `find` and `make -n` grants are listed, never counted.
@@ -87,6 +94,9 @@ export function reviewQuestion(rule: string): string {
     return 'Is this file meant to be committed? Claude Code writes approved commands here, secrets included.';
   if (/unscanned/.test(rule))
     return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
+  // Config rules are review items only under a test, fixture or example tree (fw#481 S2).
+  if (/^CI-1\.(broad-allow|hook-remote-code|codex-unsafe-defaults)$|^CI-3\.mcp-/.test(rule))
+    return 'This config sits in a test or example folder. Does anyone open that folder as a project?';
   return 'Is this an instruction the agent follows, or text for a person?';
 }
 

@@ -79,7 +79,7 @@ const NOT_HONOURED_NEW =
 const BASE_UNREADABLE =
   'the base could not be read, so no suppression can be shown to predate this change: not honoured';
 const notHonouredEscalated = (from: Severity) =>
-  `this finding was accepted at ${from} and this change makes it worse: the suppression does not cover the new severity`;
+  `this finding was accepted at ${from} and this change makes it worse: the suppression does not cover what it is now`;
 const NOT_HONOURED_EVIDENCE =
   'the evidence changed in this change (the finding now matches something different): the suppression covered the old evidence, not this';
 
@@ -148,7 +148,12 @@ export function diffScans(base: ScanResult | null | undefined, head: ScanResult)
     // A finding that already existed and got WORSE is guardrail erosion (a deny backstop
     // deleted, a mitigation removed). It is not new, and calling it "unchanged" would let
     // the removal merge silently — so it is its own class, and it counts as introduced.
-    const isEscalation = !!prior && SEVERITY_RANK[raw.severity] > SEVERITY_RANK[prior.severity];
+    // Worse by severity, or (fw#481 S1) the worse form at the same severity: a committed allow
+    // list that lost its deny backstop is medium before and after, and still erosion.
+    const isEscalation =
+      !!prior &&
+      (SEVERITY_RANK[raw.severity] > SEVERITY_RANK[prior.severity] ||
+        (raw.severity === prior.severity && !!raw.widened && !prior.widened));
     // THE honour rule (review H.2–H.4, 2026-09-27): a head finding keeps its suppression only
     // if the SAME finding existed in the base, no worse, with the same evidence. That keeps
     // the legitimate workflow — a change that only suppresses an unchanged pre-existing

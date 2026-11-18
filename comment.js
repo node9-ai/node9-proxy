@@ -71,6 +71,8 @@ function reviewQuestion(rule) {
     return 'Does the agent need this command with any arguments, or only one exact form?';
   if (/unscanned/.test(rule))
     return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
+  if (/^CI-1\.(broad-allow|hook-remote-code|codex-unsafe-defaults)$|^CI-3\.mcp-/.test(rule))
+    return 'This config sits in a test or example folder. Does anyone open that folder as a project?';
   return 'Is this an instruction the agent follows, or text for a person?';
 }
 /** The quoted text of a finding: its first code span, else its title. */

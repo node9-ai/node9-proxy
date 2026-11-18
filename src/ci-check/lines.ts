@@ -18,6 +18,20 @@ export function lineOf(content: string, needle: string, from = 0): number | unde
   return i < 0 ? undefined : lineAtIndex(content, i);
 }
 
+/** 1-based line of the `n`-th (0-based) occurrence of `needle`; the last one found when there
+ *  are fewer; undefined when there is none. */
+export function lineOfNth(content: string, needle: string, n: number): number | undefined {
+  if (!needle) return undefined;
+  let at = content.indexOf(needle);
+  if (at < 0) return undefined;
+  for (let k = 0; k < n && k < 1_000; k++) {
+    const next = content.indexOf(needle, at + needle.length);
+    if (next < 0) break;
+    at = next;
+  }
+  return lineAtIndex(content, at);
+}
+
 /** 1-based line of the first regex match, or undefined. The regex must not be global. */
 export function lineOfRe(content: string, re: RegExp): number | undefined {
   const m = re.exec(content);

