@@ -118,6 +118,10 @@ interface Step {
   scopeEnvEvent?: boolean;
   /** An earlier step of the job signs in to a cloud (AWS or Google). Set by normalizeWorkflow. */
   cloudAuthBefore?: boolean;
+  /** An earlier step of the job writes a model key into `$GITHUB_ENV`, so a CLI started later
+   *  has it without its own `env:` (fw#481, a pattern behind a missed agent). Set by
+   *  normalizeWorkflow. */
+  fuelExportedBefore?: boolean;
 }
 interface Job {
   if?: string;
@@ -418,12 +422,15 @@ function normalizeWorkflow(raw: Record<string, unknown>): Workflow {
     // Computed once per job, not on every isAgentStep call (a large env times many steps).
     const scopeEnvEvent = wfEnvEvent || EVENT_CONTEXT_RE.test(str(job.env));
     let cloudAuth = false;
+    let fuelExported = false;
     for (const step of job.steps) {
       if (step == null || typeof step !== 'object') continue;
       step.scopeEnv = scopeEnv;
       step.scopeEnvEvent = scopeEnvEvent;
       step.cloudAuthBefore = cloudAuth;
+      step.fuelExportedBefore = fuelExported;
       if (CLOUD_AUTH_ACTION_RE.test(str(step.uses))) cloudAuth = true;
+      if (FUEL_EXPORT_RE.test(str(step.run).slice(0, 20_000))) fuelExported = true;
       if (step.with == null || typeof step.with !== 'object') continue;
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(step.with)) {
@@ -576,6 +583,9 @@ const AGENT_CLI_RE = new RegExp(
   ].join('|'),
   'i'
 );
+// A step that hands a model key to the later steps of its job through `$GITHUB_ENV`.
+const FUEL_EXPORT_RE =
+  /\b(?:ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|GEMINI_API_KEY)=[^\n]{0,300}>>\s*["']?\$\{?GITHUB_ENV\b/;
 // The model credential a run-step agent is started with.
 const RUN_FUEL_ENV_RE =
   /^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|KILO_API_KEY|OPENCODE_API_KEY|DEVIN_API_KEY|LLM_API_KEY|AWS_BEARER_TOKEN_BEDROCK)$/i;
@@ -689,7 +699,8 @@ function isAgentStep(step: Step): boolean {
     EVENT_CONTEXT_RE.test(str(step.env)) ||
     Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k)) ||
     cloudModelEnv(env) ||
-    !!step.cloudAuthBefore
+    !!step.cloudAuthBefore ||
+    !!step.fuelExportedBefore
   );
 }
 
@@ -700,8 +711,62 @@ function isAgentStep(step: Step): boolean {
 // the grant flag also naturally excludes `--disallowedTools` (never extracted).
 function allowedToolsFromArgs(claudeArgs: string): string {
   let out = '';
-  for (const m of claudeArgs.matchAll(/--allowed[-_]?tools[=\s]+("[^"]*"|'[^']*'|\S+)/gi))
-    out += ' ' + m[1];
+  for (const m of claudeArgs.matchAll(/--allowed[-_]?tools(?:=|\s+)/gi)) {
+    // fw#481 L1-a: the CLI takes every argument up to the next option, so
+    // `--allowedTools Read Grep Bash(gh:*) --max-turns 5` grants three tools, and so does
+    // `--allowedTools "Bash(git:*)" "Bash(gh:*)"`. Only the first argument was read, which hid
+    // an open `gh` next to a PAT. The first argument is taken as before; each further one only
+    // when it reads as a tool list, so a prompt written after the flag is not taken for tools.
+    const args = cliArgsAfter(claudeArgs, (m.index ?? 0) + m[0].length);
+    args.forEach((a, i) => {
+      if (i === 0 || TOOL_LIST_ARG_RE.test(a.replace(/^(["'])([\s\S]*)\1$/, '$2'))) out += ' ' + a;
+    });
+  }
+  return out;
+}
+
+// One tool grant (`Read`, `mcp__srv__tool`, `Bash(git log:*)`, `WebFetch(domain:x)`), or a
+// comma-separated list of them.
+const TOOL_GRANT_SRC = String.raw`[A-Za-z_][\w.-]{0,80}(?:\([^()\n]{0,200}\))?`;
+const TOOL_LIST_ARG_RE = new RegExp(`^${TOOL_GRANT_SRC}(?:\\s*,\\s*${TOOL_GRANT_SRC}){0,100}$`);
+
+/** The shell-like arguments that follow `from`, up to the next option (`-x`, `--x`), a shell
+ *  operator, or the end of the command. A quoted argument is one argument; an unquoted
+ *  `Bash(git log:*)` keeps its parenthesised part whole. A `\` line continuation is skipped.
+ *  At most 50 arguments: a real tool list is short. */
+function cliArgsAfter(text: string, from: number): string[] {
+  const out: string[] = [];
+  let i = from;
+  const n = Math.min(text.length, from + 20_000);
+  while (i < n && out.length < 50) {
+    while (i < n && /[ \t]/.test(text[i])) i++;
+    if (text[i] === '\\' && (text[i + 1] === '\n' || text[i + 1] === '\r')) {
+      i += text[i + 1] === '\r' && text[i + 2] === '\n' ? 3 : 2;
+      continue;
+    }
+    if (i >= n || /[\n\r;|&)]/.test(text[i]) || text[i] === '-') break;
+    let j = i;
+    if (text[i] === '"' || text[i] === "'") {
+      const q = text[i];
+      j = text.indexOf(q, i + 1);
+      if (j < 0) j = n - 1;
+      j++;
+    } else {
+      let paren = false;
+      while (j < n) {
+        const c = text[j];
+        if (c === '(') paren = true;
+        else if (c === ')') {
+          if (!paren) break;
+          paren = false;
+        } else if (!paren && /[\s;|&]/.test(c)) break;
+        j++;
+      }
+    }
+    if (j <= i) break;
+    out.push(text.slice(i, j));
+    i = j;
+  }
   return out;
 }
 
@@ -780,6 +845,9 @@ function collectTools(steps: Step[]): string {
     s += ' ' + allowedToolsFromArgs(args);
     // `with:` keys are lower-cased by normalizeWorkflow.
     s += ' ' + str(w['allowed_tools']) + ' ' + str(w['allowedtools']);
+    // fw#481 L5: a wrapper around an agent CLI often takes the list as `tools:` (or
+    // `allowed-tools:`). Read only on a recognised wrapper, never on an arbitrary action.
+    if (st.uses && isWrapperAgent(st)) s += ' ' + str(w['tools']) + ' ' + str(w['allowed-tools']);
     s += ' ' + allowedToolsFromSettings(str(w['settings']));
     if (isGeminiStep(st)) s += ' ' + (geminiToolGrants(str(w['settings'])) ?? '');
     // T.2a: skipping permissions makes any allow list moot: an unrestricted shell.
@@ -791,11 +859,16 @@ function collectTools(steps: Step[]): string {
       s += ' ' + permissionEnvGrants({ ...(st.scopeEnv ?? {}), ...(st.env ?? {}) });
     }
   }
-  return s;
+  // fw#481 L1-b (founder, 2026-11-18): the legacy colon form `Bash:*` is read as the
+  // unrestricted shell it was meant to grant. What the current CLI does with it is not
+  // documented; reading it as nothing would hide a shell the author asked for.
+  return s.replace(LEGACY_BASH_ALL_RE, '$1Bash');
 }
 
+const LEGACY_BASH_ALL_RE = /(^|["'\s,\[])Bash:\*(?=["'\s,\]]|$)/g;
+
 const PERMISSION_BYPASS_RE =
-  /--dangerously-skip-permissions|--permission-mode[=\s]+["']?bypassPermissions|--dangerously-bypass-approvals-and-sandbox|--allow-all-tools|--yolo\b/i;
+  /--dangerously-skip-permissions|--permission-mode[=\s]+["']?bypassPermissions|--dangerously-bypass-approvals-and-sandbox|--allow-all-tools|--yolo\b|(?:\s-s|--sandbox)[=\s]+["']?danger-full-access/i;
 
 /** T.2a: opencode / Kilo take their tool policy as JSON in an env var. `"bash": "allow"` or a
  *  `"*": "allow"` pattern is an unrestricted shell; any other allowed pattern is a scoped
@@ -962,6 +1035,37 @@ export interface EnvironmentInfo {
 }
 let ENVIRONMENTS: EnvironmentInfo | null = null;
 
+// fw#481 L6: the allow lists of the repository's own committed `.claude/settings.json` and
+// `.claude/settings.local.json`, set by scanTree for the length of one scan. claude-code-action
+// loads user, project and local settings (its SDK option `settingSources`, v1.0.269), and on PR
+// events it restores `.claude/` from the base branch, which is this same committed copy. So an
+// agent step of the action that runs in a checkout of the repository gets these grants on top of
+// its `--allowedTools` (founder, 2026-11-18: read as additive, as every CLI release we know).
+let COMMITTED_ALLOW = '';
+export function setCommittedAgentAllow(grants: string): void {
+  COMMITTED_ALLOW = grants.slice(0, 20_000);
+}
+
+/** The committed grants an agent step of this job picks up: an official claude-code-action or
+ *  base-action step, after a checkout into the workspace root, that does not narrow the
+ *  settings sources to exclude the project. */
+function committedGrantsFor(job: Job, steps: Step[]): string {
+  if (!COMMITTED_ALLOW) return '';
+  const all = job.steps ?? [];
+  for (const st of steps) {
+    const claude =
+      !!claudeActionBuild(st.uses)?.official || CLAUDE_BASE_ACTION_RE.test(str(st.uses));
+    if (!claude || settingSourcesSkipProject(str(st.with?.['claude_args']))) continue;
+    const k = all.indexOf(st);
+    const checkedOut = all.some(
+      (c, n) =>
+        n < k && /^\s*actions\/checkout@/i.test(str(c.uses)) && !str(c.with?.['path']).trim()
+    );
+    if (checkedOut) return COMMITTED_ALLOW;
+  }
+  return '';
+}
+
 const ENV_BY_EVENT_RE =
   /^\$\{\{\s*github\.event_name\s*==\s*'([\w-]{1,60})'\s*&&\s*'([^']{0,200})'\s*\|\|\s*'([^']{0,200})'\s*\}\}$/i;
 
@@ -1018,6 +1122,53 @@ function upstreamRunTrusted(wf: Workflow, raw: Record<string, unknown>): boolean
   const run = on?.['workflow_run'] as { workflows?: unknown } | undefined;
   const names = Array.isArray(run?.workflows) ? run.workflows.map(String) : [];
   return names.length > 0 && names.every((n) => TRUSTED_RUN_SOURCES.has(n));
+}
+
+/** fw#481 L2-a: labels that automation adds, on an event a stranger starts, with a token that
+ *  is not the job's default one (a PAT or an App token). Unlike a label made with
+ *  `GITHUB_TOKEN`, such a label starts the workflows that listen for it, so it is no gate, like
+ *  a label an issue form applies (T.6.9). Literal names only: a computed label is not followed.
+ *  Read by scanTree before the analyses. */
+export function automationLabelsOf(path: string, content: string): string[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = loadWorkflow(content).raw;
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const wf = raw as Workflow;
+  CALLERS.delete(wf);
+  if (!triggerReach(wf, raw).untrusted) return [];
+  const out = new Set<string>();
+  for (const job of jobList(wf)) {
+    if (jobGated(job, wf, raw)) continue;
+    const jobEnv = str(job.env);
+    for (const st of job.steps ?? []) {
+      const code = str(st.run) + ' ' + str(st.with?.['script']);
+      if (code.length > 200_000 || !/add-?label|addLabels|labels\s*:/i.test(code)) continue;
+      const token =
+        str(st.env?.['GH_TOKEN']) +
+        ' ' +
+        str(st.env?.['GITHUB_TOKEN']) +
+        ' ' +
+        str(st.with?.['github-token']) +
+        ' ' +
+        jobEnv;
+      if (
+        !/secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]|steps\.[\w-]+\.outputs\.token|env\.\w*(?:PAT|APP|BOT)\w*TOKEN/i.test(
+          token
+        )
+      )
+        continue;
+      for (const m of code.matchAll(/--add-label[=\s]+["']?([^"'\n]{1,200})/gi))
+        for (const l of m[1].split(',')) if (l.trim()) out.add(l.trim());
+      for (const m of code.matchAll(/labels\s*:\s*\[([^\]]{0,500})\]/gi))
+        for (const q of m[1].matchAll(/["'`]([^"'`]{1,100})["'`]/g)) out.add(q[1]);
+      if (out.size > 200) return [...out];
+    }
+  }
+  return [...out];
 }
 
 /** T.4: a workflow's name for `workflow_run.workflows` (its `name:`, else its path), and
@@ -1268,8 +1419,32 @@ function ifsAreGated(ifs: string, label: LabelConfig): boolean {
  *  API check (`gh api /orgs/…/memberships/…`, `getCollaboratorPermissionLevel`, …) whose
  *  output guards the agent step via `if: steps.<gate>.outputs.<x> == …`. Some repositories gate
  *  this way; ACTOR_GATE_RE only reads `if:` expressions and misses it. */
+// GitHub's agentic workflows start the agent through their egress firewall.
+const AWF_RE = /(?:^|[\s;&|(])awf\s+(?:--config|--allow-domains)\b/;
+
+// fw#481 L4: an event field a stranger writes, expanded by `${{ }}` straight into a `run:`
+// script. The runner pastes the text into the script before the shell reads it, so the text
+// runs as code in that job. Passing it through `env:` and quoting `"$VAR"` is the safe form and
+// does not match.
+const UNTRUSTED_EXPR_RE =
+  /\$\{\{[^}]{0,300}?\b(?:github\.event\.(?:issue\.(?:title|body)|comment\.body|pull_request\.(?:title|body|head\.ref|head\.label)|review\.body|review_comment\.body|discussion\.(?:title|body)|head_commit\.message|workflow_run\.(?:head_branch|display_title|head_commit\.message))|github\.head_ref)\b/;
+
+/** Does a `run:` script of this job paste stranger-written event text into the shell? */
+function jobInjectsUntrusted(job: Job): boolean {
+  return (job.steps ?? []).some((st) => {
+    const run = str(st.run);
+    return run.length > 0 && run.length <= 200_000 && UNTRUSTED_EXPR_RE.test(run);
+  });
+}
+
 function hasStepMembershipGate(job: Job): boolean {
   const steps = job.steps ?? [];
+  // fw#481 L4-b: a check computed in a job whose script runs a stranger's text is theirs to
+  // answer: the injected script writes the output the agent step reads. Only a script that
+  // runs before the first agent step can do that.
+  const firstAgent = steps.findIndex(isAgentStep);
+  if (firstAgent > 0 && jobInjectsUntrusted({ steps: steps.slice(0, firstAgent) } as Job))
+    return false;
   // Gate steps: a per-user membership/permission CHECK that has an `id` (so a later
   // `if:` can reference its output). Review R4-round2 #2: a bare member-listing or an
   // id-less step is NOT a gate.
@@ -1632,6 +1807,10 @@ function upstreamJobGates(
   // refused any `||`, even one inside a group whose every alternative is gated
   // (a repository hand-verified as clean was scored medium).
   if (depIf && jobIfGated(depIf, label)) return true;
+  // fw#481 L4-b: past this point the gate is decided by the job's steps. A step that pastes a
+  // stranger's text into its script runs their code first, which can write the very output or
+  // status the dependent reads. A job-level `if:` (above) is decided before any step runs.
+  if (jobInjectsUntrusted(dep)) return false;
   const steps = dep.steps ?? [];
   // T.1: an upstream job whose script decides by the actor (a permission or membership call,
   // or an allowlist compared with the actor) gates a dependent that reads its outputs.
@@ -1838,6 +2017,76 @@ function headUsedBefore(job: Job, agentStep: Step): boolean {
         ? !INERT_ACTION_RE.test(str(st.uses))
         : typeof st.run === 'string' && !!st.run.trim() && !runIsInert(st.run)
     );
+}
+
+/** fw#481 L3-a: does a `run:` step after the job's root head checkout run something that may
+ *  execute the checked-out files? Agent steps are judged by their tools, not here. */
+function jobRunsHeadScript(job: Job): boolean {
+  const steps = job.steps ?? [];
+  const i = steps.findIndex((st) => untrustedHeadCheckout([st]) === 'root');
+  if (i < 0) return false;
+  return steps
+    .slice(i + 1)
+    .some(
+      (st) =>
+        !st.uses &&
+        typeof st.run === 'string' &&
+        !!st.run.trim() &&
+        !isRunAgent(st) &&
+        !runChecksOutHead(st.run) &&
+        runExecutesCheckout(withoutHeredocBodies(st.run))
+    );
+}
+
+// fw#481 L3-a: a command that runs files of the checkout: a script by its relative path, an
+// interpreter on a repository file, or a package manager or build tool that runs the project's
+// own install and build scripts. Positive evidence only: `runIsInert` reads an unknown word as
+// "may run code", which is right before an agent's own check and too broad here (`set -e`,
+// `date`, `sha256sum` and shell functions would count). A path under a directory the job filled
+// from the base branch (`.trusted*`) is not the PR's code.
+const CHECKOUT_EXEC_RE = new RegExp(
+  [
+    String.raw`(?:^|[\s;&|(])(?:python3?|node|ruby|perl|php|bash|sh|zsh|tsx|ts-node|deno\s+run|bun\s+run)\s+(?:-[A-Za-z]\s+)*(?!-|/|\$|~)(?!\.?/?\.?trusted)[\w./-]+\.(?:py|js|mjs|cjs|ts|rb|pl|php|sh)\b`,
+    String.raw`(?:^|[\s;&|(])\./(?!\.?trusted)[\w.][\w./-]*`,
+    String.raw`(?:^|[\s;&|(])(?:npm|pnpm)\s+(?:ci|install|i|run|test|exec|rebuild)\b`,
+    String.raw`(?:^|[\s;&|(])yarn(?:\s+(?:install|run|test|build)\b|\s*(?:$|[;&|]))`,
+    String.raw`(?:^|[\s;&|(])bun\s+(?:install|i|test)\b`,
+    String.raw`(?:^|[\s;&|(])pip3?\s+install\s+(?:--?\w[\w-]*\s+)*(?:-e\s+)?(?:\.(?:\s|$|\[)|-r\b)`,
+    String.raw`(?:^|[\s;&|(])(?:uv\s+(?:sync|run)|poetry\s+(?:install|run)|pytest|tox|make|mvn|gradle|\./gradlew)\b`,
+    String.raw`(?:^|[\s;&|(])(?:cargo\s+(?:build|test|run|check)|go\s+(?:build|test|run|generate)|bazel\s+(?:build|test|run))\b`,
+  ].join('|'),
+  'm'
+);
+
+/** Does this script run files of the checkout? Comment lines are skipped. */
+function runExecutesCheckout(run: string): boolean {
+  if (run.length > 200_000) return true;
+  // `--ignore-scripts` installs without running any package's own scripts.
+  return run
+    .split('\n')
+    .some((l) => !/^\s*#/.test(l) && !/--ignore-scripts\b/.test(l) && CHECKOUT_EXEC_RE.test(l));
+}
+
+/** A heredoc's body is data handed to a command, not commands. Its lines (often an expanded
+ *  `${{ }}` value) would otherwise read as unknown commands. Bounded to 200 heredocs. */
+function withoutHeredocBodies(run: string): string {
+  const lines = run.split('\n');
+  const out: string[] = [];
+  let end: string | null = null;
+  let seen = 0;
+  for (const line of lines) {
+    if (end !== null) {
+      if (line.trim() === end) end = null;
+      continue;
+    }
+    out.push(line);
+    const m = seen < 200 ? /<<-?\s*(['"]?)([A-Za-z_][\w-]{0,40})\1/.exec(line) : null;
+    if (m) {
+      end = m[2];
+      seen++;
+    }
+  }
+  return out.join('\n');
 }
 
 /** `allow-bots: true` approves `github-actions[bot]`, and `allow-bot-users` the bots it names.
@@ -2427,7 +2676,23 @@ function analyzeWorkflowInner(
   // T.2b: `uses: ./…` after checking out the untrusted head to the workspace root runs the
   // head's own action code with the job's secrets: code execution, whatever the agent does.
   const headActionRuns = head === 'root' && powerSteps.some((st) => /^\s*\.\//.test(str(st.uses)));
-  const toolsBlob = collectTools(scopedSteps) + (headActionRuns ? ' Bash' : '');
+  // fw#481 L3-a: a `run:` step after the root head checkout that may execute the checkout
+  // (`python scripts/x.py`, `npm ci`, `make`) does the same as `uses: ./`, under a trigger that
+  // hands the job the base repository's secrets. Only for the open jobs; a gated job is the
+  // fork-code-on-trust rule's (T.7).
+  const headScriptRuns =
+    !headActionRuns && head === 'root' && secretExposed && injJobs.some(jobRunsHeadScript);
+  // fw#481 L4-a: an open job whose script pastes a stranger's text runs it as shell, with the
+  // job's token and secrets, whatever the agent's own tool list says.
+  const injectedScript = forkInput && injJobs.some(jobInjectsUntrusted);
+  // fw#481 L6: the repository's committed allow lists, loaded by the action in that checkout.
+  const committedGrants = [...new Set(injJobs.map((j) => committedGrantsFor(j, powerSteps)))]
+    .filter(Boolean)
+    .join(' ');
+  const toolsBlob =
+    collectTools(scopedSteps) +
+    (committedGrants ? ' ' + committedGrants : '') +
+    (headActionRuns || headScriptRuns || injectedScript ? ' Bash' : '');
   // S.1: the agent reads the untrusted item itself (tool, handle, payload-built prompt file).
   // Scoped to the INJECTABLE jobs, like the tools above: a gated job's read tool is unreachable.
   // Only for a workflow with its OWN stranger-firable trigger: a reusable template given the
@@ -2629,6 +2894,18 @@ function analyzeWorkflowInner(
       'triggered by `pull_request`: fork PRs run with a read-only token (lower risk than pull_request_target)'
     );
   if (head === 'root') signals.push('checks out the untrusted PR head into the workspace root');
+  if (committedGrants && BROAD_TOOL_RE.test(committedGrants))
+    signals.push(
+      "the action loads the repository's committed `.claude/settings` allow list in this checkout, and it adds broad tools to the agent's own list"
+    );
+  if (injectedScript)
+    signals.push(
+      "a `run:` script expands stranger-written event text with `${{ }}` (shell injection): it runs as code in the agent's job, with its token and secrets. Pass it through `env:` and quote it instead"
+    );
+  if (headScriptRuns)
+    signals.push(
+      "a `run:` step executes the checked-out PR code (a script, an install or a build): the PR author's code runs with the job's token and secrets"
+    );
   if (headActionRuns)
     signals.push(
       "runs the checked-out head's own action (`uses: ./…`): the PR author's code runs with the job's secrets"
@@ -2999,7 +3276,7 @@ function evalAgentJob(
     bypassActive ? 2 : 0
   );
   const injectable = untrustedTrigger && !gate && reach > 0;
-  const tools = collectTools(live);
+  const tools = collectTools(live) + ' ' + committedGrantsFor(job, live); // L6
   const canReadEnv = EXFIL_RCE_RE.test(tools); // bare shell = read env + exfil
 
   const secrets = agentReachableSecrets(wf, live, [job]);
@@ -3345,21 +3622,44 @@ function analyzeTrustedReadersInner(
       (st) => !!claudeActionBuild(st.uses) || !!str(st.with?.['github_token']).trim()
     );
     const write = pat || (permWrite && !withheld && (handsToken || persisted));
-    if (!write) continue;
+    // fw#481 L5-b: an unrestricted shell next to a secret whose loss outlives the job turns the
+    // same reading into a way out for that secret, whoever starts the run.
+    const shell = EXFIL_RCE_RE.test(tools);
+    const lasting =
+      pat ||
+      stepsHoldPat(agent) ||
+      steps.some((st) => CLOUD_LOGIN_RE.test(str(st.uses))) ||
+      agentReachableSecrets(wf, agent, [job]).some((s) => LASTING_SECRET_KINDS.has(s.kind));
+    // An agent started inside GitHub's agentic-workflow firewall (`awf`) reaches only the hosts
+    // its config allows, with the model and GitHub keys left out of its environment.
+    const firewalled = steps.some((st) => AWF_RE.test(str(st.run).slice(0, 200_000)));
+    const high = shell && lasting && !firewalled;
+    if (!write && !high) continue;
 
-    const writes = pat ? 'a static PAT' : 'a write token';
+    const writes = pat
+      ? 'a static PAT'
+      : write
+        ? 'a write token'
+        : 'a secret that outlives the run';
     return [
       {
         check: 'CI-2',
         rule: 'CI-2.trusted-trigger-reader',
         dimension: 'workflows',
-        severity: 'advisory',
-        title: 'Agent on a trusted trigger reads content strangers write, with a write token',
+        severity: high ? 'high' : 'advisory',
+        title: high
+          ? 'Agent reads content strangers write, with an unrestricted shell and a lasting secret'
+          : 'Agent on a trusted trigger reads content strangers write, with a write token',
         file: path,
         signals: [
           `runs on ${keys.map((k) => safeText(k, 40)).join(', ')}: no stranger starts it`,
           ...reads.map((r) => `the agent ${r}`),
           `it holds ${writes}: injected text in that content can act with it`,
+          ...(high
+            ? [
+                'the agent has an unrestricted shell: injected text can send that secret out of the runner',
+              ]
+            : []),
         ],
         fix: 'Give the agent a read-only token and apply its output in a separate step, or filter the items to trusted authors first.',
       },

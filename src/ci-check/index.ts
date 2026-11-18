@@ -7,12 +7,14 @@ import { fetchTree, isUnwalked, type OnProgress } from './fetch';
 import {
   analyzeWorkflow,
   analyzeWorkflowSecrets,
+  setCommittedAgentAllow,
   analyzeWorkflowPlugins,
   analyzeTrustedReaders,
   analyzeForkCodeOnTrust,
   analyzeAgentOutputToEnv,
   issueFormLabels,
   runSourceOf,
+  automationLabelsOf,
   localCallsOf,
   type LocalCaller,
 } from './workflows';
@@ -77,7 +79,30 @@ export function packageRefsOf(res: ScanResult): PackageRef[] {
 }
 
 /** Run all checks over an already-fetched tree (pure — testable without network). */
+/** The allow lists of the root `.claude/settings.json` and `.claude/settings.local.json`, as one
+ *  space-separated grant string. A file that does not parse grants nothing. */
+function committedAllowOf(files: RepoTree['files']): string {
+  const out: string[] = [];
+  for (const file of files) {
+    if (file.path !== '.claude/settings.json' && file.path !== '.claude/settings.local.json')
+      continue;
+    try {
+      const cfg = JSON.parse(file.content) as {
+        permissions?: { allow?: unknown; allowedTools?: unknown };
+      };
+      for (const list of [cfg.permissions?.allow, cfg.permissions?.allowedTools])
+        if (Array.isArray(list))
+          for (const g of list.slice(0, 500))
+            if (typeof g === 'string') out.push(JSON.stringify(g));
+    } catch {
+      /* not JSON: nothing granted */
+    }
+  }
+  return out.join(' ');
+}
+
 export function scanTree(tree: RepoTree): ScanResult {
+  setCommittedAgentAllow('');
   const findings: CiFinding[] = [];
   const inspected: string[] = [];
   const notes = [...tree.notes];
@@ -157,6 +182,15 @@ export function scanTree(tree: RepoTree): ScanResult {
       /* unreadable form: its labels are unknown, so none is excluded from the gates */
     }
   }
+  // fw#481 L2-a: labels automation adds on a stranger's event with a PAT or an App token.
+  for (const file of tree.files) {
+    if (routeOfFile(file) !== 'workflow') continue;
+    try {
+      for (const l of automationLabelsOf(file.path, file.content)) autoLabels.add(l);
+    } catch {
+      /* unreadable: its labels are unknown */
+    }
+  }
   // T.4: the workflows no stranger can start, by the name `workflow_run.workflows` uses. A name
   // shared with a stranger-firable workflow is not trusted.
   const runSources = new Map<string, boolean>();
@@ -170,6 +204,8 @@ export function scanTree(tree: RepoTree): ScanResult {
     }
   }
   const trustedRunSources = new Set([...runSources].filter(([, t]) => t).map(([n]) => n));
+  // fw#481 L6: the root agent settings the action loads in a checkout of this repository.
+  setCommittedAgentAllow(committedAllowOf(tree.files));
   for (const file of tree.files) {
     if (routeOfFile(file) !== 'workflow') continue;
     try {
@@ -368,6 +404,7 @@ export function scanTree(tree: RepoTree): ScanResult {
     suppressedCount = applySuppressions(findings, suppressions.active);
   }
 
+  setCommittedAgentAllow(''); // L6: one scan's settings, never left for the next caller
   // Every finding says whether it counts (§Q); only alerts set the result.
   for (const f of findings) f.tier = tierOf(f);
 
