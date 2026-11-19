@@ -146,7 +146,8 @@ export function canRequireEsm(
 export function unsupportedNodeMessage(version: string, execPath: string): string {
   return (
     `node9: Node.js ${version} (${execPath}) cannot run node9; it needs Node.js 22.12 or later. ` +
-    'Run "node9 agents add <agent>" in a terminal where node9 works, so the hook uses that Node.'
+    'Put a newer Node first on the agent\'s PATH, or run "node9 agents add <agent>" ' +
+    'in a terminal where node9 works, so the hook uses that Node.'
   );
 }
 

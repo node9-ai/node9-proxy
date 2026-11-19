@@ -197,7 +197,8 @@ function printInlineAskNotice(): void {
 export function fullPathCommand(
   subcommand: string,
   platform: NodeJS.Platform = process.platform,
-  home: string = os.homedir()
+  home: string = os.homedir(),
+  opts: { pinGlobalBin?: boolean } = {}
 ): string {
   if (process.env.NODE9_TESTING === '1') return `node9 ${subcommand}`;
   const nodeExec = toForwardSlashes(process.execPath); // e.g. C:/Program Files/nodejs/node.exe
@@ -218,7 +219,10 @@ export function fullPathCommand(
   // call unchecked. When the bin is JavaScript, it goes through the shim like
   // a .js path, so the hook runs on the Node that runs this setup. A wrapper
   // that is not JavaScript (pnpm writes a shell script) keeps the bin itself.
-  if (!pinsNode(nodeExec, cliScript)) return `"${cliScript}" ${subcommand}`;
+  // Codex passes pinGlobalBin: false (see codexHookCommand).
+  if (!isJs && (opts.pinGlobalBin === false || !pinsNode(nodeExec, cliScript))) {
+    return `"${cliScript}" ${subcommand}`;
+  }
   // POSIX: the command in the agent's config points at a shim node9 owns,
   // not at node + cli.js directly. Codex keys hook trust to the command's
   // CONTENT, so a command that embeds process.execPath expires every time nvm
@@ -228,7 +232,7 @@ export function fullPathCommand(
   // its BODY carries the absolute node + cli.js and is rewritten freely.
   // Windows keeps `node "<cli.js>"`: `node` is a PATH lookup there and the
   // cli.js path lives under the npm prefix, so it is already upgrade-stable.
-  ensureHookShim(home, nodeExec, cliScript);
+  ensureHookShim(home, pinnedNode(nodeExec, cliScript), cliScript);
   // Forward slashes: this string is a POSIX shell command, and it must not
   // depend on the separator the HOST happens to use. path.join on a Windows
   // test runner yields backslashes, which would make the emitted command vary
@@ -245,7 +249,28 @@ export function fullPathCommand(
  */
 export function pinsNode(nodeExec: string, cliScript: string): boolean {
   if (cliScript.endsWith('.js')) return true;
-  return resolvesToJsFile(cliScript) && /^node(js)?(\.exe)?$/i.test(path.basename(nodeExec));
+  return resolvesToJsFile(cliScript) && runsOnNode(nodeExec);
+}
+
+function runsOnNode(execPath: string): boolean {
+  return /^node(js)?(\.exe)?$/i.test(path.basename(execPath));
+}
+
+/**
+ * The node path to write into the shim. process.execPath is the resolved
+ * binary, and a package manager deletes it on upgrade (Homebrew's
+ * Cellar/node/<version>/bin/node). npm puts its global bin next to the node
+ * that owns it (nvm, Homebrew, /usr/local), and that link survives upgrades:
+ * use it when it leads to the same binary.
+ */
+export function pinnedNode(nodeExec: string, cliScript: string): string {
+  const beside = toForwardSlashes(path.join(path.dirname(cliScript), 'node'));
+  try {
+    if (fs.realpathSync(beside) === fs.realpathSync(nodeExec)) return beside;
+  } catch {
+    /* no node beside the bin: keep execPath */
+  }
+  return nodeExec;
 }
 
 /** True when `bin` is, or links to, a JavaScript file that node can run. */
@@ -268,9 +293,13 @@ export function hookShimBody(nodeExec: string, cliScript: string): string {
   return (
     '#!/bin/sh\n' +
     '# node9 hook shim — written by `node9 init` / `node9 agents add`. Do not edit.\n' +
-    '# Agents call this fixed path; node9 rewrites the line below on upgrade so\n' +
+    '# Agents call this fixed path; node9 rewrites the lines below on upgrade so\n' +
     '# the hook command they trusted never changes (Codex keys trust to it).\n' +
-    `exec "${nodeExec}" "${cliScript}" "$@"\n`
+    "# The node that ran setup runs node9, whatever the agent's PATH holds. If an\n" +
+    '# upgrade removed it, the first node on PATH does, as a global install would.\n' +
+    `node="${nodeExec}"\n` +
+    '[ -x "$node" ] || node=node\n' +
+    `exec "$node" "${cliScript}" "$@"\n`
   );
 }
 
@@ -308,9 +337,14 @@ function isShimTargetStale(shim: string): boolean {
   } catch {
     return false;
   }
-  const m = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
-  if (!m) return false;
-  return !fs.existsSync(m[1]) || !fs.existsSync(m[2]);
+  // Current body: node="<node>" ... exec "$node" "<cli>". Older body: exec "<node>" "<cli>".
+  const pinned = /^node="([^"]+)"$/m.exec(body)?.[1];
+  const exec = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
+  if (!exec) return false;
+  const node = exec[1] === '$node' ? pinned : exec[1];
+  if (!node) return false;
+  // A missing node still runs (PATH fallback) but no longer as set up: rewrite it.
+  return !fs.existsSync(node) || !fs.existsSync(exec[2]);
 }
 
 function toForwardSlashes(p: string): string {
@@ -412,13 +446,16 @@ export function isChurnProneHookForm(
 
 // The POSIX global form, `"<prefix>/bin/node9" check` (or unquoted), whose bin is
 // JavaScript run through `#!/usr/bin/env node`: the agent's PATH picks the
-// Node. Migrated to the shim, which pins the Node that runs setup. On Codex
-// this costs one re-trust, the same trade isChurnProneHookForm makes.
+// Node. Migrated to the shim, which pins the Node that runs setup. Not for
+// Codex: a rewrite there needs a re-trust, and a failed re-trust would turn a
+// working hook off (needsRewrite's `pathNode` option).
 export function isPathNodeHookForm(
   command: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  execPath: string = process.execPath
 ): boolean {
-  if (!command || platform === 'win32') return false;
+  // Under bun this run would write the bin again, and flag it again next time.
+  if (!command || platform === 'win32' || !runsOnNode(execPath)) return false;
   // Quoted (post-#185) or bare (pre-#185, still on machines that never re-ran setup).
   const m = /^(?:"([^"]+)"|(\/\S+)) (?:check|log|hud)\b/.exec(command.trim());
   const bin = m ? (m[1] ?? m[2]) : undefined;
@@ -428,15 +465,26 @@ export function isPathNodeHookForm(
 
 export function needsRewrite(
   command: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  opts: { pathNode?: boolean } = {}
 ): boolean {
   return (
     isStaleHookCommand(command) ||
     isLegacyHookFormat(command) ||
     isWindowsQuoteBrokenHook(command, platform) ||
     isChurnProneHookForm(command, platform) ||
-    isPathNodeHookForm(command, platform)
+    (opts.pathNode !== false && isPathNodeHookForm(command, platform))
   );
+}
+
+/**
+ * The rewrite of a node9 hook command: the current form, keeping what the
+ * user added after the subcommand (`--no-ask`, `--agent x`). `fallback` is
+ * the subcommand when `old` names none node9 knows.
+ */
+export function rewrittenHookCommand(old: string, fallback: string): string {
+  const m = /(?:node9|cli\.js|[/\\]hook)"? ((?:check|log|hud)\b.*)$/.exec(old.trim());
+  return fullPathCommand(m ? m[1] : fallback);
 }
 
 function readJson<T>(filePath: string): T | null {
@@ -775,7 +823,7 @@ export function wireClaudeNode9Event(
         // Keep the hook's own subcommand: a stray `log` must not become a
         // second `check` (or the reverse) just because of where it sits.
         if (needsRewrite(h.command)) {
-          h.command = fullPathCommand(own);
+          h.command = rewrittenHookCommand(h.command, own);
           repaired++;
         }
         const key = `${m.matcher}\0${h.command}`;
@@ -1502,7 +1550,7 @@ export async function setupCopilot(): Promise<void> {
       // Self-heal: rewrite node9 hooks whose absolute paths have vanished.
       for (const h of arr) {
         if (h.command && isNode9Hook(h.command) && needsRewrite(h.command)) {
-          h.command = fullPathCommand(subcommand);
+          h.command = rewrittenHookCommand(h.command, subcommand);
           console.log(chalk.yellow(`  🔧 ${event} hook repaired (stale path → current binary)`));
           hooksChanged = true;
           anythingChanged = true;
@@ -1970,11 +2018,21 @@ const CODEX_SESSION_START_SUBCOMMAND = 'check --agent codex';
 
 /** Every command node9 writes into ~/.codex/hooks.json: the set `node9 init`
  *  asks Codex to trust (byte-identical commands only, see selectHooksToTrust). */
+/**
+ * A Codex hook command. Codex trusts a hook by its exact text, and node9's
+ * trust step runs only from setup, so moving a working global-install hook
+ * onto the shim could leave it untrusted and skipped. Codex keeps the bin
+ * form; the PATH-node fix covers the other agents.
+ */
+function codexHookCommand(subcommand: string): string {
+  return fullPathCommand(subcommand, process.platform, os.homedir(), { pinGlobalBin: false });
+}
+
 export function codexHookCommands(): string[] {
   return [
-    fullPathCommand('check'),
-    fullPathCommand('log'),
-    fullPathCommand(CODEX_SESSION_START_SUBCOMMAND),
+    codexHookCommand('check'),
+    codexHookCommand('log'),
+    codexHookCommand(CODEX_SESSION_START_SUBCOMMAND),
   ];
 }
 
@@ -2022,7 +2080,7 @@ export async function setupCodex(): Promise<void> {
     if (!existing) {
       hooksFile.hooks.PreToolUse.push({
         matcher,
-        hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
+        hooks: [{ type: 'command', command: codexHookCommand('check'), timeout: 600 }],
       });
       hooksChanged = true;
     } else if (!existing.hooks.some((h) => isNode9Hook(h.command ?? ''))) {
@@ -2035,14 +2093,14 @@ export async function setupCodex(): Promise<void> {
       // foreign ^Bash$ hook survived a full remove + add cycle.
       // Append rather than replace: Codex runs every hook under a matcher, so
       // the user's own command keeps working alongside ours.
-      existing.hooks.push({ type: 'command', command: fullPathCommand('check'), timeout: 600 });
+      existing.hooks.push({ type: 'command', command: codexHookCommand('check'), timeout: 600 });
       hooksChanged = true;
     } else {
       // Self-heal stale absolute paths (mirrors setupClaudeCode behavior).
       for (const h of existing.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
-          h.command = fullPathCommand('check');
+        if (isNode9Hook(cmd) && needsRewrite(cmd, process.platform, { pathNode: false })) {
+          h.command = codexHookCommand('check');
           hooksChanged = true;
         }
       }
@@ -2056,15 +2114,15 @@ export async function setupCodex(): Promise<void> {
   );
   if (!hasPromptHook) {
     hooksFile.hooks.UserPromptSubmit.push({
-      hooks: [{ type: 'command', command: fullPathCommand('check'), timeout: 600 }],
+      hooks: [{ type: 'command', command: codexHookCommand('check'), timeout: 600 }],
     });
     hooksChanged = true;
   } else {
     for (const m of hooksFile.hooks.UserPromptSubmit) {
       for (const h of m.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
-          h.command = fullPathCommand('check');
+        if (isNode9Hook(cmd) && needsRewrite(cmd, process.platform, { pathNode: false })) {
+          h.command = codexHookCommand('check');
           hooksChanged = true;
         }
       }
@@ -2079,15 +2137,15 @@ export async function setupCodex(): Promise<void> {
   if (!hasPostHook) {
     hooksFile.hooks.PostToolUse.push({
       matcher: '.*',
-      hooks: [{ type: 'command', command: fullPathCommand('log'), timeout: 600 }],
+      hooks: [{ type: 'command', command: codexHookCommand('log'), timeout: 600 }],
     });
     hooksChanged = true;
   } else {
     for (const m of hooksFile.hooks.PostToolUse) {
       for (const h of m.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
-          h.command = fullPathCommand('log');
+        if (isNode9Hook(cmd) && needsRewrite(cmd, process.platform, { pathNode: false })) {
+          h.command = codexHookCommand('log');
           hooksChanged = true;
         }
       }
@@ -2104,7 +2162,7 @@ export async function setupCodex(): Promise<void> {
       hooks: [
         {
           type: 'command',
-          command: fullPathCommand(CODEX_SESSION_START_SUBCOMMAND),
+          command: codexHookCommand(CODEX_SESSION_START_SUBCOMMAND),
           timeout: 30,
         },
       ],
@@ -2114,8 +2172,8 @@ export async function setupCodex(): Promise<void> {
     for (const m of hooksFile.hooks.SessionStart) {
       for (const h of m.hooks) {
         const cmd = h.command ?? '';
-        if (isNode9Hook(cmd) && needsRewrite(cmd)) {
-          h.command = fullPathCommand(CODEX_SESSION_START_SUBCOMMAND);
+        if (isNode9Hook(cmd) && needsRewrite(cmd, process.platform, { pathNode: false })) {
+          h.command = codexHookCommand(CODEX_SESSION_START_SUBCOMMAND);
           hooksChanged = true;
         }
       }
@@ -2929,10 +2987,10 @@ interface OpencodeConfig {
  * Resolves the argv prefix used to invoke the node9 CLI from a child
  * process. Two production shapes mirroring fullPathCommand's logic:
  *
- *   - Global install whose bin links to cli.js (npm, bun): run it with the
- *     current node, as fullPathCommand's shim does, so the agent's PATH
- *     cannot pick an older Node. A bin that is not JavaScript (pnpm's shell
- *     wrapper) is spawned directly.
+ *   - Global install whose bin links to cli.js (npm, bun), or a cli.js
+ *     path: on POSIX the shared hook shim (~/.node9/bin/hook), as
+ *     fullPathCommand writes for the other agents; on Windows node + cli.js.
+ *     A bin that is not JavaScript (pnpm's shell wrapper) is spawned directly.
  *
  *   - Dev / npm-link: argv[1] is the cli.js file with a #!/usr/bin/env
  *     node shebang. Invoke via the current node executable + cli.js.
@@ -2944,8 +3002,16 @@ function node9ArgvForShim(): string[] {
   if (process.env.NODE9_TESTING === '1') return ['node9'];
   const nodeExec = process.execPath;
   const cliScript = process.argv[1];
-  if (cliScript && pinsNode(nodeExec, cliScript)) return [nodeExec, cliScript];
-  return [cliScript];
+  if (!cliScript || !pinsNode(nodeExec, cliScript)) return [cliScript];
+  // POSIX: the shared hook shim, so these plugins run on the Node that set them
+  // up, fall back to PATH when an upgrade removed it, and are healed with the
+  // other agents. Both plugins fail closed, so a dead node path in them would
+  // block every tool call.
+  if (process.platform !== 'win32') {
+    ensureHookShim(os.homedir(), pinnedNode(nodeExec, cliScript), cliScript);
+    return [hookShimPath(os.homedir())];
+  }
+  return [nodeExec, cliScript];
 }
 
 /**

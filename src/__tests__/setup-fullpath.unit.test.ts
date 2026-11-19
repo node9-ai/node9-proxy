@@ -16,6 +16,7 @@
  * + process.argv[1] to exercise the real path.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawnSync } from 'child_process';
 import fs from 'fs';
 import {
   fullPathCommand,
@@ -27,6 +28,8 @@ import {
   isChurnProneHookForm,
   isPathNodeHookForm,
   pinsNode,
+  pinnedNode,
+  rewrittenHookCommand,
   isNode9StatusLine,
   hookShimPath,
   hookShimBody,
@@ -155,7 +158,7 @@ describe('fullPathCommand', () => {
     );
     // And the space-bearing node path is quoted INSIDE the shim.
     expect(fs.readFileSync(path.join(home, '.node9', 'bin', 'hook'), 'utf-8')).toContain(
-      'exec "/Users/Some User/.nvm/versions/node/v22.0.0/bin/node" "/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" "$@"'
+      'node="/Users/Some User/.nvm/versions/node/v22.0.0/bin/node"\n[ -x "$node" ] || node=node\nexec "$node" "/Users/Some User/.npm-global/lib/node_modules/node9-ai/dist/cli.js" "$@"'
     );
     fs.rmSync(home, { recursive: true, force: true });
   });
@@ -528,6 +531,98 @@ describe.skipIf(process.platform === 'win32')(
       expect(pinsNode('/home/u/.bun/bin/bun', '/opt/node9/dist/cli.js')).toBe(true);
       restoreProcess = stubProcess('/home/u/.bun/bin/bun', binLink);
       expect(fullPathCommand('check', 'linux', path.join(root, 'home'))).toBe(`"${binLink}" check`);
+    });
+
+    it('pins the node link beside the bin, which survives a package-manager upgrade', () => {
+      // Homebrew: <prefix>/bin/node -> Cellar/node/<ver>/bin/node, and
+      // process.execPath is the Cellar path that `brew upgrade` deletes.
+      const realNode = fs.realpathSync(process.execPath);
+      fs.symlinkSync(realNode, path.join(root, 'bin', 'node'));
+      expect(pinnedNode(realNode, binLink)).toBe(path.join(root, 'bin', 'node'));
+      // No node beside the bin (a checkout, a custom prefix): execPath itself.
+      expect(pinnedNode(realNode, path.join(root, 'lib', 'x', 'cli.js'))).toBe(realNode);
+      // A different node beside the bin is not the one that ran setup.
+      expect(pinnedNode('/opt/other/node', binLink)).toBe('/opt/other/node');
+    });
+
+    it('the shim falls back to the PATH node when the pinned one is gone', () => {
+      const home = path.join(root, 'home');
+      const cli = path.join(root, 'print-version.js');
+      fs.writeFileSync(cli, 'console.log("ran", process.argv.slice(2).join(" "));\n');
+      ensureHookShim(home, path.join(root, 'removed', 'node'), cli);
+      const r = spawnSync('sh', [hookShimPath(home), 'check', '--x'], {
+        encoding: 'utf-8',
+        env: { PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin` },
+      });
+      expect(r.error).toBeUndefined();
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe('ran check --x');
+    });
+
+    it('the shim runs the pinned node, not the first node on PATH', () => {
+      const home = path.join(root, 'home');
+      const cli = path.join(root, 'print-exec.js');
+      fs.writeFileSync(cli, 'console.log(process.execPath);\n');
+      // A decoy `node` first on PATH that would fail if it ran.
+      const decoyDir = path.join(root, 'decoy');
+      fs.mkdirSync(decoyDir);
+      fs.writeFileSync(path.join(decoyDir, 'node'), '#!/bin/sh\nexit 42\n', { mode: 0o755 });
+      ensureHookShim(home, process.execPath, cli);
+      const r = spawnSync('sh', [hookShimPath(home)], {
+        encoding: 'utf-8',
+        env: { PATH: `${decoyDir}:/usr/bin:/bin` },
+      });
+      expect(r.error).toBeUndefined();
+      expect(r.status).toBe(0);
+      expect(fs.realpathSync(r.stdout.trim())).toBe(fs.realpathSync(process.execPath));
+    });
+
+    it('keeps what the user added after the subcommand when it rewrites', () => {
+      restoreProcess = stubProcess('/opt/node-v25/bin/node', binLink);
+      vi.stubEnv('HOME', path.join(root, 'home'));
+      const home = path.join(root, 'home');
+      const shim = hookShimPath(home);
+      const spy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+      expect(rewrittenHookCommand(`"${binLink}" check --no-ask`, 'check')).toBe(
+        `"${shim}" check --no-ask`
+      );
+      expect(rewrittenHookCommand(`${binLink} log --agent pi`, 'log')).toBe(
+        `"${shim}" log --agent pi`
+      );
+      // Nothing node9 recognises: the fallback subcommand.
+      expect(rewrittenHookCommand('something else', 'check')).toBe(`"${shim}" check`);
+      spy.mockRestore();
+    });
+
+    it('does not flag the PATH-node form when setup runs under bun (no churn)', () => {
+      expect(isPathNodeHookForm(`"${binLink}" check`, 'linux', '/home/u/.bun/bin/bun')).toBe(false);
+    });
+
+    it('Codex keeps the bin form: its hooks are trusted by their exact text', () => {
+      restoreProcess = stubProcess('/opt/node-v25/bin/node', binLink);
+      const home = path.join(root, 'home');
+      expect(fullPathCommand('check', 'linux', home, { pinGlobalBin: false })).toBe(
+        `"${binLink}" check`
+      );
+      // A cli.js path still goes through the shim, as before.
+      restoreProcess();
+      restoreProcess = stubProcess('/opt/node-v25/bin/node', '/opt/node9/dist/cli.js');
+      expect(fullPathCommand('check', 'linux', home, { pinGlobalBin: false })).toBe(
+        `"${hookShimPath(home)}" check`
+      );
+    });
+
+    it('reads the older shim body (exec "<node>" "<cli>") too', () => {
+      const home = path.join(root, 'home');
+      const shim = hookShimPath(home);
+      fs.mkdirSync(path.dirname(shim), { recursive: true });
+      fs.writeFileSync(
+        shim,
+        `#!/bin/sh\nexec "${path.join(root, 'gone', 'node')}" "${binLink}" "$@"\n`
+      );
+      expect(isStaleHookCommand(`"${shim}" check`)).toBe(true);
+      fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${binLink}" "$@"\n`);
+      expect(isStaleHookCommand(`"${shim}" check`)).toBe(false);
     });
 
     it('migrates the PATH-node global form on the next setup run', () => {
