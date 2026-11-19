@@ -131,6 +131,43 @@ export function enableCompileCache(
   }
 }
 
+/**
+ * True when this Node can require() an ES module. The bundles are CommonJS and
+ * require ESM-only dependencies (commander 15), so a Node without it (18, 20
+ * before 20.19, 22 before 22.12) fails on load. The feature flag is read, not
+ * the version string: it is what the bundles need, and a flag can turn it off.
+ */
+export function canRequireEsm(
+  features: { require_module?: boolean } = process.features as { require_module?: boolean }
+): boolean {
+  return features.require_module === true;
+}
+
+export function unsupportedNodeMessage(version: string, execPath: string): string {
+  return (
+    `node9: Node.js ${version} (${execPath}) cannot run node9; it needs Node.js 22.12 or later. ` +
+    'Run "node9 agents add <agent>" in a terminal where node9 works, so the hook uses that Node.'
+  );
+}
+
+// One line to stderr in place of a stack trace, and one to hook-debug.log, so
+// a hook that cannot run leaves a trace. The exit code stays 1, as the crash
+// had it: whether a hook that cannot run fails open or closed is fw#383.
+// ~/.node9 is not created here: a machine without it was never set up.
+function reportUnsupportedNode(home: string): void {
+  const message = unsupportedNodeMessage(process.version, process.execPath);
+  process.stderr.write(message + '\n');
+  try {
+    fs.appendFileSync(
+      path.join(home, '.node9', 'hook-debug.log'),
+      `[${new Date().toISOString()}] UNSUPPORTED NODE (${process.argv[2] ?? ''}): ${message}\n`
+    );
+  } catch {
+    /* no ~/.node9, or not writable: stderr already carries the message */
+  }
+  process.exitCode = 1;
+}
+
 function readVersion(): string {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')) as {
@@ -143,7 +180,9 @@ function readVersion(): string {
 }
 
 // Run only as the entry point: the spec imports the helpers above.
-if (require.main === module) {
+if (require.main === module && !canRequireEsm()) {
+  reportUnsupportedNode(os.homedir());
+} else if (require.main === module) {
   enableCompileCache(os.homedir(), readVersion(), path.resolve(__dirname, '..'));
   const bundle = bundleFor(process.argv[2]);
   // A runtime path, so the bundler leaves the target out of this file.

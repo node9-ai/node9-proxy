@@ -209,10 +209,16 @@ export function fullPathCommand(
   // the path would split it), so fall back to the PATH-resolved name. npm puts
   // its global bin dir on PATH at install time; this is the form verified
   // end-to-end against Codex Desktop on 2026-09-22.
-  if (!cliScript.endsWith('.js')) {
-    return isWindows ? `node9 ${subcommand}` : `"${cliScript}" ${subcommand}`;
-  }
-  if (isWindows) return `node "${cliScript}" ${subcommand}`;
+  const isJs = cliScript.endsWith('.js');
+  if (isWindows) return isJs ? `node "${cliScript}" ${subcommand}` : `node9 ${subcommand}`;
+  // POSIX global install (npm, bun, npm link): argv[1] is <prefix>/bin/node9, a
+  // link to dist/cli.js that runs through `#!/usr/bin/env node`. That shebang
+  // takes `node` from the AGENT's PATH, and a desktop agent whose PATH starts
+  // with an older system Node crashed every hook on load and ran each tool
+  // call unchecked. When the bin is JavaScript, it goes through the shim like
+  // a .js path, so the hook runs on the Node that runs this setup. A wrapper
+  // that is not JavaScript (pnpm writes a shell script) keeps the bin itself.
+  if (!pinsNode(nodeExec, cliScript)) return `"${cliScript}" ${subcommand}`;
   // POSIX: the command in the agent's config points at a shim node9 owns,
   // not at node + cli.js directly. Codex keys hook trust to the command's
   // CONTENT, so a command that embeds process.execPath expires every time nvm
@@ -229,6 +235,26 @@ export function fullPathCommand(
   // by who ran the build -- the same environment-dependence that made the
   // pre-#185 rows pass on Linux by accident.
   return `"${toForwardSlashes(hookShimPath(home))}" ${subcommand}`;
+}
+
+/**
+ * Whether node9 is run as `<nodeExec> <cliScript>`, pinning the Node, rather
+ * than through its bin. A .js path always is. A bin is pinned when it links to
+ * JavaScript and the running binary is node: under `bunx --bun` it is bun, and
+ * the bin's own `#!/usr/bin/env node` is the better choice there.
+ */
+export function pinsNode(nodeExec: string, cliScript: string): boolean {
+  if (cliScript.endsWith('.js')) return true;
+  return resolvesToJsFile(cliScript) && /^node(js)?(\.exe)?$/i.test(path.basename(nodeExec));
+}
+
+/** True when `bin` is, or links to, a JavaScript file that node can run. */
+function resolvesToJsFile(bin: string): boolean {
+  try {
+    return fs.realpathSync(bin).endsWith('.js');
+  } catch {
+    return false;
+  }
 }
 
 // ── Hook shim ──────────────────────────────────────────────────────────────────
@@ -265,6 +291,26 @@ export function ensureHookShim(home: string, nodeExec: string, cliScript: string
   fs.writeFileSync(shim, body, { mode: 0o755 });
   fs.chmodSync(shim, 0o755); // writeFileSync's mode is masked by umask and ignored on overwrite
   return true;
+}
+
+const SHIM_COMMAND_PATH = /[/\\]\.node9[/\\]bin[/\\]hook$/;
+
+/**
+ * True when the shim at `shim` points at a node or a cli.js that no longer
+ * exists (an nvm version removed, node9 reinstalled elsewhere). The command an
+ * agent holds is still the shim's fixed path, so only the body tells.
+ * A body that does not parse is not called stale: it is left for a human.
+ */
+function isShimTargetStale(shim: string): boolean {
+  let body: string;
+  try {
+    body = fs.readFileSync(shim, 'utf-8');
+  } catch {
+    return false;
+  }
+  const m = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
+  if (!m) return false;
+  return !fs.existsSync(m[1]) || !fs.existsSync(m[2]);
 }
 
 function toForwardSlashes(p: string): string {
@@ -312,6 +358,7 @@ export function isStaleHookCommand(command: string): boolean {
     // (subcommand names like `check`, `log`) are skipped.
     if (!tok.startsWith('/') && !/^[A-Za-z]:\//.test(tok)) continue;
     if (!fs.existsSync(tok)) return true;
+    if (SHIM_COMMAND_PATH.test(tok) && isShimTargetStale(tok)) return true;
   }
   return false;
 }
@@ -363,6 +410,22 @@ export function isChurnProneHookForm(
   return /^"[^"]+" "[^"]*cli\.js" (?:check|log|hud)\b/.test(command.trim());
 }
 
+// The POSIX global form, `"<prefix>/bin/node9" check` (or unquoted), whose bin is
+// JavaScript run through `#!/usr/bin/env node`: the agent's PATH picks the
+// Node. Migrated to the shim, which pins the Node that runs setup. On Codex
+// this costs one re-trust, the same trade isChurnProneHookForm makes.
+export function isPathNodeHookForm(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!command || platform === 'win32') return false;
+  // Quoted (post-#185) or bare (pre-#185, still on machines that never re-ran setup).
+  const m = /^(?:"([^"]+)"|(\/\S+)) (?:check|log|hud)\b/.exec(command.trim());
+  const bin = m ? (m[1] ?? m[2]) : undefined;
+  if (!bin || bin.endsWith('.js') || SHIM_COMMAND_PATH.test(bin)) return false;
+  return resolvesToJsFile(bin);
+}
+
 export function needsRewrite(
   command: string,
   platform: NodeJS.Platform = process.platform
@@ -371,7 +434,8 @@ export function needsRewrite(
     isStaleHookCommand(command) ||
     isLegacyHookFormat(command) ||
     isWindowsQuoteBrokenHook(command, platform) ||
-    isChurnProneHookForm(command, platform)
+    isChurnProneHookForm(command, platform) ||
+    isPathNodeHookForm(command, platform)
   );
 }
 
@@ -2865,8 +2929,10 @@ interface OpencodeConfig {
  * Resolves the argv prefix used to invoke the node9 CLI from a child
  * process. Two production shapes mirroring fullPathCommand's logic:
  *
- *   - Global npm install: argv[1] is a self-contained bin wrapper
- *     (no .js suffix). spawnSync that path directly.
+ *   - Global install whose bin links to cli.js (npm, bun): run it with the
+ *     current node, as fullPathCommand's shim does, so the agent's PATH
+ *     cannot pick an older Node. A bin that is not JavaScript (pnpm's shell
+ *     wrapper) is spawned directly.
  *
  *   - Dev / npm-link: argv[1] is the cli.js file with a #!/usr/bin/env
  *     node shebang. Invoke via the current node executable + cli.js.
@@ -2878,7 +2944,7 @@ function node9ArgvForShim(): string[] {
   if (process.env.NODE9_TESTING === '1') return ['node9'];
   const nodeExec = process.execPath;
   const cliScript = process.argv[1];
-  if (cliScript && cliScript.endsWith('.js')) return [nodeExec, cliScript];
+  if (cliScript && pinsNode(nodeExec, cliScript)) return [nodeExec, cliScript];
   return [cliScript];
 }
 

@@ -25,6 +25,8 @@ import {
   needsRewrite,
   isWindowsQuoteBrokenHook,
   isChurnProneHookForm,
+  isPathNodeHookForm,
+  pinsNode,
   isNode9StatusLine,
   hookShimPath,
   hookShimBody,
@@ -335,6 +337,10 @@ describe('needsRewrite (#185 follow-up)', () => {
     // this row used to hold up as correct is exactly the one that expires
     // Codex trust on every nvm switch, and it is migrated on purpose — see
     // the isChurnProneHookForm block.
+    // A global bin that is not JavaScript (pnpm's shell wrapper) stays as it is.
+    // realpath is pinned so the row does not depend on what this host has
+    // installed at /usr/local/bin.
+    vi.spyOn(fs, 'realpathSync').mockReturnValue('/usr/local/bin/node9');
     expect(needsRewrite('"/home/u/.node9/bin/hook" check', 'linux')).toBe(false);
     expect(needsRewrite('"/usr/local/bin/node9" check', 'linux')).toBe(false);
   });
@@ -447,6 +453,8 @@ describe('isChurnProneHookForm — migrating the pre-shim POSIX form', () => {
 
   it('does not flag the shim form, the bare form, or the global-binary form', () => {
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    // Not JavaScript behind the bin (see isPathNodeHookForm for the JS case).
+    vi.spyOn(fs, 'realpathSync').mockReturnValue('/usr/local/bin/node9');
     for (const cmd of [
       '"/home/u/.node9/bin/hook" check',
       'node9 check',
@@ -457,3 +465,109 @@ describe('isChurnProneHookForm — migrating the pre-shim POSIX form', () => {
     }
   });
 });
+
+// The global-install hook ran through `#!/usr/bin/env node`, so the AGENT's PATH
+// picked the Node. A desktop agent whose PATH starts with an older system Node
+// (18 here) crashed every hook on load (ERR_REQUIRE_ESM from commander 15) and
+// the agent ran each tool call unchecked. The node that runs `node9 init` /
+// `agents add` is one that runs node9, so the hook now pins it in the shim.
+describe.skipIf(process.platform === 'win32')(
+  'global install: the hook pins the Node that wired it',
+  () => {
+    let root = '';
+    let restoreProcess: () => void = () => {};
+    let binLink = '';
+    let shWrapper = '';
+
+    beforeEach(() => {
+      // Earlier blocks leave fs spies in place; these rows need the real fs.
+      vi.restoreAllMocks();
+      vi.stubEnv('NODE9_TESTING', '');
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-global-'));
+      // npm / bun global layout: <prefix>/bin/node9 -> ../lib/node_modules/node9-ai/dist/cli.js
+      const cli = path.join(root, 'lib', 'node_modules', 'node9-ai', 'dist', 'cli.js');
+      fs.mkdirSync(path.dirname(cli), { recursive: true });
+      fs.writeFileSync(cli, '#!/usr/bin/env node\n');
+      fs.mkdirSync(path.join(root, 'bin'));
+      binLink = path.join(root, 'bin', 'node9');
+      fs.symlinkSync(cli, binLink);
+      // pnpm-style global bin: a shell script, not JavaScript. node cannot run it.
+      shWrapper = path.join(root, 'bin', 'node9-sh');
+      fs.writeFileSync(shWrapper, '#!/bin/sh\nexec node "$basedir/cli.js" "$@"\n', { mode: 0o755 });
+    });
+
+    afterEach(() => {
+      restoreProcess();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    it('writes the shim with the running node for a bin that links to cli.js', () => {
+      restoreProcess = stubProcess('/opt/node-v25/bin/node', binLink);
+      const home = path.join(root, 'home');
+      expect(fullPathCommand('check', 'linux', home)).toBe(`"${hookShimPath(home)}" check`);
+      expect(fs.readFileSync(hookShimPath(home), 'utf-8')).toBe(
+        hookShimBody('/opt/node-v25/bin/node', binLink)
+      );
+    });
+
+    it('keeps the quoted bin for a wrapper that is not JavaScript (pnpm)', () => {
+      restoreProcess = stubProcess('/opt/node-v25/bin/node', shWrapper);
+      const home = path.join(root, 'home');
+      expect(fullPathCommand('check', 'linux', home)).toBe(`"${shWrapper}" check`);
+      expect(fs.existsSync(hookShimPath(home))).toBe(false);
+    });
+
+    it('pins node, never another runtime that happens to run setup', () => {
+      expect(pinsNode('/opt/node-v25/bin/node', binLink)).toBe(true);
+      expect(pinsNode('/usr/bin/nodejs', binLink)).toBe(true);
+      expect(pinsNode('/home/u/.bun/bin/bun', binLink)).toBe(false);
+      expect(pinsNode('/opt/node-v25/bin/node', shWrapper)).toBe(false);
+      // A .js path was always run with the current binary; that is unchanged.
+      expect(pinsNode('/home/u/.bun/bin/bun', '/opt/node9/dist/cli.js')).toBe(true);
+      restoreProcess = stubProcess('/home/u/.bun/bin/bun', binLink);
+      expect(fullPathCommand('check', 'linux', path.join(root, 'home'))).toBe(`"${binLink}" check`);
+    });
+
+    it('migrates the PATH-node global form on the next setup run', () => {
+      for (const cmd of [
+        `"${binLink}" check`,
+        `"${binLink}" log`,
+        `"${binLink}" hud`,
+        // The unquoted pre-#185 form, still in configs that never re-ran setup.
+        `${binLink} check`,
+        `${binLink} log`,
+      ]) {
+        expect(isPathNodeHookForm(cmd, 'linux'), cmd).toBe(true);
+        expect(needsRewrite(cmd, 'linux'), cmd).toBe(true);
+      }
+    });
+
+    it('does not migrate a wrapper, the shim, the two-path form, or Windows', () => {
+      const home = path.join(root, 'home');
+      ensureHookShim(home, process.execPath, binLink);
+      for (const cmd of [
+        `"${shWrapper}" check`,
+        `"${hookShimPath(home)}" check`,
+        `"${process.execPath}" "${binLink}" check`,
+        'node9 check',
+      ]) {
+        expect(isPathNodeHookForm(cmd, 'linux'), cmd).toBe(false);
+      }
+      expect(isPathNodeHookForm(`"${binLink}" check`, 'win32')).toBe(false);
+    });
+
+    it('reads a shim whose node is gone as stale, so setup rewrites it', () => {
+      const home = path.join(root, 'home');
+      ensureHookShim(home, path.join(root, 'removed-nvm', 'node'), binLink);
+      const cmd = `"${hookShimPath(home)}" check`;
+      expect(isStaleHookCommand(cmd)).toBe(true);
+      expect(needsRewrite(cmd, 'linux')).toBe(true);
+      // A live shim stays as it is: no churn on a working hook.
+      ensureHookShim(home, process.execPath, binLink);
+      expect(isStaleHookCommand(cmd)).toBe(false);
+      expect(needsRewrite(cmd, 'linux')).toBe(false);
+    });
+  }
+);
