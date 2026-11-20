@@ -19,8 +19,9 @@ import { scanArgs } from '../dlp';
 describe('generate.ts oracle', () => {
   it('untilBlocked rejects a candidate the engine does not block and returns the next one that it does', () => {
     const prefix = ['AK', 'IA'].join('');
-    // First candidate: the body spells a reachable stopword (six A's are reachable through the prefix's trailing A).
-    const bad = prefix + 'AAAAA' + 'QX7Z3BHD' + 'M7N';
+    // First candidate: the body opens with eight of one character, which the
+    // engine reads as filler, not a key (dlp/placeholder.ts).
+    const bad = prefix + 'A'.repeat(8) + 'QX7Z3BHD';
     expect(
       scanArgs({ content: `aws_access_key_id = ${bad}` }),
       'the bad candidate really is unblocked'

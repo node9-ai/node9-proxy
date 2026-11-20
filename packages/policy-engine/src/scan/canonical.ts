@@ -811,7 +811,16 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // would be, and a dotenv load (or node -r dotenv/config, --env-file) whose
 // values reach the code reads ./.env. node's value flags (`--env-file .env`)
 // no longer hide the `-e` after them. Histories scanned under v38 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
+// canonical-v40 (2026-11-20, node9Firewall#301, DLP-1): the credential scanner
+// judges a placeholder by the token's shape (dlp/placeholder.ts) instead of
+// dropping any match that contains a stopword. A key, token or password that
+// merely carries `here`, `your`, `fake`, `example` ... inside it is reported;
+// the judgement reads the secret part of a match (Bearer token, Cloudinary
+// secret, npm token), not the words around it. A connection string whose
+// password is a vocabulary word (`password`, `test`) is a placeholder now.
+// Measured on 75,921 real commands and 109,653 tool texts: 42 verdicts change.
+// Histories scanned under v39 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
 // 2026-11-08, hash bumped with NO version bump (node9Firewall#451): dlp/index.ts
 // gained the Inline Secret Assignment pattern. argumentsOnly, which scanArgs
@@ -875,7 +884,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '1c4a57ad24e7c8c3';
+export const CANONICAL_EXTRACTOR_HASH = '6cac8adf9c7523ec';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

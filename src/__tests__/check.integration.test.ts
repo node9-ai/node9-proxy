@@ -704,6 +704,91 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   });
 });
 
+describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. Before the fix a key or password that merely CONTAINED `here` or
+  // `your` was dropped as a placeholder and the command ran with no finding.
+  // Each pair differs only in the four letters in the middle. Synthetic values
+  // assembled at runtime.
+  const AWS_CONTROL = ['AKIA', 'QX7Z', 'WXYZ', '3BHDM7NP'].join('');
+  const AWS_WORD_INSIDE = ['AKIA', 'QX7Z', 'HERE', '3BHDM7NP'].join('');
+  const AWS_DOC_KEY = ['AKIA', 'IOSFODNN7', 'EXAMPLE'].join('');
+  const PW_CONTROL = ['Qx7Lm2', 'wxyz', 'Vb9'].join('');
+  const PW_WORD_INSIDE = ['Qx7Lm2', 'your', 'Vb9'].join('');
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const lastAuditRow = (): Record<string, unknown> => {
+    const lines = fs
+      .readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8')
+      .trim()
+      .split('\n');
+    return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  };
+
+  it.each([
+    ['AWS control', `aws configure set aws_access_key_id ${AWS_CONTROL}`, AWS_CONTROL, 'AWS'],
+    [
+      'AWS, word inside',
+      `aws configure set aws_access_key_id ${AWS_WORD_INSIDE}`,
+      AWS_WORD_INSIDE,
+      'AWS',
+    ],
+    [
+      'connection string control',
+      `psql postgres://app:${PW_CONTROL}@db.internal:5432/app -c 'select 1'`,
+      PW_CONTROL,
+      'Database Connection String',
+    ],
+    [
+      'connection string, word inside the password',
+      `psql postgres://app:${PW_WORD_INSIDE}@db.internal:5432/app -c 'select 1'`,
+      PW_WORD_INSIDE,
+      'Database Connection String',
+    ],
+  ])('%s → blocked by the credential scanner', (_name, command, secret, pattern) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(r.stdout).not.toContain(secret);
+    expect(r.stderr).not.toContain(secret);
+    const row = lastAuditRow();
+    expect(JSON.stringify(row)).not.toContain(secret);
+    expect(row.decision).toBe('deny');
+    // The block is this detector's, not another shield's.
+    expect(String(row.checkedBy)).toMatch(/dlp/i);
+    expect(String(row.dlpPattern)).toContain(pattern);
+  });
+
+  it.each([
+    `aws configure set aws_access_key_id ${AWS_DOC_KEY}`,
+    "psql postgres://user:password@localhost/db -c 'select 1'",
+    "psql 'postgres://user:<your-password>@localhost/db' -c 'select 1'",
+  ])('%s → a placeholder, allowed silently', (command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+});
+
 describe('DLP: a secret passed as an inline env var (node9Firewall#451)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. The three commands from the issue: a connection string blocks, a

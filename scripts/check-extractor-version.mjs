@@ -42,6 +42,9 @@ const SOURCES = [
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output
   // and must trip this gate too.
   'packages/policy-engine/src/dlp/index.ts',
+  // scanArgs drops a match that dlp/placeholder.ts calls a placeholder
+  // (node9Firewall#301): a change there changes what the extractor reports.
+  'packages/policy-engine/src/dlp/placeholder.ts',
   // canonical.ts:478 runs analyzePipeChain (policy/pipe-chain.ts), whose
   // SOURCE_COMMANDS and SENSITIVE_PATTERNS decide the `risk` that ships in the
   // scan output. Proven absent 2026-09-10: appending a line to that file left
