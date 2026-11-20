@@ -704,6 +704,59 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   });
 });
 
+describe('jail: a literal script on a shell standard input (node9Firewall#300, JAIL-20)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. `sh -c 'cat KEY'` was always blocked; the same script piped into a
+  // shell fell to a generic review, and as a here-string or a heredoc it was
+  // allowed with no prompt.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+
+  it.each([
+    ['the wrapped control', "sh -c 'cat ~/.ssh/id_rsa'"],
+    ['piped from echo', "echo 'cat ~/.ssh/id_rsa' | sh"],
+    ['piped from printf', "printf 'cat %s\\n' ~/.ssh/id_rsa | bash"],
+    ['a here-string', "bash <<< 'cat ~/.ssh/id_rsa'"],
+    ['a heredoc', "sh <<'EOF'\ncat .env\nEOF"],
+  ])('%s → blocked by the credential jail', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toMatch(/protected file/);
+  });
+
+  it.each([
+    ['a dynamic script', 'echo "$x" | sh'],
+    ['a script with no jailed read', "echo 'ls -la' | sh"],
+    ['a fixture file', "bash <<< 'cat .env.example'"],
+  ])('%s → not blocked', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    const decision = r.stdout.trim()
+      ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision
+      : 'allow';
+    expect(decision).not.toBe('deny');
+  });
+});
+
 describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. Before the fix a key or password that merely CONTAINED `here` or

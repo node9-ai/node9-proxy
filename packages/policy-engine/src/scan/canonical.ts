@@ -818,7 +818,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // the judgement reads the secret part of a match (Bearer token, Cloudinary
 // secret, npm token), not the words around it. A connection string whose
 // password is a vocabulary word (`password`, `test`) is a placeholder now.
-// Measured on 75,921 real commands and 109,653 tool texts: 42 verdicts change.
+// Measured on 75,921 real commands and 109,653 tool texts: 38 verdicts change.
+// Same version (node9Firewall#300, JAIL-20): the credential jail reads a
+// literal script on a shell's standard input (`echo '...' | sh`, a here-string
+// or a heredoc into bash) through the structural file-access walk, the way
+// `sh -c '...'` was always read. 0 verdict changes on the same 75,921 commands.
 // Histories scanned under v39 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
@@ -884,7 +888,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '6cac8adf9c7523ec';
+export const CANONICAL_EXTRACTOR_HASH = '2b2ea28aca58e1c3';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

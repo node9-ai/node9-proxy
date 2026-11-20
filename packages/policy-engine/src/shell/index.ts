@@ -4467,12 +4467,17 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // on it: keyed by the normalised text, two different commands that normalise
   // alike would share whichever verdict was computed first.
   const normalized = normalizeCommandForPolicy(command);
+  // A shell that may read a script on standard input (JAIL-20): the script is
+  // read by the structural walk, and its reader word may be assembled by
+  // printf, so the keyword fast path must not skip it.
+  const stdinShell = feedsShellStdin(command) || feedsShellStdin(normalized);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
   if (
     !FS_OP_PRESCREEN_RE.test(normalized) &&
     !FS_OP_PRESCREEN_RE.test(command) &&
     !SOURCES_FILE_RE.test(command) &&
-    !runsInlineInterpreter(command, normalized)
+    !runsInlineInterpreter(command, normalized) &&
+    !stdinShell
   )
     return null;
   if (fsOpCache.has(command)) {
@@ -4488,9 +4493,15 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // Inline interpreter code is read last (node9Firewall#440), and its block is
   // not hidden by a review the other readings found (`cp .env x; python3 -c
   // "open('.env')"`, /code-review 2026-11-07).
+  // A script on a shell's standard input (`echo '...' | sh`, `bash <<EOF`) is
+  // read by the same structural walk (node9Firewall#300). There the two
+  // readings combine by strictness: a review the direct reading found must
+  // not hide a block inside the script.
+  const own = analyzeFsOperationImpl(command);
   const direct =
-    analyzeFsOperationImpl(command) ??
-    (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null);
+    stdinShell && own?.verdict !== 'block'
+      ? stricter(own, structuralJailRead(command))
+      : (own ?? (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null));
   const computed =
     direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
       ? direct
@@ -5380,6 +5391,21 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
 const INDIRECT_SHAPE_RE =
   /\b(?:for|while|until|find|xargs|set|source)\b|\$\{?PWD\b|[*?[]|(?:^|[;&|(\s])\.\s/;
 
+/**
+ * A shell interpreter word together with a pipe or a `<<`: the command can
+ * feed a shell a script on standard input (`echo '...' | sh`, `bash <<EOF`,
+ * `sh <<< '...'`). A cheap over-approximation; the structural walk decides.
+ * Derived from SHELL_INTERPRETERS so the two cannot drift.
+ */
+const STDIN_SHELL_WORD_RE = new RegExp(
+  `(?:^|[\\s;&|(/\\\\])(?:${[...SHELL_INTERPRETERS]
+    .map((name) => name.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&'))
+    .join('|')})(?=$|[\\s;&|)<])`,
+  'i'
+);
+const feedsShellStdin = (command: string): boolean =>
+  /\||<</.test(command) && STDIN_SHELL_WORD_RE.test(command);
+
 /** `source FILE` / `. FILE`: no reader word, so the prescreen needs this. */
 const SOURCES_FILE_RE = /(?:^|[;&|(\s])(?:source|\.)\s/;
 
@@ -5824,8 +5850,9 @@ function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null 
  *  read of a jailed file's content and are skipped. */
 function structuralJailRead(command: string): FsOpVerdict | null {
   let accesses: FileAccess[];
+  const report = { exhausted: false };
   try {
-    accesses = collectShellFileAccesses(command);
+    accesses = collectShellFileAccesses(command, {}, report);
   } catch {
     return null;
   }
@@ -5845,7 +5872,9 @@ function structuralJailRead(command: string): FsOpVerdict | null {
     if (hit?.verdict === 'block') return hit;
     review ??= hit;
   }
-  return review;
+  // A payload the walk left unread is not "nothing found": the same answer
+  // the direct walk gives when its own budget runs out.
+  return report.exhausted ? stricter(review, UNANALYSABLE_NESTING) : review;
 }
 
 /** An interpreter name inlineLanguageOf reads, in either reading of the
