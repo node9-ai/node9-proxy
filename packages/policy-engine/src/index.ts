@@ -31,6 +31,8 @@ export {
   AGENT_INSTRUCTION_DIRS,
   isAgentInstructionPath,
   isInside,
+  isPublicSshMaterial,
+  PUBLIC_SSH_NAME_SOURCE,
 } from './files/paths';
 export type { FileAccess, FileAccessContext } from './files/paths';
 

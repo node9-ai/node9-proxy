@@ -893,6 +893,99 @@ describe('Always allow is scoped to the command (node9Firewall#343)', () => {
   });
 });
 
+describe('jail: public material under ~/.ssh is readable (node9Firewall#308, JAIL-16)', () => {
+  // Through the built CLI, shipped defaults, no approver. `known_hosts`,
+  // `authorized_keys` and `*.pub` were blocked like a private key, through
+  // the shell and through the file tools.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 300,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+    fs.mkdirSync(path.join(tmpHome, '.ssh'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.ssh', 'known_hosts'), 'github.com ssh-ed25519 AAAA\n');
+    fs.writeFileSync(path.join(tmpHome, '.ssh', 'id_rsa.pub'), 'ssh-rsa AAAA test\n');
+    fs.writeFileSync(path.join(tmpHome, '.ssh', 'id_rsa'), 'not a real key\n');
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const call = (tool_name: string, tool_input: Record<string, unknown>) =>
+    runCheck({ hook_event_name: 'PreToolUse', tool_name, tool_input }, { HOME: tmpHome }, tmpHome);
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+  const ssh = (name: string) => path.join(tmpHome, '.ssh', name);
+
+  it.each([
+    ['cat known_hosts', 'Bash', { command: 'cat ~/.ssh/known_hosts' }],
+    ['cat a public key', 'Bash', { command: 'cat ~/.ssh/id_rsa.pub' }],
+    [
+      'the CI idiom',
+      'Bash',
+      {
+        command:
+          'grep -q github.com ~/.ssh/known_hosts || ssh-keyscan github.com >> ~/.ssh/known_hosts',
+      },
+    ],
+    ['exporting a public key', 'Bash', { command: 'cp ~/.ssh/id_rsa.pub ./deploy.pub' }],
+  ])('%s → allowed silently', (_name, tool, input) => {
+    const r = call(tool, input);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('Read and Grep of public material are allowed', () => {
+    for (const r of [
+      call('Read', { file_path: ssh('known_hosts') }),
+      call('Read', { file_path: ssh('id_rsa.pub') }),
+      call('Grep', { pattern: 'github', path: ssh('known_hosts') }),
+    ]) {
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(decisionOf(r)).toBe('allow');
+    }
+  });
+
+  it.each([
+    ['cat a private key', 'Bash', { command: 'cat ~/.ssh/id_rsa' }],
+    ['cat every file', 'Bash', { command: 'cat ~/.ssh/*' }],
+    ['a public and a private operand', 'Bash', { command: 'cat ~/.ssh/id_rsa.pub ~/.ssh/id_rsa' }],
+  ])('%s → still blocked', (_name, tool, input) => {
+    const r = call(tool, input);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).toBe('deny');
+  });
+
+  it('file tools: a private key, and a WRITE to a public name, are still blocked', () => {
+    for (const r of [
+      call('Read', { file_path: ssh('id_rsa') }),
+      call('Read', { file_path: ssh('config') }),
+      call('Write', { file_path: ssh('authorized_keys'), content: 'ssh-ed25519 AAAA attacker' }),
+      call('Edit', { file_path: ssh('known_hosts'), old_string: 'github', new_string: 'evil' }),
+    ]) {
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(decisionOf(r)).toBe('deny');
+    }
+  });
+
+  it('a *.pub symlink to a private key is still the private key', () => {
+    fs.symlinkSync(ssh('id_rsa'), ssh('k.pub'));
+    const r = call('Read', { file_path: ssh('k.pub') });
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).toBe('deny');
+  });
+
+  it('copying a private key onto a public name is held, not quiet', () => {
+    const r = call('Bash', { command: 'cp ~/.ssh/id_rsa ~/.ssh/x.pub' });
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+});
+
 describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. Before the fix a key or password that merely CONTAINED `here` or

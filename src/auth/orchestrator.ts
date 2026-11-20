@@ -1627,6 +1627,9 @@ export async function _authorizeHeadlessCore(
       (filePath
         ? scanFilePath(filePath, options?.cwd, {
             systemAccessHandled: !isManual && fileAccess.handledPaths.has(filePath),
+            // A read of public material under .ssh is not a credential read
+            // (node9Firewall#308); a write to the same names still is held.
+            readOnly: fileToolOperation(toolName, args) === 'read',
           })
         : null) ?? argumentScan(),
     pii: () => detectArgsPii(args),
@@ -2351,6 +2354,7 @@ export async function _authorizeHeadlessCore(
       const sensitiveHit = candidates.some((c) =>
         scanFilePath(c, options?.cwd, {
           systemAccessHandled: !isManual && fileAccess.handledPaths.has(c),
+          readOnly: fileToolOperation(toolName, args) === 'read',
         })
       );
       if (jailHit || sensitiveHit) {

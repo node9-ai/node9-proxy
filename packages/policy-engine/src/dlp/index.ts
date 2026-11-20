@@ -11,7 +11,7 @@ import safeRegex from 'safe-regex2';
 import { findMnemonic, type MnemonicBudget } from './mnemonic';
 import { secretViews, newSecretViewBudget } from './secret-views';
 import { isPlaceholder } from './placeholder';
-import { isLegacySystemPath, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
+import { isLegacySystemPath, isPublicSshMaterial, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
@@ -1302,10 +1302,20 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
 export function matchSensitivePath(
   resolvedPath: string,
   originalPath: string,
-  options: { systemAccessHandled?: boolean } = {}
+  options: {
+    systemAccessHandled?: boolean;
+    /**
+     * The call only READS the file (`Read`, `Grep`). Public material under
+     * `.ssh` (known_hosts, authorized_keys, *.pub) is then not sensitive
+     * (JAIL-16). A write to the same names stays blocked: adding a key to
+     * `authorized_keys` is persistence, not a read of something public.
+     */
+    readOnly?: boolean;
+  } = {}
 ): DlpMatch | null {
   // Normalise to forward slashes for cross-platform pattern matching.
   const normalised = resolvedPath.replace(/\\/g, '/');
+  if (options.readOnly && isPublicSshMaterial(normalised)) return null;
   if (!options.systemAccessHandled && isLegacySystemPath(normalised))
     return sensitivePathMatch(originalPath);
 

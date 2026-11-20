@@ -3,6 +3,8 @@ import {
   analyzeFsOperation,
   analyzePipeChain,
   matchSensitivePath,
+  isPublicSshMaterial,
+  PUBLIC_SSH_NAME_SOURCE,
   SENSITIVE_PATH_RE,
 } from '@node9/policy-engine';
 import { SHIELDS } from '../shields';
@@ -131,5 +133,89 @@ describe('the credential jail: both doors agree on every .env filename', () => {
     const p = '/home/u/project/.env.production';
     expect(astDoor(p), 'Bash door').toBe(true);
     expect(dlpDoor(p), 'file-tool door').toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The same contract for ~/.ssh (node9Firewall#308, JAIL-16). The `.ssh` rule
+// judged every file under the directory, so `known_hosts`, `authorized_keys`
+// and `*.pub` were blocked like a private key. The exemption is a closed list
+// by name, and it has to reach all five carriers or the doors disagree again.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Door 2 for a READ: the file-tool gate is told the call only reads. */
+const dlpReadDoor: Door = (p) => matchSensitivePath(p, p, { readOnly: true }) !== null;
+const sshJsonDoor: Door = (p) =>
+  matchesShieldRule('project-jail', 'shield:project-jail:block-read-ssh-any-tool', p);
+
+const SSH_DOORS: Array<[string, Door]> = [
+  ['AST (Bash)', astDoor],
+  ['DLP (file tools, read)', dlpReadDoor],
+  ['JSON backstop', sshJsonDoor],
+  ['pipe-chain', pipeDoor],
+  ['extractor scan', scanDoor],
+];
+
+// `true` = every carrier must treat a READ of this file as jailed.
+const SSH_FILES: Array<[string, boolean]> = [
+  ['id_rsa', true],
+  ['id_ed25519', true],
+  ['id_ecdsa', true],
+  ['deploy_key', true],
+  ['config', true], // can name key files and hosts: not on the list
+  ['id_rsa.pub.bak', true], // not a public key by name
+  ['keys/deploy.pub', true], // a sub-directory is not "directly inside"
+  ['known_hosts_backup', true],
+  ['known_hosts', false],
+  ['known_hosts.old', false],
+  ['authorized_keys', false],
+  ['authorized_keys2', false],
+  ['id_rsa.pub', false],
+  ['id_ed25519.pub', false],
+];
+
+describe('the credential jail: every door agrees on every ~/.ssh filename', () => {
+  for (const [name, jailed] of SSH_FILES) {
+    const abs = `/home/u/.ssh/${name}`;
+    it(`${name} is ${jailed ? 'jailed' : 'NOT jailed'} through every carrier`, () => {
+      const verdicts = SSH_DOORS.map(([label, door]) => [label, door(abs)] as const);
+      const disagree = verdicts.filter(([, v]) => v !== jailed).map(([l]) => l);
+      expect(
+        disagree,
+        `${name}: ${disagree.join(', ')} disagree with the contract ` +
+          `(expected ${jailed ? 'jailed' : 'not jailed'}). ` +
+          `Carriers: ${verdicts.map(([l, v]) => `${l}=${v}`).join(' ')}`
+      ).toEqual([]);
+      // The predicate is the contract's own definition.
+      expect(isPublicSshMaterial(abs)).toBe(!jailed);
+    });
+  }
+
+  it('the directory itself is jailed through every carrier', () => {
+    const dir = '/home/u/.ssh';
+    expect(SSH_DOORS.filter(([, door]) => !door(dir)).map(([l]) => l)).toEqual([]);
+  });
+
+  it('the two regex copies carry the same name list as the predicate', () => {
+    const shield = SHIELDS['project-jail'];
+    for (const ruleName of [
+      'shield:project-jail:block-read-ssh-any-tool',
+      'shield:project-jail:block-write-ssh-trust-files',
+    ]) {
+      const rule = shield.smartRules.find((r) => r.name === ruleName);
+      expect(rule?.conditions[0].value, ruleName).toContain(PUBLIC_SSH_NAME_SOURCE);
+    }
+    expect(SENSITIVE_PATH_RE.source).toContain(PUBLIC_SSH_NAME_SOURCE);
+  });
+
+  it('a WRITE to a public name is still jailed at the file-tool gate and by the shield', () => {
+    for (const name of ['authorized_keys', 'known_hosts', 'id_rsa.pub']) {
+      const p = `/home/u/.ssh/${name}`;
+      expect(matchSensitivePath(p, p), name).not.toBeNull();
+      expect(
+        matchesShieldRule('project-jail', 'shield:project-jail:block-write-ssh-trust-files', p),
+        name
+      ).toBe(true);
+    }
   });
 });

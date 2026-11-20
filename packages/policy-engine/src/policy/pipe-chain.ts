@@ -1,5 +1,5 @@
 import { unwrapCommandHead, FS_READ_TOOLS } from '../shell/index';
-import { isPasswordHashPath } from '../files/paths';
+import { isPasswordHashPath, isPublicSshMaterial } from '../files/paths';
 
 // Pipe-chain exfiltration detector.
 // Classifies the stages of a shell pipeline as source / transform / sink and
@@ -83,6 +83,8 @@ const SENSITIVE_PATTERNS = [
 ];
 
 function isSensitivePath(p: string): boolean {
+  // Public material under .ssh is not a credential source (JAIL-16).
+  if (isPublicSshMaterial(p)) return false;
   return isPasswordHashPath(p) || SENSITIVE_PATTERNS.some((re) => re.test(p));
 }
 

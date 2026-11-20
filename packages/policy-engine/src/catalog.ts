@@ -829,7 +829,11 @@ export function ssrfCheckId(tier: SsrfTier): string {
   return isStrictGatedTier(tier) ? 'network.internal-addresses' : 'network.metadata';
 }
 
-const PROJECT_JAIL_BLOCK_READ = /^shield:project-jail:block-read-(ssh|aws|env)(-any-tool)?$/;
+// The write rule for ~/.ssh trust files belongs with the reads: before the
+// public names were made readable (node9Firewall#308) a write to them was
+// caught by block-read-ssh-any-tool, under this same check.
+const PROJECT_JAIL_BLOCK_READ =
+  /^shield:project-jail:(?:block-read-(ssh|aws|env)(-any-tool)?|block-write-ssh-trust-files)$/;
 
 /**
  * The check behind a rule name or a verdict label the code emits today.

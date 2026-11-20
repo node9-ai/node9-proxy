@@ -17,7 +17,12 @@ import { toPlainTree, walk } from './plain-tree';
 import { matchesPattern } from '../rules';
 import { isShellShapedTool, type InspectionInput } from './tool-input';
 import { foldHomoglyphs } from '../dlp/normalize';
-import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES, type FileAccess } from '../files/paths';
+import {
+  SYSTEM_AUTH_DIRS,
+  SYSTEM_AUTH_FILES,
+  isPublicSshMaterial,
+  type FileAccess,
+} from '../files/paths';
 import picomatch from 'picomatch';
 import { collectShellFileAccesses } from './file-access';
 import { readDotenvCli } from './dotenv-cli';
@@ -2031,7 +2036,14 @@ const SENSITIVE_PATH_RULES: Array<{
   {
     rule: 'shield:project-jail:block-read-ssh',
     reason: 'Reading SSH private keys is blocked by project-jail shield',
-    match: (p) => /([\\/]\.ssh[\\/]|^\.ssh[\\/]|^(?:[~/]|[A-Za-z]:).*[\\/]\.ssh$)/i.test(p),
+    // Public material is not a key (JAIL-16): `known_hosts`, `authorized_keys`
+    // and `*.pub` are readable. Because the exemption lives in the rule itself,
+    // the copy tier sees `x.pub` as a destination OUTSIDE the jail, so
+    // `cp ~/.ssh/id_rsa ~/.ssh/x.pub` is a reviewed copy, not a quiet rename
+    // followed by an allowed read.
+    match: (p) =>
+      /([\\/]\.ssh[\\/]|^\.ssh[\\/]|^(?:[~/]|[A-Za-z]:).*[\\/]\.ssh$)/i.test(p) &&
+      !isPublicSshMaterial(p),
   },
   {
     rule: 'shield:project-jail:block-read-aws',
@@ -5860,6 +5872,10 @@ function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null 
     }
   });
   glob = parts.join('/');
+  // `~/.ssh/*.pub`: a last segment that ends in the literal `.pub` can only
+  // select public keys (JAIL-16). The predicate is anchored on the name, so
+  // `~/.ssh/*` and `~/.ssh/id_*` are not this.
+  if (isPublicSshMaterial(glob)) return null;
   const first = parts.findIndex((seg) => GLOB_META.test(seg));
   if (first < 0) return matchSensitivePath(glob);
   const prefix = parts.slice(0, first).join('/');

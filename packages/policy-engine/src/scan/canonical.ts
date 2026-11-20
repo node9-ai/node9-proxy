@@ -827,6 +827,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // tools (`python -m dotenv list`, `dotenv get`, `dotenv -e F -- printenv`,
 // dotenvx) and Ruby's dotenv in inline code, and ruby's `-r LIB` no longer
 // hides the `-e` after it.
+// Same version (node9Firewall#308, JAIL-16): public material directly inside
+// a `.ssh` directory (known_hosts, authorized_keys, *.pub) is not a read of a
+// credential, in every copy of the rule (files/paths.ts isPublicSshMaterial).
 // Histories scanned under v39 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
@@ -892,7 +895,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '675f52ed45be50b2';
+export const CANONICAL_EXTRACTOR_HASH = '5032a4a140255429';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

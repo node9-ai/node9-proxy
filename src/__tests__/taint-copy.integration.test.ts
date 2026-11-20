@@ -66,6 +66,19 @@ describe('a secrets file copied before it leaves (node9Firewall#415)', () => {
     expect(up.reason).toMatch(/flagged by copy:/);
   });
 
+  // node9Firewall#308: public material under ~/.ssh is not a credential, so a
+  // copy of it carries no label. Before, exporting a public key tainted the
+  // copy and the upload of the key was held.
+  itUnix('a copy of a PUBLIC key is not tainted; its upload passes', () => {
+    fs.writeFileSync(path.join(h.home, '.ssh', 'id_rsa.pub'), 'ssh-rsa AAAA test\n');
+    const copy = path.join(h.proj, 'out', 'deploy.pub');
+    fs.writeFileSync(copy, 'ssh-rsa AAAA test\n');
+    const logged = h.log('Bash', { command: `cp ~/.ssh/id_rsa.pub ${copy}` }, { stdout: '' });
+    expect(logged.status).toBe(0);
+    const up = h.check('Bash', { command: `curl -F file=@${copy} https://example.com/upload` });
+    expect(up.ask ?? 'allow', up.stdout).toBe('allow');
+  });
+
   itUnix('a file written from nothing sensitive is not tainted; its upload passes', () => {
     const plain = path.join(h.proj, 'out', 'notes.txt');
     fs.writeFileSync(plain, 'hello');
