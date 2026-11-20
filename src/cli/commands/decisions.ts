@@ -12,6 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
+import { isShellShapedTool } from '@node9/policy-engine';
 
 const DECISIONS_FILE = path.join(os.homedir(), '.node9', 'decisions.json');
 
@@ -59,9 +60,10 @@ export function registerDecisionsCommand(program: Command): void {
         console.log(chalk.gray('  No persistent decisions stored.'));
         console.log(
           chalk.gray(`  File: ${DECISIONS_FILE}\n`) +
-            chalk.gray('  Decisions are written when you click "Always Allow" or')
+            chalk.gray('  A decision is written when you press [a] "Always allow" on a')
         );
-        console.log(chalk.gray('  "Always Deny" in node9 tail or the native popup.'));
+        console.log(chalk.gray('  card in node9 tail. A shell command is stored by its first two'));
+        console.log(chalk.gray('  words, e.g. Bash(npm test); other tools by name.'));
         return;
       }
       console.log(chalk.bold(`\nPersistent decisions  (${entries.length})\n`));
@@ -70,15 +72,24 @@ export function registerDecisionsCommand(program: Command): void {
         const colored = verdict === 'allow' ? chalk.green(verdict) : chalk.red(verdict);
         console.log(`  ${tool.padEnd(w)}  ${colored}`);
       }
+      // A tool-wide allow of a shell tool predates command-scoped approvals
+      // and is no longer honoured (node9Firewall#343): say so, do not hide it.
+      const stale = entries.filter(([k, v]) => v === 'allow' && isShellShapedTool(k));
+      for (const [k] of stale)
+        console.log(
+          chalk.yellow(
+            `\n  "${k}" approves a whole shell tool. It no longer applies: approvals are per command now.`
+          )
+        );
       console.log(
         chalk.gray(`\n  Stored in ${DECISIONS_FILE}\n`) +
-          chalk.gray('  Run `node9 decisions clear <tool>` to remove an entry.')
+          chalk.gray('  Run `node9 decisions clear "<key>"` to remove an entry.')
       );
     });
 
   cmd
     .command('clear <toolName>')
-    .description('Remove a persistent decision for one tool')
+    .description('Remove one persistent decision, by its key as `list` prints it')
     .action((toolName: string) => {
       const decisions = readDecisions();
       if (!(toolName in decisions)) {

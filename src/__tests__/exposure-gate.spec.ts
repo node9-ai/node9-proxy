@@ -446,8 +446,14 @@ describe('native popup decisions on an exposure card', () => {
     expect(
       resolveNativeDecision({ code: 1, output: 'Allow & trust\n', elapsedMs: 50, locked: false })
     ).toBe('deny');
+    const { TRUST_BUTTON } = await import('../ui/native.js');
     expect(
-      resolveNativeDecision({ code: 1, output: 'Always Allow\n', elapsedMs: 2000, locked: false })
+      resolveNativeDecision({
+        code: 1,
+        output: `${TRUST_BUTTON}\n`,
+        elapsedMs: 2000,
+        locked: false,
+      })
     ).toBe('always_allow');
   });
 });

@@ -823,6 +823,76 @@ describe('jail: the dotenv command-line tools and Ruby dotenv (node9Firewall#443
   });
 });
 
+describe('Always allow is scoped to the command (node9Firewall#343)', () => {
+  // Through the built CLI: decisions.json as the daemon writes it, then the
+  // real hook. `mkfs` is a rule-less review at Standard, the kind a standing
+  // approval may answer. Before the fix `{ "Bash": "allow" }` answered every
+  // such review of the tool, for good.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 300,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const plant = (decisions: Record<string, string>) =>
+    fs.writeFileSync(path.join(tmpHome, '.node9', 'decisions.json'), JSON.stringify(decisions));
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+  const lastAuditRow = (): Record<string, unknown> => {
+    const lines = fs
+      .readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8')
+      .trim()
+      .split('\n');
+    return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  };
+
+  it('control: with no approval the command is held', () => {
+    const r = run('mkfs /dev/sdb');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+
+  it('the approved command is allowed by the standing approval', () => {
+    plant({ 'Bash(mkfs /dev/sdb)': 'allow' });
+    const r = run('mkfs /dev/sdb');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(decisionOf(r)).toBe('allow');
+    expect(lastAuditRow().checkedBy).toBe('persistent');
+  });
+
+  it.each([
+    ['a different command', 'mkfs /dev/sdc'],
+    ['the approved command behind a list', 'mkfs /dev/sdb && mkfs /dev/sdc'],
+    ['the approved command in a pipeline', 'mkfs /dev/sdb | tee log'],
+  ])('%s is not', (_name, command) => {
+    plant({ 'Bash(mkfs /dev/sdb)': 'allow' });
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+
+  it('a tool-wide Bash approval from before no longer applies', () => {
+    plant({ Bash: 'allow' });
+    const r = run('mkfs /dev/sdb');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+});
+
 describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. Before the fix a key or password that merely CONTAINED `here` or

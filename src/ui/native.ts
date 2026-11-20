@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import { smartTruncate, extractContext } from '../context-sniper';
 import { safeMessage } from '../utils/safe-text';
+import { extractCommandPattern } from '../auth/state';
 
 export const isTestEnv = () => {
   return (
@@ -25,6 +26,16 @@ export const MIN_INTERACTION_MS = 400;
 // Pure decision logic for the native popup, extracted so it can be unit-tested
 // without spawning a real dialog. Fails closed: only a non-spurious affirmative
 // resolves to allow / always_allow; everything else is deny.
+/** The popup's third button. It grants a one-hour trust, and says so: it
+ *  used to read "Always Allow" / "never ask again" (node9Firewall#343). */
+export const TRUST_BUTTON = 'Trust 1h';
+
+/** What the one-hour trust covers, as the popup words it. `scope` is the
+ *  command prefix a shell tool's trust is limited to, absent for other tools. */
+export function trustScopeText(toolName: string, scope: string | undefined): string {
+  return scope ? `commands starting with "${scope}"` : `${toolName} calls`;
+}
+
 export function resolveNativeDecision(opts: {
   code: number;
   output: string;
@@ -37,7 +48,9 @@ export function resolveNativeDecision(opts: {
   // dialog and click is spurious (timeout-as-0, WM auto-close, headless dismiss).
   const tooFast = elapsedMs < MIN_INTERACTION_MS;
   if (output.includes('Allow & trust')) return tooFast ? 'deny' : 'trust_recipients';
-  if (output.includes('Always Allow')) return tooFast ? 'deny' : 'always_allow';
+  // The button that writes a one-hour trust. Its internal name predates the
+  // label: it never was permanent (node9Firewall#343).
+  if (output.includes(TRUST_BUTTON)) return tooFast ? 'deny' : 'always_allow';
   if (code === 0) return tooFast ? 'deny' : 'allow';
   return 'deny';
 }
@@ -159,7 +172,8 @@ function escapePango(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function buildPlainMessage(
+/** Exported for its wording rows (node9Firewall#343). */
+export function buildPlainMessage(
   toolName: string,
   formattedArgs: string,
   agent: string | undefined,
@@ -167,7 +181,8 @@ function buildPlainMessage(
   locked: boolean,
   allowCount: number = 1,
   ruleDescription?: string,
-  exposure = false
+  exposure = false,
+  trustScope: string | null = null
 ): string {
   const lines: string[] = [];
 
@@ -181,9 +196,11 @@ function buildPlainMessage(
   lines.push('');
   lines.push(formattedArgs);
 
-  if (allowCount >= 3 && !exposure) {
+  if (allowCount >= 3 && !exposure && trustScope) {
     lines.push('');
-    lines.push(`💡 Approved ${allowCount - 1}× before — "Always Allow" creates a permanent rule`);
+    lines.push(
+      `💡 Approved ${allowCount - 1}× before. "${TRUST_BUTTON}" stops this prompt for an hour`
+    );
   }
 
   if (!locked) {
@@ -191,7 +208,9 @@ function buildPlainMessage(
     lines.push(
       exposure
         ? '↵ Enter = Allow once   |   ⎋ Esc = Block   |   "Allow & trust" = this address is fine from now on'
-        : '↵ Enter = Allow ↵   |   ⎋ Esc = Block ⎋   |   "Always Allow" = never ask again'
+        : trustScope
+          ? `↵ Enter = Allow ↵   |   ⎋ Esc = Block ⎋   |   "${TRUST_BUTTON}" = no prompt for ${trustScope} for 1 hour`
+          : '↵ Enter = Allow ↵   |   ⎋ Esc = Block ⎋'
     );
   }
 
@@ -206,7 +225,8 @@ function buildPangoMessage(
   locked: boolean,
   allowCount: number = 1,
   ruleDescription?: string,
-  exposure = false
+  exposure = false,
+  trustScope: string | null = null
 ): string {
   const lines: string[] = [];
 
@@ -223,10 +243,10 @@ function buildPangoMessage(
   lines.push('');
   lines.push(`<tt>${escapePango(formattedArgs)}</tt>`);
 
-  if (allowCount >= 3 && !exposure) {
+  if (allowCount >= 3 && !exposure && trustScope) {
     lines.push('');
     lines.push(
-      `<span foreground="#f0c040">💡 Approved ${allowCount - 1}× before — "Always Allow" creates a permanent rule</span>`
+      `<span foreground="#f0c040">💡 Approved ${allowCount - 1}× before. "${TRUST_BUTTON}" stops this prompt for an hour</span>`
     );
   }
 
@@ -235,7 +255,9 @@ function buildPangoMessage(
     lines.push(
       exposure
         ? '<small>↵ Enter = <b>Allow once</b>   |   ⎋ Esc = <b>Block</b>   |   "Allow &amp; trust" = this address is fine from now on</small>'
-        : '<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "Always Allow" = never ask again</small>'
+        : trustScope
+          ? `<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b>   |   "${TRUST_BUTTON}" = no prompt for ${escapePango(trustScope)} for 1 hour</small>`
+          : '<small>↵ Enter = <b>Allow ↵</b>   |   ⎋ Esc = <b>Block ⎋</b></small>'
     );
   }
 
@@ -253,11 +275,23 @@ export async function askNativePopup(
   matchedWord?: string,
   allowCount: number = 1,
   ruleDescription?: string,
-  /** fw#318 P5: an exposure card offers "Allow & trust" instead of "Always Allow". */
-  exposureDestinations: readonly string[] = []
+  /** fw#318 P5: an exposure card offers "Allow & trust" instead of the trust button. */
+  exposureDestinations: readonly string[] = [],
+  /**
+   * Whether a one-hour trust can answer this call. False for a call-specific
+   * review (a credential, an exposure, an app permission): the button is then
+   * not offered. It used to be shown and silently allow once
+   * (node9Firewall#343).
+   */
+  trustOffered = false
 ): Promise<'allow' | 'deny' | 'always_allow' | 'trust_recipients'> {
   if (isTestEnv()) return 'deny';
-  const thirdButton = exposureDestinations.length > 0 ? 'Allow & trust' : 'Always Allow';
+  // The same scope the trust session is written with (auth/state.ts).
+  const trustScope = trustOffered
+    ? trustScopeText(toolName, extractCommandPattern(toolName, args))
+    : null;
+  const thirdButton =
+    exposureDestinations.length > 0 ? 'Allow & trust' : trustScope ? TRUST_BUTTON : null;
 
   const { message: formattedArgs, intent } = formatArgs(args, matchedField, matchedWord);
   const intentLabel = intent === 'EDIT' ? 'Code Edit' : 'Action Approval';
@@ -271,7 +305,8 @@ export async function askNativePopup(
     locked,
     allowCount,
     ruleDescription,
-    exposureDestinations.length > 0
+    exposureDestinations.length > 0,
+    trustScope
   );
 
   return new Promise((resolve) => {
@@ -301,7 +336,9 @@ export async function askNativePopup(
       if (process.platform === 'darwin') {
         const buttons = locked
           ? `buttons {"Waiting…"} default button "Waiting…"`
-          : `buttons {"Block ⎋", "${thirdButton}", "Allow ↵"} default button "Allow ↵" cancel button "Block ⎋"`;
+          : thirdButton
+            ? `buttons {"Block ⎋", "${thirdButton}", "Allow ↵"} default button "Allow ↵" cancel button "Block ⎋"`
+            : `buttons {"Block ⎋", "Allow ↵"} default button "Allow ↵" cancel button "Block ⎋"`;
         const script = `on run argv\ntell application "System Events"\nactivate\ndisplay dialog (item 1 of argv) with title (item 2 of argv) ${buttons}\nend tell\nend run`;
         childProcess = spawn('osascript', ['-e', script, '--', message, title]);
       } else if (process.platform === 'linux') {
@@ -313,7 +350,8 @@ export async function askNativePopup(
           locked,
           allowCount,
           ruleDescription,
-          exposureDestinations.length > 0
+          exposureDestinations.length > 0,
+          trustScope
         );
         // No --timeout: zenity's timeout exit code is 0 on X11/XWayland, which
         // the close handler would silently treat as "allow". Instead we rely on
@@ -332,7 +370,7 @@ export async function askNativePopup(
         ];
         if (!locked) {
           argsList.push('--cancel-label', 'Block  ⎋');
-          argsList.push('--extra-button', thirdButton);
+          if (thirdButton) argsList.push('--extra-button', thirdButton);
         }
         childProcess = spawn('zenity', argsList);
       } else if (process.platform === 'win32') {

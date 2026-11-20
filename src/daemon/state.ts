@@ -25,6 +25,7 @@ import { SessionExposureStore } from './exposure-store.js';
 import { sessionCounters } from './session-counters.js';
 import { sessionHistory } from './session-history.js';
 import { atomicWriteSync } from '../utils/atomic-write';
+import { persistentScope } from '../auth/state.js';
 import { CardStore, type Card } from './cards.js';
 export { sessionCounters, sessionHistory };
 export type { HudStatus } from './session-counters.js';
@@ -371,10 +372,20 @@ export function readPersistentDecisions(): Record<string, 'allow' | 'deny'> {
   return {};
 }
 
-export function writePersistentDecision(toolName: string, decision: 'allow' | 'deny'): void {
+/**
+ * Store a standing decision. An ALLOW is stored under the scope the prompt
+ * showed (`Bash(npm test)`, not `Bash`: node9Firewall#343); a deny stays
+ * tool-wide, as it was.
+ */
+export function writePersistentDecision(
+  toolName: string,
+  decision: 'allow' | 'deny',
+  args?: unknown
+): void {
   try {
     const decisions = readPersistentDecisions();
-    decisions[toolName] = decision;
+    const key = decision === 'allow' ? persistentScope(toolName, args).key : toolName;
+    decisions[key] = decision;
     atomicWriteSync(DECISIONS_FILE, JSON.stringify(decisions, null, 2));
     // broadcast('decisions') removed — only the browser dashboard
     // consumed it. The new `node9 decisions list` CLI re-reads the

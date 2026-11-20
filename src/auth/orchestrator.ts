@@ -2261,11 +2261,10 @@ export async function _authorizeHeadlessCore(
     // should not silently bypass a rule the user wrote (e.g. review-git-push).
     // policyResult.ruleName is set only when a smart rule matched.
     //
-    // KNOWN GAP (roadmap): persistent approvals are keyed by tool name only.
-    // For shell tools (Bash), "Always Allow" approves the entire tool even for
-    // commands not covered by a smart rule. Future work: key by command-level
-    // pattern (e.g. first command token) so approvals are narrowly scoped.
-    // See: doc/roadmap.md "Command-Scoped Persistent Approvals".
+    // A shell tool's approval is scoped to the command (node9Firewall#343):
+    // getPersistentDecision reads `Bash(npm test)` / `Bash(=<exact command>)`
+    // for this call's own command, and ignores a tool-wide `Bash: allow` left
+    // from before. Other tools are approved by name.
     //
     // B1 (#6): tier-7 strict reviews skip the consult too — same key-on-
     // ruleName defect as the cloud guard above. An "Always Allow" clicked
@@ -2277,7 +2276,7 @@ export async function _authorizeHeadlessCore(
     const persistent =
       policyResult.ruleName || policyResult.tier === 7 || hardBlockDowngraded
         ? null
-        : getPersistentDecision(toolName);
+        : getPersistentDecision(toolName, args);
     // `!appPermReview`: a prior "Always Allow" must not bypass an org-set review
     // (fix #3). A persistent DENY still short-circuits (tightening is fine).
     if (persistent === 'allow' && !callSpecificReview()) {
@@ -2885,7 +2884,10 @@ export async function _authorizeHeadlessCore(
           policyMatchedWord,
           daemonAllowCount,
           riskMetadata?.ruleDescription,
-          exposureDestinations
+          exposureDestinations,
+          // The button writes a trust session only when the trust guard would
+          // honour one; otherwise it is not offered (node9Firewall#343).
+          standingTrustApplies()
         );
 
         if (decision === 'trust_recipients') {
