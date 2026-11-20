@@ -155,6 +155,24 @@ function builtFromVocabulary(token: string): boolean {
   return letters * 2 >= alphanumerics;
 }
 
+/**
+ * Only lower-case words joined by `-`, `_` or `.`, three or more, with no
+ * digit and no capital: a phrase (a URL slug, a kebab-case name), never a
+ * generated token. `pypi-package-backdoored-to-steal-credentials...` in an
+ * article URL was redacted as a PyPI token (node9Firewall#374). A random
+ * token of 20 characters has no digit and no capital less than once in ten
+ * million. A word is at most 20 letters: `dp.pt.` followed by 43 letters is a
+ * token body, not a third word.
+ *
+ * For vendor TOKEN patterns only. A password a person chose can be exactly
+ * this shape (four words and three dashes), so the validators that judge a
+ * password do not ask this.
+ */
+const PHRASE_RE = /^[a-z]{1,20}(?:[-_.][a-z]{1,20}){2,}$/;
+export function isPhrase(secret: string): boolean {
+  return PHRASE_RE.test(secret);
+}
+
 export function isPlaceholder(secret: string): boolean {
   if (secret.length === 0) return false;
   // 1. a template marker anywhere

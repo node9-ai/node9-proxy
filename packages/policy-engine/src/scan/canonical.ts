@@ -833,6 +833,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Same version (node9Firewall#369): validateIban knows the BBAN shape of AD,
 // AE, BA and EE, so a hex id with one of those prefixes and a lucky mod-97 is
 // not an IBAN.
+// Same version (node9Firewall#374): the PyPI pattern is anchored on the
+// macaroon prefix (`pypi-AgE`), and a vendor-token match made only of
+// lower-case words joined by separators (a URL slug) is a phrase, not a token.
 // Histories scanned under v39 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
@@ -898,7 +901,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '059e91906c5ae90b';
+export const CANONICAL_EXTRACTOR_HASH = '7ed9aa041744ce03';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

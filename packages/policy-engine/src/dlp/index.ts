@@ -10,7 +10,7 @@
 import safeRegex from 'safe-regex2';
 import { findMnemonic, type MnemonicBudget } from './mnemonic';
 import { secretViews, newSecretViewBudget } from './secret-views';
-import { isPlaceholder } from './placeholder';
+import { isPhrase, isPlaceholder } from './placeholder';
 import { isLegacySystemPath, isPublicSshMaterial, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
@@ -907,7 +907,11 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // ── PyPI ──────────────────────────────────────────────────────────────────
   {
     name: 'PyPI Upload Token',
-    regex: /\bpypi-[A-Za-z0-9_-]{50,}\b/,
+    // A PyPI token is a macaroon whose base64 body always starts with the
+    // same bytes: `pypi-AgEIcHlwaS5vcmc` (pypi.org), `pypi-AgENdGVzdC5weXBp`
+    // (test.pypi.org). Without the `AgE` anchor any `pypi-<long-slug>` in a
+    // URL matched (node9Firewall#374).
+    regex: /\bpypi-AgE[A-Za-z0-9_-]{50,}\b/,
     severity: 'block',
     keywords: ['pypi-'],
     minEntropy: 3.0,
@@ -1449,12 +1453,14 @@ function suppressed(pattern: DlpPattern, m: ArrayLike<unknown>, before = ''): bo
   const group = pattern.secretGroup !== undefined ? m[pattern.secretGroup] : undefined;
   // A misindexed group falls back to the whole match: judged as before, never skipped.
   const secret = typeof group === 'string' && group.length > 0 ? group : raw;
-  if (isPlaceholder(secret)) return true;
+  // A vendor token is generated: words joined by dashes are a slug or a name.
+  if (isPlaceholder(secret) || isPhrase(secret)) return true;
   // The vendor prefix is not material: `AKIA` in front of EXAMPLEEXAMPLE22
   // does not make it a key. Judge the body behind the pattern's own prefix too.
   const lower = secret.toLowerCase();
   const prefix = pattern.keywords?.find((kw) => lower.startsWith(kw.toLowerCase()));
-  if (prefix && isPlaceholder(secret.slice(prefix.length))) return true;
+  const body = prefix ? secret.slice(prefix.length) : '';
+  if (prefix && (isPlaceholder(body) || isPhrase(body))) return true;
   if (pattern.minEntropy !== undefined && shannonEntropy(secret) < pattern.minEntropy) return true;
   return false;
 }

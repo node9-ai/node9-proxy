@@ -101,6 +101,30 @@ describe('node9 log on Claude Code — redact in place', () => {
     expect(runLog(bashWith('total 0\n'))).toBeNull();
   });
 
+  // node9Firewall#374. A news article URL whose slug has `pypi-` followed by
+  // a long phrase was redacted as a PyPI token and the session flagged, twice
+  // in one research session. A token-shaped canary still is.
+  it('a URL slug that starts with pypi- is not a credential; a PyPI token still is', () => {
+    const url = [
+      'https://www.bleepingcomputer.example/news/security/popular-litellm-',
+      'pypi-package-backdoored-to-steal-credentials-auth-tokens/',
+    ].join('');
+    expect(runLog(bashWith(`Source: ${url}\n`))).toBeNull();
+    expect(runLog(readWith(`See ${url} for the report.\n`))).toBeNull();
+    expect(auditRows().some((r) => /dlp/i.test(String(r.checkedBy ?? '')))).toBe(false);
+
+    const token = [
+      'pypi-',
+      'AgEIcHlwaS5vcmc',
+      'Qx7Lm2Vb9Tz4Kp3Wn8Rd5Hc6Yf1Gs0Jbe2Ua9Mi4Xo7Pl3Ktr6Zw1Nq8Dv5',
+    ].join('');
+    const out = runLog(bashWith(`TWINE_PASSWORD=${token}\n`));
+    expect(out.updatedToolOutput.stdout).toBe(
+      'TWINE_PASSWORD=[node9-redacted:PyPI Upload Token]\n'
+    );
+    expect(out.additionalContext).toMatch(/PyPI Upload Token/);
+  });
+
   it('T7: a 300 KB stdout with the secret past 100 KB: replacement whole and redacted', () => {
     const stdout = 'x'.repeat(200_000) + `\ntoken=${FAKE_GH_TOKEN}\n` + 'y'.repeat(100_000);
     const out = runLog(bashWith(stdout));
