@@ -70,12 +70,26 @@
         {
           "field": "file_path",
           "op": "matches",
-          "value": "([\\/\\\\]\\.ssh([\\/\\\\]|$)|^\\.ssh[\\/\\\\])",
+          "value": "([\\/\\\\]\\.ssh(?:$|[\\/\\\\](?!(?:known_hosts(?:\\.old)?|authorized_keys2?|[^\\\\/]+\\.pub)$))|^\\.ssh[\\/\\\\](?!(?:known_hosts(?:\\.old)?|authorized_keys2?|[^\\\\/]+\\.pub)$))",
           "flags": "i"
         }
       ],
       "verdict": "block",
       "reason": "Reading SSH private keys is blocked by project-jail shield"
+    },
+    {
+      "name": "shield:project-jail:block-write-ssh-trust-files",
+      "tool": "!(read|read_file|grep|grep_search)",
+      "conditions": [
+        {
+          "field": "file_path",
+          "op": "matches",
+          "value": "(?:^|[\\/\\\\])\\.ssh[\\/\\\\](?:known_hosts(?:\\.old)?|authorized_keys2?|[^\\\\/]+\\.pub)$",
+          "flags": "i"
+        }
+      ],
+      "verdict": "block",
+      "reason": "Changing SSH keys and trusted hosts is blocked by project-jail shield"
     },
     {
       "name": "shield:project-jail:block-read-aws-any-tool",

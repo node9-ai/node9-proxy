@@ -27,6 +27,7 @@ const SCRIPT = path.join(ROOT, 'scripts', 'check-extractor-version.mjs');
 const SOURCE_FILES = [
   'packages/policy-engine/src/scan/canonical.ts',
   'packages/policy-engine/src/dlp/index.ts',
+  'packages/policy-engine/src/dlp/placeholder.ts',
   'packages/policy-engine/src/dlp/canary.ts',
   'packages/policy-engine/src/scan/pii.ts',
   'packages/policy-engine/src/scan/checksums.ts',
@@ -36,6 +37,9 @@ const SOURCE_FILES = [
   'packages/policy-engine/src/rules/index.ts',
   'packages/policy-engine/src/shell/index.ts',
   'packages/policy-engine/src/shell/plain-tree.ts',
+  'packages/policy-engine/src/shell/file-access.ts',
+  'packages/policy-engine/src/shell/inline-code.ts',
+  'packages/policy-engine/src/shell/dotenv-cli.ts',
   'packages/policy-engine/src/shell/tool-input.ts',
   'packages/policy-engine/src/policy/pipe-chain.ts',
   'packages/policy-engine/src/files/paths.ts',

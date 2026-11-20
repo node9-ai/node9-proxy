@@ -171,12 +171,19 @@ export const IBAN_LENGTH: Readonly<Record<string, number>> = {
  * and common in practice. A country not listed keeps the length-only rule.
  */
 const IBAN_BBAN_SHAPE: Readonly<Record<string, RegExp>> = {
+  // AD, AE, BA, EE: the registered countries whose code is two hex letters
+  // and that had no shape here, so a hex id with that prefix and a lucky
+  // mod-97 read as an IBAN (node9Firewall#369).
+  AD: /^\d{8}[A-Z0-9]{12}$/,
+  AE: /^\d{19}$/,
   AT: /^\d{16}$/,
+  BA: /^\d{16}$/,
   BE: /^\d{12}$/,
   CH: /^\d{5}[A-Z0-9]{12}$/,
   CZ: /^\d{20}$/,
   DE: /^\d{18}$/,
   DK: /^\d{14}$/,
+  EE: /^\d{16}$/,
   ES: /^\d{20}$/,
   FI: /^\d{14}$/,
   FR: /^\d{10}[A-Z0-9]{11}\d{2}$/,

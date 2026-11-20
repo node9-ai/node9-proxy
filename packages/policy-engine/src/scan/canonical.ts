@@ -811,7 +811,33 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // would be, and a dotenv load (or node -r dotenv/config, --env-file) whose
 // values reach the code reads ./.env. node's value flags (`--env-file .env`)
 // no longer hide the `-e` after them. Histories scanned under v38 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
+// canonical-v40 (2026-11-20, node9Firewall#301, DLP-1): the credential scanner
+// judges a placeholder by the token's shape (dlp/placeholder.ts) instead of
+// dropping any match that contains a stopword. A key, token or password that
+// merely carries `here`, `your`, `fake`, `example` ... inside it is reported;
+// the judgement reads the secret part of a match (Bearer token, Cloudinary
+// secret, npm token), not the words around it. A connection string whose
+// password is a vocabulary word (`password`, `test`) is a placeholder now.
+// Measured on 75,921 real commands and 109,653 tool texts: 38 verdicts change.
+// Same version (node9Firewall#300, JAIL-20): the credential jail reads a
+// literal script on a shell's standard input (`echo '...' | sh`, a here-string
+// or a heredoc into bash) through the structural file-access walk, the way
+// `sh -c '...'` was always read. 0 verdict changes on the same 75,921 commands.
+// Same version (node9Firewall#443): the jail reads the dotenv command-line
+// tools (`python -m dotenv list`, `dotenv get`, `dotenv -e F -- printenv`,
+// dotenvx) and Ruby's dotenv in inline code, and ruby's `-r LIB` no longer
+// hides the `-e` after it.
+// Same version (node9Firewall#308, JAIL-16): public material directly inside
+// a `.ssh` directory (known_hosts, authorized_keys, *.pub) is not a read of a
+// credential, in every copy of the rule (files/paths.ts isPublicSshMaterial).
+// Same version (node9Firewall#369): validateIban knows the BBAN shape of AD,
+// AE, BA and EE, so a hex id with one of those prefixes and a lucky mod-97 is
+// not an IBAN.
+// Same version (node9Firewall#374): the PyPI pattern is anchored on the
+// macaroon prefix (`pypi-AgE`), and a vendor-token match made only of
+// lower-case words joined by separators (a URL slug) is a phrase, not a token.
+// Histories scanned under v39 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
 // 2026-11-08, hash bumped with NO version bump (node9Firewall#451): dlp/index.ts
 // gained the Inline Secret Assignment pattern. argumentsOnly, which scanArgs
@@ -875,7 +901,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v39';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '1c4a57ad24e7c8c3';
+export const CANONICAL_EXTRACTOR_HASH = '0981d8f2268c7d69';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

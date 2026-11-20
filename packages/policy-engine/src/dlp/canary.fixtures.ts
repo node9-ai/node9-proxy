@@ -40,8 +40,10 @@ export const ALPHA_B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 export const ALPHA_ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 export const ALPHA_B64 = ALPHA_ALNUM + '+/';
 
-/** Stopwords reachable in the generated alphabets (corpus A1/A3/A4); the
- *  engine's own list is module-private, so this is the diagnostic mirror. */
+/** Letter runs the generators avoid (corpus A1/A3/A4). Stricter than the
+ *  engine, which since node9Firewall#301 judges a placeholder by shape
+ *  (dlp/placeholder.ts) and no longer drops a value for containing one of
+ *  these; a body free of them is reportable under both rules. */
 export const REACHABLE_STOPWORDS = [
   'example',
   'placeholder',

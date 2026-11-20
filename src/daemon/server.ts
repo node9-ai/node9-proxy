@@ -705,7 +705,7 @@ export function startDaemon(): void {
             extractCommandPattern(card.request.toolName, card.request.args)
           );
         } else if (persist === true) {
-          writePersistentDecision(card.request.toolName, verdict);
+          writePersistentDecision(card.request.toolName, verdict, card.request.args);
         } else if (verdict === 'allow' && trustRecipients === true) {
           // fw#318 P5: "Allow + trust this address". Only an exposure card
           // carries destinations; the list is written locally unless the

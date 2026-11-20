@@ -11,6 +11,7 @@ import { openStartupLogFd, recordStartupState } from '../daemon/startup-log';
 import { DAEMON_PORT } from '../daemon';
 import { getInternalToken } from '../auth/daemon';
 import { safeMessage } from '../utils/safe-text';
+import { extractCommandPattern, persistentScope } from '../auth/state';
 
 const PID_FILE = path.join(os.homedir(), '.node9', 'daemon.pid');
 
@@ -536,7 +537,8 @@ export function deadlineLine(deadline: number | null | undefined, now = Date.now
   return `Auto-denies in ${m > 0 ? `${m}m ` : ''}${sec}s (at ${at}) if nobody answers`;
 }
 
-function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] {
+/** Exported for its label rows: what each standing answer says it covers. */
+export function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] {
   // Recovery menu: stateful rule with a recoveryCommand uses a different card layout
   if (req.recoveryCommand) {
     return buildRecoveryCardLines(req);
@@ -585,10 +587,19 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
     lines.push(`${CYAN}║${RESET} ${argLabel}:  ${GRAY}${argsPreview}${RESET}`);
   }
 
+  // What the two standing answers cover, said on the card (node9Firewall#343).
+  // [a] is permanent and scoped to the command for a shell tool; [t] is a
+  // 30-minute trust on the command prefix. The daemon computes the same scope
+  // from the same call when it stores the answer.
+  const scope = persistentScope(req.toolName, req.args);
+  const trustPrefix = extractCommandPattern(req.toolName, req.args);
+  const always = safeMessage(scope.label, 48);
+  const trusted = trustPrefix ? ` "${safeMessage(trustPrefix, 32)}"` : '';
+
   // 💡 Insight: show after 2+ prior terminal approvals for this tool (i.e. the 3rd prompt onward)
-  if (localCount >= 2) {
+  if (localCount >= 2 && exposure.length === 0) {
     lines.push(
-      `${CYAN}║${RESET} ${YELLOW}💡${RESET} Approved ${localCount}× before — ${BOLD}[a]${RESET}${YELLOW} creates a permanent rule${RESET}`
+      `${CYAN}║${RESET} ${YELLOW}💡${RESET} Approved ${localCount}× before: ${BOLD}[a]${RESET}${YELLOW} allows ${always} from now on${RESET}`
     );
   }
 
@@ -601,7 +612,7 @@ function buildCardLines(req: ApprovalRequest, localCount: number = 0): string[] 
     ``,
     exposure.length > 0
       ? `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${CYAN}[s]${RESET} Allow + trust ${exposure.length === 1 ? 'this address' : 'these addresses'}`
-      : `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${YELLOW}[a]${RESET} Always Allow   ${BOLD}${CYAN}[t]${RESET} Trust 30m`,
+      : `  ${BOLD}${GREEN}[↵/y]${RESET} Allow   ${BOLD}${RED}[n]${RESET} Deny   ${BOLD}${YELLOW}[a]${RESET} Always allow ${always}   ${BOLD}${CYAN}[t]${RESET} Trust${trusted} 30m`,
     ``
   );
 
@@ -1057,7 +1068,9 @@ export async function startTail(options: TailOptions = {}): Promise<void> {
 
   console.log(chalk.cyan.bold(`\n🛰️  Node9 tail`));
   if (canApprove) {
-    console.log(chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always  [t] Trust 30m'));
+    console.log(
+      chalk.dim('Card: [↵/y] Allow  [n] Deny  [a] Always allow this command  [t] Trust 30m')
+    );
     console.log(chalk.dim(`Approvers (toggle): ${approverStatusLine()}  [q] quit`));
   }
   const ctxStat = readSessionUsage();

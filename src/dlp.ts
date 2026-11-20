@@ -40,7 +40,13 @@ export type { InjectionMatch, InjectionContext, InjectionConfidence } from '@nod
 export function scanFilePath(
   filePath: string,
   cwd = process.cwd(),
-  options: { systemAccessHandled?: boolean } = {}
+  options: {
+    systemAccessHandled?: boolean;
+    /** The call only reads the file: public material under `.ssh` is then
+     *  not sensitive (node9Firewall#308). Decided on the RESOLVED path, so a
+     *  `*.pub` symlink to a private key is still the private key. */
+    readOnly?: boolean;
+  } = {}
 ): DlpMatch | null {
   if (!filePath) return null;
 

@@ -60,7 +60,7 @@ export const PRIVILEGE_ESCALATION_RE = /\bchmod\s+(0?777|\+x)\b|\bchown\s+root\b
 // secret. That is an input-contract bug in the caller, not in this pattern --
 // see stage 5 of doc/credential-jail-architecture.md.
 export const SENSITIVE_PATH_RE =
-  /[\\/]\.aws(?:[\\/]|$)|^\.aws[\\/]|[\\/]\.ssh(?:[\\/]|$)|^\.ssh[\\/]|(?:^|[\\/])\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
+  /[\\/]\.aws(?:[\\/]|$)|^\.aws[\\/]|[\\/]\.ssh(?:$|[\\/](?!(?:known_hosts(?:\.old)?|authorized_keys2?|[^\\/]+\.pub)$))|^\.ssh[\\/](?!(?:known_hosts(?:\.old)?|authorized_keys2?|[^\\/]+\.pub)$)|(?:^|[\\/])\.env(?![\w-])(?:[\w.-]*\.local$|(?!\.(?:example|sample|template)\b)(?!\.test$)[\w.-]*$)|\.config\/gcloud\/credentials\.db\b|\.docker\/config\.json\b|\.netrc\b|\.npmrc\b|\.node9\/credentials\.json\b/i;
 
 /**
  * Tool names that read or grep file contents. Used to gate SENSITIVE_PATH_RE

@@ -704,6 +704,421 @@ describe('git from the parsed command (node9Firewall#413)', () => {
   });
 });
 
+describe('jail: a literal script on a shell standard input (node9Firewall#300, JAIL-20)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. `sh -c 'cat KEY'` was always blocked; the same script piped into a
+  // shell fell to a generic review, and as a here-string or a heredoc it was
+  // allowed with no prompt.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+
+  it.each([
+    ['the wrapped control', "sh -c 'cat ~/.ssh/id_rsa'"],
+    ['piped from echo', "echo 'cat ~/.ssh/id_rsa' | sh"],
+    ['piped from printf', "printf 'cat %s\\n' ~/.ssh/id_rsa | bash"],
+    ['a here-string', "bash <<< 'cat ~/.ssh/id_rsa'"],
+    ['a heredoc', "sh <<'EOF'\ncat .env\nEOF"],
+  ])('%s → blocked by the credential jail', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toMatch(/protected file/);
+  });
+
+  it.each([
+    ['a dynamic script', 'echo "$x" | sh'],
+    ['a script with no jailed read', "echo 'ls -la' | sh"],
+    ['a fixture file', "bash <<< 'cat .env.example'"],
+  ])('%s → not blocked', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    const decision = r.stdout.trim()
+      ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision
+      : 'allow';
+    expect(decision).not.toBe('deny');
+  });
+});
+
+describe('jail: the dotenv command-line tools and Ruby dotenv (node9Firewall#443)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. These reached `.env` with no reader word the jail knew and were
+  // allowed with no finding.
+  let tmpHome: string;
+  const settings = (mode: string) => ({
+    settings: {
+      mode,
+      autoStartDaemon: false,
+      approvers: { native: false, browser: false, cloud: false, terminal: false },
+    },
+  });
+  beforeEach(() => {
+    tmpHome = makeTempHome(settings('standard'));
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+
+  it.each([
+    ['a print form through python', 'python3 -m dotenv list'],
+    ['a print form of the CLI', 'dotenv get API_KEY'],
+    ['a run form that prints the environment', 'dotenv -e .env -- printenv'],
+    ['a run form with a shell that echoes a variable', "dotenv -e .env -- sh -c 'echo $API_KEY'"],
+    ['Ruby inline code', `ruby -e 'require "dotenv/load"; puts ENV["API_KEY"]'`],
+  ])('%s → blocked by the credential jail', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    expect(decisionOf(r)).toBe('deny');
+    expect(JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecisionReason).toMatch(
+      /protected file/
+    );
+  });
+
+  it.each([
+    ['a run form that only loads', 'dotenv -- npm run dev'],
+    ['a fixture file', 'dotenv -f .env.example list'],
+    ['a Ruby loader for another program', `ruby -e 'require "dotenv/load"; require "./app"'`],
+  ])('%s → allowed silently', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('a file whose name is a variable: recorded at Standard, asked at Strict', () => {
+    const command = `node --env-file "$F" -e 'console.log(process.env.API_KEY)'`;
+    const standard = run(command);
+    expect(standard.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(standard)).toBe('allow');
+    cleanupHome(tmpHome);
+    tmpHome = makeTempHome(settings('strict'));
+    const strict = run(command);
+    expect(strict.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(strict)).not.toBe('allow');
+  });
+});
+
+describe('Always allow is scoped to the command (node9Firewall#343)', () => {
+  // Through the built CLI: decisions.json as the daemon writes it, then the
+  // real hook. `mkfs` is a rule-less review at Standard, the kind a standing
+  // approval may answer. Before the fix `{ "Bash": "allow" }` answered every
+  // such review of the tool, for good.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 300,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const plant = (decisions: Record<string, string>) =>
+    fs.writeFileSync(path.join(tmpHome, '.node9', 'decisions.json'), JSON.stringify(decisions));
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+  const lastAuditRow = (): Record<string, unknown> => {
+    const lines = fs
+      .readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8')
+      .trim()
+      .split('\n');
+    return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  };
+
+  it('control: with no approval the command is held', () => {
+    const r = run('mkfs /dev/sdb');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+
+  it('the approved command is allowed by the standing approval', () => {
+    plant({ 'Bash(mkfs /dev/sdb)': 'allow' });
+    const r = run('mkfs /dev/sdb');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(decisionOf(r)).toBe('allow');
+    expect(lastAuditRow().checkedBy).toBe('persistent');
+  });
+
+  it.each([
+    ['a different command', 'mkfs /dev/sdc'],
+    ['the approved command behind a list', 'mkfs /dev/sdb && mkfs /dev/sdc'],
+    ['the approved command in a pipeline', 'mkfs /dev/sdb | tee log'],
+  ])('%s is not', (_name, command) => {
+    plant({ 'Bash(mkfs /dev/sdb)': 'allow' });
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+
+  it('a tool-wide Bash approval from before no longer applies', () => {
+    plant({ Bash: 'allow' });
+    const r = run('mkfs /dev/sdb');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+});
+
+describe('jail: public material under ~/.ssh is readable (node9Firewall#308, JAIL-16)', () => {
+  // Through the built CLI, shipped defaults, no approver. `known_hosts`,
+  // `authorized_keys` and `*.pub` were blocked like a private key, through
+  // the shell and through the file tools.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 300,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+    fs.mkdirSync(path.join(tmpHome, '.ssh'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.ssh', 'known_hosts'), 'github.com ssh-ed25519 AAAA\n');
+    fs.writeFileSync(path.join(tmpHome, '.ssh', 'id_rsa.pub'), 'ssh-rsa AAAA test\n');
+    fs.writeFileSync(path.join(tmpHome, '.ssh', 'id_rsa'), 'not a real key\n');
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const call = (tool_name: string, tool_input: Record<string, unknown>) =>
+    runCheck({ hook_event_name: 'PreToolUse', tool_name, tool_input }, { HOME: tmpHome }, tmpHome);
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+  const ssh = (name: string) => path.join(tmpHome, '.ssh', name);
+
+  it.each([
+    ['cat known_hosts', 'Bash', { command: 'cat ~/.ssh/known_hosts' }],
+    ['cat a public key', 'Bash', { command: 'cat ~/.ssh/id_rsa.pub' }],
+    [
+      'the CI idiom',
+      'Bash',
+      {
+        command:
+          'grep -q github.com ~/.ssh/known_hosts || ssh-keyscan github.com >> ~/.ssh/known_hosts',
+      },
+    ],
+    ['exporting a public key', 'Bash', { command: 'cp ~/.ssh/id_rsa.pub ./deploy.pub' }],
+  ])('%s → allowed silently', (_name, tool, input) => {
+    const r = call(tool, input);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('Read and Grep of public material are allowed', () => {
+    for (const r of [
+      call('Read', { file_path: ssh('known_hosts') }),
+      call('Read', { file_path: ssh('id_rsa.pub') }),
+      call('Grep', { pattern: 'github', path: ssh('known_hosts') }),
+    ]) {
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(decisionOf(r)).toBe('allow');
+    }
+  });
+
+  it.each([
+    ['cat a private key', 'Bash', { command: 'cat ~/.ssh/id_rsa' }],
+    ['cat every file', 'Bash', { command: 'cat ~/.ssh/*' }],
+    ['a public and a private operand', 'Bash', { command: 'cat ~/.ssh/id_rsa.pub ~/.ssh/id_rsa' }],
+  ])('%s → still blocked', (_name, tool, input) => {
+    const r = call(tool, input);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).toBe('deny');
+  });
+
+  it('file tools: a private key, and a WRITE to a public name, are still blocked', () => {
+    for (const r of [
+      call('Read', { file_path: ssh('id_rsa') }),
+      call('Read', { file_path: ssh('config') }),
+      call('Write', { file_path: ssh('authorized_keys'), content: 'ssh-ed25519 AAAA attacker' }),
+      call('Edit', { file_path: ssh('known_hosts'), old_string: 'github', new_string: 'evil' }),
+    ]) {
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(decisionOf(r)).toBe('deny');
+    }
+  });
+
+  it('a *.pub symlink to a private key is still the private key', () => {
+    fs.symlinkSync(ssh('id_rsa'), ssh('k.pub'));
+    const r = call('Read', { file_path: ssh('k.pub') });
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).toBe('deny');
+  });
+
+  it('copying a private key onto a public name is held, not quiet', () => {
+    const r = call('Bash', { command: 'cp ~/.ssh/id_rsa ~/.ssh/x.pub' });
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+});
+
+describe('a general kill of node processes is not a node9 disarm (node9Firewall#482)', () => {
+  // Through the built CLI, shipped defaults, no approver. `pkill node` and
+  // `killall node` were held for approval as "the AI wants to stop node9": they
+  // do stop the daemon along with every other node process, but that is how
+  // stray dev servers are cleared, and the daemon comes back on the next call.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 300,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+
+  it.each(['pkill node', 'pkill -f node', 'killall node', 'pkill python'])(
+    '%s → allowed silently, like any other process kill',
+    (command) => {
+      const r = run(command);
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe('');
+    }
+  );
+
+  it.each(['pkill node9', "pkill -f 'node9 daemon'", 'killall node9', 'node9 daemon stop'])(
+    '%s → still held: it is aimed at node9',
+    (command) => {
+      const r = run(command);
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(decisionOf(r)).not.toBe('allow');
+      expect(r.stdout).toMatch(/stop node9/);
+    }
+  );
+});
+
+describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. Before the fix a key or password that merely CONTAINED `here` or
+  // `your` was dropped as a placeholder and the command ran with no finding.
+  // Each pair differs only in the four letters in the middle. Synthetic values
+  // assembled at runtime.
+  const AWS_CONTROL = ['AKIA', 'QX7Z', 'WXYZ', '3BHDM7NP'].join('');
+  const AWS_WORD_INSIDE = ['AKIA', 'QX7Z', 'HERE', '3BHDM7NP'].join('');
+  const AWS_DOC_KEY = ['AKIA', 'IOSFODNN7', 'EXAMPLE'].join('');
+  const PW_CONTROL = ['Qx7Lm2', 'wxyz', 'Vb9'].join('');
+  const PW_WORD_INSIDE = ['Qx7Lm2', 'your', 'Vb9'].join('');
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const lastAuditRow = (): Record<string, unknown> => {
+    const lines = fs
+      .readFileSync(path.join(tmpHome, '.node9', 'audit.log'), 'utf-8')
+      .trim()
+      .split('\n');
+    return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  };
+
+  it.each([
+    ['AWS control', `aws configure set aws_access_key_id ${AWS_CONTROL}`, AWS_CONTROL, 'AWS'],
+    [
+      'AWS, word inside',
+      `aws configure set aws_access_key_id ${AWS_WORD_INSIDE}`,
+      AWS_WORD_INSIDE,
+      'AWS',
+    ],
+    [
+      'connection string control',
+      `psql postgres://app:${PW_CONTROL}@db.internal:5432/app -c 'select 1'`,
+      PW_CONTROL,
+      'Database Connection String',
+    ],
+    [
+      'connection string, word inside the password',
+      `psql postgres://app:${PW_WORD_INSIDE}@db.internal:5432/app -c 'select 1'`,
+      PW_WORD_INSIDE,
+      'Database Connection String',
+    ],
+  ])('%s → blocked by the credential scanner', (_name, command, secret, pattern) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(r.stdout).not.toContain(secret);
+    expect(r.stderr).not.toContain(secret);
+    const row = lastAuditRow();
+    expect(JSON.stringify(row)).not.toContain(secret);
+    expect(row.decision).toBe('deny');
+    // The block is this detector's, not another shield's.
+    expect(String(row.checkedBy)).toMatch(/dlp/i);
+    expect(String(row.dlpPattern)).toContain(pattern);
+  });
+
+  it.each([
+    `aws configure set aws_access_key_id ${AWS_DOC_KEY}`,
+    "psql postgres://user:password@localhost/db -c 'select 1'",
+    "psql 'postgres://user:<your-password>@localhost/db' -c 'select 1'",
+  ])('%s → a placeholder, allowed silently', (command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+});
+
 describe('DLP: a secret passed as an inline env var (node9Firewall#451)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. The three commands from the issue: a connection string blocks, a

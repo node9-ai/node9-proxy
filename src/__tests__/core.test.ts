@@ -842,7 +842,9 @@ describe('authorizeHeadless — persistent decisions', () => {
     // Regression: a blanket persistent allow for the Bash tool must never override
     // a smart rule with verdict "review". The user explicitly configured review-git-push
     // to require human approval; a stored "always allow" should not silently bypass it.
-    setupReviewGitPushMocks({ Bash: 'allow' });
+    // The approval is scoped to this very command (node9Firewall#343): a
+    // tool-wide `Bash: allow` is ignored now and would prove nothing here.
+    setupReviewGitPushMocks({ 'Bash(git push)': 'allow' });
     // git push matches the review-git-push smart rule → must NOT be auto-approved
     // by the persistent store. The request must reach the race engine.
     //
@@ -945,7 +947,9 @@ describe('authorizeHeadless — persistent decisions', () => {
     // reach the persistent store check. If 'mkfs' is removed from DANGEROUS_WORDS,
     // local-policy would auto-allow this call (checkedBy:'local-policy') and the
     // persistent path would no longer be exercised.
-    setupReviewGitPushMocks({ Bash: 'allow' });
+    //
+    // The approval is the command's own (node9Firewall#343): `Bash(mkfs /dev/sdb)`.
+    setupReviewGitPushMocks({ 'Bash(mkfs /dev/sdb)': 'allow' });
     // 'Bash' matches the rule's tool, but 'mkfs /dev/sdb' does not match the
     // git-push condition — so the rule is a no-op and persistent allow short-circuits.
     const result = await authorizeHeadless('Bash', { command: 'mkfs /dev/sdb' });
@@ -953,6 +957,33 @@ describe('authorizeHeadless — persistent decisions', () => {
     const expectedCheckedBy: AuthResult['checkedBy'] = 'persistent';
     expect(result.checkedBy).toBe(expectedCheckedBy);
     expect(result.blockedBy).toBeUndefined();
+  });
+
+  // ── node9Firewall#343: an approval of one command is not an approval of the tool ──
+  it('Always allow on one Bash command does not allow a different command', async () => {
+    setupReviewGitPushMocks({ 'Bash(mkfs /dev/sdb)': 'allow' });
+    expect(process.env.NODE9_TESTING).toBe('1');
+    // Same tool, same verb, another device: its own review, not the stored answer.
+    const other = await authorizeHeadless('Bash', { command: 'mkfs /dev/sdc' });
+    expect(other.approved).toBe(false);
+    const persistentCheckedBy: AuthResult['checkedBy'] = 'persistent';
+    expect(other.checkedBy).not.toBe(persistentCheckedBy);
+    // The approved command behind a list operator is a different command too.
+    const chained = await authorizeHeadless('Bash', {
+      command: 'mkfs /dev/sdb && mkfs /dev/sdc',
+    });
+    expect(chained.approved).toBe(false);
+    expect(chained.checkedBy).not.toBe(persistentCheckedBy);
+  });
+
+  it('a tool-wide Bash approval stored before approvals were scoped no longer applies', async () => {
+    // Before the fix this exact row was approved with checkedBy 'persistent'.
+    setupReviewGitPushMocks({ Bash: 'allow' });
+    expect(process.env.NODE9_TESTING).toBe('1');
+    const result = await authorizeHeadless('Bash', { command: 'mkfs /dev/sdb' });
+    expect(result.approved).toBe(false);
+    const persistentCheckedBy: AuthResult['checkedBy'] = 'persistent';
+    expect(result.checkedBy).not.toBe(persistentCheckedBy);
   });
 
   it('smart rule with verdict:allow short-circuits via local-policy — persistent store is never consulted', async () => {
@@ -1012,7 +1043,9 @@ describe('authorizeHeadless — persistent decisions', () => {
     const globalPath = path.join('/mock/home', '.node9', 'config.json');
     existsSpy.mockImplementation((p) => String(p) === decisionsPath || String(p) === globalPath);
     readSpy.mockImplementation((p) => {
-      if (String(p) === decisionsPath) return JSON.stringify({ bash: 'allow' }); // would approve if reached
+      // Scoped to the blocked command itself: would approve if reached.
+      if (String(p) === decisionsPath)
+        return JSON.stringify({ 'bash(./restricted_deploy.sh --env)': 'allow', bash: 'allow' });
       if (String(p) === globalPath)
         return JSON.stringify({
           settings: { mode: 'standard', approvalTimeoutMs: 0 },

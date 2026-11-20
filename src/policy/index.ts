@@ -1,5 +1,10 @@
 import type { InspectionInput, InspectionLayers, DlpMatch } from '@node9/policy-engine';
-import { reviewsEveryInline, isBlockAll, checkValue } from '@node9/policy-engine';
+import {
+  reviewsEveryInline,
+  isBlockAll,
+  checkValue,
+  fileToolOperation,
+} from '@node9/policy-engine';
 // src/policy/index.ts
 // Host wrapper around @node9/policy-engine.
 //
@@ -297,7 +302,7 @@ export async function explainPolicy(
             prepared,
             catalogSettingsFromConfig(config.settings, config.policy)
           ),
-    dlp: () => explainDlpMatch(args, prepared),
+    dlp: () => explainDlpMatch(toolName, args, prepared),
     pii: () => detectArgsPii(args),
     packageCheck: () =>
       manual || !cfg?.enabled
@@ -385,7 +390,11 @@ const GATE_PLAIN: Record<PreEngineGate, string> = {
 };
 
 /** The same DLP inputs the hook scans: the file path first, then the arguments. */
-function explainDlpMatch(args: unknown, prepared: PreparedFileAccess): DlpMatch | null {
+function explainDlpMatch(
+  toolName: string,
+  args: unknown,
+  prepared: PreparedFileAccess
+): DlpMatch | null {
   const argsObj =
     args && typeof args === 'object' && !Array.isArray(args)
       ? (args as Record<string, unknown>)
@@ -395,6 +404,7 @@ function explainDlpMatch(args: unknown, prepared: PreparedFileAccess): DlpMatch 
     (filePath
       ? scanFilePath(filePath, prepared.cwd, {
           systemAccessHandled: prepared.handledPaths.has(filePath),
+          readOnly: fileToolOperation(toolName, args) === 'read',
         })
       : null) ?? (args !== undefined ? scanArgumentSecrets(args) : null)
   );

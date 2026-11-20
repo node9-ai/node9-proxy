@@ -9,13 +9,15 @@
 //   host:<hostname>   lower-cased, no port, no brackets
 //   iban:<IBAN>       upper-cased, no spaces, checksum-valid
 //   account:<number>  an IBAN-shaped number whose checksum does not hold (a
-//                     sandbox or test account), only under a recipient key
+//                     sandbox or test account), written in upper case. A
+//                     lower-case run of the same shape is an id (a hash, a
+//                     trace id), not an account (node9Firewall#369).
 //
 // Pure, bounded, never throws. Values are compared on the machine and shown
 // only in the local approval prompt; audit rows carry the kind and a count.
 // Design: docs/roadmap/active/untrusted-content-proxy-code-design.md, 4.2.
 
-import { validateIban } from '../scan/checksums';
+import { IBAN_LENGTH, validateIban } from '../scan/checksums';
 
 export type DestinationKind = 'email' | 'host' | 'iban' | 'account';
 
@@ -31,8 +33,29 @@ const EMAIL_RE =
 // A URL with a scheme, or a www. host: a bare "node.js" or "file.txt" in prose
 // must not become a destination. Trailing punctuation is trimmed below.
 const URL_RE = /\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>"'`){}]+/gi;
-// IBAN-shaped: country, check digits, then groups that may carry spaces or dashes.
-const IBAN_RE = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/g;
+// IBAN-shaped: country, check digits, then groups that may carry spaces or
+// dashes. Case-insensitive, on the text as written: a checksum-valid IBAN is
+// one in either case, and the account fallback needs to see the case.
+const IBAN_RE = /\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,4})?\b/gi;
+const ACCOUNT_SHAPE_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/;
+
+/**
+ * The account number an IBAN-shaped match names when its checksum fails, or
+ * null. Two rules keep ordinary ids out (node9Firewall#369: about 5% of
+ * 16- and 22-character hex ids have this shape once upper-cased):
+ *  - it is upper case as written. An account number is; a hash is not.
+ *  - it does not run into the next word. The pattern allows a space between
+ *    groups so a printed IBAN is read; only a value in print format (groups of
+ *    four) is joined across spaces, otherwise the account is the first
+ *    unbroken run (`US13...212 OK` is not `...212OK`).
+ */
+function accountOf(written: string): string | null {
+  if (written !== written.toUpperCase()) return null;
+  const groups = written.split(/[ -]+/);
+  const printed = groups.length > 1 && groups.slice(0, -1).every((g) => g.length === 4);
+  const compact = printed ? groups.join('') : groups[0];
+  return ACCOUNT_SHAPE_RE.test(compact) ? compact : null;
+}
 
 // Argument keys whose string value is a recipient even without a scheme
 // (an email tool's `to`, a transfer's `recipient`).
@@ -84,13 +107,43 @@ function hostOfUrl(value: string): string | null {
   }
 }
 
+/**
+ * A checksum-valid IBAN, upper-cased and cut to its country's length, or null.
+ * validateIban reads the first N characters for the country, so an IBAN
+ * followed by more text still counts. That allowance is for an IBAN written
+ * as one: in a value that is NOT upper case as written (an id that happens to
+ * pass mod-97) the IBAN must end exactly where a group of the text ends.
+ */
+function ibanOf(written: string): string | null {
+  const compact = written.replace(/[ -]/g, '').toUpperCase();
+  if (!validateIban(compact)) return null;
+  // The IBAN is the country's length and no more: the pattern can take the
+  // word after it as one more group (`... 1332 from`), and the content side
+  // and the call side must name the same string.
+  const length = IBAN_LENGTH[compact.slice(0, 2)];
+  const iban = compact.slice(0, length);
+  if (written === written.toUpperCase()) return iban;
+  // Not upper case as written: the IBAN must END where a group ends, so a
+  // longer id whose first characters happen to validate is not one.
+  let at = 0;
+  for (const group of written.split(/[ -]+/)) {
+    at += group.length;
+    if (at === length) return iban;
+    if (at > length) break;
+  }
+  return null;
+}
+
 function addIbans(text: string, out: Set<string>): void {
-  for (const m of text.toUpperCase().matchAll(IBAN_RE)) {
-    const compact = m[0].replace(/[ -]/g, '');
-    if (validateIban(compact)) out.add(`iban:${compact}`);
-    // The same shape with a failing checksum is kept as an account number so
-    // a transfer to it can be matched; it is never reported as an IBAN.
-    else if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact)) out.add(`account:${compact}`);
+  for (const m of text.matchAll(IBAN_RE)) {
+    const iban = ibanOf(m[0]);
+    if (iban) out.add(`iban:${iban}`);
+    else {
+      // The same shape with a failing checksum is kept as an account number
+      // so a transfer to it can be matched; it is never reported as an IBAN.
+      const account = accountOf(m[0]);
+      if (account) out.add(`account:${account}`);
+    }
     if (out.size >= MAX_DESTINATIONS) return;
   }
 }
@@ -164,8 +217,10 @@ function walk(value: unknown, key: string | undefined, out: Set<string>, depth: 
       if (h && (h.includes(':') || /\.\p{L}{2,}$/u.test(h))) out.add(`host:${h}`);
       // An account number that is IBAN-shaped but fails the checksum (a
       // sandbox account, a fictional bank): still the place the money goes.
-      const acct = s.replace(/[ .-]/g, '').toUpperCase();
-      if (/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(acct) && !validateIban(acct))
+      // Upper case as written, like the free-text rule: a lower-case hex id
+      // under `account` or `target` is an id, not a place money goes.
+      const acct = s.replace(/[ .-]/g, '');
+      if (acct === acct.toUpperCase() && ACCOUNT_SHAPE_RE.test(acct) && !validateIban(acct))
         out.add(`account:${acct}`);
     }
     return;

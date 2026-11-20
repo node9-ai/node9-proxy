@@ -51,6 +51,8 @@ interface Daemon {
   port: number;
   base: string;
   token: string;
+  /** The daemon's HOME: its files (decisions.json, trust.json) live under it. */
+  home: string;
   check(body: Record<string, unknown>): Promise<{ id: string; deadline: number | null }>;
   wait(id: string, opts?: { token?: boolean; signal?: AbortSignal }): Promise<Response>;
   decision(id: string, body: Record<string, unknown>): Promise<Response>;
@@ -111,6 +113,7 @@ async function startDaemon(config: Record<string, unknown>): Promise<Daemon> {
     port,
     base,
     token,
+    home,
     async check(body) {
       const res = await post(`${base}/check`, body, false);
       expect(res.ok).toBe(true);
@@ -313,6 +316,46 @@ describe('approval cards on a real daemon', () => {
       })
     ).json()) as { allowCount: number };
     expect(next.allowCount).toBe(1);
+  });
+
+  // node9Firewall#343. Before: [a] stored `{ "bash": "allow" }`, the whole
+  // tool, for good. Now the daemon stores the scope the card showed.
+  it('[a] Always allow stores the command, not the tool', async () => {
+    const decisions = () =>
+      JSON.parse(fs.readFileSync(path.join(d.home, '.node9', 'decisions.json'), 'utf-8')) as Record<
+        string,
+        string
+      >;
+    const simple = await d.check({
+      toolName: 'bash',
+      args: { command: 'npm test -- --watch' },
+      fromCLI: true,
+    });
+    const ok = await d.decision(simple.id, {
+      decision: 'allow',
+      persist: true,
+      source: 'terminal',
+    });
+    expect(ok.status).toBe(200);
+    const body = (await (await d.wait(simple.id)).json()) as { record: Record_ };
+    expect(body.record).toMatchObject({ decision: 'allow', standing: 'always-allow' });
+    expect(decisions()).toEqual({ 'bash(npm test)': 'allow' });
+
+    // A compound command is stored as that exact command.
+    const compound = await d.check({
+      toolName: 'bash',
+      args: { command: 'npm ci && npm test' },
+      fromCLI: true,
+    });
+    await d.decision(compound.id, { decision: 'allow', persist: true, source: 'terminal' });
+    await d.wait(compound.id);
+    const keys = Object.keys(decisions());
+    expect(keys).toHaveLength(2);
+    expect(keys).toContain('bash(npm test)');
+    // A digest of the text, never the text itself.
+    expect(keys.find((k) => k !== 'bash(npm test)')).toMatch(/^bash\(=#[0-9a-f]{32}\)$/);
+    // Never the tool itself.
+    expect(decisions()).not.toHaveProperty('bash');
   });
 
   it("a protocol-2 card's /wait needs the internal token", async () => {

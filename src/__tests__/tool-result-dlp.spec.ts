@@ -150,10 +150,12 @@ describe('T. the tool-result DLP path', () => {
     expect(t.leaks).toBe(1);
   });
 
-  it('T7 a template value is still suppressed, by the engine stopwords', () => {
-    // The case the demoter was written for. The engine's DLP_STOPWORDS do this
-    // on the RAW value, where it can actually be done.
-    transcript([toolUse({ command: 'cat .env.example' }), toolResult('AKIAEXAMPLEEXAMPLE12')]);
+  it('T7 a template value is still suppressed, by the engine placeholder judgement', () => {
+    // The case the demoter was written for. The engine's isPlaceholder does
+    // this on the RAW value, where it can actually be done. The value has the
+    // key's real shape (base32 body), so the suppression is what keeps it quiet.
+    const template = ['AKIA', 'EXAMPLE', 'EXAMPLE', '22'].join('');
+    transcript([toolUse({ command: 'cat .env.example' }), toolResult(template)]);
     expect(scan().totals.leaks).toBe(0);
   });
 

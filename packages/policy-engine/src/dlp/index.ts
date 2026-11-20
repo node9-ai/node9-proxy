@@ -10,7 +10,8 @@
 import safeRegex from 'safe-regex2';
 import { findMnemonic, type MnemonicBudget } from './mnemonic';
 import { secretViews, newSecretViewBudget } from './secret-views';
-import { isLegacySystemPath, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
+import { isPhrase, isPlaceholder } from './placeholder';
+import { isLegacySystemPath, isPublicSshMaterial, LEGACY_SYSTEM_PATH_RE } from '../files/paths';
 import { validateWif, validateXprv, validateGithubToken, validateCask } from '../scan/checksums';
 import type { DlpMatch } from '../types';
 export type { DlpMatch } from '../types';
@@ -66,6 +67,16 @@ interface DlpPattern {
    *  is explicit rather than "group 1 if present". */
   redactGroup?: number;
   /**
+   * The capture group that holds the SECRET part of the match, when the match
+   * also carries text the writer of the command controls (a scheme word, a
+   * host or cloud name) or a fixed label. The placeholder judgement and the
+   * entropy floor read this group, never the whole match: a heuristic applied
+   * to a span the writer controls is a suppression the writer controls
+   * (node9Firewall#301). Absent: the whole match is the secret. redactText
+   * still replaces the whole match; a validator still receives it.
+   */
+  secretGroup?: number;
+  /**
    * Only the bounded tool-argument gate (matchArgumentText, reached through
    * inspectArgumentSecrets / scanArgumentSecrets) uses this pattern. The raw
    * scanners skip it: scanArgs (prompts, tool output, history scans, audit
@@ -98,36 +109,6 @@ function shannonEntropy(s: string): number {
   }
   return h;
 }
-
-// ── Stop Words ────────────────────────────────────────────────────────────────
-// If the matched secret contains any of these (case-insensitive), suppress the
-// finding — it's a placeholder, template variable, or documentation example.
-const DLP_STOPWORDS: string[] = [
-  'example',
-  'placeholder',
-  'changeme',
-  'your_key',
-  'your_token',
-  'your_secret',
-  'replace_me',
-  'insert_key',
-  'put_your',
-  'fake',
-  'dummy',
-  'sample',
-  'xxxxxxxx',
-  'aaaaaa',
-  'bbbbbb',
-  '00000000',
-  '${',
-  '{{',
-  '%{',
-  '<your',
-  'test_key',
-  'test_token',
-  'your',
-  'here',
-];
 
 // ── Context validators (node9Firewall#348) ────────────────────────────────────
 // Shared by the two name-based patterns. A value is "generated-looking" when
@@ -194,8 +175,7 @@ function looksGenerated(
   lettersOnlyAllowed = false
 ): boolean {
   if (value.length < minLength) return false;
-  const lower = value.toLowerCase();
-  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
+  if (isPlaceholder(value)) return false;
   if (REFERENCE_VALUE_RE.test(value)) return false;
   if (!lettersOnlyAllowed && IDENTIFIER_VALUE_RE.test(value)) return false;
   if (EMAIL_VALUE_RE.test(value)) return false;
@@ -463,9 +443,7 @@ const SQL_PASSWORD_VALUE_RE = /['"]([^'"\s]{8,128})['"]$/;
 function validateSqlPassword(raw: string): boolean {
   const value = capturedValue(raw, SQL_PASSWORD_VALUE_RE);
   if (value === null) return false;
-  const lower = value.toLowerCase();
-  if (DLP_STOPWORDS.some((sw) => lower.includes(sw)) || REFERENCE_VALUE_RE.test(value))
-    return false;
+  if (isPlaceholder(value) || REFERENCE_VALUE_RE.test(value)) return false;
   if (/^[a-z]+$/i.test(value) && value.length < 12) return false; // a word
   return shannonEntropy(value) >= 2.5 && !hasSequentialRun(value);
 }
@@ -523,8 +501,7 @@ function validateBasicCredential(raw: string, before = ''): boolean {
   // random token with dashes ("x7k2…-44v9…-7kvu…") reads as words. A password
   // already mixes letters and digits here; it must not be a placeholder, a
   // sequential run or low in entropy.
-  const lower = password.toLowerCase();
-  if (DLP_STOPWORDS.some((sw) => lower.includes(sw)) || hasSequentialRun(password)) return false;
+  if (isPlaceholder(password) || hasSequentialRun(password)) return false;
   return shannonEntropy(password) >= 3.0;
 }
 
@@ -547,7 +524,7 @@ function validateDropboxSecret(raw: string): boolean {
   const value = capturedValue(raw, DROPBOX_SECRET_RE);
   if (value === null || value !== value.toLowerCase()) return false;
   if (!/[0-9]/.test(value) || !/[a-z]/.test(value)) return false;
-  if (DLP_STOPWORDS.some((sw) => value.includes(sw)) || hasSequentialRun(value)) return false;
+  if (isPlaceholder(value) || hasSequentialRun(value)) return false;
   return shannonEntropy(value) >= 3.0;
 }
 
@@ -564,8 +541,7 @@ const DB_URL_PASSWORD_RE = /:\/\/[^:/\s@]*:([^@\s]{4,})@/;
 function validateDbConnectionString(raw: string): boolean {
   const password = capturedValue(raw, DB_URL_PASSWORD_RE);
   if (password === null) return false;
-  const lower = password.toLowerCase();
-  if (DLP_STOPWORDS.some((sw) => lower.includes(sw))) return false;
+  if (isPlaceholder(password)) return false;
   return shannonEntropy(raw) >= 3.0;
 }
 
@@ -800,8 +776,9 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // ── NPM ───────────────────────────────────────────────────────────────────
   {
     name: 'NPM Auth Token',
-    regex: /_authToken\s*=\s*[A-Za-z0-9_-]{20,}/,
+    regex: /_authToken\s*=\s*([A-Za-z0-9_-]{20,})/,
     severity: 'block',
+    secretGroup: 1,
     keywords: ['_authtoken'],
   },
 
@@ -930,7 +907,11 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // ── PyPI ──────────────────────────────────────────────────────────────────
   {
     name: 'PyPI Upload Token',
-    regex: /\bpypi-[A-Za-z0-9_-]{50,}\b/,
+    // A PyPI token is a macaroon whose base64 body always starts with the
+    // same bytes: `pypi-AgEIcHlwaS5vcmc` (pypi.org), `pypi-AgENdGVzdC5weXBp`
+    // (test.pypi.org). Without the `AgE` anchor any `pypi-<long-slug>` in a
+    // URL matched (node9Firewall#374).
+    regex: /\bpypi-AgE[A-Za-z0-9_-]{50,}\b/,
     severity: 'block',
     keywords: ['pypi-'],
     minEntropy: 3.0,
@@ -940,11 +921,12 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // contextBoost: promoted to block when assigned (e.g. AUTH_TOKEN=Bearer eyJ...)
   {
     name: 'Bearer Token',
-    regex: /Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/i,
+    regex: /Bearer\s+([a-zA-Z0-9\-._~+/]{20,})=*/i,
     severity: 'review',
     keywords: ['bearer'],
     contextBoost: true,
     minEntropy: 3.0,
+    secretGroup: 1,
   },
 
   // ── HTTP Basic credential ─────────────────────────────────────────────────
@@ -1022,8 +1004,9 @@ export const DLP_PATTERNS: DlpPattern[] = [
   // ── Cloudinary ────────────────────────────────────────────────────────────
   {
     name: 'Cloudinary URL',
-    regex: /\bcloudinary:\/\/[0-9]+:[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+/,
+    regex: /\bcloudinary:\/\/[0-9]+:([a-zA-Z0-9_-]+)@[a-zA-Z0-9_-]+/,
     severity: 'block',
+    secretGroup: 1,
     keywords: ['cloudinary://'],
   },
 
@@ -1323,10 +1306,20 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
 export function matchSensitivePath(
   resolvedPath: string,
   originalPath: string,
-  options: { systemAccessHandled?: boolean } = {}
+  options: {
+    systemAccessHandled?: boolean;
+    /**
+     * The call only READS the file (`Read`, `Grep`). Public material under
+     * `.ssh` (known_hosts, authorized_keys, *.pub) is then not sensitive
+     * (JAIL-16). A write to the same names stays blocked: adding a key to
+     * `authorized_keys` is persistence, not a read of something public.
+     */
+    readOnly?: boolean;
+  } = {}
 ): DlpMatch | null {
   // Normalise to forward slashes for cross-platform pattern matching.
   const normalised = resolvedPath.replace(/\\/g, '/');
+  if (options.readOnly && isPublicSshMaterial(normalised)) return null;
   if (!options.systemAccessHandled && isLegacySystemPath(normalised))
     return sensitivePathMatch(originalPath);
 
@@ -1373,6 +1366,18 @@ function assertBuiltinPatternsAreSafe(): void {
       throw new Error(
         `[node9 engine] Builtin DLP pattern '${p.name}' is vulnerable to ReDoS: ${p.regex.source}`
       );
+    }
+  }
+  for (const p of DLP_PATTERNS) {
+    // A secretGroup past the pattern's own groups would read the offset or the
+    // input text in redactText's callback: refuse it at import, like ReDoS.
+    const groups = (new RegExp(`${p.regex.source}|`).exec('')?.length ?? 1) - 1;
+    for (const index of [p.secretGroup, p.redactGroup]) {
+      if (index !== undefined && (index < 1 || index > groups)) {
+        throw new Error(
+          `[node9 engine] Builtin DLP pattern '${p.name}' names group ${index} of ${groups}`
+        );
+      }
     }
   }
   for (const re of SENSITIVE_PATH_PATTERNS) {
@@ -1434,7 +1439,8 @@ export const DLP_SCAN_LIMITS = {
  * three DLP entrypoints (scanArgs, scanText, redactText); they used to carry
  * three copies of the stopword + entropy sequence, and redactText had no test.
  */
-function suppressed(pattern: DlpPattern, raw: string, before = ''): boolean {
+function suppressed(pattern: DlpPattern, m: ArrayLike<unknown>, before = ''): boolean {
+  const raw = m[0] as string;
   if (pattern.validate) {
     let ok: boolean;
     try {
@@ -1444,8 +1450,18 @@ function suppressed(pattern: DlpPattern, raw: string, before = ''): boolean {
     }
     return !ok;
   }
-  if (DLP_STOPWORDS.some((sw) => raw.toLowerCase().includes(sw))) return true;
-  if (pattern.minEntropy !== undefined && shannonEntropy(raw) < pattern.minEntropy) return true;
+  const group = pattern.secretGroup !== undefined ? m[pattern.secretGroup] : undefined;
+  // A misindexed group falls back to the whole match: judged as before, never skipped.
+  const secret = typeof group === 'string' && group.length > 0 ? group : raw;
+  // A vendor token is generated: words joined by dashes are a slug or a name.
+  if (isPlaceholder(secret) || isPhrase(secret)) return true;
+  // The vendor prefix is not material: `AKIA` in front of EXAMPLEEXAMPLE22
+  // does not make it a key. Judge the body behind the pattern's own prefix too.
+  const lower = secret.toLowerCase();
+  const prefix = pattern.keywords?.find((kw) => lower.startsWith(kw.toLowerCase()));
+  const body = prefix ? secret.slice(prefix.length) : '';
+  if (prefix && (isPlaceholder(body) || isPhrase(body))) return true;
+  if (pattern.minEntropy !== undefined && shannonEntropy(secret) < pattern.minEntropy) return true;
   return false;
 }
 
@@ -1465,7 +1481,7 @@ function firstAcceptedMatch(pattern: DlpPattern, text: string): string | null {
       re.lastIndex = m.index + 1; // progress guard; these patterns never match empty
       continue;
     }
-    if (!suppressed(pattern, m[0], text.slice(Math.max(0, m.index - 64), m.index))) return m[0];
+    if (!suppressed(pattern, m, text.slice(Math.max(0, m.index - 64), m.index))) return m[0];
     // On rejection, exec's own lastIndex advance (to the end of the match) is
     // sufficient: the vendor patterns are \b-anchored and separator-free, so a
     // valid match can never begin INSIDE a rejected one. The two context
@@ -1718,7 +1734,9 @@ export function redactText(text: string): { result: string; found: string[] } {
       continue;
     }
     result = result.replace(globalRegex, (match: string, ...rest: unknown[]) => {
-      if (suppressed(pattern, match)) return match; // leave the text intact
+      // replace() passes (match, ...groups, offset, input): [match, ...rest]
+      // indexes the groups the way an exec result does.
+      if (suppressed(pattern, [match, ...rest])) return match; // leave the text intact
       if (!found.includes(pattern.name)) found.push(pattern.name);
       const marker = `[node9-redacted:${pattern.name}]`;
       const group =

@@ -4,6 +4,14 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { matchesPattern } from '../policy';
+import {
+  COMMAND_WRAPPERS,
+  SHELL_INTERPRETERS,
+  detectInlineExec,
+  isShellShapedTool,
+  resolveShellInput,
+} from '@node9/policy-engine';
+import { createHash } from 'crypto';
 import { atomicWriteSync } from '../utils/atomic-write';
 import { forecastRun } from './forecast-context';
 
@@ -130,13 +138,113 @@ export function writeTrustSession(toolName: string, durationMs: number, args?: u
   }
 }
 
-export function getPersistentDecision(toolName: string): 'allow' | 'deny' | null {
+/**
+ * Tools whose argument is a shell command: a standing approval of one of them
+ * is scoped to the command, never to the tool (node9Firewall#343). The
+ * engine's own list (Bash and its aliases, and the MCP executors it reads as
+ * a shell), so a tool the gate judges as a shell is approved as one.
+ */
+export const isShellTool = (toolName: string): boolean => isShellShapedTool(toolName);
+
+/** The command a shell tool call runs, as the engine reads it; '' when the
+ *  call carries none it can read. */
+function shellCommandOf(toolName: string, args: unknown): string {
+  const input = resolveShellInput(toolName, args);
+  return input.kind === 'shell' ? input.command.trim() : '';
+}
+
+/**
+ * Anything that makes a command more than ONE simple command, or makes its
+ * words depend on the shell: a list, a pipe, a redirect, a substitution, a
+ * variable, a group, an escape, a newline. Read from the text on purpose: a
+ * quoted `;` also counts, which only makes the approval narrower.
+ */
+const NOT_ONE_SIMPLE_COMMAND_RE = /[;&|<>()`$\\{}\n\r]/;
+
+/** What a standing "Always allow" covers, and how it is shown to the person. */
+export interface PersistentScope {
+  /** The key in decisions.json. */
+  key: string;
+  /** What the prompt shows after "Always allow". */
+  label: string;
+}
+
+/**
+ * The scope of a standing approval for this call (node9Firewall#343).
+ *
+ * A shell tool is never approved as a whole: one keypress on a harmless
+ * command used to remove every later rule-less review of the tool, for good.
+ *  - One simple command: its first two words. `Bash(npm test)` later allows
+ *    `npm test -- --watch`, not `npm run build`.
+ *  - Anything else (a compound command, a wrapper, inline code): this exact
+ *    command, stored as `Bash(=#<digest>)`. A two-word prefix of
+ *    `cd /tmp && ...` or of `sh -c '...'` says nothing about what runs.
+ * Another tool keeps its bare name: the tool is the scope.
+ *
+ * The daemon writes with this, the authorizer reads with it and `node9 tail`
+ * shows its label, so the three cannot drift.
+ */
+export function persistentScope(toolName: string, args: unknown): PersistentScope {
+  if (!isShellTool(toolName)) return { key: toolName, label: toolName };
+  const command = shellCommandOf(toolName, args);
+  if (!command || !prefixNamesTheCommand(command)) {
+    // The exact text, stored as a digest: the command can carry a secret or
+    // run to kilobytes, and decisions.json is a plain file that
+    // `node9 decisions list` prints.
+    const digest = createHash('sha256').update(command).digest('hex').slice(0, 32);
+    return { key: `${toolName}(=#${digest})`, label: 'this exact command' };
+  }
+  const prefix = command.split(/\s+/).slice(0, 2).join(' ');
+  return { key: `${toolName}(${prefix})`, label: `"${prefix}"` };
+}
+
+/** Words that run ANOTHER command: after one of them the first two words say
+ *  nothing about what runs. */
+const RUNS_ANOTHER_COMMAND = new Set([
+  ...COMMAND_WRAPPERS,
+  ...SHELL_INTERPRETERS,
+  'eval',
+  'source',
+  '.',
+]);
+
+/**
+ * Do a command's first two words name what it runs? Only then is a prefix a
+ * fair scope for a standing approval. Not when it is more than one simple
+ * command; not when it starts with a wrapper (`sudo`, `env`, `xargs`,
+ * `timeout`), a shell (`sh -c '...'`, `bash script.sh`: the engine reads a
+ * literal payload as an ordinary command, so detectInlineExec does not flag
+ * it) or an environment assignment (`TOKEN=... npm publish`: the
+ * prefix would also store the value); and not when it carries inline code
+ * (`sh -c '...'`, `python3 -c ...`, `node -e ...`), where "Always allow
+ * `sh -c`" would approve every script.
+ */
+function prefixNamesTheCommand(command: string): boolean {
+  if (NOT_ONE_SIMPLE_COMMAND_RE.test(command)) return false;
+  const first = command.split(/\s+/)[0];
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) return false;
+  if (RUNS_ANOTHER_COMMAND.has((first.split('/').pop() ?? '').toLowerCase())) return false;
+  try {
+    return !detectInlineExec(command);
+  } catch {
+    return false; // unreadable: the narrow scope
+  }
+}
+
+export function getPersistentDecision(toolName: string, args?: unknown): 'allow' | 'deny' | null {
   try {
     const file = path.join(os.homedir(), '.node9', 'decisions.json');
     if (!fs.existsSync(file)) return null;
     const decisions = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, string>;
-    const d = decisions[toolName];
-    if (d === 'allow' || d === 'deny') return d;
+    const whole = decisions[toolName];
+    if (!isShellTool(toolName)) return whole === 'allow' || whole === 'deny' ? whole : null;
+    // A tool-wide deny still applies: tightening is fine. A tool-wide ALLOW of
+    // a shell tool, written before approvals were scoped, no longer does.
+    if (whole === 'deny') return 'deny';
+    // No readable command: nothing a stored approval could have named.
+    if (!shellCommandOf(toolName, args)) return null;
+    const scoped = decisions[persistentScope(toolName, args).key];
+    if (scoped === 'allow' || scoped === 'deny') return scoped;
   } catch {
     /* ignore */
   }

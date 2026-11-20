@@ -11,6 +11,7 @@ import {
   copySourcePaths,
   literalShellPayload,
   shellConsumesPipe,
+  decodeAnsiC,
   FS_READ_TOOLS,
   SHELL_INTERPRETERS,
   functionBodies,
@@ -328,9 +329,17 @@ export function sedSubstitutions(script: string): string[] | null {
   return out.length > 0 ? out : null;
 }
 
+/** What a walk could not finish: set when a nested payload was left unread
+ *  because the payload budget or the nesting bound ran out. A caller that
+ *  gates on the result must not read that as "nothing found". */
+export interface FileAccessWalkReport {
+  exhausted: boolean;
+}
+
 export function collectShellFileAccesses(
   command: string,
-  context: FileAccessContext = {}
+  context: FileAccessContext = {},
+  report?: FileAccessWalkReport
 ): FileAccess[] {
   const out: FileAccess[] = [];
   let payloads = 256;
@@ -368,7 +377,11 @@ export function collectShellFileAccesses(
       });
   }
   function nestedPayload(payload: string | null, state: State, depth: number): void {
-    if (payload === null || depth >= MAX_PAYLOAD_DEPTH || payloads-- <= 0) return;
+    if (payload === null) return;
+    if (depth >= MAX_PAYLOAD_DEPTH || payloads-- <= 0) {
+      if (report) report.exhausted = true;
+      return;
+    }
     const f = parseShared(payload);
     if (typeof f !== 'symbol') statements(f.Stmts ?? [], state, depth + 1);
   }
@@ -1080,9 +1093,139 @@ export function collectShellFileAccesses(
     }
     return null;
   }
+  /**
+   * A heredoc body as the script a shell receives (node9Firewall#300). The
+   * outer shell expands an unquoted body before the inner one parses it, so a
+   * part this walk can resolve is put in as text, and one it cannot is left as
+   * an unknown variable: the literal lines stay readable instead of the whole
+   * body being skipped for one `$X` in it.
+   */
+  function heredocScript(word: any): string {
+    let text = '';
+    for (const part of word?.Parts ?? []) {
+      if (part?.kind === 'Lit') {
+        text += part.Value ?? '';
+        continue;
+      }
+      text += resolveWordLiteral({ Parts: [part] }) ?? '$N9_UNRESOLVED';
+    }
+    return text;
+  }
+  /** The script a statement feeds a shell on stdin: a heredoc or a herestring. */
+  function stdinScriptText(stmt: any): string | null {
+    for (const redir of stmt?.Redirs ?? []) {
+      if (redir.Hdoc) return heredocScript(redir.Hdoc);
+      if (redir.Op === ops().HERE_STRING) return resolveWordLiteral(redir.Word);
+    }
+    return null;
+  }
+  /** `printf FORMAT ARGS...` with every word literal: the text it writes, the
+   *  format reused while arguments remain. Escapes are left for the caller. */
+  function printfText(stmt: any): string | null {
+    const cmd = stmt?.Cmd;
+    if (!cmd || cmd.kind !== 'CallExpr') return null;
+    const words: (string | null)[] = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
+    if (words.some((w) => w === null)) return null;
+    const head = unwrapCommandHead(words);
+    if (base(words[head]) !== 'printf') return null;
+    const rest = words.slice(head + 1) as string[];
+    if (rest[0] === '--') rest.shift();
+    // `printf -v NAME ...` assigns a variable and prints nothing.
+    if (rest.length === 0 || rest[0].startsWith('-')) return null;
+    const [format, ...args] = rest;
+    const directive = /%(?:%|[-+ #0]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[a-zA-Z])/g;
+    let text = '';
+    let next = 0;
+    for (let round = 0; round < 64; round++) {
+      let used = false;
+      text += format.replace(directive, (d) => {
+        if (d === '%%') return '%';
+        used = true;
+        return args[next++] ?? '';
+      });
+      if (!used || next >= args.length) break;
+    }
+    return text;
+  }
+  /** `( cmd )` and `{ cmd; }` around one statement: that statement. A group
+   *  with its own redirect is left alone (the redirect changes what flows). */
+  function soleStatement(stmt: any): any {
+    let cur = stmt;
+    for (let i = 0; i < 8; i++) {
+      const cmd = cur?.Cmd;
+      if (!cmd || (cmd.kind !== 'Subshell' && cmd.kind !== 'Block')) break;
+      if ((cur.Redirs ?? []).length > 0 || (cmd.Stmts ?? []).length !== 1) break;
+      cur = cmd.Stmts[0];
+    }
+    return cur;
+  }
+  /** `cat` with no file, or `tee`: what the stage reads is what it writes. */
+  function passesStdinThrough(stmt: any, depth = 0): boolean {
+    const cmd = stmt?.Cmd;
+    // A group passes its input through when a statement in it does:
+    // `{ cat; echo done; }` hands the piped script on, with a line of its own.
+    if (cmd && (cmd.kind === 'Subshell' || cmd.kind === 'Block'))
+      return (
+        depth <= 4 &&
+        (stmt.Redirs ?? []).length === 0 &&
+        (cmd.Stmts ?? []).some((inner: any) => passesStdinThrough(inner, depth + 1))
+      );
+    if (!cmd || cmd.kind !== 'CallExpr') return false;
+    const words: (string | null)[] = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
+    const head = unwrapCommandHead(words);
+    const name = base(words[head]);
+    const rest = words.slice(head + 1);
+    if (name === 'tee') return true;
+    return name === 'cat' && rest.every((w) => w === '-' || (w !== null && /^-[A-Za-z]+$/.test(w)));
+  }
+  /**
+   * The readings of what a stage writes, as a script for the shell it is piped
+   * into: none when nothing literal is written, one when the text is certain,
+   * two when it depends on the shell. `printf` and `echo -e` decode backslash
+   * escapes; a plain `echo` keeps them in bash and decodes them in dash, so
+   * both texts are read. A group gives the literal lines of its statements:
+   * one that writes something unknown does not unsay the lines that are
+   * known, each still reaches the shell.
+   */
+  function producedScripts(stmt: any, depth = 0): string[] {
+    const cmd = stmt?.Cmd;
+    if (!cmd) return [];
+    if (cmd.kind === 'Subshell' || cmd.kind === 'Block') {
+      if (depth > 4 || (stmt.Redirs ?? []).length > 0) return [];
+      const first: string[] = [];
+      const last: string[] = [];
+      for (const inner of cmd.Stmts ?? []) {
+        const readings = producedScripts(inner, depth + 1);
+        if (readings.length === 0) continue;
+        first.push(readings[0]);
+        last.push(readings[readings.length - 1]);
+      }
+      if (first.length === 0) return [];
+      const a = first.join('\n');
+      const b = last.join('\n');
+      return a === b ? [a] : [a, b];
+    }
+    if (cmd.kind !== 'CallExpr') return [];
+    const words: (string | null)[] = (cmd.Args ?? []).map((w: any) => resolveWordLiteral(w));
+    if (words.length === 1 && base(words[0]) === 'cat') {
+      const text = stdinScriptText(stmt);
+      return text === null ? [] : [text];
+    }
+    const formatted = printfText(stmt);
+    if (formatted !== null) return [decodeAnsiC(formatted)];
+    const text = producedText(stmt);
+    if (text === null) return [];
+    if (!text.includes('\\')) return [text];
+    const head = unwrapCommandHead(words);
+    const decodes = words
+      .slice(head + 1)
+      .some((w) => w !== null && /^-[neE]+$/.test(w) && w.includes('e'));
+    const decoded = decodeAnsiC(text);
+    return decodes || decoded === text ? [decoded] : [text, decoded];
+  }
   /** `bash <<EOF`, `bash <<< '...'`: the shell runs its stdin text. */
   function stdinScript(stmt: any, state: State, depth: number): void {
-    if (readsScriptFromStdin(stmt)) nestedPayload(stdinText(stmt), clone(state), depth);
+    if (readsScriptFromStdin(stmt)) nestedPayload(stdinScriptText(stmt), clone(state), depth);
   }
   function statement(stmt: any, state: State, depth: number): void {
     if (!stmt || depth > MAX_DEPTH) return;
@@ -1160,18 +1303,27 @@ export function collectShellFileAccesses(
         // subshells; a literal script piped into a shell is parsed as code.
         const seen = clone(state);
         let pureAnd = true;
+        // The script readings flowing down the pipeline: set by a literal
+        // producer, carried through `cat` / `tee`, dropped by anything else.
+        let flowing: string[] = [];
         segments.forEach(({ op, part }, i) => {
           if (op === ops().AND || op === ops().OR) {
             if (i > 0 && op === ops().AND && pureAnd && state.onSuccess)
               state.cwd = state.onSuccess;
             if (i > 0 && op === ops().OR) merge(state, seen);
+            flowing = []; // a list operator ends the pipeline
             statement(part, state, depth + 1);
           } else {
             const fed = i > 0 ? producedText(segments[i - 1].part) : null;
             if (fed !== null) pipedStdin.set(part, fed);
             statement(part, clone(state), depth + 1);
-            if (i > 0 && readsScriptFromStdin(part))
-              nestedPayload(producedText(segments[i - 1].part), clone(state), depth);
+            const incoming = i > 0 ? flowing : [];
+            if (i > 0 && readsScriptFromStdin(soleStatement(part)))
+              for (const script of incoming) nestedPayload(script, clone(state), depth);
+            // What flows on: the stage's own literal text, and what it passes
+            // through. Both when it does both (`{ cat; echo done; }`); bounded.
+            const own = producedScripts(part);
+            flowing = [...(passesStdinThrough(part) ? incoming : []), ...own].slice(0, 4);
             // `echo NAMES | xargs CMD`: the names reach CMD as operands.
             if (fed !== null) nestedPayload(xargsPayload(part, fed), clone(state), depth);
           }

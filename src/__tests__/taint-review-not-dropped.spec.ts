@@ -73,6 +73,7 @@ vi.mock('../auth/cloud', async (orig) => ({
 }));
 
 import { authorizeHeadless, _resetConfigCache } from '../core.js';
+import { persistentScope } from '../auth/state.js';
 
 /** The real caller's shape for an exfiltration attempt: a network tool reading a
  *  tainted file. isNetworkTool() gates the taint lookup on exactly this. */
@@ -142,6 +143,20 @@ describe('taint review is never resolved by a non-human channel (task #16 vector
     // Neither of the two auto-resolution signatures may appear.
     expect(result.checkedBy).not.toBe('local-policy');
     expect(result.checkedBy).not.toBe('cloud');
+  });
+
+  // node9Firewall#343: a standing "Always allow" for this very command exists,
+  // the session is tainted, and the call still goes to a person. (From code
+  // this held before; nothing pinned it.)
+  it('a persistent Always allow for the command does not answer a tainted call', async () => {
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'decisions.json'),
+      JSON.stringify({ [persistentScope('Bash', EXFIL_ARGS).key]: 'allow', Bash: 'allow' })
+    );
+    const result = await authorizeHeadless('Bash', EXFIL_ARGS, { agent: 'MCP' }, {});
+    expect(result.approved).toBe(false);
+    expect(result.checkedBy).not.toBe('persistent');
+    expect(mockCheckTaint).toHaveBeenCalled();
   });
 
   it('the taint check actually ran (guards against a vacuous pass)', async () => {

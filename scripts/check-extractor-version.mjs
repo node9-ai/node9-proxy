@@ -37,11 +37,21 @@ const SOURCES = [
   // table decides which children and scalars exist. Dropping `Hdoc` there
   // would silently blind the heredoc detectors with this gate still green.
   'packages/policy-engine/src/shell/plain-tree.ts',
+  // The credential jail reads indirect names and a script on a shell's stdin
+  // through the structural walk (node9Firewall#300): a change there changes
+  // jail verdicts in a history scan.
+  'packages/policy-engine/src/shell/file-access.ts',
+  // The jail's inline-code and dotenv readings (node9Firewall#440, #443).
+  'packages/policy-engine/src/shell/inline-code.ts',
+  'packages/policy-engine/src/shell/dotenv-cli.ts',
   'packages/policy-engine/src/shell/tool-input.ts',
   // canonical.ts:297 runs scanArgs (dlp/index.ts) over tool args and ships the
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output
   // and must trip this gate too.
   'packages/policy-engine/src/dlp/index.ts',
+  // scanArgs drops a match that dlp/placeholder.ts calls a placeholder
+  // (node9Firewall#301): a change there changes what the extractor reports.
+  'packages/policy-engine/src/dlp/placeholder.ts',
   // canonical.ts:478 runs analyzePipeChain (policy/pipe-chain.ts), whose
   // SOURCE_COMMANDS and SENSITIVE_PATTERNS decide the `risk` that ships in the
   // scan output. Proven absent 2026-09-10: appending a line to that file left

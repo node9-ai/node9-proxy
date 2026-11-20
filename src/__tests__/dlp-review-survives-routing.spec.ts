@@ -118,6 +118,7 @@ vi.mock('../auth/cloud', async (orig) => ({
 }));
 
 import { authorizeHeadless, _resetConfigCache } from '../core.js';
+import { persistentScope } from '../auth/state.js';
 
 // Review-severity pattern (Bearer Token), by construction so no scanner reads
 // this file as a leak. NOT in assignment context: contextBoost would promote
@@ -289,9 +290,11 @@ describe('DLP-3: a DLP credential review is never resolved by a non-human channe
   // ── Guard 3: a prior "Always Allow" ───────────────────────────────────────
   describe('persistent "Always Allow"', () => {
     it('does not answer a DLP review (measured: it did, as checkedBy persistent)', async () => {
+      // Scoped to this very command (node9Firewall#343): a tool-wide entry
+      // is ignored now, and the row would pass without touching the guard.
       fs.writeFileSync(
         path.join(tmpHome, '.node9', 'decisions.json'),
-        JSON.stringify({ Bash: 'allow' })
+        JSON.stringify({ [persistentScope('Bash', BASH_ARGS).key]: 'allow' })
       );
       const r = await authorizeHeadless('Bash', BASH_ARGS, GATEWAY);
       expect(r.approved).toBe(false);

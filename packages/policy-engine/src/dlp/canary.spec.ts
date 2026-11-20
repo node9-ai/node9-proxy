@@ -120,10 +120,11 @@ describe('A. generators (properties proven through the engine as oracle)', () =>
     }
     expect(genDbUrl(S('A10')).password).toHaveLength(16);
   });
-  it('A11 generator known-true: a forced stopword body is NOT blocked; the loop then yields one that is', () => {
-    const forced = genAwsId(S('A11'), { forceBody: 'AAAAA' + 'QX7Z3BHD' + 'M7N' });
+  it('A11 generator known-true: a forced filler body is NOT blocked; the loop then yields one that is', () => {
+    // Eight of one character in a row is filler to the engine (dlp/placeholder.ts).
+    const forced = genAwsId(S('A11'), { forceBody: 'A'.repeat(8) + 'QX7Z3BHD' });
     expect(forced).toHaveLength(20);
-    expect(scanArgs({ k: forced }), 'aaaaaa reachable through the prefix').toBeNull();
+    expect(scanArgs({ k: forced }), 'a run of eight is a placeholder').toBeNull();
     expect(scanArgs({ k: genAwsId(S('A11')) })?.severity).toBe('block');
   });
   it('A12 record cardinality: a full plant yields five values, all distinct', () => {

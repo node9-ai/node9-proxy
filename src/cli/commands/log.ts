@@ -848,7 +848,9 @@ export async function carryTaintAcrossWrites(
       await notifyTaintPropagate(src, dst, move);
       continue;
     }
-    const sensitive = scanFilePath(src, cwd);
+    // The source is READ by the copy: a public key or known_hosts copied out
+    // of ~/.ssh does not make its copy a tainted file (node9Firewall#308).
+    const sensitive = scanFilePath(src, cwd, { readOnly: true });
     if (sensitive) await notifyTaint(dst, `copy:${sensitive.patternName}:${path.basename(src)}`);
   }
 }

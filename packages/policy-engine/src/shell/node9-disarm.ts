@@ -7,7 +7,11 @@
 //   - `node9 daemon stop|uninstall`, `node9 uninstall`
 //   - kill / taskkill of the daemon's pid (the host passes it from
 //     ~/.node9/daemon.pid), or of a pid read from that file
-//   - pkill / killall / taskkill by a name or pattern the daemon matches
+//   - pkill / killall / taskkill by a name or pattern AIMED at the daemon.
+//     A general kill of every node process (`pkill node`, `killall node`) is
+//     not one: it is how stray dev servers are cleared, the daemon comes back
+//     on the next tool call, and commands.system-processes judges it like any
+//     other process kill (node9Firewall#482).
 //   - systemctl / launchctl stopping the node9 service
 // Writes to ~/.node9 are the file gate's half (files/protected-access.ts).
 
@@ -35,7 +39,13 @@ const DAEMON_CMDLINES = [
   'node9 daemon start',
 ];
 const DAEMON_NAMES = ['node', 'node9'];
-const KILLALL_NAMES = new Set(['node', 'node9', 'node.exe', 'node9.exe']);
+/** An exact process name that is the daemon's and nobody else's. */
+const KILLALL_NAMES = new Set(['node9', 'node9.exe']);
+/** How an ORDINARY node process looks to the same two matchers. A pattern
+ *  that selects one of these as well is a general kill, not one aimed at
+ *  node9. */
+const ORDINARY_NODE_CMDLINES = ['node server.js'];
+const ORDINARY_NODE_NAMES = ['node'];
 
 const STOP_SYSTEMCTL = new Set(['stop', 'disable', 'mask', 'kill']);
 const STOP_LAUNCHCTL = new Set(['unload', 'bootout', 'remove', 'stop', 'kill', 'disable']);
@@ -72,6 +82,24 @@ function patternSelects(pattern: string, targets: readonly string[]): boolean {
     .filter(Boolean);
   if (pieces.length === 0) return false;
   return targets.some((t) => pieces.every((p) => t.includes(p)));
+}
+
+/** A pattern that can select the daemon and would not select an ordinary
+ *  node process just as well: `node9`, `cli.js daemon`, `node .*daemon` are
+ *  aimed; `node`, `nod`, `js` are general. */
+function aimedAtDaemon(pattern: string, full: boolean): boolean {
+  // Each alternative of `a|b` is a pattern of its own: `node9|zzz` selects the
+  // daemon through its first one. patternSelects alone asks for EVERY piece,
+  // which read an alternation as a conjunction and let it through
+  // (/code-review). A `|` inside a group is split the same way: the pieces
+  // only get shorter, which errs toward holding the command.
+  return pattern
+    .split('|')
+    .some(
+      (alternative) =>
+        patternSelects(alternative, full ? DAEMON_CMDLINES : DAEMON_NAMES) &&
+        !patternSelects(alternative, full ? ORDINARY_NODE_CMDLINES : ORDINARY_NODE_NAMES)
+    );
 }
 
 /** The text of a word, from the parser's byte offsets. */
@@ -150,15 +178,13 @@ function killsDaemon(
       pattern = w;
     }
     if (pattern === null) return null;
-    return patternSelects(pattern, full ? DAEMON_CMDLINES : DAEMON_NAMES)
-      ? `pkill ${full ? '-f ' : ''}${pattern}`
-      : null;
+    return aimedAtDaemon(pattern, full) ? `pkill ${full ? '-f ' : ''}${pattern}` : null;
   }
   if (head === 'killall') {
     const regex = args.some((w) => w === '-r' || w === '--regexp');
     for (const w of args) {
       if (w === null || w.startsWith('-')) continue;
-      if (regex ? patternSelects(w, DAEMON_NAMES) : KILLALL_NAMES.has(w.toLowerCase()))
+      if (regex ? aimedAtDaemon(w, false) : KILLALL_NAMES.has(w.toLowerCase()))
         return `killall ${w}`;
     }
     return null;

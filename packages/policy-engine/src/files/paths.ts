@@ -137,3 +137,30 @@ export interface FileAccessContext {
   homeDirs?: string[];
   accesses?: FileAccess[];
 }
+
+// ── Public material under ~/.ssh (node9Firewall#308, JAIL-16) ────────────────
+// The `.ssh` rule judged every file under the directory, so reading
+// `known_hosts`, `authorized_keys` or a `*.pub` key was blocked like a private
+// key. These names hold no secret. The list is closed and by NAME, directly
+// inside a `.ssh` directory: `config` is not on it (it can name key files and
+// hosts), nor is `id_rsa.pub.bak`, nor anything in a sub-directory.
+//
+// ONE definition, read by the AST tier (shell/index.ts), the file-tool gate
+// (dlp/index.ts), the pipe-chain reader list and the extractor's path pattern.
+// The shield's regex rule in project-jail.json carries PUBLIC_SSH_NAME_SOURCE
+// as a lookahead; jail-both-doors.test.ts holds the two in step.
+//
+// A glob counts when it can only select public names: a last segment that ends
+// in the literal `.pub` (`*.pub`, `id_*.pub`) expands to nothing else.
+
+/** The names, as a regex source without anchors, for the copies that are regexes. */
+export const PUBLIC_SSH_NAME_SOURCE = String.raw`(?:known_hosts(?:\.old)?|authorized_keys2?|[^\\/]+\.pub)`;
+const PUBLIC_SSH_PATH_RE = new RegExp(
+  String.raw`(?:^|[\\/])\.ssh[\\/]${PUBLIC_SSH_NAME_SOURCE}$`,
+  'i'
+);
+
+/** Is this path (or glob) public material directly inside a `.ssh` directory? */
+export function isPublicSshMaterial(p: string): boolean {
+  return PUBLIC_SSH_PATH_RE.test(p);
+}

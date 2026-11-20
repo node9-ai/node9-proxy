@@ -31,6 +31,8 @@ export {
   AGENT_INSTRUCTION_DIRS,
   isAgentInstructionPath,
   isInside,
+  isPublicSshMaterial,
+  PUBLIC_SSH_NAME_SOURCE,
 } from './files/paths';
 export type { FileAccess, FileAccessContext } from './files/paths';
 
@@ -88,6 +90,7 @@ export {
   AST_FS_REGEX_RULES,
   FS_READ_TOOLS,
   COMMAND_WRAPPERS,
+  SHELL_INTERPRETERS,
   NET_BINARIES,
   positionedArgs,
   PATTERN_VERB_NAMES,
