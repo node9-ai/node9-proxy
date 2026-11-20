@@ -427,7 +427,10 @@ export function collectShellFileAccesses(
   }
   function fromWords(tokens: Array<Word | null>, state: State, nested: State, depth: number): void {
     const words = tokens.map((w) => (w && !w.dynamic ? w.value : null));
-    const head = unwrapCommandHead(words, true);
+    let head = unwrapCommandHead(words, true);
+    // `builtin cd DIR` is `cd DIR`: the directory change must be followed, or
+    // the reads after it are recorded with no directory.
+    if (base(words[head]) === 'builtin' && ['cd', 'pushd'].includes(base(words[head + 1]))) head++;
     const name = base(words[head]);
     if (name === 'find') {
       findActions(tokens, words, head, state, nested, depth);
@@ -634,7 +637,10 @@ export function collectShellFileAccesses(
       if (!target) return;
       const targetSpelling = target.value || (target.pattern as string);
       for (const source of operands) {
-        if (name === 'mv') add('remove', source, state, { recursive: true, followFinal: false });
+        // A move takes the file out as a copy does: the jail's copy rules
+        // judge its source (`copy` on FileAccess: a copy, move or archive).
+        if (name === 'mv')
+          add('remove', source, state, { recursive: true, followFinal: false, copy: true });
         else if (name !== 'ln' && !linkOnly)
           add('read', source, state, { recursive, followFinal: !preserveSourceLink, copy: true });
         if (!noDirectory)

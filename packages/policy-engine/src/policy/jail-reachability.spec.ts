@@ -252,7 +252,12 @@ describe('jail reachability — non-goals, pinned as failing', () => {
   it.fails('xargs -a', () => {
     expect(v(`xargs -a ${X} echo`)).toMatch(/^block:/);
   });
-  it.fails('cd then a relative read', () => {
+  // Flipped 2026-11-20: the jail consults the structural walk for a command
+  // that changes directory and judges a relative name under the directory
+  // entered. At the real hook `cd ~/.ssh && cat id_rsa` was allowed with no
+  // finding. Kept as a positive row; the shapes are in
+  // jail-cwd-relative.spec.ts.
+  it('cd then a relative read', () => {
     expect(v(`cd ${D} && cat id_rsa`)).toMatch(/^block:/);
   });
   // A reader named by ABSOLUTE PATH. Pre-existing and consistent with stage 1:
