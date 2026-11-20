@@ -823,6 +823,10 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // literal script on a shell's standard input (`echo '...' | sh`, a here-string
 // or a heredoc into bash) through the structural file-access walk, the way
 // `sh -c '...'` was always read. 0 verdict changes on the same 75,921 commands.
+// Same version (node9Firewall#443): the jail reads the dotenv command-line
+// tools (`python -m dotenv list`, `dotenv get`, `dotenv -e F -- printenv`,
+// dotenvx) and Ruby's dotenv in inline code, and ruby's `-r LIB` no longer
+// hides the `-e` after it.
 // Histories scanned under v39 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
@@ -888,7 +892,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '2b2ea28aca58e1c3';
+export const CANONICAL_EXTRACTOR_HASH = '675f52ed45be50b2';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

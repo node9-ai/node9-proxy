@@ -757,6 +757,72 @@ describe('jail: a literal script on a shell standard input (node9Firewall#300, J
   });
 });
 
+describe('jail: the dotenv command-line tools and Ruby dotenv (node9Firewall#443)', () => {
+  // Through the built CLI, shipped defaults, no approver, the real hook input
+  // shape. These reached `.env` with no reader word the jail knew and were
+  // allowed with no finding.
+  let tmpHome: string;
+  const settings = (mode: string) => ({
+    settings: {
+      mode,
+      autoStartDaemon: false,
+      approvers: { native: false, browser: false, cloud: false, terminal: false },
+    },
+  });
+  beforeEach(() => {
+    tmpHome = makeTempHome(settings('standard'));
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+
+  it.each([
+    ['a print form through python', 'python3 -m dotenv list'],
+    ['a print form of the CLI', 'dotenv get API_KEY'],
+    ['a run form that prints the environment', 'dotenv -e .env -- printenv'],
+    ['a run form with a shell that echoes a variable', "dotenv -e .env -- sh -c 'echo $API_KEY'"],
+    ['Ruby inline code', `ruby -e 'require "dotenv/load"; puts ENV["API_KEY"]'`],
+  ])('%s → blocked by the credential jail', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).not.toBe(0);
+    expect(decisionOf(r)).toBe('deny');
+    expect(JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecisionReason).toMatch(
+      /protected file/
+    );
+  });
+
+  it.each([
+    ['a run form that only loads', 'dotenv -- npm run dev'],
+    ['a fixture file', 'dotenv -f .env.example list'],
+    ['a Ruby loader for another program', `ruby -e 'require "dotenv/load"; require "./app"'`],
+  ])('%s → allowed silently', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it('a file whose name is a variable: recorded at Standard, asked at Strict', () => {
+    const command = `node --env-file "$F" -e 'console.log(process.env.API_KEY)'`;
+    const standard = run(command);
+    expect(standard.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(standard)).toBe('allow');
+    cleanupHome(tmpHome);
+    tmpHome = makeTempHome(settings('strict'));
+    const strict = run(command);
+    expect(strict.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(strict)).not.toBe('allow');
+  });
+});
+
 describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. Before the fix a key or password that merely CONTAINED `here` or

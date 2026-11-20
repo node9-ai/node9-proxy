@@ -332,6 +332,8 @@ export interface InlinePreload {
   dotenv?: boolean;
   /** `node --env-file=F`: each F is loaded into the environment. */
   envFiles?: string[];
+  /** `node --env-file "$F"`: a file is loaded whose name is not known. */
+  unknownEnvFile?: boolean;
 }
 
 // A call that opens its argument for reading. The name is matched whole:
@@ -415,7 +417,23 @@ const DOTENV = {
     env: /\b(?:environ|getenv)\b/,
     literalPath: /\b(?:load_dotenv|dotenv_values)\s*\(\s*(?:dotenv_path\s*=\s*)?[rRbBuU]?['"]/,
   },
+  // Ruby's dotenv gem (node9Firewall#443): `require "dotenv/load"` loads on
+  // require; `require "dotenv"` alone does not, it needs Dotenv.load.
+  ruby: {
+    load: /\brequire\s*\(?\s*['"]dotenv\/load['"]|\bDotenv\s*\.\s*(?:load|overload|parse)\b/,
+    values: /\bDotenv\s*\.\s*parse\b/,
+    env: /\bENV\b/,
+    literalPath: /\bDotenv\s*\.\s*(?:load|overload|parse)\s*\(?\s*['"]/,
+  },
 } as const;
+
+/** Does this inline code read the process environment? Only for the languages
+ *  the dotenv rule covers; false for the others. */
+export function inlineReadsEnvironment(language: InlineLanguage, code: string): boolean {
+  return language === 'python' || language === 'node' || language === 'ruby'
+    ? DOTENV[language].env.test(code)
+    : false;
+}
 const DOTENV_PATH_OPTION = /\bconfig\s*\(\s*\{[^)]*\bpath\s*:\s*$/;
 
 /**
@@ -456,7 +474,7 @@ export function inlineReadPaths(
     for (const m of code.matchAll(OPENED_NAME[language])) opened.add(m[1] ?? m[2]);
     for (const [name, values] of assigned) if (opened.has(name)) out.push(...values);
   }
-  if (language === 'python' || language === 'node') {
+  if (language === 'python' || language === 'node' || language === 'ruby') {
     const d = DOTENV[language];
     const readsEnv = d.env.test(code);
     const loads = /dotenv/.test(code) && d.load.test(code) && !d.literalPath.test(code);

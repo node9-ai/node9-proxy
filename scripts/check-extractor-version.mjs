@@ -41,6 +41,9 @@ const SOURCES = [
   // through the structural walk (node9Firewall#300): a change there changes
   // jail verdicts in a history scan.
   'packages/policy-engine/src/shell/file-access.ts',
+  // The jail's inline-code and dotenv readings (node9Firewall#440, #443).
+  'packages/policy-engine/src/shell/inline-code.ts',
+  'packages/policy-engine/src/shell/dotenv-cli.ts',
   'packages/policy-engine/src/shell/tool-input.ts',
   // canonical.ts:297 runs scanArgs (dlp/index.ts) over tool args and ships the
   // result as a 'dlp' extractor finding, so DLP_PATTERNS changes alter output

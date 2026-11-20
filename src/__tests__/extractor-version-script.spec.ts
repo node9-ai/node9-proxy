@@ -38,6 +38,8 @@ const SOURCE_FILES = [
   'packages/policy-engine/src/shell/index.ts',
   'packages/policy-engine/src/shell/plain-tree.ts',
   'packages/policy-engine/src/shell/file-access.ts',
+  'packages/policy-engine/src/shell/inline-code.ts',
+  'packages/policy-engine/src/shell/dotenv-cli.ts',
   'packages/policy-engine/src/shell/tool-input.ts',
   'packages/policy-engine/src/policy/pipe-chain.ts',
   'packages/policy-engine/src/files/paths.ts',

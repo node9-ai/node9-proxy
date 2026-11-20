@@ -20,9 +20,11 @@ import { foldHomoglyphs } from '../dlp/normalize';
 import { SYSTEM_AUTH_DIRS, SYSTEM_AUTH_FILES, type FileAccess } from '../files/paths';
 import picomatch from 'picomatch';
 import { collectShellFileAccesses } from './file-access';
+import { readDotenvCli } from './dotenv-cli';
 import {
   inlineLanguageOf,
   inlineReadPaths,
+  inlineReadsEnvironment,
   judgeInlineCode,
   type InlineCodeCategory,
   type InlinePreload,
@@ -2643,6 +2645,9 @@ function attachedCode(interp: string, flag: string): string | null {
 const NODE_VALUE_FLAG =
   /^(-r|--require|--import|--loader|--experimental-loader|--env-file|--env-file-if-exists|--input-type|-C|--conditions)(?:=(.*))?$/;
 
+/** ruby's `-r LIB` / `-I DIR`, the value attached or in the next word. */
+const RUBY_VALUE_FLAG = /^-([rI])(.*)$/;
+
 /**
  * Does this ONE statement execute inline code, and which? `pipeFed` says whether
  * it reads another command's stdout (decided by the caller at the pipeline
@@ -2694,6 +2699,7 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
   const codes: Array<string | null> = [];
   const preload: InlinePreload = {};
   const nodeFamily = inlineLanguageOf(interp) === 'node';
+  const rubyFamily = inlineLanguageOf(interp) === 'ruby';
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     // node's flags that take a value: the value is not a script operand
@@ -2706,7 +2712,22 @@ function inlineExecCall(stmt: any, pipeFed: boolean): InlineCall | null {
         if (value != null) {
           if (/^--env-file/.test(flag[1])) (preload.envFiles ??= []).push(value);
           else if (/^dotenv\/config(?:\.js)?$/.test(value)) preload.dotenv = true;
+        } else if (/^--env-file/.test(flag[1])) {
+          // `--env-file "$F"`: something is loaded, its name is not known.
+          preload.unknownEnvFile = true;
         }
+        continue;
+      }
+    }
+    // ruby's `-r LIB` and `-I DIR`: the value is not a script operand (it was
+    // read as one, and the `-e` after it was then missed), and `-r dotenv/load`
+    // loads ./.env before the code runs (node9Firewall#443).
+    if (rubyFamily && !selectedProgram && codes.length === 0 && a != null) {
+      const flag = RUBY_VALUE_FLAG.exec(a);
+      if (flag) {
+        const value = flag[2] !== '' ? flag[2] : args[++i];
+        if (flag[1] === 'r' && value != null && /^dotenv\/load(?:\.rb)?$/.test(value))
+          preload.dotenv = true;
         continue;
       }
     }
@@ -4471,13 +4492,17 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // read by the structural walk, and its reader word may be assembled by
   // printf, so the keyword fast path must not skip it.
   const stdinShell = feedsShellStdin(command) || feedsShellStdin(normalized);
+  // A dotenv command-line tool names no reader word either (node9Firewall#443).
+  const dotenvCli =
+    DOTENV_CLI_PRESCREEN_RE.test(command) || DOTENV_CLI_PRESCREEN_RE.test(normalized);
   // Fast path — skip the AST parse when no fs-op tool keyword is present.
   if (
     !FS_OP_PRESCREEN_RE.test(normalized) &&
     !FS_OP_PRESCREEN_RE.test(command) &&
     !SOURCES_FILE_RE.test(command) &&
     !runsInlineInterpreter(command, normalized) &&
-    !stdinShell
+    !stdinShell &&
+    !dotenvCli
   )
     return null;
   if (fsOpCache.has(command)) {
@@ -4502,10 +4527,15 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
     stdinShell && own?.verdict !== 'block'
       ? stricter(own, structuralJailRead(command))
       : (own ?? (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null));
-  const computed =
+  const withInline =
     direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
       ? direct
       : stricter(direct, inlineCodeJailRead(command));
+  // The dotenv command-line tools (node9Firewall#443), by strictness as well.
+  const computed =
+    withInline?.verdict === 'block' || !dotenvCli
+      ? withInline
+      : stricter(withInline, dotenvCliJailRead(command));
   if (fsOpCache.size >= FS_OP_CACHE_MAX) {
     const oldest = fsOpCache.keys().next().value;
     if (oldest !== undefined) fsOpCache.delete(oldest);
@@ -5772,10 +5802,23 @@ export function analyzeUnknownCredentialReads(command: string): { reason: string
     }
     return !hit;
   });
-  return hit
+  if (hit)
+    return {
+      reason:
+        'Files are read by names a listing produces when the command runs, and the listing can include credential files',
+    };
+  // An environment file whose name is a variable (node9Firewall#443): its
+  // values are shown, and node9 cannot tell which file it is.
+  let unknownEnvFile = false;
+  try {
+    unknownEnvFile = readsUnknownEnvFile(command) || dotenvCliReads(command).unknown;
+  } catch {
+    /* a walker error is not a finding */
+  }
+  return unknownEnvFile
     ? {
         reason:
-          'Files are read by names a listing produces when the command runs, and the listing can include credential files',
+          'An environment file is loaded and its values are shown, and its name is not known until the command runs: it can be a credential file',
       }
     : null;
 }
@@ -5911,6 +5954,125 @@ function inlineCodeJailRead(command: string): FsOpVerdict | null {
     }
   }
   return review;
+}
+
+// ── The dotenv command-line tools (node9Firewall#443) ───────────────────────
+// `python -m dotenv list`, `dotenv get KEY`, `dotenv -e .env -- printenv`,
+// `dotenvx run -- env`: a `.env` file reaches the output with no reader word
+// the walks above know. shell/dotenv-cli.ts says what one command does; this
+// decides which of its files are READ:
+//   print form  the file is printed: a read, like `cat` of it
+//   run form    `source FILE; CMD`: a read only when CMD shows what was
+//               loaded (it prints the environment, a shell script in it
+//               echoes a variable, or inline code in it reads the environment)
+// `dotenv -- npm run dev` loads the file for another program and is no read,
+// as `source .env && npm run dev` is none.
+
+/** A word that names one of the tools, in either reading of the command. */
+const DOTENV_CLI_PRESCREEN_RE = /\bdotenvx?\b/i;
+const MAX_DOTENV_PAYLOAD_DEPTH = 3;
+
+/** The files a command's dotenv calls read, and whether one of them has a
+ *  name that is not literal (`dotenv -f "$F" list`). */
+function dotenvCliReads(command: string, depth = 0): { paths: string[]; unknown: boolean } {
+  const out = { paths: [] as string[], unknown: false };
+  if (depth > MAX_DOTENV_PAYLOAD_DEPTH || !DOTENV_CLI_PRESCREEN_RE.test(command)) return out;
+  const bytes = new TextEncoder().encode(command);
+  const sourceOf = (from: unknown, to: unknown): string =>
+    typeof from === 'number' && typeof to === 'number' && from >= 0 && to > from
+      ? new TextDecoder().decode(bytes.subarray(from, to))
+      : '';
+  walkCommandScope(command, (node: unknown) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (!n || n.kind !== 'CallExpr') return true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const args: any[] = n.Args || [];
+    const words = args.map((a) => resolveWordLiteral(a));
+    if (words.length === 0) return true;
+    const call = readDotenvCli(words, unwrapCommandHead(words));
+    if (!call) {
+      // `sh -c 'dotenv list'`: the payload is a command line of its own.
+      const payload = literalShellPayload(words, baseWord(words[0]));
+      if (payload !== null) {
+        const inner = dotenvCliReads(payload, depth + 1);
+        out.paths.push(...inner.paths);
+        out.unknown ||= inner.unknown;
+      }
+      return true;
+    }
+    let shown = call.mode === 'print';
+    if (!shown) {
+      const inner = words.slice(call.inner);
+      // `dotenv -- printenv`, `dotenv -- env`, `dotenv -- sudo printenv`. Both
+      // readings: `env` is itself a wrapper, so unwrapping a bare `env` leaves
+      // nothing.
+      const literal = (ws: (string | null)[]): ws is string[] =>
+        ws.length > 0 && ws.every((w) => w !== null);
+      const plain = inner.slice(unwrapCommandHead(inner));
+      shown =
+        (literal(inner) && printsEnvironment(inner)) ||
+        (literal(plain) && printsEnvironment(plain));
+      // `dotenv -- sh -c 'echo $KEY'`: the INNER shell expands the variable,
+      // after the file is loaded. (`dotenv -- echo $KEY` is expanded by the
+      // outer shell, before dotenv runs: nothing of the file is shown.) The
+      // existing source-and-print rule decides, with `.env` standing in for
+      // the file so its answer is only "printed or not".
+      const payload = shown ? null : literalShellPayload(inner, baseWord(inner[0]));
+      if (payload !== null && sourcedAndPrinted(`. .env\n${payload}`) !== null) shown = true;
+      // `dotenv -- node -e 'console.log(process.env.KEY)'`: inline code that
+      // reads the environment the file was loaded into.
+      if (!shown) {
+        const text = sourceOf(args[call.inner]?.pos, args[args.length - 1]?.end);
+        const calls = text ? inlineExecCalls(text) : [];
+        if (calls !== PARSE_FAIL)
+          shown = calls.some((c) => {
+            const language = inlineLanguageOf(c.interp);
+            return (
+              language !== null &&
+              c.code.some((code) => code !== null && inlineReadsEnvironment(language, code))
+            );
+          });
+      }
+    }
+    if (!shown) return true;
+    for (const file of call.files) {
+      if (file === null) out.unknown = true;
+      else out.paths.push(file);
+    }
+    return true;
+  });
+  return out;
+}
+
+/** The jail's verdict for the files a command's dotenv calls read. */
+function dotenvCliJailRead(command: string): FsOpVerdict | null {
+  let result: FsOpVerdict | null = null;
+  try {
+    for (const p of dotenvCliReads(command).paths) {
+      result = stricter(result, matchSensitivePath(p));
+      if (result?.verdict === 'block') break;
+    }
+  } catch {
+    /* a walker error keeps what was found */
+  }
+  return result;
+}
+
+/** `node --env-file "$F" -e '...process.env...'`: inline code that reads the
+ *  environment after a file was loaded whose name is not known. */
+function readsUnknownEnvFile(command: string): boolean {
+  if (!/--env-file/.test(command)) return false;
+  const calls = inlineExecCalls(command);
+  if (calls === PARSE_FAIL) return false;
+  return calls.some((c) => {
+    const language = inlineLanguageOf(c.interp);
+    return (
+      c.preload?.unknownEnvFile === true &&
+      language !== null &&
+      c.code.some((code) => code !== null && inlineReadsEnvironment(language, code))
+    );
+  });
 }
 
 // Basenamed, because unwrapCommandHead basenames its head: without it
