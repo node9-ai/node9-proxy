@@ -1045,7 +1045,7 @@ describe('authorizeHeadless — persistent decisions', () => {
     readSpy.mockImplementation((p) => {
       // Scoped to the blocked command itself: would approve if reached.
       if (String(p) === decisionsPath)
-        return JSON.stringify({ 'bash(./restricted_deploy.sh --env)': 'allow' });
+        return JSON.stringify({ 'bash(./restricted_deploy.sh --env)': 'allow', bash: 'allow' });
       if (String(p) === globalPath)
         return JSON.stringify({
           settings: { mode: 'standard', approvalTimeoutMs: 0 },

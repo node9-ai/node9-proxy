@@ -341,7 +341,7 @@ describe('approval cards on a real daemon', () => {
     expect(body.record).toMatchObject({ decision: 'allow', standing: 'always-allow' });
     expect(decisions()).toEqual({ 'bash(npm test)': 'allow' });
 
-    // A compound command is stored as its exact text.
+    // A compound command is stored as that exact command.
     const compound = await d.check({
       toolName: 'bash',
       args: { command: 'npm ci && npm test' },
@@ -349,10 +349,11 @@ describe('approval cards on a real daemon', () => {
     });
     await d.decision(compound.id, { decision: 'allow', persist: true, source: 'terminal' });
     await d.wait(compound.id);
-    expect(decisions()).toEqual({
-      'bash(npm test)': 'allow',
-      'bash(=npm ci && npm test)': 'allow',
-    });
+    const keys = Object.keys(decisions());
+    expect(keys).toHaveLength(2);
+    expect(keys).toContain('bash(npm test)');
+    // A digest of the text, never the text itself.
+    expect(keys.find((k) => k !== 'bash(npm test)')).toMatch(/^bash\(=#[0-9a-f]{32}\)$/);
     // Never the tool itself.
     expect(decisions()).not.toHaveProperty('bash');
   });

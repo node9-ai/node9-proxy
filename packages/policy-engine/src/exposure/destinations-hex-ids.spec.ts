@@ -58,6 +58,22 @@ describe('a real IBAN is an iban in either case and in print format', () => {
   });
 });
 
+// /code-review: the pattern takes a following four-letter word as one more
+// group. The IBAN is still one, in either case, and it is cut to its own
+// length so the content side and the call side name the same string.
+describe('an IBAN followed by a word', () => {
+  const printed = IBAN.replace(/(.{4})/g, '$1 ').trim();
+  it.each([
+    ['upper case, print format', `${printed} from the joint account`],
+    ['lower case, print format', `${printed.toLowerCase()} from the joint account`],
+    ['upper case, one run', `${IBAN} THANKS`],
+    ['lower case, one run', `${IBAN.toLowerCase()} asap`],
+  ])('%s', (_name, text) => {
+    expect(extractContentDestinations(`Pay ${text}.`)).toEqual([`iban:${IBAN}`]);
+    expect(extractArgDestinations({ memo: text })).toEqual([`iban:${IBAN}`]);
+  });
+});
+
 describe('a sandbox account written in upper case is still an account', () => {
   it('in content, under a recipient key, and in a free-text argument', () => {
     expect(extractContentDestinations(`Pay to ${SANDBOX}.`)).toEqual([`account:${SANDBOX}`]);

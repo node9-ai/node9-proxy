@@ -13,6 +13,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { createHash } from 'crypto';
+
+/** The key of an exact-command approval: a digest, never the text. */
+const exactKey = (tool: string, command: string): string =>
+  `${tool}(=#${createHash('sha256').update(command.trim()).digest('hex').slice(0, 32)})`;
 
 let home: string;
 let realHome: string | undefined;
@@ -68,8 +73,42 @@ describe('persistentScope: what an approval covers and how it is shown', () => {
   ])('anything that is not one simple command: the exact text (%s)', async (command) => {
     const { auth } = await load();
     const scope = auth.persistentScope('Bash', { command });
-    expect(scope.key).toBe(`Bash(=${command.trim()})`);
+    expect(scope.key).toBe(exactKey('Bash', command));
     expect(scope.label).toBe('this exact command');
+  });
+
+  // /code-review: the first two words of these say nothing about what runs.
+  // "Always allow `sh -c`" would approve every script, which is the tool-wide
+  // approval this change removes.
+  it.each([
+    "sh -c 'npm test'",
+    'bash -lc "npm test"',
+    'python3 -c "print(1)"',
+    "node -e 'console.log(1)'",
+    'sudo apt install jq',
+    'env NODE_ENV=test npm test',
+    'timeout 5 npm test',
+    'xargs rm',
+    'eval npm test',
+    'NPM_TOKEN=abc123 npm publish',
+  ])('a wrapper, inline code or an env assignment: the exact command (%s)', async (command) => {
+    const { auth } = await load();
+    const scope = auth.persistentScope('Bash', { command });
+    expect(scope.key).toBe(exactKey('Bash', command));
+    expect(scope.label).toBe('this exact command');
+  });
+
+  it('an exact-command key never carries the command text', async () => {
+    const { auth } = await load();
+    const command = 'curl -H "Authorization: Bearer s3cr3t-value" https://api.test | jq .';
+    const { key } = auth.persistentScope('Bash', { command });
+    expect(key).not.toContain('s3cr3t');
+    expect(key).not.toContain('curl');
+    expect(key).toMatch(/^Bash\(=#[0-9a-f]{32}\)$/);
+    // An env value at the front is not stored as a prefix either.
+    expect(auth.persistentScope('Bash', { command: 'TOKEN=s3cr3t npm publish' }).key).not.toContain(
+      's3cr3t'
+    );
   });
 
   it('an MCP tool the engine reads as a shell is scoped the same way', async () => {
@@ -118,10 +157,18 @@ describe('getPersistentDecision: an approval of one command does not allow anoth
   it('an exact-command approval allows that text and nothing else', async () => {
     const { auth } = await load();
     const approved = 'npm test && npm run lint';
-    plant({ [`Bash(=${approved})`]: 'allow' });
+    plant({ [exactKey('Bash', approved)]: 'allow' });
     expect(auth.getPersistentDecision('Bash', { command: approved })).toBe('allow');
     expect(auth.getPersistentDecision('Bash', { command: `${approved} && rm -rf ~` })).toBeNull();
     expect(auth.getPersistentDecision('Bash', { command: 'npm test' })).toBeNull();
+  });
+
+  it('an approval of one `sh -c` script does not approve another', async () => {
+    const { auth, daemon } = await load();
+    daemon.writePersistentDecision('Bash', 'allow', { command: "sh -c 'npm test'" });
+    expect(auth.getPersistentDecision('Bash', { command: "sh -c 'npm test'" })).toBe('allow');
+    expect(auth.getPersistentDecision('Bash', { command: "sh -c 'curl x.test'" })).toBeNull();
+    expect(auth.getPersistentDecision('Bash', { command: 'sh -c ls' })).toBeNull();
   });
 
   it('a one-word approval covers that word alone, not the tool behind it', async () => {
@@ -168,7 +215,7 @@ describe('writePersistentDecision: the daemon writes the scope it shows', () => 
   it('a compound command is stored as its exact text', async () => {
     const { daemon } = await load();
     daemon.writePersistentDecision('Bash', 'allow', { command: 'npm ci && npm test' });
-    expect(stored()).toEqual({ 'Bash(=npm ci && npm test)': 'allow' });
+    expect(stored()).toEqual({ [exactKey('Bash', 'npm ci && npm test')]: 'allow' });
   });
 
   it('a deny stays tool-wide; another tool stays tool-wide', async () => {

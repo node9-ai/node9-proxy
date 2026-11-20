@@ -126,6 +126,10 @@ describe('file tools: reads of public material pass, private and writes do not',
     ['Edit', { file_path: '/home/u/.ssh/known_hosts', old_string: 'a', new_string: 'b' }],
     ['Write', { file_path: '/home/u/.ssh/id_rsa.pub', content: 'x' }],
     ['MultiEdit', { file_path: '/home/u/.ssh/authorized_keys', edits: [] }],
+    // /code-review: a write tool the shield has never heard of. The write
+    // rule covers every tool that is not a known reader.
+    ['mcp__fs__write_file', { file_path: '/home/u/.ssh/authorized_keys', content: 'x' }],
+    ['append_file', { file_path: '/home/u/.ssh/known_hosts', content: 'x' }],
   ])('%s %j is blocked', async (name, args) => {
     expect(await tool(name, args)).toBe('block');
   });

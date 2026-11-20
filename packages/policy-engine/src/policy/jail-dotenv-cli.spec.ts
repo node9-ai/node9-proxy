@@ -61,6 +61,12 @@ describe('a dotenv command that prints the file is a read of it', () => {
     expect(await G(command)).toBe('block');
   });
 
+  it('a file named after the subcommand is the file that is judged', () => {
+    expect(analyzeFsOperation('dotenvx get KEY -f config/.env.production')?.path).toBe(
+      'config/.env.production'
+    );
+  });
+
   it('names the .env rule', () => {
     expect(analyzeFsOperation('python3 -m dotenv list')?.ruleName).toBe(
       'shield:project-jail:block-read-env'
@@ -118,6 +124,9 @@ describe('false-positive controls', () => {
     ['installing the package', 'pip install python-dotenv'],
     ['the word in a path', 'cat docs/dotenv.md'],
     ['python-dotenv export flag is not a file', 'dotenv -e true -f .env.example list'],
+    // /code-review: dotenvx names the file AFTER the subcommand.
+    ['a fixture file named after get', 'dotenvx get KEY -f .env.example'],
+    ['a fixture file named after list', 'dotenv list --file=.env.example'],
   ])('quiet: %s', (_name, command) => {
     expect(analyzeFsOperation(command)).toBeNull();
   });

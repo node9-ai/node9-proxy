@@ -88,10 +88,18 @@ function patternSelects(pattern: string, targets: readonly string[]): boolean {
  *  node process just as well: `node9`, `cli.js daemon`, `node .*daemon` are
  *  aimed; `node`, `nod`, `js` are general. */
 function aimedAtDaemon(pattern: string, full: boolean): boolean {
-  return (
-    patternSelects(pattern, full ? DAEMON_CMDLINES : DAEMON_NAMES) &&
-    !patternSelects(pattern, full ? ORDINARY_NODE_CMDLINES : ORDINARY_NODE_NAMES)
-  );
+  // Each alternative of `a|b` is a pattern of its own: `node9|zzz` selects the
+  // daemon through its first one. patternSelects alone asks for EVERY piece,
+  // which read an alternation as a conjunction and let it through
+  // (/code-review). A `|` inside a group is split the same way: the pieces
+  // only get shorter, which errs toward holding the command.
+  return pattern
+    .split('|')
+    .some(
+      (alternative) =>
+        patternSelects(alternative, full ? DAEMON_CMDLINES : DAEMON_NAMES) &&
+        !patternSelects(alternative, full ? ORDINARY_NODE_CMDLINES : ORDINARY_NODE_NAMES)
+    );
 }
 
 /** The text of a word, from the parser's byte offsets. */

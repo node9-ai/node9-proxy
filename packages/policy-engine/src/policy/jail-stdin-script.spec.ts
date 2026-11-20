@@ -67,6 +67,10 @@ describe('a literal script piped into a shell is read', () => {
     ['the producer in a brace group', "{ echo 'cat .env'; } | sh"],
     ['two lines from a brace group', "{ echo 'cd /tmp'; echo 'cat ~/.ssh/id_rsa'; } | sh"],
     ['a group that also prints something unknown', "{ echo 'cat .env'; date; } | sh"],
+    [
+      'a group that passes the script on and adds a line',
+      "echo 'cat .env' | { cat; echo done; } | sh",
+    ],
     ['the shell in a subshell', "echo 'cat .env' | (sh)"],
     ['the shell in a brace group', "echo 'cat .env' | { sh; }"],
   ])('blocks: %s', async (_name, command) => {

@@ -79,7 +79,7 @@
     },
     {
       "name": "shield:project-jail:block-write-ssh-trust-files",
-      "tool": "{write,write_file,create_file,edit,edit_file,multiedit,replace,notebookedit,apply_patch}",
+      "tool": "!(read|read_file|grep|grep_search)",
       "conditions": [
         {
           "field": "file_path",

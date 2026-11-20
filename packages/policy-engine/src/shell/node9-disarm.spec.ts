@@ -31,6 +31,13 @@ describe('aimed at node9: still a disarm', () => {
     'systemctl --user stop node9-daemon',
     "sh -c 'pkill node9'",
     'sudo pkill -f "node9 daemon"',
+    // /code-review: an alternation was read as "every piece must occur", so
+    // one alternative that matches nothing let the daemon's name through.
+    "pkill -f 'node9|zzz'",
+    "pkill 'node9|x'",
+    "pkill -f 'vite|node9 daemon'",
+    "pkill -f '(node9|zzz) daemon'",
+    "killall -r 'node9|foo'",
   ])('%s', (command) => {
     expect(finding(command)?.ruleName).toBe('review-node9-disarm');
   });
@@ -52,6 +59,8 @@ describe('a general kill of node processes: not a disarm', () => {
     'taskkill /F /IM node.exe',
     "sh -c 'pkill node'",
     'sudo pkill node',
+    "pkill -f 'node|vite'",
+    "pkill -f 'vite|next dev'",
   ])('%s', (command) => {
     expect(finding(command)).toBeNull();
   });

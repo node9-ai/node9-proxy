@@ -108,20 +108,30 @@ function hostOfUrl(value: string): string | null {
 }
 
 /**
- * A checksum-valid IBAN, upper-cased, or null. validateIban reads the first N
- * characters for the country, so an IBAN followed by more text still counts.
- * That allowance is for an IBAN written as one: a value that is NOT upper case
- * as written (an id that happens to pass mod-97) must be exactly the
- * country's length.
+ * A checksum-valid IBAN, upper-cased and cut to its country's length, or null.
+ * validateIban reads the first N characters for the country, so an IBAN
+ * followed by more text still counts. That allowance is for an IBAN written
+ * as one: in a value that is NOT upper case as written (an id that happens to
+ * pass mod-97) the IBAN must end exactly where a group of the text ends.
  */
 function ibanOf(written: string): string | null {
   const compact = written.replace(/[ -]/g, '').toUpperCase();
   if (!validateIban(compact)) return null;
-  if (written === written.toUpperCase()) return compact;
-  const run = written.split(/[ -]+/);
-  const printed = run.length > 1 && run.slice(0, -1).every((g) => g.length === 4);
-  const length = (printed ? run.join('') : run[0]).length;
-  return length === IBAN_LENGTH[compact.slice(0, 2)] ? compact : null;
+  // The IBAN is the country's length and no more: the pattern can take the
+  // word after it as one more group (`... 1332 from`), and the content side
+  // and the call side must name the same string.
+  const length = IBAN_LENGTH[compact.slice(0, 2)];
+  const iban = compact.slice(0, length);
+  if (written === written.toUpperCase()) return iban;
+  // Not upper case as written: the IBAN must END where a group ends, so a
+  // longer id whose first characters happen to validate is not one.
+  let at = 0;
+  for (const group of written.split(/[ -]+/)) {
+    at += group.length;
+    if (at === length) return iban;
+    if (at > length) break;
+  }
+  return null;
 }
 
 function addIbans(text: string, out: Set<string>): void {

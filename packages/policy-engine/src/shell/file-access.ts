@@ -1160,8 +1160,16 @@ export function collectShellFileAccesses(
     return cur;
   }
   /** `cat` with no file, or `tee`: what the stage reads is what it writes. */
-  function passesStdinThrough(stmt: any): boolean {
-    const cmd = soleStatement(stmt)?.Cmd;
+  function passesStdinThrough(stmt: any, depth = 0): boolean {
+    const cmd = stmt?.Cmd;
+    // A group passes its input through when a statement in it does:
+    // `{ cat; echo done; }` hands the piped script on, with a line of its own.
+    if (cmd && (cmd.kind === 'Subshell' || cmd.kind === 'Block'))
+      return (
+        depth <= 4 &&
+        (stmt.Redirs ?? []).length === 0 &&
+        (cmd.Stmts ?? []).some((inner: any) => passesStdinThrough(inner, depth + 1))
+      );
     if (!cmd || cmd.kind !== 'CallExpr') return false;
     const words: (string | null)[] = (cmd.Args ?? []).map((a: any) => resolveWordLiteral(a));
     const head = unwrapCommandHead(words);
@@ -1312,8 +1320,10 @@ export function collectShellFileAccesses(
             const incoming = i > 0 ? flowing : [];
             if (i > 0 && readsScriptFromStdin(soleStatement(part)))
               for (const script of incoming) nestedPayload(script, clone(state), depth);
+            // What flows on: the stage's own literal text, and what it passes
+            // through. Both when it does both (`{ cat; echo done; }`); bounded.
             const own = producedScripts(part);
-            flowing = own.length > 0 ? own : passesStdinThrough(part) ? incoming : [];
+            flowing = [...(passesStdinThrough(part) ? incoming : []), ...own].slice(0, 4);
             // `echo NAMES | xargs CMD`: the names reach CMD as operands.
             if (fed !== null) nestedPayload(xargsPayload(part, fed), clone(state), depth);
           }

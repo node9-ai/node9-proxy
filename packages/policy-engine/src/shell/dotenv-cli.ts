@@ -55,6 +55,21 @@ const QUIET_SUBCOMMANDS = new Set([
   'ext',
 ]);
 
+/** The files named by file flags from `from` on, added to `files`. */
+function filesAfter(words: (string | null)[], from: number, files: (string | null)[]): void {
+  for (let j = from; j < words.length; j++) {
+    const w = words[j];
+    if (w === null) continue;
+    if (FILE_FLAGS.has(w)) {
+      if (words[j + 1] !== undefined) files.push(words[j + 1]);
+      j++;
+      continue;
+    }
+    const joined = /^(?:--file|--env-file)=(.*)$/.exec(w);
+    if (joined) files.push(joined[1]);
+  }
+}
+
 /** Where the dotenv tool's own arguments start, or -1 when `words[head]` is
  *  not a dotenv tool. `head` is the command head, wrappers already skipped. */
 function dotenvArgsStart(words: (string | null)[], head: number): number {
@@ -144,6 +159,8 @@ export function readDotenvCli(words: (string | null)[], head: number): DotenvCli
     if (!sawRun) {
       if (w === 'list' || w === 'get') {
         print = true;
+        // dotenvx writes the file after the subcommand: `get KEY -f FILE`.
+        filesAfter(words, i + 1, files);
         break;
       }
       if (w === 'run') {
@@ -153,12 +170,7 @@ export function readDotenvCli(words: (string | null)[], head: number): DotenvCli
       }
       if (w === 'decrypt') {
         print = words.slice(i + 1).some((x) => x === '--stdout');
-        // Options after `decrypt` may still name the file.
-        for (let j = i + 1; j < words.length; j++) {
-          const x = words[j];
-          if (x !== null && FILE_FLAGS.has(x) && words[j + 1] !== undefined)
-            files.push(words[j + 1]);
-        }
+        filesAfter(words, i + 1, files);
         break;
       }
       if (QUIET_SUBCOMMANDS.has(w)) return null;
