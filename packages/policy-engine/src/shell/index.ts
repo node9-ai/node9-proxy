@@ -4545,7 +4545,7 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   const withInline =
     direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
       ? direct
-      : stricter(direct, inlineCodeJailRead(command, changesDir ? enteredDirs(command) : []));
+      : stricter(direct, inlineCodeJailRead(command, changesDir));
   // The dotenv command-line tools (node9Firewall#443), by strictness as well.
   const computed =
     withInline?.verdict === 'block' || !dotenvCli
@@ -5996,10 +5996,14 @@ const runsInlineInterpreter = (command: string, normalized: string): boolean =>
  * not of commands.inline-exec, so it runs whatever that check says. Only the
  * languages node9 reads: a shell payload is read by the walks above.
  */
-function inlineCodeJailRead(command: string, dirs: readonly string[] = []): FsOpVerdict | null {
+function inlineCodeJailRead(command: string, changesDir = false): FsOpVerdict | null {
   const calls = inlineExecCalls(command);
   if (calls === PARSE_FAIL) return null;
   let review: FsOpVerdict | null = null;
+  // Walked once, and only when the code opens a relative name: most commands
+  // with `cd` and an interpreter word run a script file, not inline code.
+  let entered: string[] | null = null;
+  const dirs = (): string[] => (entered ??= changesDir ? enteredDirs(command) : []);
   for (const call of calls) {
     const language = inlineLanguageOf(call.interp);
     if (language === null) continue;
@@ -6009,7 +6013,7 @@ function inlineCodeJailRead(command: string, dirs: readonly string[] = []): FsOp
         // The path as written, and under each directory the command entered:
         // `cd ~/.ssh && python3 -c "open('id_rsa')"` opens ~/.ssh/id_rsa.
         const relative = !/^(?:[/\\~$]|[A-Za-z]:)/.test(p);
-        const spellings = relative ? [p, ...dirs.map((d) => `${d}/${p}`)] : [p];
+        const spellings = relative ? [p, ...dirs().map((d) => `${d}/${p}`)] : [p];
         for (const spelling of spellings) {
           const hit = matchSensitivePath(spelling);
           if (hit?.verdict === 'block') return hit;
