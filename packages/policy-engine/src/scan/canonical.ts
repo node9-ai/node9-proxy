@@ -837,7 +837,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // macaroon prefix (`pypi-AgE`), and a vendor-token match made only of
 // lower-case words joined by separators (a URL slug) is a phrase, not a token.
 // Histories scanned under v39 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
+// canonical-v41 (2026-11-20): a read by a relative name after `cd` / `pushd`
+// into a credential directory (`cd ~/.ssh && cat id_rsa`) is judged under the
+// directory the command entered; the jail consults the structural walk for a
+// command that changes directory. Histories scanned under v40 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v41';
 
 // 2026-11-08, hash bumped with NO version bump (node9Firewall#451): dlp/index.ts
 // gained the Inline Secret Assignment pattern. argumentsOnly, which scanArgs
@@ -901,7 +905,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '0981d8f2268c7d69';
+export const CANONICAL_EXTRACTOR_HASH = 'dbde5e7f06f3738a';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;

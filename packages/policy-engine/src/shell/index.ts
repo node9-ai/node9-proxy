@@ -4534,15 +4534,18 @@ export function analyzeFsOperation(command: string): FsOpVerdict | null {
   // read by the same structural walk (node9Firewall#300). There the two
   // readings combine by strictness: a review the direct reading found must
   // not hide a block inside the script.
+  // A command that changes directory is read by that walk too: `cd ~/.ssh &&
+  // cat id_rsa` names the key relative to a directory only the walk tracks.
+  const changesDir = CHANGES_DIR_RE.test(command) || CHANGES_DIR_RE.test(normalized);
   const own = analyzeFsOperationImpl(command);
   const direct =
-    stdinShell && own?.verdict !== 'block'
+    (stdinShell || changesDir) && own?.verdict !== 'block'
       ? stricter(own, structuralJailRead(command))
       : (own ?? (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null));
   const withInline =
     direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
       ? direct
-      : stricter(direct, inlineCodeJailRead(command));
+      : stricter(direct, inlineCodeJailRead(command, changesDir));
   // The dotenv command-line tools (node9Firewall#443), by strictness as well.
   const computed =
     withInline?.verdict === 'block' || !dotenvCli
@@ -5448,6 +5451,14 @@ const STDIN_SHELL_WORD_RE = new RegExp(
 const feedsShellStdin = (command: string): boolean =>
   /\||<</.test(command) && STDIN_SHELL_WORD_RE.test(command);
 
+/**
+ * `cd DIR` / `pushd DIR` as a command word: what follows may name a file
+ * relative to DIR. A cheap over-approximation; the structural walk knows which
+ * directory each read happens in. A quote or a backtick before the word
+ * counts: `sh -c 'cd ~/.ssh && cat id_rsa'` opens its payload with it.
+ */
+const CHANGES_DIR_RE = /(?:^|[\s;&|({'"`])(?:cd|pushd)\s/;
+
 /** `source FILE` / `. FILE`: no reader word, so the prescreen needs this. */
 const SOURCES_FILE_RE = /(?:^|[;&|(\s])(?:source|\.)\s/;
 
@@ -5904,6 +5915,21 @@ function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null 
   return null;
 }
 
+/**
+ * A relative name as the file it is in the directory the command entered:
+ * after `cd ~/.ssh`, `id_rsa` is `~/.ssh/id_rsa`. The walk records that
+ * directory on each access (empty when the command never changed it, or
+ * changed it to something that is not literal). An absolute, home-relative or
+ * variable-led name is already whole. A leading `./` is dropped so the name
+ * sits directly under the directory, where the public-material rule looks.
+ */
+function underEnteredDir(a: FileAccess, name: string): string {
+  const dir = a.cwd ?? '';
+  if (!dir || /^(?:[/\\~$]|[A-Za-z]:)/.test(name)) return name;
+  const rest = name.replace(/^(?:\.\/)+/, '');
+  return `${dir.replace(/[/\\]+$/, '')}/${rest}`;
+}
+
 /** The jail applied to the reads the structural file-access walk resolves.
  *  Listings (`ls`) and recursive directory reads (`grep -r x .`) are not a
  *  read of a jailed file's content and are skipped. */
@@ -5920,17 +5946,34 @@ function structuralJailRead(command: string): FsOpVerdict | null {
   const sourcedHit = sourcedAndPrinted(command);
   if (sourcedHit?.verdict === 'block') return sourcedHit;
   let review: FsOpVerdict | null = sourcedHit;
+  // A relative copy source under a directory the command entered, with the
+  // jail's copy verdict for it (`cd ~/.ssh && cp id_rsa /tmp/k`).
+  let relativeCopy: FsOpVerdict | null = null;
   for (const a of accesses) {
-    // A copy's source is judged by the jail's copy rules (a review, and a
-    // rename inside the jail stays quiet), not as a read.
-    if (a.operation !== 'read' || a.listing || a.recursive || a.copy) continue;
+    if (a.copy && !a.listing && (a.operation === 'read' || a.operation === 'remove')) {
+      // A copy's or a move's source is judged by the jail's copy rules (a
+      // review), not as a read. The direct walk does that for a source as
+      // written; a source that is relative to a directory the command entered
+      // is only known here.
+      const entered = underEnteredDir(a, a.path);
+      if (entered !== a.path) relativeCopy ??= copyVerdictOf(matchSensitivePath(entered));
+      continue;
+    }
+    if (a.operation !== 'read' || a.listing || a.recursive) continue;
     // A loop variable keeps an item's text, not its pattern (`for f in .e*`), so
     // a path with glob characters is judged as the glob it was.
     const glob = a.glob ?? (GLOB_META.test(a.path) ? a.path : undefined);
-    const hit = glob ? matchSensitiveGlob(glob, !!a.dotGlob) : matchSensitivePath(a.path);
+    const hit = glob
+      ? matchSensitiveGlob(underEnteredDir(a, glob), !!a.dotGlob)
+      : matchSensitivePath(underEnteredDir(a, a.path));
     if (hit?.verdict === 'block') return hit;
     review ??= hit;
   }
+  // Always a review, also for a copy that stays inside the directory
+  // (`cd ~/.ssh && cp id_rsa id_rsa.bak`). The walk does not tie a write to
+  // the copy that made it, and "every write of the command lands in the jail"
+  // let an unrelated `touch x` silence an upload of the key (/code-review).
+  review = stricter(review, relativeCopy);
   // A payload the walk left unread is not "nothing found": the same answer
   // the direct walk gives when its own budget runs out.
   return report.exhausted ? stricter(review, UNANALYSABLE_NESTING) : review;
@@ -5953,23 +5996,75 @@ const runsInlineInterpreter = (command: string, normalized: string): boolean =>
  * not of commands.inline-exec, so it runs whatever that check says. Only the
  * languages node9 reads: a shell payload is read by the walks above.
  */
-function inlineCodeJailRead(command: string): FsOpVerdict | null {
+function inlineCodeJailRead(command: string, changesDir = false): FsOpVerdict | null {
   const calls = inlineExecCalls(command);
   if (calls === PARSE_FAIL) return null;
   let review: FsOpVerdict | null = null;
+  // Walked once, and only when the code opens a relative name: most commands
+  // with `cd` and an interpreter word run a script file, not inline code.
+  let entered: string[] | null = null;
+  const dirs = (): string[] => (entered ??= changesDir ? enteredDirs(command) : []);
   for (const call of calls) {
     const language = inlineLanguageOf(call.interp);
     if (language === null) continue;
     for (const code of call.code) {
       if (code === null) continue;
       for (const p of inlineReadPaths(language, code, call.preload)) {
-        const hit = matchSensitivePath(p);
-        if (hit?.verdict === 'block') return hit;
-        review ??= hit;
+        // The path as written, and under each directory the command entered:
+        // `cd ~/.ssh && python3 -c "open('id_rsa')"` opens ~/.ssh/id_rsa.
+        const relative = !/^(?:[/\\~$]|[A-Za-z]:)/.test(p);
+        const spellings = relative ? [p, ...dirs().map((d) => `${d}/${p}`)] : [p];
+        for (const spelling of spellings) {
+          const hit = matchSensitivePath(spelling);
+          if (hit?.verdict === 'block') return hit;
+          review ??= hit;
+        }
       }
     }
   }
   return review;
+}
+
+/** How many directory changes one command is read for. */
+const MAX_ENTERED_DIRS = 16;
+
+/**
+ * The directories a command enters with a literal `cd` / `pushd`, for the
+ * inline-code reading (the structural walk tracks the directory per read; an
+ * interpreter's code is not one of its reads). Every one of them, whatever the
+ * order: a file the code opens by a relative name may be in any. A relative
+ * target is also taken under each directory entered before it. `sh -c`
+ * payloads are followed.
+ */
+function enteredDirs(command: string, depth = 0, out: string[] = []): string[] {
+  if (depth > 3) return out;
+  try {
+    walkCommandScope(command, (node: unknown) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (!n || n.kind !== 'CallExpr' || out.length >= MAX_ENTERED_DIRS) return true;
+      const words = callWords(n);
+      if (words.length === 0) return true;
+      let head = unwrapCommandHead(words);
+      if (baseWord(words[head]) === 'builtin') head++;
+      const name = baseWord(words[head]);
+      if (name !== 'cd' && name !== 'pushd') {
+        const payload = literalShellPayload(words, baseWord(words[0]));
+        if (payload !== null) enteredDirs(payload, depth + 1, out);
+        return true;
+      }
+      const target = words.slice(head + 1).find((w) => w === null || !w.startsWith('-'));
+      if (!target) return true;
+      const dir = target.replace(/[/\\]+$/, '');
+      const rooted = /^(?:[/\\~]|[A-Za-z]:)/.test(dir);
+      for (const d of rooted ? [dir] : [dir, ...out.map((prev) => `${prev}/${dir}`)])
+        if (out.length < MAX_ENTERED_DIRS && !out.includes(d)) out.push(d);
+      return true;
+    });
+  } catch {
+    /* a walker error keeps what was found */
+  }
+  return out;
 }
 
 // ── The dotenv command-line tools (node9Firewall#443) ───────────────────────
