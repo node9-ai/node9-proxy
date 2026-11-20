@@ -53,16 +53,38 @@ const HELD = [
   'pkill -f "node9 daemon"',
   'pkill -f node9',
   'pkill -f daemon',
-  'pkill node',
-  'killall node',
-  'killall -9 node',
+  'pkill node9',
+  'pkill -9 node9',
+  'pkill -f "cli.js daemon"',
+  'pkill -f "daemon start"',
+  'pkill -f "node .*daemon"',
+  'killall node9',
+  'killall -r "node9.*"',
+  "sh -c 'pkill node9'",
   'systemctl --user stop node9-daemon',
   'systemctl --user disable --now node9-daemon.service',
   'systemctl --user mask node9-daemon',
   'launchctl bootout gui/501/ai.node9.daemon',
   'launchctl unload ~/Library/LaunchAgents/ai.node9.daemon.plist',
-  'taskkill /F /IM node.exe',
+  'taskkill /F /IM node9.exe',
   `taskkill /PID ${DAEMON_PID} /F`,
+];
+
+// A general kill of every node process is not aimed at node9
+// (node9Firewall#482): it clears stray dev servers, the daemon comes back on
+// the next tool call, and it gets the verdict any other process kill gets.
+// Before the fix every row here was held as a disarm.
+const GENERAL_NODE_KILLS = [
+  'pkill node',
+  'pkill -9 node',
+  'pkill -f node',
+  'pkill -f "node "',
+  'pkill nod',
+  'pkill -f js',
+  'killall node',
+  'killall -9 node',
+  'killall -r "node.*"',
+  'taskkill /F /IM node.exe',
 ];
 
 // The file gate's half. On Windows the protected-file gate does not run at
@@ -104,6 +126,22 @@ const ALLOWED = [
   'taskkill /IM python.exe',
   'echo note > ~/.node9-notes.txt',
 ];
+
+describe('a general kill of node processes is not a disarm (node9Firewall#482)', () => {
+  it.each(GENERAL_NODE_KILLS)('same verdict as any other process kill: %s', async (command) => {
+    const verdict = await explainPolicy('Bash', { command });
+    expect(JSON.stringify(verdict)).not.toContain('node9-disarm');
+    // `pkill python` is the reference: whatever it gets, this gets.
+    expect(verdict.decision).toBe(await bash('pkill python'));
+  });
+
+  it.each(GENERAL_NODE_KILLS)('and at Strict: %s', async (command) => {
+    setLevel('strict');
+    const verdict = await explainPolicy('Bash', { command });
+    expect(JSON.stringify(verdict)).not.toContain('node9-disarm');
+    expect(verdict.decision).toBe(await bash('pkill python'));
+  });
+});
 
 describe('switching node9 off is held (commands.node9-disarm)', () => {
   it.each(HELD)('review at Standard: %s', async (command) => {

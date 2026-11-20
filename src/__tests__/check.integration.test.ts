@@ -986,6 +986,54 @@ describe('jail: public material under ~/.ssh is readable (node9Firewall#308, JAI
   });
 });
 
+describe('a general kill of node processes is not a node9 disarm (node9Firewall#482)', () => {
+  // Through the built CLI, shipped defaults, no approver. `pkill node` and
+  // `killall node` were held for approval as "the AI wants to stop node9": they
+  // do stop the daemon along with every other node process, but that is how
+  // stray dev servers are cleared, and the daemon comes back on the next call.
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = makeTempHome({
+      settings: {
+        mode: 'standard',
+        autoStartDaemon: false,
+        approvalTimeoutMs: 300,
+        approvers: { native: false, browser: false, cloud: false, terminal: false },
+      },
+    });
+  });
+  afterEach(() => cleanupHome(tmpHome));
+
+  const run = (command: string) =>
+    runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } },
+      { HOME: tmpHome },
+      tmpHome
+    );
+  const decisionOf = (r: RunResult): string =>
+    r.stdout.trim() ? JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision : 'allow';
+
+  it.each(['pkill node', 'pkill -f node', 'killall node', 'pkill python'])(
+    '%s → allowed silently, like any other process kill',
+    (command) => {
+      const r = run(command);
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe('');
+    }
+  );
+
+  it.each(['pkill node9', "pkill -f 'node9 daemon'", 'killall node9', 'node9 daemon stop'])(
+    '%s → still held: it is aimed at node9',
+    (command) => {
+      const r = run(command);
+      expect(r.status, 'spawn failed').not.toBeNull();
+      expect(decisionOf(r)).not.toBe('allow');
+      expect(r.stdout).toMatch(/stop node9/);
+    }
+  );
+});
+
 describe('DLP: a stopword inside a real-shaped secret (node9Firewall#301, DLP-1)', () => {
   // Through the built CLI, shipped defaults, no approver, the real hook input
   // shape. Before the fix a key or password that merely CONTAINED `here` or
