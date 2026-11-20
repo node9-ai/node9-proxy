@@ -200,6 +200,28 @@ describe('exposure gate: a send after the session read outside content', () => {
     expect((await send('attacker@example.com')).approved).toBe(true);
   });
 
+  // node9Firewall#369. A lower-case hex id (a trace id, a hash prefix) that
+  // starts with two letters and two digits was read as an `account:`
+  // destination, so after exposure this call was held as a transfer to an
+  // unknown account. An upper-case sandbox account still is one.
+  it('a hex id in the arguments is not an account destination; a sandbox account is', async () => {
+    mockCheckSessionExposure.mockResolvedValue(exposed());
+    const hexId = ['be12', 'a1b2', 'c3d4', 'e5f6'].join('');
+    const withId = await authorizeHeadless(
+      'mcp__calendar__create_event',
+      { title: 'Retry the sync', trace_id: hexId, note: `request ${hexId} failed` },
+      META
+    );
+    expect(withId.approved).toBe(true);
+    const sandbox = ['US13', '3000', '0001', '2121', '2121', '212'].join('');
+    const transfer = await authorizeHeadless(
+      'mcp__bank__send_money',
+      { recipient: sandbox, amount: 10 },
+      META
+    );
+    expect(transfer.approved).toBe(false);
+  });
+
   it('a destructive call with no destination is held; a plain one is logged', async () => {
     mockCheckSessionExposure.mockResolvedValue(exposed());
     const del = await authorizeHeadless('mcp__drive__delete_file', { id: '13' }, META);

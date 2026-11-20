@@ -830,6 +830,9 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // Same version (node9Firewall#308, JAIL-16): public material directly inside
 // a `.ssh` directory (known_hosts, authorized_keys, *.pub) is not a read of a
 // credential, in every copy of the rule (files/paths.ts isPublicSshMaterial).
+// Same version (node9Firewall#369): validateIban knows the BBAN shape of AD,
+// AE, BA and EE, so a hex id with one of those prefixes and a lucky mod-97 is
+// not an IBAN.
 // Histories scanned under v39 re-read.
 export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
 
@@ -895,7 +898,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v40';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '5032a4a140255429';
+export const CANONICAL_EXTRACTOR_HASH = '059e91906c5ae90b';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
