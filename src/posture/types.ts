@@ -30,7 +30,16 @@ export interface Coverage {
  * from a single tier. Internal: not rendered, not shipped.
  */
 export type CoverageProbe =
-  | { kind: 'fileRead'; paths: string[] } // → scanFilePath (DLP layer)
+  | {
+      kind: 'fileRead'; // → scanFilePath (DLP layer)
+      paths: string[];
+      /** The row's fix is a jail step: annotateCoverage rewrites it to the step
+       *  that fits the state (enable the jail, jail a file, or the mode). */
+      jailFix?: boolean;
+      /** A sentence that goes before the jail step, when the real fix is not the
+       *  jail (a plaintext secret is moved out of the file first). */
+      lead?: string;
+    }
   | { kind: 'command'; command: string } // → evaluatePolicy (policy layer)
   | { kind: 'egress' } // → config.policy.egress
   | { kind: 'gateWired' } // → partial while node9 enforces (its hook judges the call)
@@ -117,6 +126,9 @@ export interface PostureResult {
   tier: 'good' | 'at-risk' | 'critical';
   /** Number of checks evaluated — the score denominator. */
   checksRun: number;
+  /** Which layer governs policy on this machine. The renderer says so once,
+   *  because on a workspace-governed machine no fix is a local command. */
+  policySource?: 'workspace' | 'local';
 }
 
 export interface Headline {

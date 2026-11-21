@@ -90,7 +90,9 @@ describe('checkOutsideContent', () => {
     expect(f.severity).toBe('high');
     expect(f.owner).toBe('node9');
     expect(f.detail).toContain('github (Claude Code, by name)');
-    expect(f.detail.join(' ')).toContain('egress is open');
+    // The gap is the `why` line; detail lists the servers only (it was printed twice).
+    expect(f.why).toContain('egress is open');
+    expect(f.detail.join(' ')).not.toContain('egress is open');
     expect(f.fix).toContain('node9 egress watch');
   });
 
@@ -111,7 +113,7 @@ describe('checkOutsideContent', () => {
     egress = { enabled: true, mode: 'block' };
     checks = { 'behavior.untrusted-content': 'off' };
     const [f] = checkOutsideContent(ctx());
-    expect(f.detail.join(' ')).toContain('behavior.untrusted-content is off');
-    expect(f.detail.join(' ')).not.toContain('egress is open');
+    expect(f.why).toContain('behavior.untrusted-content is off');
+    expect(f.why).not.toContain('egress is open');
   });
 });

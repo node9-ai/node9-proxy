@@ -64,7 +64,8 @@ function fileReadFinding(paths: string[]): Finding {
     title: 't',
     detail: [],
     fix: STATIC_FIX,
-    coverageProbe: { kind: 'fileRead', paths },
+    // The real rows (secrets.ts) mark their fix as a jail step this way.
+    coverageProbe: { kind: 'fileRead', paths, jailFix: true },
   };
 }
 
@@ -138,10 +139,11 @@ describe('N6 — fix-string honesty (the founder bug) + ship privacy contract', 
     expect(f.fix).toBe(STATIC_FIX);
   });
 
-  it('rewrite only touches findings whose fix actually recommends project-jail', async () => {
+  it('rewrite only touches findings whose fix is a jail step', async () => {
     applied.current = ['project-jail'];
     const f = fileReadFinding([P.claude]);
     f.fix = 'Rotate this credential.'; // some other finding style
+    f.coverageProbe = { kind: 'fileRead', paths: [P.claude] }; // not marked jailFix
     await annotateCoverage([f], CTX);
     expect(f.fix).toBe('Rotate this credential.');
   });

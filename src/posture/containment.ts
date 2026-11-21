@@ -12,7 +12,9 @@
 // Linux-only signals (/.dockerenv, /proc). On other platforms these read empty.
 
 import fs from 'fs';
+import { getConfig } from '../config';
 import type { CheckContext, Finding } from './types';
+import { remedy, type PolicySource } from './remedy';
 
 /** Points the unsandboxed-host gap deducts while open. The biggest single
  *  hardening lever (sandbox closes it); tuned so a clean-but-unsandboxed host
@@ -31,8 +33,41 @@ function inContainer(): boolean {
   return false;
 }
 
-export function checkContainment(_ctx: CheckContext): Finding[] {
+/** The lighter path of the Isolation row: only the steps not taken yet. A row
+ *  that said "enable project-jail" beside a Secrets row saying project-jail is
+ *  enabled contradicted the report (founder's machine, 2026-11-21). No points
+ *  are promised: the score grants none for this path. Exported for tests. */
+export function lighterPath(state: {
+  jailOn: boolean;
+  egressBlocking: boolean;
+  source: PolicySource;
+}): string {
+  const steps: string[] = [];
+  if (!state.jailOn)
+    steps.push(
+      `  • ${remedy.shieldLine(state.source, 'project-jail')} — block stray credential reads`
+    );
+  if (!state.egressBlocking)
+    steps.push(`  • ${remedy.egressLockLine(state.source)} — block data exfil`);
+  if (steps.length === 0)
+    return 'Lighter — harden in place: already on (project-jail and an egress lock).';
+  return 'Lighter — harden in place, keep full host access:\n' + steps.join('\n');
+}
+
+export function checkContainment(ctx: CheckContext): Finding[] {
   if (inContainer()) return [];
+
+  let jailOn = false;
+  let egressBlocking = false;
+  let source: PolicySource = 'local';
+  try {
+    const config = getConfig(ctx.cwd);
+    jailOn = (config.policy.appliedShields ?? []).includes('project-jail');
+    egressBlocking = config.policy.egress.enabled && config.policy.egress.mode === 'block';
+    source = config.policySource === 'workspace' ? 'workspace' : 'local';
+  } catch {
+    /* no readable config: nothing is on, and the local commands apply */
+  }
 
   return [
     {
@@ -56,11 +91,7 @@ export function checkContainment(_ctx: CheckContext): Finding[] {
         'Two ways to shrink the blast radius — pick by how much flexibility you need:\n' +
         `Strongest — jail it (closes this gap, +${ISOLATION_WEIGHT}):\n` +
         '  • node9 sandbox run <agent>\n' +
-        `Lighter — harden in place, keep full host access (about +${Math.round(
-          ISOLATION_WEIGHT / 2
-        )}):\n` +
-        '  • node9 shield enable project-jail — block stray credential reads\n' +
-        '  • node9 egress lock — block data exfil',
+        lighterPath({ jailOn, egressBlocking, source }),
     },
   ];
 }

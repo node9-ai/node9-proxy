@@ -8,19 +8,20 @@ import fs from 'fs';
 import { getConfig } from '../config';
 import { ALLOWED_DOMAINS_PATH } from '../sandbox/templates';
 import type { CheckContext, Finding } from './types';
+import { remedy, type PolicySource } from './remedy';
 
 interface EgressConfig {
   enabled: boolean;
   mode: 'off' | 'review' | 'block';
+  /** Which layer governs policy here: the fix line depends on it (remedy.ts). */
+  policySource?: PolicySource;
 }
 
 /** The egress state plus the SSRF floor knobs, for the floor row. */
 export interface FloorConfig extends EgressConfig {
   ssrfStrict: boolean;
   ssrfAllow: string[];
-  /** Which layer governs policy here. The remediation line depends on it: the
-   *  CLI command is refused on a workspace-governed machine. */
-  policySource: 'workspace' | 'local';
+  policySource: PolicySource;
 }
 
 /**
@@ -104,7 +105,7 @@ export function evaluateEgressConfig(egress: EgressConfig): Finding {
     who: 'If the agent is ever tricked, nothing stops it sending your data out.',
     owner: 'node9',
     detail: [],
-    fix: 'Fix it now: run `node9 egress watch` (or `node9 egress lock` to hard-block).',
+    fix: `Fix it now: ${remedy.egress(egress.policySource ?? 'local')}.`,
     coverageProbe: { kind: 'egress' },
   };
 }
@@ -129,11 +130,12 @@ export function checkEgressFloor(egress: FloorConfig): Finding[] {
     'link-local and multicast addresses',
     egress.ssrfStrict
       ? 'the strict tier is on: loopback, the private ranges and CGNAT are blocked too'
-      : `the strict tier is off: loopback, the private ranges and CGNAT (100.64/10) stay reachable (${
-          egress.policySource === 'workspace'
-            ? 'turn it on in the dashboard, Enforcement → Network'
-            : '`node9 egress strict on`'
-        })`,
+      : `the strict tier is off: loopback, the private ranges and CGNAT (100.64/10) stay reachable (${remedy.checkByTitle(
+          egress.policySource,
+          'Internal address',
+          'block',
+          'node9 egress strict on'
+        )})`,
   ];
   if (egress.ssrfAllow.length) {
     detail.push(`you exempted: ${egress.ssrfAllow.join(', ')}`);
@@ -194,7 +196,11 @@ export function checkEgress(ctx: CheckContext): Finding[] {
   const config = getConfig(ctx.cwd);
   const egress = config.policy.egress;
   return [
-    evaluateEgressConfig({ enabled: egress.enabled, mode: egress.mode }),
+    evaluateEgressConfig({
+      enabled: egress.enabled,
+      mode: egress.mode,
+      policySource: config.policySource,
+    }),
     ...checkEgressFloor({
       enabled: egress.enabled,
       mode: egress.mode,

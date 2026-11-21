@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { postureCategoryOwasp } from '@node9/policy-engine';
 import type { Finding, PostureResult, Severity } from './types';
 import { openHeadroom } from './score';
+import { WORKSPACE_NOTE } from './remedy';
 
 const ICON: Record<Severity, string> = {
   critical: chalk.red('❌'),
@@ -226,14 +227,28 @@ export function renderPosture(result: PostureResult, opts: RenderPostureOptions 
   // Group OPEN findings by WHOSE JOB it is: node9 has a lever (run a command),
   // vs only-you (OS/infra — node9 can detect but not fix). Unset owner → 'os'
   // (don't falsely claim node9 can fix it).
-  const node9Open = open.filter((f) => f.owner === 'node9');
-  // 🔒 middle tier: owner is still the user's, but node9 has an adjacent lever
-  // that reduces the risk (a runnable command). Sits between fix-it and only-you.
-  const reduceOpen = open.filter((f) => f.owner !== 'node9' && f.node9Reduces);
-  const osOpen = open.filter((f) => f.owner !== 'node9' && !f.node9Reduces);
+  // 🔒 middle tier: optional hardening. Either the owner is still the user and
+  // node9 has an adjacent lever that reduces the risk, or the row carries a
+  // score weight (the points the header calls "the 🔒 tier below"): a weighted
+  // row shown in the first section made that header line false (Cost, +4).
+  const hardening = (f: Finding) => !!f.scoreWeight || (f.owner !== 'node9' && !!f.node9Reduces);
+  const node9Open = open.filter((f) => f.owner === 'node9' && !hardening(f));
+  const reduceOpen = open.filter(hardening);
+  const osOpen = open.filter((f) => f.owner !== 'node9' && !hardening(f));
 
+  // On a workspace-governed machine no fix is a local command (remedy.ts), and
+  // the report says why once instead of in every row.
+  const governed = result.policySource === 'workspace';
   if (node9Open.length > 0) {
-    lines.push('  ' + chalk.cyan.bold('🔧 node9 can fix these — run the command'));
+    lines.push(
+      '  ' +
+        chalk.cyan.bold(
+          governed
+            ? '🔧 node9 can fix these — change it on the dashboard'
+            : '🔧 node9 can fix these — run the command'
+        )
+    );
+    if (governed) for (const l of wrap(WORKSPACE_NOTE, 76)) lines.push('  ' + chalk.gray(l));
     for (const f of node9Open) lines.push(...renderFinding(f, true, openLabel(f)));
   }
   if (reduceOpen.length > 0) {
@@ -243,7 +258,7 @@ export function renderPosture(result: PostureResult, opts: RenderPostureOptions 
   }
   if (osOpen.length > 0) {
     if (node9Open.length > 0 || reduceOpen.length > 0) lines.push('');
-    lines.push('  ' + chalk.bold("🧱 YOUR PART — node9 can't fix these (OS-level)"));
+    lines.push('  ' + chalk.bold("🧱 YOUR PART — node9 can't fix these"));
     for (const f of osOpen) lines.push(...renderFinding(f, false, openLabel(f)));
   }
 

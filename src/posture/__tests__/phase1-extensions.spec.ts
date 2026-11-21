@@ -133,7 +133,9 @@ describe('Coverage: the daemon after a reboot', () => {
     expect(f).toBeDefined();
     expect(f.severity).toBe('medium');
     expect(f.why).toContain('No autostart entry');
-    expect(f.fix).toContain('node9 doctor');
+    // `node9 doctor` only reports the state; this is the command that changes it.
+    expect(f.fix).toContain('node9 daemon install');
+    expect(f.fix).not.toContain('node9 doctor');
     autostart = 'disabled';
     expect(checkCoverage(ctx()).find((x) => x.title.includes('reboot'))!.why).toContain('disabled');
   });

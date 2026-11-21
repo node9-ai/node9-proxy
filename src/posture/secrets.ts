@@ -19,6 +19,14 @@ import { loadCanaries } from '../canary/registry';
 import { readCappedText } from '../utils/read-capped';
 import { homeCredentialFiles } from '../credential-files';
 import { scanArgs } from '../dlp';
+import { cap, policySourceOf, remedy } from './remedy';
+
+/** What removes a plaintext secret, said before any jail step (which only
+ *  keeps the agent from reading the file the secret still sits in). */
+export const MOVE_SECRET_LEAD =
+  'Move each secret out of the file (an environment variable set for the one server or ' +
+  'command that needs it, or a secrets manager) and rotate it. Until then, keep the agent ' +
+  'from reading the file.';
 
 const MAX_FILE_BYTES = 256 * 1024;
 
@@ -88,6 +96,7 @@ function plantedDecoyPaths(): Set<string> {
 
 export function checkSecrets(ctx: CheckContext): Finding[] {
   const home = ctx.home || os.homedir();
+  const source = policySourceOf(ctx.cwd);
   const findings: Finding[] = [];
   // Decoys node9 planted are not the user's secrets: excluded from both scans
   // below, reported once as informational (design canary-design.md, H4).
@@ -116,11 +125,18 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       why: 'They were saved in plaintext config / .env files.',
       who: 'A tricked agent (or any program you run) could read and leak them.',
       detail: plaintext,
-      fix: 'Fix it now: run `node9 shield enable project-jail` (blocks credential-file reads in-path).',
+      // A jail keeps the agent from reading the file; the secret is still in it.
+      // The fix that removes the risk comes first (MOVE_SECRET_LEAD).
+      fix: `${MOVE_SECRET_LEAD} ${cap(remedy.shield(source, 'project-jail'))} (blocks credential-file reads in-path).`,
       // Coverage is decided at the DLP layer — does node9 block the agent
       // reading these? (See enforcement.ts.)
       owner: 'node9',
-      coverageProbe: { kind: 'fileRead', paths: plaintextPaths },
+      coverageProbe: {
+        kind: 'fileRead',
+        paths: plaintextPaths,
+        jailFix: true,
+        lead: MOVE_SECRET_LEAD,
+      },
     });
   }
 
@@ -147,9 +163,9 @@ export function checkSecrets(ctx: CheckContext): Finding[] {
       why: 'They sit unlocked in your home folder.',
       who: 'An unsandboxed agent could read them and use them to reach your servers / cloud.',
       detail: creds,
-      fix: 'Fix it now: run `node9 shield enable project-jail` (blocks ~/.ssh, ~/.aws, .env reads in-path).',
+      fix: `Fix it now: ${remedy.shield(source, 'project-jail')} (blocks ~/.ssh, ~/.aws, .env reads in-path).`,
       owner: 'node9',
-      coverageProbe: { kind: 'fileRead', paths: credPaths },
+      coverageProbe: { kind: 'fileRead', paths: credPaths, jailFix: true },
     });
   }
   // ── Secrets in the environment the agent inherits (high) ─────────────────

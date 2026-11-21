@@ -16,14 +16,14 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { checkValue } from '@node9/policy-engine';
-import { analyzeInstructionFile } from '../ci-check/instructions';
+import { analyzeInstructionFile, analyzeWithdrawnGuidance } from '../ci-check/instructions';
 import type { CiFinding } from '../ci-check/types';
 import { getConfig, catalogSettingsFrom } from '../config';
 import type { CheckContext, Finding } from './types';
+import { remedy } from './remedy';
 import { readSmallFile } from '../utils/read-small-file';
 
 export const CATEGORY = 'Instruction files';
-const WITHDRAWN_RULE = 'CI-6.withdrawn-guidance';
 
 const MAX_FILES = 200;
 const MAX_FILE_BYTES = 256 * 1024;
@@ -77,15 +77,22 @@ export function instructionFiles(home: string): string[] {
   return out;
 }
 
-const MAX_SKILL_FILES = 400;
+const MAX_SKILL_FILES = 1000;
+/** Deep enough for the layout the Claude desktop app syncs skills into
+ *  (`skills/synced/<bucket>/<skill>/references/x.md`). */
+const SKILL_DEPTH = 5;
 
-/** Skill folders outside ~/.claude/skills that agents load skills from: Codex,
+/** Every folder an agent on this machine loads skills from: Claude Code, Codex,
  *  the shared .agents layout, the project's own folders and Claude Code plugins.
- *  Read for withdrawn vendor guidance only; the other content rules stay on the
- *  files listed by instructionFiles, so plugin docs do not add review noise. */
-export function extraSkillFiles(home: string, cwd: string): { files: string[]; capped: boolean } {
+ *  Read for withdrawn vendor guidance only, and it is the ONLY input of that
+ *  rule: a memory file or a CLAUDE.md that names the same text is a note, not a
+ *  stale copy of a skill. The other content rules stay on the files listed by
+ *  instructionFiles, so plugin docs do not add review noise. User folders come
+ *  first, so the budget is spent on plugins last. */
+export function skillFiles(home: string, cwd: string): { files: string[]; capped: boolean } {
   const out: string[] = [];
   const dirs = [
+    path.join(home, '.claude', 'skills'),
     path.join(home, '.codex', 'skills'),
     path.join(home, '.agents', 'skills'),
     path.join(cwd, '.claude', 'skills'),
@@ -93,15 +100,17 @@ export function extraSkillFiles(home: string, cwd: string): { files: string[]; c
   ];
   const marketplaces = path.join(home, '.claude', 'plugins', 'marketplaces');
   for (const m of safeDirs(marketplaces)) {
-    for (const plugin of safeDirs(path.join(marketplaces, m, 'plugins'))) {
-      dirs.push(path.join(marketplaces, m, 'plugins', plugin, 'skills'));
+    for (const group of ['plugins', 'external_plugins']) {
+      for (const plugin of safeDirs(path.join(marketplaces, m, group))) {
+        dirs.push(path.join(marketplaces, m, group, plugin, 'skills'));
+      }
     }
   }
-  const seen = new Set<string>([path.join(home, '.claude', 'skills')]);
+  const seen = new Set<string>();
   for (const d of dirs) {
     if (seen.has(d)) continue; // cwd may be home
     seen.add(d);
-    listMdCapped(d, 3, out, MAX_SKILL_FILES);
+    listMdCapped(d, SKILL_DEPTH, out, MAX_SKILL_FILES);
   }
   return { files: out, capped: out.length >= MAX_SKILL_FILES };
 }
@@ -164,14 +173,11 @@ export function checkInstructionFiles(ctx: CheckContext): Finding[] {
   const detail: string[] = [];
   let worst: 'high' | 'medium' = 'medium';
   let filesHit = 0;
-  const withdrawn: CiFinding[] = [];
   for (const file of instructionFiles(home)) {
     const text = readSmall(file);
     if (text === null) continue;
     const memory = isMemory(file);
-    const all = analyzeInstructionFile(display(file, home), text);
-    for (const h of all) if (h.rule === WITHDRAWN_RULE) withdrawn.push(h);
-    const hits = all.filter((h) => h.rule !== WITHDRAWN_RULE && counts(h, memory));
+    const hits = analyzeInstructionFile(display(file, home), text).filter((h) => counts(h, memory));
     if (hits.length === 0) continue;
     filesHit++;
     for (const h of hits.slice(0, 3)) {
@@ -194,23 +200,27 @@ export function checkInstructionFiles(ctx: CheckContext): Finding[] {
   }
 
   // ── Installed skills that still carry guidance their vendor withdrew ─────
-  const extra = extraSkillFiles(home, ctx.cwd || home);
-  for (const file of extra.files) {
+  // Skill folders only (see skillFiles): the files above are not all skills.
+  const withdrawn: CiFinding[] = [];
+  const skills = skillFiles(home, ctx.cwd || home);
+  for (const file of skills.files) {
     const text = readSmall(file);
     if (text === null) continue;
-    for (const h of analyzeInstructionFile(display(file, home), text))
-      if (h.rule === WITHDRAWN_RULE) withdrawn.push(h);
+    withdrawn.push(...analyzeWithdrawnGuidance(display(file, home), text));
   }
   if (withdrawn.length > 0) {
     const detailLines = withdrawn
       .slice(0, 12)
       .map((h) => `${h.file}${h.line ? ` (line ${h.line})` : ''}: ${h.signals[0] ?? h.title}`);
-    if (extra.capped)
+    if (skills.capped)
       detailLines.push(`stopped after ${MAX_SKILL_FILES} skill files: the list may be incomplete`);
     findings.push({
       category: CATEGORY,
       severity: 'medium',
-      title: `${withdrawn.length} installed skill file${withdrawn.length === 1 ? '' : 's'} still carr${withdrawn.length === 1 ? 'ies' : 'y'} guidance its vendor withdrew`,
+      title:
+        withdrawn.length === 1
+          ? '1 installed skill file still carries guidance its vendor withdrew'
+          : `${withdrawn.length} installed skill files still carry guidance their vendor withdrew`,
       what: 'A skill on this machine still tells the agent something the vendor removed from its own copy of the skill.',
       why: 'The skill was copied from a catalog or a vendor before the vendor fixed it, and the copy was never updated.',
       who: 'An agent that loads the skill follows the old guidance and can write it into code or config.',
@@ -236,7 +246,7 @@ export function checkInstructionFiles(ctx: CheckContext): Finding[] {
       who: 'A poisoned line written in one session is loaded by every later one.',
       detail: [],
       owner: 'node9',
-      fix: 'Set files.agent-instructions to review (the Checks page, or `checks.files.agent-instructions` in the config file).',
+      fix: `Set files.agent-instructions to review (${remedy.checkWhere(config.policySource === 'workspace' ? 'workspace' : 'local', 'files.agent-instructions')}).`,
     });
   }
 

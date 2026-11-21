@@ -14,6 +14,7 @@ import { getConfig } from '../config';
 import { getAgentWiring } from '../agent-wiring';
 import type { CheckContext, Coverage, Finding } from './types';
 import { isRecordOnly, levelOf } from '@node9/policy-engine';
+import { cap, remedy, type PolicySource } from './remedy';
 
 interface EnforceEnv {
   /** node9 is actually enforcing (not observe/audit) AND wired into an agent. */
@@ -65,6 +66,7 @@ function viaFromRule(ruleName?: string): string | undefined {
 export async function annotateCoverage(findings: Finding[], ctx: CheckContext): Promise<void> {
   const config = getConfig(ctx.cwd);
   const mode = config.settings.mode;
+  const source: PolicySource = config.policySource === 'workspace' ? 'workspace' : 'local';
   const wired = getAgentWiring(ctx.home).some((r) => r.isProtected);
   const env: EnforceEnv = {
     enforcing: wired && !isRecordOnly(mode),
@@ -118,15 +120,16 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
         // to the SaaS and ship.ts's contract is that fix never carries
         // paths (detail[], which lists the files, deliberately never
         // leaves the machine).
-        if (
-          (config.policy.appliedShields ?? []).includes('project-jail') &&
-          f.fix?.includes('shield enable project-jail')
-        ) {
+        if ((config.policy.appliedShields ?? []).includes('project-jail') && probe.jailFix) {
+          // A row whose real fix is not the jail says that first (probe.lead).
+          const lead = probe.lead ? `${probe.lead} ` : '';
           const known = verdicts.filter((v) => v !== null).length;
           if (known === 0) {
             f.fix =
+              lead +
               'project-jail is already enabled but does not cover the file(s) listed here. ' +
-              'Fix it now: run `node9 jail add <file>` for each file above.';
+              (lead ? '' : 'Fix it now: ') +
+              `${lead ? cap(remedy.jailAdd(source, 'each file above')) : remedy.jailAdd(source, 'each file above')}.`;
           } else {
             // Some of the files ARE recognised. Saying the jail covers none of
             // them was false (founder's machine, 2026-11-21: 5 of 6). Mark the
@@ -138,11 +141,12 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
               );
             }
             f.fix =
+              lead +
               `node9 already recognises reads of ${known} of these ${verdicts.length} files ` +
-              '(marked above). For each unmarked file, run `node9 jail add <file>`.' +
+              `(marked above). ${cap(remedy.jailAdd(source, 'each unmarked file'))}.` +
               (isRecordOnly(mode)
                 ? ` node9 is in ${levelOf(mode)} mode, which logs these reads and lets them ` +
-                  'through: set mode to `standard` (or `strict`) to stop them.'
+                  `through: ${remedy.mode(source)} to stop them.`
                 : '');
           }
         }
@@ -154,11 +158,12 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
         // when nothing is stopped, the mode is what is missing.
         // Only for a record-only mode: when the gap is an unwired agent, the
         // mode is not the fix (fw#408 review).
-        if (isRecordOnly(mode) && f.fix?.includes('shield enable project-jail')) {
+        if (isRecordOnly(mode) && probe.jailFix) {
           f.fix =
+            (probe.lead ? `${probe.lead} ` : '') +
             'node9 already recognises reads of these files, but it is in ' +
             `${levelOf(mode)} mode, which logs them and lets them through. ` +
-            'Fix it now: set mode to `standard` (or `strict`) to stop them.';
+            `Fix it now: ${remedy.mode(source)} to stop them.`;
         }
       }
       continue;
@@ -172,15 +177,19 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
       viaFromRule(verdict.ruleName)
     );
     if (f.coverage.state === 'open' && verdict.decision !== 'allow' && isRecordOnly(mode))
-      f.fix = auditModeFix(mode, 'node9 already stops this');
+      f.fix = auditModeFix(mode, 'node9 already stops this', source);
   }
 }
 
 /** The fix text when a setting is in place and only the mode holds it back:
  *  one sentence, the same for every check (no path, ships as is). */
-export function auditModeFix(mode: string | undefined, whatIsSet: string): string {
+export function auditModeFix(
+  mode: string | undefined,
+  whatIsSet: string,
+  source: PolicySource = 'local'
+): string {
   return (
     `${whatIsSet}, but node9 is in ${levelOf(mode)} mode, which records and lets through. ` +
-    'Fix it now: set mode to `standard` (or `strict`) to enforce it.'
+    `Fix it now: ${remedy.mode(source)} to enforce it.`
   );
 }
