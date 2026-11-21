@@ -481,11 +481,17 @@ export function collectShellFileAccesses(
   /** A reader operand whose name is not known until the command runs, as
    *  `*` (or `DIR/*` for a relative literal prefix `DIR/`) in each directory
    *  the command entered. The starting directory is left out: there `*` is
-   *  any file of any project, the unknown-names check's case. */
+   *  any file of any project, the unknown-names check's case. A rooted
+   *  prefix (`~/.ssh/$X`) is the same directory wherever the shell is. */
   function addUnknownRead(token: Word | null, state: State): void {
     const prefix = token?.value ?? '';
-    if (/^[/~$]|^[A-Za-z]:/.test(prefix)) return;
+    if (/^[$]|^[A-Za-z]:/.test(prefix)) return;
     const pattern = `${prefix.slice(0, prefix.lastIndexOf('/') + 1)}*`;
+    if (/^[/~]/.test(prefix)) {
+      if (pattern.length > 2)
+        out.push({ operation: 'read', path: pattern, cwd: '', followFinal: true, glob: pattern });
+      return;
+    }
     for (const cwd of state.cwd)
       if (cwd)
         out.push({ operation: 'read', path: pattern, cwd, followFinal: true, glob: pattern });

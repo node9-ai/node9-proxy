@@ -69,9 +69,7 @@ describe('JAIL-14b — echo and printf of a literal are that literal', () => {
 describe('JAIL-14b — anything else stays dynamic', () => {
   it.each([
     // a body that computes something
-    [`cat $(find ${D} -name 'id_*')`, 'null'],
     [`cat $(cat /tmp/p)`, 'null'],
-    [`cat $(ls ${D} | head -1)`, 'null'],
     // two statements, a redirect, an assignment inside
     [`cat $(echo ${K}; echo x)`, 'null'],
     [`cat $(echo ${K} > /dev/null)`, 'null'],
@@ -81,6 +79,13 @@ describe('JAIL-14b — anything else stays dynamic', () => {
     [`cat $(printf '%s/%s' ${D} id_rsa)`, 'null'],
     [`cat $(printf '%d' 5)`, 'null'],
   ])('%s -> %s', (c, want) => expect(v(c)).toBe(want));
+
+  // Founder decision 2026-11-21: not resolved, but a listing of a credential
+  // directory names nothing else, so its names read are `cat ~/.ssh/*`.
+  it.each([[`cat $(find ${D} -name 'id_*')`], [`cat $(ls ${D} | head -1)`]])(
+    '%s -> block (a listing of the directory)',
+    (c) => expect(v(c)).toBe('block')
+  );
 
   it('a split token is caught after all: the resolver concatenates parts', () => {
     // The corpus predicted that nothing short of running the shell reads

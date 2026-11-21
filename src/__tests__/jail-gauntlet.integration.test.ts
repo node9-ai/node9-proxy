@@ -337,7 +337,7 @@ describe.skipIf(process.platform === 'win32')(
       ['key USE through $HOME', () => `ssh -i $HOME/.ssh/id_rsa host`],
       ['key INSTALL through $HOME', () => `cp /tmp/ci_key $HOME/.ssh/id_rsa`],
       ['a reassigned HOME is not the real home', () => `HOME=/tmp/fake; cat $HOME/id_rsa`],
-      ['a genuinely dynamic substitution', () => `cat $(find $HOME/.ssh -name 'id_*')`],
+      ['a genuinely dynamic substitution', () => `cat $(find $HOME/project -name 'id_*')`],
       ['a pattern that mentions the jail', () => `grep -rn "\\.ssh/" $DIR`],
       ['the CI idiom the rejected regex would have hit', () => `cat $TEMPLATE | envsubst > .env`],
     ])('%s still runs', (_label, mk) => {
@@ -345,6 +345,15 @@ describe.skipIf(process.platform === 'win32')(
       keyIn(home);
       const r = probe(home, 'Bash', { command: mk() });
       expect(r.verdict).toBe('allow');
+    });
+
+    // Founder decision 2026-11-21: not resolved, but a listing of ~/.ssh names
+    // nothing except held files, so reading its names is `cat ~/.ssh/*`.
+    it('a listing of ~/.ssh whose names are read is blocked', () => {
+      const { home } = jailedHome();
+      keyIn(home);
+      const r = probe(home, 'Bash', { command: `cat $(find $HOME/.ssh -name 'id_*')` });
+      expect(r.verdict).toBe('block');
     });
   }
 );

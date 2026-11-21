@@ -301,3 +301,66 @@ describe('the default walk is unchanged', () => {
     expect(collectShellFileAccesses('env -C ~/.ssh cat id_rsa').map((a) => a.cwd)).toEqual(['']);
   });
 });
+
+describe('names a listing of a credential directory produces', () => {
+  // Founder decision 2026-11-21: decision b1 (log at Standard) is for a
+  // listing that MAY include a credential file. A listing of ~/.ssh or ~/.aws
+  // names nothing else, so reading its names is `cat ~/.ssh/*`: a block.
+  it.each([
+    ['a substitution of find', 'cat $(find ~/.ssh -type f)'],
+    ['$HOME', 'cat $(find $HOME/.ssh -type f)'],
+    ['backticks', 'cat `find ~/.ssh -type f`'],
+    ['ls -d of a glob', 'cat $(ls -d ~/.ssh/*)'],
+    ['ls of the directory', 'cat $(ls ~/.ssh)'],
+    ['find into xargs', 'find ~/.ssh -type f | xargs cat'],
+    ['-print0 into xargs -0', 'find ~/.ssh -type f -print0 | xargs -0 cat'],
+    ['a stage between', 'find ~/.ssh -type f | sort | xargs cat'],
+    ['a read loop', 'ls -d ~/.ssh/* | while read f; do cat "$f"; done'],
+    ['a for loop', 'for f in $(find ~/.ssh -type f); do cat "$f"; done'],
+    ['.aws', 'grep -l BEGIN $(find ~/.aws -type f)'],
+    ['fd', 'fd . ~/.ssh | xargs cat'],
+    ['a find filter that can select a key', "cat $(find ~/.ssh -name 'id_*')"],
+    // The same read with no listing at all: a name not known until it runs.
+    ['an unknown name in the directory', 'cat ~/.ssh/$X'],
+    ['an unknown name under $HOME', 'cat "$HOME/.ssh/$X"'],
+  ])('blocks: %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+
+  it.each([
+    ['a filter of public keys', "cat $(find ~/.ssh -name '*.pub')"],
+    ['a glob of public keys', 'cat $(ls ~/.ssh/*.pub)'],
+    ['known_hosts by name', 'find ~/.ssh -name known_hosts | xargs cat'],
+    ['directories only', 'find ~/.ssh -type d | xargs ls'],
+    ['no reader', 'chmod 600 $(find ~/.ssh -type f)'],
+    ['no reader in the loop', 'for f in $(find ~/.ssh -type f); do chmod 600 "$f"; done'],
+    ['a listing alone', 'ls -la ~/.ssh'],
+    ['an unknown name elsewhere', 'cat /tmp/$X'],
+    ['an unknown name in the home directory', 'cat ~/$X'],
+    ['a listing of one public file', 'cat $(ls ~/.ssh/known_hosts)'],
+    ['a listing of the parent', 'find ~/.ssh/.. -maxdepth 1 -type f | xargs cat'],
+  ])('quiet: %s', (_name, command) => {
+    expect(analyzeFsOperation(command)).toBeNull();
+  });
+
+  // CodeQL js/polynomial-redos on the first prescreen: a long run of the
+  // directory name with no expansion was quadratic. It runs on every call.
+  it.each([
+    ['repeated .aws/', `cat ${'.aws/'.repeat(40_000)}$`],
+    ['repeated $( with no )', `cat ${'$( ~/.ssh '.repeat(20_000)}`],
+  ])('stays fast on a long input: %s', (_name, command) => {
+    const t = performance.now();
+    analyzeFsOperation(command);
+    expect(performance.now() - t).toBeLessThan(2_000);
+  });
+
+  it.each([
+    ['a project', 'cat $(find ~/project -type f)'],
+    ['the current directory', 'find . -type f | xargs cat'],
+  ])('a listing that may include a credential file keeps decision b1: %s', async (_n, command) => {
+    expect(analyzeFsOperation(command)).toBeNull();
+    const v = await evaluatePolicy(config, 'Bash', { command }, { agent: 'claude' }, {});
+    expect(v.decision).toBe('allow');
+    expect(v.ruleName).toBe('review-read-unknown-names');
+  });
+});

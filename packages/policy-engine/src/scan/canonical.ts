@@ -846,7 +846,11 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // glob cd target, `env -C`, a hard link's relative source and the session's
 // own cwd count; `..` in the entered directory is folded. Histories scanned
 // under v41 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v42';
+// canonical-v43 (2026-11-21): a listing of a credential directory whose names
+// are read (`cat $(find ~/.ssh -type f)`, `find ~/.aws | xargs cat`) and
+// `cat ~/.ssh/$X` block, as `cat ~/.ssh/*` does. Histories scanned under v42
+// re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v43';
 
 // 2026-11-08, hash bumped with NO version bump (node9Firewall#451): dlp/index.ts
 // gained the Inline Secret Assignment pattern. argumentsOnly, which scanArgs
@@ -910,7 +914,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v42';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = '3e74a6cffd82db82';
+export const CANONICAL_EXTRACTOR_HASH = 'a60fbf5de2ecbdeb';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
