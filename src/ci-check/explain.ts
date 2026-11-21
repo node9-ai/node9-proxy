@@ -52,6 +52,8 @@ export interface WorkflowFacts {
   pushCode: boolean;
   /** It can change pull requests or issues (comment, label, approve). */
   editThreads: boolean;
+  /** N2: it can write text (comment, edit, review) with a token that can write threads. */
+  writesText?: boolean;
   pat: boolean;
   /** `show_full_output: true`: everything the agent prints is in the public Actions log. */
   publicOutput: boolean;
@@ -94,6 +96,14 @@ export function explainWorkflow(f: WorkflowFacts): Explain {
   else if (f.tools.length) saw.push(`It has tools that can change things (${codes(f.tools)}).`);
   if (f.pat) saw.push('It holds a personal access token.');
   else if (f.pushCode) saw.push('It can push code to the repository.');
+  // N2: a high grade from narrow tools names the write it rests on.
+  if (
+    !f.tools.length &&
+    !f.pushCode &&
+    f.writesText &&
+    (f.severity === 'high' || f.severity === 'critical')
+  )
+    saw.push('It can comment on or edit issues and pull requests.');
   if (f.publicOutput) saw.push('Everything it prints is public (`show_full_output: true`).');
   if (f.scrubOff)
     saw.push('Its shell holds your keys (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is off).');
