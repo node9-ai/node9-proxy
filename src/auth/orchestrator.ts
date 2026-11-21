@@ -1813,13 +1813,22 @@ export async function _authorizeHeadlessCore(
     if (judge) {
       const policyResult = await evaluateCurrentPolicy();
       const wouldBlock = policyResult.decision === 'block';
+      // A would-block row names what would have stopped the call: the
+      // verdict's own rule and check, the pair the enforced block row
+      // carries. Without them every such row read as an anonymous "risky
+      // command" on the dashboard. The verdict's rule replaces a rule an
+      // earlier gate left on `meta` (the file finding has its own row), so
+      // the row never names a rule that did not produce this verdict.
+      const rowMeta = wouldBlock
+        ? { ...ownRowMeta(true), ruleName: policyResult.ruleName, checkId: policyResult.checkId }
+        : ownRowMeta(true);
       if (!isManual)
         appendLocalAudit(
           toolName,
           args,
           'allow',
           wouldBlock ? 'observe-mode-would-block' : 'observe-mode',
-          ownRowMeta(true),
+          rowMeta,
           hashAuditArgs
         );
       return {

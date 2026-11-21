@@ -285,7 +285,14 @@ export function renderPosture(result: PostureResult, opts: RenderPostureOptions 
   const summary = parts.length ? parts.join(' · ') : chalk.green('no findings');
   lines.push(`  ${summary}`);
   lines.push('');
-  if (opts.viaNpx) {
+  // Only for a reader who does not have node9: a machine where node9 is wired
+  // into an agent ran this through npx by choice, and was told to install what
+  // it has (founder's machine, 2.66.2). Same signal as the headline's install
+  // advice: the Coverage row "node9 is not in-path for any agent".
+  const notWired = result.findings.some(
+    (f) => f.category === 'Coverage' && f.severity === 'critical'
+  );
+  if (opts.viaNpx && notWired) {
     // A reader who ran the one-off check is usually one developer on one
     // machine: the next step that fits is a local install, before a team sign-up.
     lines.push(

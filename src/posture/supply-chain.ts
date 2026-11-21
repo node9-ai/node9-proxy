@@ -39,15 +39,35 @@ interface McpServerConfig {
 // Package-runner wrappers that launch a tool by name from args.
 const PACKAGE_RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'dlx', 'yarn', 'pnpm', 'bun']);
 
+// A Node runtime in front of the node9 script: `node <path>/node9 mcp-server`.
+// An entry is written this way to pin the Node that node9 starts under.
+const NODE_RUNTIMES = /^(node|nodejs|bun)(\.exe)?$/i;
+const NODE9_SUBCOMMANDS = new Set(['mcp-server', 'mcp-gateway']);
+const lastSegment = (p: string): string => p.split(/[\\/]/).pop() ?? '';
+
+/** The node9 entry script: the file npm links as `node9`, or `cli.js` inside
+ *  a node9 package folder (an install, or a development checkout). */
+function isNode9Script(arg: string): boolean {
+  if (/^node9(\.(js|cjs|mjs|cmd))?$/i.test(lastSegment(arg))) return true;
+  return /(^|[\\/])(node9-ai|node9-proxy|@node9[\\/]proxy)[\\/]dist[\\/]cli\.js$/i.test(arg);
+}
+
 /**
- * True when a server is launched THROUGH node9 (so its calls are gated).
- * Matches the bare `node9` binary, an absolute/relative path to it
- * (`/usr/local/bin/node9`), and `npx node9 …` style wrappers — so a wrapped
- * server isn't mislabeled "runs outside node9".
+ * True when a server is launched THROUGH node9 (so its calls are gated), or
+ * is node9's own MCP server. Matches the bare `node9` binary, an
+ * absolute/relative path to it (`/usr/local/bin/node9`), `npx node9 …` style
+ * wrappers, and a Node runtime in front of the node9 script — so neither a
+ * wrapped server nor node9 itself is mislabeled "runs outside node9" (2.66.2
+ * reported node9's own server, entered as `node <path>/node9 mcp-server`).
  */
 export function isNode9Managed(command?: string, args: string[] = []): boolean {
   if (!command) return false;
   if (path.basename(command).toLowerCase() === 'node9') return true;
+  // The subcommand is required: a script that merely sits in a folder named
+  // node9 is not node9.
+  if (NODE_RUNTIMES.test(lastSegment(command))) {
+    return isNode9Script(args[0] ?? '') && NODE9_SUBCOMMANDS.has(args[1] ?? '');
+  }
   if (PACKAGE_RUNNERS.has(path.basename(command).toLowerCase())) {
     return args.some((a) => a === 'node9' || path.basename(a).toLowerCase() === 'node9');
   }

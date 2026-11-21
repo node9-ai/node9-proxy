@@ -99,10 +99,16 @@ export function checkOutsideContent(ctx: CheckContext): Finding[] {
         .slice(0, 8)
         .map(([name, e]) => `${name} (${e.agents.join(', ')}, by ${e.how})`),
       owner: 'node9',
+      // The page is named once: on a workspace-governed machine every step of
+      // this fix is on it.
       fix:
-        `${cap(remedy.egress(source))}, keep behavior.untrusted-content on, and mark each ` +
-        'server\'s reading tools as "Brings outside content" on the Protection page of the ' +
-        'dashboard so the hold applies to them.',
+        source === 'workspace'
+          ? `${cap(remedy.egress(source))} and keep behavior.untrusted-content on. On the ` +
+            'same page, mark each server\'s reading tools as "Brings outside content" so the ' +
+            'hold applies to them.'
+          : `${cap(remedy.egress(source))}, keep behavior.untrusted-content on, and mark each ` +
+            'server\'s reading tools as "Brings outside content" on the Protection page of the ' +
+            'dashboard so the hold applies to them.',
     },
   ];
 }
