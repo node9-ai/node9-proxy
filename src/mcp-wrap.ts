@@ -10,6 +10,7 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { AGENT_SPECS, readMcpServers, type McpServer, type McpFormat } from './agent-wiring';
 import { tokenize, quoteArg } from './mcp-cmd';
 import { getServerKey } from './mcp-pin';
+import { parseNode9Launch, gatewayUpstream, MCP_WRAP_SUBCOMMAND } from './mcp-entry';
 export type { McpServer, McpFormat } from './agent-wiring';
 export { tokenize } from './mcp-cmd';
 
@@ -27,22 +28,22 @@ export interface McpEntry {
   raw: McpServer; // the FULL original entry (env/type/…) — wrap/unwrap must preserve it
 }
 
-/** Is this entry launched via the node9 binary (bare, an absolute path, or a
- *  Windows node9.exe/.cmd/.ps1/.bat)? The `(^|[\\/])` anchor avoids matching
- *  `mynode9` / `notnode9`. */
-function isNode9Command(command: string | undefined): boolean {
-  return /(^|[\\/])node9(\.(exe|cmd|ps1|bat))?$/i.test(command ?? '');
-}
-
 /** ungoverned = a spawnable upstream to wrap · gatewayed = already governed ·
  *  node9-self = node9's OWN mcp-server entry (never wrap) · remote = URL/SSE
  *  server with no command (can't be gatewayed via --upstream — never wrap). */
 export function classifyMcp(s: McpServer): McpServerState {
-  // A node9 wrap = the node9 binary (bare OR absolute path, fix #7) AND
-  // args[0]==='mcp-gateway'. Requiring node9 avoids misclassifying a NON-node9
-  // server that merely takes 'mcp-gateway' as its first arg as "already governed".
-  if (isNode9Command(s.command)) {
-    return (s.args ?? [])[0] === 'mcp-gateway' ? 'gatewayed' : 'node9-self';
+  // Whether the entry starts node9, and with which subcommand, is read by
+  // parseNode9Launch: the bin (bare or a path, fix #7), the launcher, and the
+  // forms that pin a Node in front of it. Requiring node9 avoids misclassifying
+  // a NON-node9 server that merely takes 'mcp-gateway' as its first arg as
+  // "already governed".
+  const launch = parseNode9Launch(s);
+  if (launch) {
+    if (launch.subcommand === MCP_WRAP_SUBCOMMAND) return 'gatewayed';
+    // The legacy wrap, `node9 mcp --upstream <cmd>`. The upstream is required:
+    // `mcp` is also the parent of `mcp status` and the other mcp commands.
+    if (gatewayUpstream(launch) !== null) return 'gatewayed';
+    return 'node9-self';
   }
   // No spawnable command (remote HTTP/SSE server, or a malformed entry) → not
   // wrappable; wrapping it would produce a broken `--upstream ""`.
@@ -72,31 +73,61 @@ export function mcpUpstreamString(s: Pick<McpServer, 'command' | 'args'>): strin
   return [s.command ?? '', ...(s.args ?? [])].map(quoteArg).join(' ');
 }
 
-export function toGateway(s: McpServer, configName?: string): McpServer {
+/**
+ * `launcher` is the argv that starts node9, in front of the subcommand:
+ * `['node9']`, or `['/abs/node', '/abs/node9']` for an entry that pins its Node.
+ */
+export function toGateway(
+  s: McpServer,
+  configName?: string,
+  launcher: string[] = ['node9']
+): McpServer {
   const upstream = mcpUpstreamString(s);
   // Omit the flag when empty OR when the name starts with '-': a name like
   // "--upstream" would make commander swallow the next token as its value.
   const nameArgs = configName && !configName.startsWith('-') ? ['--config-name', configName] : [];
+  const [command, ...launcherArgs] = launcher.length > 0 ? launcher : ['node9'];
   return {
     ...s,
-    command: 'node9',
-    args: ['mcp-gateway', ...nameArgs, '--upstream', upstream],
+    command,
+    args: [...launcherArgs, MCP_WRAP_SUBCOMMAND, ...nameArgs, '--upstream', upstream],
   };
 }
 
 /** Reverse toGateway. null when not a gateway-wrapped entry. */
 export function fromGateway(s: McpServer): McpServer | null {
-  // Accept an absolute-path node9 too (fix #7 asymmetry) so `ungateway` can
-  // reverse exactly the entries classifyMcp now surfaces as 'gatewayed'.
-  if (!isNode9Command(s.command) || (s.args ?? [])[0] !== 'mcp-gateway') return null;
-  const args = s.args ?? [];
-  const i = args.indexOf('--upstream');
+  // The subcommand and the upstream come from the parsed launch, never from
+  // args[0]: an entry that pins its Node has the node9 script there. This
+  // reverses exactly the entries classifyMcp surfaces as 'gatewayed'.
+  const launch = parseNode9Launch(s);
+  if (!launch) return null;
   // A gatewayed entry with no (or empty) --upstream is corrupt/hand-edited — can't
   // reverse it, so decline rather than write back an empty command (re-review).
-  if (i < 0 || !args[i + 1]) return null;
-  const [command, ...rest] = tokenize(args[i + 1]);
+  const upstream = gatewayUpstream(launch);
+  if (!upstream) return null;
+  const [command, ...rest] = tokenize(upstream);
   if (!command) return null;
   return { ...s, command, args: rest };
+}
+
+/**
+ * Wrap an already-wrapped entry again (to stamp `--config-name`, or to repair
+ * a legacy wrap), keeping the launcher it has. null when it cannot be reversed.
+ * Keeping the launcher matters: an entry that pins its Node was written that
+ * way because the bare `node9` does not start on that agent's PATH, and a
+ * refresh that put `command: "node9"` back would take the server down.
+ */
+export function regateway(s: McpServer, configName?: string): McpServer | null {
+  const launch = parseNode9Launch(s);
+  const orig = fromGateway(s);
+  if (!launch || !orig) return null;
+  return toGateway(orig, configName, launch.launcher);
+}
+
+/** The `--upstream` of an inventory entry, or null when it is not a wrap. */
+export function entryUpstream(e: Pick<McpEntry, 'command' | 'args'>): string | null {
+  const launch = parseNode9Launch(e);
+  return launch ? gatewayUpstream(launch) : null;
 }
 
 /** Every MCP server across all agent configs, classified. */
@@ -164,8 +195,7 @@ export function findCorruptedMcpWraps(home: string = os.homedir()): CorruptedMcp
   const out: CorruptedMcpWrap[] = [];
   for (const e of inventoryMcp(home)) {
     if (e.state !== 'gatewayed') continue;
-    const i = e.args.indexOf('--upstream');
-    const upstream = i >= 0 ? (e.args[i + 1] ?? '') : '';
+    const upstream = entryUpstream(e) ?? '';
     if (!isCorruptedUpstream(upstream)) continue;
     out.push({
       agent: e.agent,
@@ -192,10 +222,8 @@ export function inventoryServerKeys(inv: McpEntry[]): Set<string> {
   const keys = new Set<string>();
   for (const e of inv) {
     if (e.state === 'gatewayed') {
-      const i = e.args.indexOf('--upstream');
-      if (i >= 0 && e.args[i + 1]) {
-        keys.add(getServerKey(e.args[i + 1]));
-      }
+      const upstream = entryUpstream(e);
+      if (upstream) keys.add(getServerKey(upstream));
     } else if (e.state === 'ungoverned') {
       // Mirror toGateway exactly — quoteArg each token before joining.
       const cmd = [e.command, ...e.args].map(quoteArg).join(' ');

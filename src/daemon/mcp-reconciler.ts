@@ -12,7 +12,7 @@ import {
   inventoryMcp,
   inventoryServerKeys,
   toGateway,
-  fromGateway,
+  regateway,
   writeMcpEntry,
   type McpEntry,
 } from '../mcp-wrap';
@@ -89,8 +89,9 @@ export function runMcpReconcile(): void {
   // ── R1 Layer 1: refresh the `--config-name` stamp on governed servers ──────────
   // A governed server wrapped before `--config-name` existed has no stable identity,
   // so the config-vs-connected join guesses env and phantoms (redis-prod). Re-wrap it
-  // WITH the stamp — `toGateway(fromGateway(raw), configKey)` — reusing the same
-  // primitives `--rewrap` uses. serverKey is unchanged (pins/app-perm rules survive),
+  // WITH the stamp — `regateway(raw, configKey)` — the same primitive `--rewrap`
+  // uses. It keeps the entry's launcher, so a wrap that pins its Node stays pinned.
+  // serverKey is unchanged (pins/app-perm rules survive),
   // writeMcpEntry backs up, and it's reversible via `ungateway`. Constraints:
   //   • SILENT — no desktop popup (R2 notification fatigue); a hook-debug line instead.
   //   • JSON only — never auto-rewrite TOML/Codex (smol-toml reformats the file, fix #8).
@@ -99,10 +100,10 @@ export function runMcpReconcile(): void {
   for (const e of inv) {
     if (e.state !== 'gatewayed' || e.format === 'toml') continue;
     if (e.args.includes('--config-name')) continue;
-    const orig = fromGateway(e.raw);
-    if (!orig) continue; // corrupt wrapper (no parseable --upstream) — leave it
+    const stamped = regateway(e.raw, e.name);
+    if (!stamped) continue; // corrupt wrapper (no parseable --upstream) — leave it
     try {
-      writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(orig, e.name));
+      writeMcpEntry(e.mcpFile, e.format, e.name, stamped);
       appendToLog(HOOK_DEBUG_LOG, {
         event: 'mcp-config-name-refreshed',
         agent: e.agent,

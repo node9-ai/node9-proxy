@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { mcpUpstreamString } from './mcp-wrap';
+import { MCP_WRAP_SUBCOMMAND, LEGACY_MCP_WRAP_SUBCOMMAND, isMcpWrapSubcommand } from './mcp-entry';
 import { codexTrustInstruction } from './codex-trust';
 import { establishCodexTrust } from './codex-app-server';
 import * as yaml from 'yaml';
@@ -506,27 +507,12 @@ function writeJson(filePath: string, data: unknown): void {
 
 // ── MCP wrap vocabulary ───────────────────────────────────────────────────────
 
-// The subcommand that actually accepts `--upstream`. `node9 mcp` is a PARENT
-// command (gateway | ungateway | status | pin) and has no such option, so a
-// wrap written as `node9 mcp --upstream <cmd>` dies on startup with
-// `error: unknown option '--upstream'`. Every agent's wrap carried that form.
-//
-// The damage is worse than lost governance: node9 REPLACES the user's server
-// command, so the wrap also broke the very server it was meant to protect.
-// Found 2026-09-22 in Codex's own log, not in ours — node9 had no idea the
-// server it wrapped was failing to start.
-export const MCP_WRAP_SUBCOMMAND = 'mcp-gateway';
-const LEGACY_MCP_WRAP_SUBCOMMAND = 'mcp';
+// The subcommand names and their history live in mcp-entry.ts, with the parser
+// that reads an entry. Re-exported: callers and tests import them from here.
+export { MCP_WRAP_SUBCOMMAND, isMcpWrapSubcommand };
 
 export function mcpWrapArgs(upstream: string): string[] {
   return [MCP_WRAP_SUBCOMMAND, '--upstream', upstream];
-}
-
-// Recognises the legacy subcommand too. An install still carrying it must read
-// back as OURS — otherwise teardown stops unwrapping it and the user is left
-// with a dead server and no way to undo it.
-export function isMcpWrapSubcommand(arg: unknown): boolean {
-  return arg === MCP_WRAP_SUBCOMMAND || arg === LEGACY_MCP_WRAP_SUBCOMMAND;
 }
 
 // Rewrites, in place, any node9 wrap still using the invalid subcommand, and

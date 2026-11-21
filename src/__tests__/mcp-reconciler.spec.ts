@@ -169,4 +169,74 @@ describe('mcp reconcile pass', () => {
       '--config-name'
     );
   });
+
+  // Entries that pin their Node: `<node> <node9 bin> <subcommand>`. Found on a
+  // machine whose PATH held Node 18: the hand-pinned own server was baselined
+  // and nudged as a new third-party server, and auto-wrap would have wrapped it.
+  const NODE = '/home/u/.nvm/versions/node/v25.9.0/bin/node';
+  const BIN = '/home/u/.nvm/versions/node/v25.9.0/bin/node9';
+  const baselineIds = (): string[] => {
+    const f = path.join(home, '.node9', 'mcp-baseline.json');
+    return fs.existsSync(f) ? (JSON.parse(fs.readFileSync(f, 'utf-8')) as string[]) : [];
+  };
+
+  it("pinned: node9's own hand-pinned server is not nudged and not baselined", () => {
+    writeConfig({ mode: 'standard' });
+    writeClaude({ node9: { command: NODE, args: [BIN, 'mcp-server'] } });
+    runMcpReconcile();
+    expect(sendSpy).toHaveBeenCalledTimes(0);
+    expect(baselineIds()).toEqual([]);
+  });
+
+  it('pinned: auto-wrap leaves hand-pinned and launcher entries exactly as they are', () => {
+    writeConfig({ mode: 'standard', mcpAutoWrap: true });
+    const servers = {
+      node9: { command: NODE, args: [BIN, 'mcp-server'] },
+      pg: {
+        command: NODE,
+        args: [BIN, 'mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y pg-mcp'],
+      },
+      viaLauncher: {
+        command: path.join(home, '.node9', 'bin', 'node9'),
+        args: ['mcp-gateway', '--config-name', 'viaLauncher', '--upstream', 'npx x'],
+      },
+    };
+    writeClaude(servers);
+    runMcpReconcile();
+    expect(sendSpy).toHaveBeenCalledTimes(0);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf-8')).mcpServers
+    ).toEqual(servers);
+  });
+
+  it('refresh: a legacy `mcp --upstream` wrap is rewritten to the subcommand that starts', () => {
+    // `node9 mcp` has no --upstream option, so this wrap dies on startup. It now
+    // reads as a wrap, and the refresh that stamps --config-name repairs it.
+    writeClaude({ redis: { command: 'node9', args: ['mcp', '--upstream', 'npx redis-mcp'] } });
+    runMcpReconcile();
+    expect(claudeServer('redis')).toEqual({
+      command: 'node9',
+      args: ['mcp-gateway', '--config-name', 'redis', '--upstream', 'npx redis-mcp'],
+    });
+    expect(sendSpy).toHaveBeenCalledTimes(0);
+  });
+
+  it('pinned: the --config-name refresh keeps the Node pin of a hand-pinned wrap', () => {
+    writeClaude({
+      redis: { command: NODE, args: [BIN, 'mcp-gateway', '--upstream', 'npx redis-mcp'] },
+    });
+    runMcpReconcile();
+    const redis = claudeServer('redis');
+    // Rewriting it to `command: "node9"` would put it back on PATH's Node.
+    expect(redis.command).toBe(NODE);
+    expect(redis.args).toEqual([
+      BIN,
+      'mcp-gateway',
+      '--config-name',
+      'redis',
+      '--upstream',
+      'npx redis-mcp',
+    ]);
+    expect(sendSpy).toHaveBeenCalledTimes(0);
+  });
 });

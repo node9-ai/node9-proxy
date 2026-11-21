@@ -5,7 +5,14 @@
 // (daemon) calls the same engine.
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { inventoryMcp, toGateway, fromGateway, writeMcpEntry, type McpEntry } from '../../mcp-wrap';
+import {
+  inventoryMcp,
+  toGateway,
+  fromGateway,
+  regateway,
+  writeMcpEntry,
+  type McpEntry,
+} from '../../mcp-wrap';
 import { resolveMcpStatus, type McpStatusEntry } from '../../mcp-status';
 
 // Plain state word, padded so the CONNECTED column lines up across colored rows
@@ -70,14 +77,15 @@ function wrapEntry(e: McpEntry): void {
 // Re-wrap an ALREADY-gatewayed server: unwrap to the original upstream, then
 // wrap again WITH --config-name. Same upstream ⇒ same serverKey ⇒ no pin/rule
 // loss. Used by `--rewrap` to retrofit servers wrapped before --config-name.
+// The entry keeps its launcher: a wrap that pins its Node stays pinned.
 function rewrapEntry(e: McpEntry): void {
-  const orig = fromGateway(e.raw);
-  if (!orig) {
+  const rewrapped = regateway(e.raw, e.name);
+  if (!rewrapped) {
     // Corrupt/hand-edited wrapper (no parseable --upstream) — refuse rather than
     // write back a broken command.
     throw new Error("couldn't parse the original upstream (corrupt gateway entry)");
   }
-  writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(orig, e.name));
+  writeMcpEntry(e.mcpFile, e.format, e.name, rewrapped);
 }
 
 export function registerMcpGatewayCommand(mcp: Command): void {

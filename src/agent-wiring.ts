@@ -22,6 +22,7 @@ import {
   claudeDesktopConfigPath,
 } from './setup';
 import { opencodeShimHasCurrentShape } from './setup-opencode-shim';
+import { parseNode9Launch } from './mcp-entry';
 
 // ── Low-level detectors (this module is now the shared home for them) ─────────
 
@@ -102,20 +103,23 @@ export interface McpServer {
 /** `vscode`: JSON keyed under `servers` (VSCode's own shape), read-only here. */
 export type McpFormat = 'json' | 'toml' | 'vscode';
 
-// node9 wraps an upstream server as { command: 'node9', args: [...] } and also
-// installs a standalone { command: 'node9', args: ['mcp-server'] } entry — both
-// have command 'node9'. `present` = any node9-owned entry; `wrapped` = the
-// human-readable list ("name → args") shown by status.
+// node9 wraps an upstream server as `node9 mcp-gateway …` and also installs a
+// standalone `node9 mcp-server` entry. Both start node9, and parseNode9Launch
+// is what says so: the bare name, a path, or a form that pins the Node in
+// front of it. `present` = any node9-owned entry; `wrapped` = the
+// human-readable list ("name → node9's arguments") shown by status.
 function detectMcp(servers: Record<string, McpServer> | undefined): {
   wrapped: string[];
   present: boolean;
 } {
-  const entries = Object.entries(servers ?? {});
-  const present = entries.some(([, s]) => s?.command === 'node9');
-  const wrapped = entries
-    .filter(([, s]) => s?.command === 'node9' && Array.isArray(s.args) && s.args.length > 0)
-    .map(([name, s]) => `${name} → ${(s.args as string[]).join(' ')}`);
-  return { wrapped, present };
+  const launches = Object.entries(servers ?? {}).flatMap(([name, s]) => {
+    const launch = s && typeof s === 'object' ? parseNode9Launch(s) : null;
+    return launch ? [{ name, launch }] : [];
+  });
+  const wrapped = launches
+    .filter(({ launch }) => launch.subcommand !== '')
+    .map(({ name, launch }) => `${name} → ${[launch.subcommand, ...launch.rest].join(' ')}`);
+  return { wrapped, present: launches.length > 0 };
 }
 
 // Raw MCP server map for the reconciler (name → {command,args,...}), across both
