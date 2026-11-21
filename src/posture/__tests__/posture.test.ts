@@ -1316,6 +1316,41 @@ describe('isNode9Managed', () => {
     expect(isNode9Managed('node', ['server.js'])).toBe(false);
     expect(isNode9Managed(undefined)).toBe(false);
   });
+
+  // 2.66.2 reported node9's own server as "outside node9" when the entry
+  // pinned a Node in front of the node9 script.
+  it('treats a Node runtime in front of the node9 script as managed', () => {
+    const bin = '/home/u/.nvm/versions/node/v25.9.0/bin';
+    expect(isNode9Managed(`${bin}/node`, [`${bin}/node9`, 'mcp-server'])).toBe(true);
+    expect(
+      isNode9Managed('node', [
+        '/usr/lib/node_modules/node9-ai/node_modules/@node9/proxy/dist/cli.js',
+        'mcp-gateway',
+        '--upstream',
+        'npx some-server',
+      ])
+    ).toBe(true);
+    expect(
+      isNode9Managed('/work/node9-proxy/../node', ['/work/node9-proxy/dist/cli.js', 'mcp-server'])
+    ).toBe(true);
+    expect(
+      isNode9Managed('C:\\Program Files\\nodejs\\node.exe', [
+        'C:\\Users\\u\\AppData\\Roaming\\npm\\node9.cmd',
+        'mcp-server',
+      ])
+    ).toBe(true);
+  });
+
+  it('does not wave through a script that only looks like node9', () => {
+    // no node9 subcommand
+    expect(isNode9Managed('node', ['/usr/bin/node9', 'serve'])).toBe(false);
+    expect(isNode9Managed('node', ['/usr/bin/node9'])).toBe(false);
+    // a folder named node9 is not the node9 script
+    expect(isNode9Managed('node', ['/srv/node9/app.js', 'mcp-server'])).toBe(false);
+    expect(isNode9Managed('node', ['/srv/mynode9', 'mcp-server'])).toBe(false);
+    // the subcommand must be the script's own first argument
+    expect(isNode9Managed('node', ['server.js', '/usr/bin/node9', 'mcp-server'])).toBe(false);
+  });
 });
 
 describe('checkCoverage', () => {

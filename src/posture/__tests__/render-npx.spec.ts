@@ -15,15 +15,36 @@ const RESULT: PostureResult = {
   checksRun: 1,
 } as unknown as PostureResult;
 
+// The row a machine without node9 gets: nothing is wired into any agent.
+const NOT_WIRED: PostureResult = {
+  ...RESULT,
+  findings: [
+    {
+      category: 'Coverage',
+      severity: 'critical',
+      title: 'node9 is not in-path for any agent',
+      detail: [],
+      owner: 'node9',
+    },
+  ],
+};
+
 describe('posture footer', () => {
-  it('adds the install step when posture ran through npx', () => {
-    const out = renderPosture(RESULT, { viaNpx: true });
+  it('adds the install step when posture ran through npx on a machine without node9', () => {
+    const out = renderPosture(NOT_WIRED, { viaNpx: true });
     expect(out).toContain('npm install -g node9-ai');
     expect(out.indexOf('npm install -g node9-ai')).toBeLessThan(out.indexOf('auth/signup'));
   });
 
   it('leaves it out for an installed node9', () => {
     expect(renderPosture(RESULT)).not.toContain('npm install -g');
+    expect(renderPosture(NOT_WIRED)).not.toContain('npm install -g');
+  });
+
+  // 2.66.2 told a machine with node9 wired in to install node9, because the
+  // run came through npx.
+  it('leaves it out when node9 is already wired in, even through npx', () => {
+    expect(renderPosture(RESULT, { viaNpx: true })).not.toContain('npm install -g');
   });
 
   it('recognises npx from npm_command or the _npx cache path', () => {

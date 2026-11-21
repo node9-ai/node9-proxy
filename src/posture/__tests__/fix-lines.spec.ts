@@ -59,6 +59,7 @@ import { checkCoverage } from '../coverage';
 import { checkCost } from '../governance';
 import { checkSecrets, MOVE_SECRET_LEAD } from '../secrets';
 import { checkSupplyChain } from '../supply-chain';
+import { checkOutsideContent } from '../outside-content';
 import { evaluateEgressConfig } from '../egress';
 import { buildNetworkFix } from '../inbound';
 import { lighterPath } from '../containment';
@@ -203,6 +204,31 @@ describe('workspace-governed machine: no row offers a local step', () => {
   });
 });
 
+describe('wording: one page name per sentence, no brackets inside brackets', () => {
+  it('the headline says what to do in its own sentence', () => {
+    for (const source of ['workspace', 'local'] as const) {
+      const action = deriveHeadline(
+        [{ category: 'Coverage', severity: 'high', title: 'audit', detail: [] }],
+        source
+      )!.action;
+      expect(action).not.toMatch(/\([^)]*\([^)]*\)[^)]*\)/); // no (a (b) c)
+      expect(action.split('. ').length).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it('Outside content names the dashboard page once on a governed machine', () => {
+    state.source = 'workspace';
+    write(
+      '.claude.json',
+      JSON.stringify({ mcpServers: { gmail: { command: 'node', args: ['gmail.js'] } } })
+    );
+    const [row] = checkOutsideContent({ home, cwd: home });
+    expect(row).toBeDefined();
+    expect(row.fix!.match(/Protection page/g)).toHaveLength(1);
+    expect(row.fix).not.toMatch(LOCAL_STEP);
+  });
+});
+
 describe('nothing is advised that is already on', () => {
   it('Isolation lists only the steps not taken, and promises no points', () => {
     const none = lighterPath({ jailOn: false, egressBlocking: false, source: 'local' });
@@ -287,6 +313,22 @@ describe('MCP servers outside node9', () => {
 
   it('does not count a server the agent app manages', () => {
     write('.codex/config.toml', APP_MANAGED);
+    expect(outside()).toBeUndefined();
+  });
+
+  it("does not count node9's own server when a pinned Node launches it", () => {
+    write(
+      '.claude.json',
+      JSON.stringify({
+        mcpServers: {
+          node9: {
+            type: 'stdio',
+            command: '/opt/node/bin/node',
+            args: ['/opt/node/bin/node9', 'mcp-server'],
+          },
+        },
+      })
+    );
     expect(outside()).toBeUndefined();
   });
 

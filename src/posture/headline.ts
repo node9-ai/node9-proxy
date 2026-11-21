@@ -7,7 +7,7 @@
 // findings, and picks the single highest-leverage action.
 
 import type { Finding, Headline, Severity } from './types';
-import { remedy, type PolicySource } from './remedy';
+import { cap, remedy, type PolicySource } from './remedy';
 
 const SEVERITY_RANK: Record<Severity, number> = {
   critical: 0,
@@ -109,7 +109,7 @@ export function deriveHeadline(
     action =
       'Install node9 and put it in-path: `npm i -g node9-ai && node9 init` — nothing here is enforced until you do.';
   } else if (observeOnly) {
-    action = `Switch node9 to enforcing mode (${remedy.mode(source)}) — right now it is only watching, not blocking.`;
+    action = `Switch node9 to enforcing mode: right now it is only watching, not blocking. ${cap(remedy.mode(source))}.`;
   } else if (egressOpen) {
     // Finding-first + keep the chain rationale the ladder is built on: egress
     // outranks secrets because closing the exit breaks the exfiltration chain —
