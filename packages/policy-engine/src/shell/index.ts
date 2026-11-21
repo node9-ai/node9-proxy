@@ -5466,10 +5466,27 @@ const INDIRECT_SHAPE_RE =
  *  command substitution (`cat $(ls ~/.ssh)`). The names are known only when
  *  the command runs, so the structural walk reads it. Narrow on purpose: a
  *  variable that merely HOLDS a credential path (`K=~/.ssh/id_rsa; cat $K`)
- *  is JAIL-14a's exact assignment table, not the walk's union of values. */
-const CREDENTIAL_DIR_LATE_RE =
-  /\.(?:ssh|aws)\/[^\s;&|<>]*[$`]|(?:\$\(|`)[^)`]*\.(?:ssh|aws)(?![\w.-])/;
-const namesCredentialDirLate = (command: string): boolean => CREDENTIAL_DIR_LATE_RE.test(command);
+ *  is JAIL-14a's exact assignment table, not the walk's union of values.
+ *  Linear in the command's length: it runs on every Bash call, and one
+ *  regular expression for both shapes was polynomial on `.aws/.aws/...`
+ *  (CodeQL js/polynomial-redos). */
+const CREDENTIAL_DIR_NAME_RE = /\.(?:ssh|aws)(?![\w.-])/;
+function namesCredentialDirLate(command: string): boolean {
+  if (!/[$`]/.test(command) || !CREDENTIAL_DIR_NAME_RE.test(command)) return false;
+  // One word: the directory, then an expansion after it.
+  for (const word of command.split(/[\s;&|<>]+/)) {
+    const at = word.search(/\.(?:ssh|aws)\//);
+    if (at >= 0 && /[$`]/.test(word.slice(at))) return true;
+  }
+  // Inside a substitution: the text between a backtick pair, or after the
+  // last `$(` before a `)`.
+  if (command.split('`').some((seg, i) => i % 2 === 1 && CREDENTIAL_DIR_NAME_RE.test(seg)))
+    return true;
+  return command.split(')').some((seg) => {
+    const open = seg.lastIndexOf('$(');
+    return open >= 0 && CREDENTIAL_DIR_NAME_RE.test(seg.slice(open));
+  });
+}
 
 /**
  * A shell interpreter word together with a pipe or a `<<`: the command can

@@ -343,6 +343,17 @@ describe('names a listing of a credential directory produces', () => {
     expect(analyzeFsOperation(command)).toBeNull();
   });
 
+  // CodeQL js/polynomial-redos on the first prescreen: a long run of the
+  // directory name with no expansion was quadratic. It runs on every call.
+  it.each([
+    ['repeated .aws/', `cat ${'.aws/'.repeat(40_000)}$`],
+    ['repeated $( with no )', `cat ${'$( ~/.ssh '.repeat(20_000)}`],
+  ])('stays fast on a long input: %s', (_name, command) => {
+    const t = performance.now();
+    analyzeFsOperation(command);
+    expect(performance.now() - t).toBeLessThan(2_000);
+  });
+
   it.each([
     ['a project', 'cat $(find ~/project -type f)'],
     ['the current directory', 'find . -type f | xargs cat'],
