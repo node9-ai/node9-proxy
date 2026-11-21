@@ -4563,7 +4563,10 @@ function analyzeCommandFs(command: string): FsOpVerdict | null {
   const direct =
     (stdinShell || changesDir) && own?.verdict !== 'block'
       ? stricter(own, structuralJailRead(command))
-      : (own ?? (INDIRECT_SHAPE_RE.test(command) ? structuralJailRead(command) : null));
+      : (own ??
+        (INDIRECT_SHAPE_RE.test(command) || namesCredentialDirLate(command)
+          ? structuralJailRead(command)
+          : null));
   const withInline =
     direct?.verdict === 'block' || !runsInlineInterpreter(command, normalized)
       ? direct
@@ -5458,6 +5461,16 @@ function matchSensitivePath(p: string): FsOpVerdict | null {
 const INDIRECT_SHAPE_RE =
   /\b(?:for|while|until|find|xargs|set|source)\b|\$\{?PWD\b|[*?[]|(?:^|[;&|(\s])\.\s/;
 
+/** A credential directory whose file names come from an expansion: one in
+ *  the same word after it (`cat ~/.ssh/$X`), or a listing of it inside a
+ *  command substitution (`cat $(ls ~/.ssh)`). The names are known only when
+ *  the command runs, so the structural walk reads it. Narrow on purpose: a
+ *  variable that merely HOLDS a credential path (`K=~/.ssh/id_rsa; cat $K`)
+ *  is JAIL-14a's exact assignment table, not the walk's union of values. */
+const CREDENTIAL_DIR_LATE_RE =
+  /\.(?:ssh|aws)\/[^\s;&|<>]*[$`]|(?:\$\(|`)[^)`]*\.(?:ssh|aws)(?![\w.-])/;
+const namesCredentialDirLate = (command: string): boolean => CREDENTIAL_DIR_LATE_RE.test(command);
+
 /**
  * A shell interpreter word together with a pipe or a `<<`: the command can
  * feed a shell a script on standard input (`echo '...' | sh`, `bash <<EOF`,
@@ -5664,6 +5677,131 @@ function findOfJailedNames(stmt: any): FsOpVerdict | null {
   return null;
 }
 
+/** A word as a path, with a leading `$HOME` read as `~` (`"$HOME/.ssh"`). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function homeLedWord(word: any): string | null {
+  const literal = resolveWordLiteral(word);
+  if (literal !== null) return literal;
+  let parts = word?.Parts ?? [];
+  if (parts.length === 1 && parts[0].kind === 'DblQuoted') parts = parts[0].Parts ?? [];
+  const first = parts[0];
+  if (first?.kind !== 'ParamExp' || first.Param?.Value !== 'HOME') return null;
+  if (first.Exp || first.Index || first.Length || first.Excl || first.Slice || first.Repl)
+    return null;
+  const rest = parts.length > 1 ? resolveWordLiteral({ Parts: parts.slice(1) }) : '';
+  return rest === null ? null : `~${rest}`;
+}
+
+/** Names a find filter can select that are held when inside ~/.ssh or ~/.aws:
+ *  a filter that selects none of them names only public material. */
+const PRIVATE_PROBE_NAMES = ['id_rsa', 'id_ed25519', 'id_ecdsa', 'config', 'credentials'];
+
+/**
+ * A listing of a credential directory itself (`find ~/.ssh -type f`,
+ * `ls -d ~/.ssh/*`, `fd . ~/.aws`): every name it produces is held, so a reader
+ * of those names reads what `cat ~/.ssh/*` reads (founder decision
+ * 2026-11-21). Decision b1, log at Standard, stays for a listing that only
+ * MAY name a credential file (`find . -type f`). A find whose -name filters
+ * select only public material (`-name '*.pub'`) or only directories is none.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function credentialDirListing(stmt: any): FsOpVerdict | null {
+  const cmd = stmt?.Cmd;
+  if (cmd?.kind !== 'CallExpr') return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const words: (string | null)[] = (cmd.Args ?? []).map((a: any) => homeLedWord(a));
+  const head = unwrapCommandHead(words);
+  const name = baseWord(words[head]);
+  const rest = words.slice(head + 1);
+  let targets: (string | null)[];
+  if (name === 'find') {
+    for (let i = 0; i < rest.length; i++)
+      if (rest[i] === '-type' && rest[i + 1] === 'd') return null;
+    const patterns = findNamePatterns(rest);
+    const selectsPrivate =
+      patterns.length === 0 ||
+      patterns.some(({ pattern, nocase }) => {
+        try {
+          const m = picomatch(shellGlob(pattern), { dot: true, nocase });
+          return PRIVATE_PROBE_NAMES.some((n) => m(n));
+        } catch {
+          return true;
+        }
+      });
+    if (!selectsPrivate) return null;
+    targets = findStartPoints(words, head).starts;
+  } else if (name === 'ls') {
+    targets = rest.filter((w) => w === null || !w.startsWith('-'));
+  } else if (name === 'fd' || name === 'fdfind') {
+    // `fd PATTERN PATH...`: the pattern is a regular expression, not a path.
+    targets = rest.filter((w) => w === null || !w.startsWith('-')).slice(1);
+  } else return null;
+  for (const target of targets) {
+    if (target === null) continue;
+    // `..` folded as for an entered directory: `find ~/.ssh/..` is the home.
+    const t = joinEntered(target, '.').replace(/[/\\]+$/, '');
+    // A listing of one public file (`ls ~/.ssh/known_hosts`) names only it.
+    if (isPublicSshMaterial(t)) continue;
+    if (GLOB_META.test(t)) {
+      const hit = matchSensitiveGlob(t, name === 'find');
+      if (hit?.verdict === 'block') return hit;
+      continue;
+    }
+    const hit = matchSensitivePath(`${t}/n9-any-name`);
+    if (hit?.verdict === 'block') return { ...hit, path: `${t}/*` };
+  }
+  return null;
+}
+
+/** A listing whose names, once read, are a jailed read. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const listingVerdict = (stmt: any): FsOpVerdict | null =>
+  findOfJailedNames(stmt) ?? credentialDirListing(stmt);
+
+/**
+ * A reader whose operands come from a listing of jailed names in a command
+ * substitution (`cat $(find ~/.ssh -type f)`), or a for loop over one whose
+ * body reads the loop variable. The pipeline shapes are findPipedToReader's.
+ */
+function listedNamesRead(command: string): FsOpVerdict | null {
+  const f = parseShared(command);
+  if (typeof f === 'symbol') return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const substVerdict = (node: any): FsOpVerdict | null => {
+    let found: FsOpVerdict | null = null;
+    walk(node, (n) => {
+      if (found) return false;
+      if (n.kind !== 'CmdSubst') return true;
+      // Every statement inside, also a pipeline stage (`$(ls ~/.ssh | head -1)`).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      walk(n, (m: any) => {
+        if (m?.Cmd) found ??= listingVerdict(m);
+        return !found;
+      });
+      return false;
+    });
+    return found;
+  };
+  let hit: FsOpVerdict | null = null;
+  walk(f, (n) => {
+    if (hit) return false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = n as any;
+    if (node.kind === 'CallExpr') {
+      const words = callWords(node);
+      if (isReaderWord(words[unwrapCommandHead(words)])) hit = substVerdict(node);
+    } else if (node.kind === 'ForClause') {
+      const v = node.Loop?.Name?.Value;
+      if (v && hasReader({ kind: 'Block', Stmts: node.Do }, v)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const item of node.Loop.Items ?? []) hit ??= substVerdict(item as any);
+      }
+    }
+    return !hit;
+  });
+  return hit;
+}
+
 const pipeOps = lazy(
   () =>
     new Set(
@@ -5721,7 +5859,7 @@ function findPipedToReader(command: string): FsOpVerdict | null {
       }
     }
     for (let i = 0; i < stages.length - 1 && !hit; i++) {
-      const found = findOfJailedNames(stages[i]);
+      const found = listingVerdict(stages[i]);
       if (found && stages.slice(i + 1).some(readsFedNames)) hit = found;
     }
     return !hit;
@@ -5988,7 +6126,7 @@ function structuralJailRead(command: string): FsOpVerdict | null {
   } catch {
     return null;
   }
-  const piped = findPipedToReader(command);
+  const piped = findPipedToReader(command) ?? listedNamesRead(command);
   if (piped) return piped;
   const sourcedHit = sourcedAndPrinted(command);
   if (sourcedHit?.verdict === 'block') return sourcedHit;

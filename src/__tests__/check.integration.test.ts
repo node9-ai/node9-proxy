@@ -1097,6 +1097,7 @@ describe('jail: a relative read after cd into a credential directory', () => {
     ['.. out of the directory', 'cd ~/.ssh/.. && cat known_hosts'],
     ['an unknown name in a project', 'cd ~/project && cat $(ls)'],
     ['an unknown option value', 'cd ~/.ssh && head -n $N known_hosts'],
+    ['a listing of public keys', "cat $(find ~/.ssh -name '*.pub')"],
   ])('%s → allowed silently', (_name, command) => {
     const r = run(command);
     expect(r.status, 'spawn failed').not.toBeNull();
@@ -1109,6 +1110,10 @@ describe('jail: a relative read after cd into a credential directory', () => {
     ['names from a listing into xargs', 'cd ~/.ssh && ls | xargs cat'],
     ['a glob cd target', 'cd ~/.s* && cat id_rsa'],
     ['env -C', 'env -C ~/.ssh cat id_rsa'],
+    // Founder decision 2026-11-21: a listing of the directory itself.
+    ['names a listing of ~/.ssh produces', 'cat $(find ~/.ssh -type f)'],
+    ['a listing of ~/.ssh into xargs', 'find ~/.ssh -type f | xargs cat'],
+    ['a name not known until it runs', 'cat ~/.ssh/$X'],
   ])('%s → blocked by the credential jail', (_name, command) => {
     const r = run(command);
     expect(r.status, 'spawn failed').not.toBeNull();

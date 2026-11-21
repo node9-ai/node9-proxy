@@ -120,7 +120,6 @@ describe('step 3: names node9 cannot know', () => {
     'find . -type f -print0 | xargs -0 cat',
     'ls -A | while read f; do cat "$f"; done',
     'cat $(find . -type f)',
-    'for f in $(find ~/.ssh -type f); do cat "$f"; done',
     'fd -H . | xargs grep -l KEY',
   ])('%s: logged at Standard, asked at Strict', async (command) => {
     const standard = await D(command);
@@ -129,6 +128,15 @@ describe('step 3: names node9 cannot know', () => {
     const strict = await D(command, 'strict');
     expect(strict.decision).toBe('review');
     expect(strict.checkId).toBe('data.credential-files-unknown');
+  });
+
+  // Founder decision 2026-11-21: a listing of a credential directory itself
+  // names nothing but held files, so reading its names is a block, as
+  // `cat ~/.ssh/*` is (jail-cwd-relative.spec.ts has the shapes).
+  it('a listing of ~/.ssh read in a loop is blocked at Standard', async () => {
+    const v = await D('for f in $(find ~/.ssh -type f); do cat "$f"; done');
+    expect(v.decision).toBe('block');
+    expect(v.ruleName).toBe('shield:project-jail:block-read-ssh');
   });
 
   it.each([
