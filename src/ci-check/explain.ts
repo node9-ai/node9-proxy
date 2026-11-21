@@ -52,6 +52,8 @@ export interface WorkflowFacts {
   pushCode: boolean;
   /** It can change pull requests or issues (comment, label, approve). */
   editThreads: boolean;
+  /** N2: it can write text (comment, edit, review) with a token that can write threads. */
+  writesText?: boolean;
   pat: boolean;
   /** `show_full_output: true`: everything the agent prints is in the public Actions log. */
   publicOutput: boolean;
@@ -98,7 +100,7 @@ export function explainWorkflow(f: WorkflowFacts): Explain {
   if (
     !f.tools.length &&
     !f.pushCode &&
-    f.editThreads &&
+    f.writesText &&
     (f.severity === 'high' || f.severity === 'critical')
   )
     saw.push('It can comment on or edit issues and pull requests.');

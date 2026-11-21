@@ -61,6 +61,9 @@ const MCP_GH_TEXT_WRITE_RE =
 // text that people read, so it is not a write channel. Not modelled: a trailing wildcard after
 // the label flag also lets `--body` through.
 const LABEL_ONLY_TOOL_RE = /--(?:add|remove)-label\b|\/labels\b|mcp__\w*label/i;
+// A text flag in the same grant (`... --body * --add-label *`) writes text after all.
+const TEXT_FLAG_RE = /\s(?:--body|--body-file|--title|-[bBtF])(?=[\s=:*)]|$)/;
+const labelOnlyGrant = (t: string) => LABEL_ONLY_TOOL_RE.test(t) && !TEXT_FLAG_RE.test(t);
 
 // R4-3: a tool that can actually mint+transmit an OIDC token or exfil a secret —
 // arbitrary shell or network egress. `id-token:write` is inert without one of these.
@@ -2238,6 +2241,7 @@ const CLAUDE_BASE_ACTION_RE = /^\s*anthropics\/claude-code-base-action@\S/i;
 /** Official claude-code-action in tag mode (no `prompt`): it keeps a tracking comment the agent
  *  edits, allows Read, Glob and Grep, and commits to a branch through its own file tool. */
 function claudeTagMode(st: Step): boolean {
+  // `direct_prompt` (beta) still runs in tag mode, with the tracking comment and its tool.
   return !!claudeActionBuild(st.uses)?.official && !str(st.with?.['prompt']).trim();
 }
 
@@ -2810,10 +2814,7 @@ function analyzeWorkflowInner(
   const writerTokens = toolTokens(toolsBlob).filter(
     (t) => GH_WRITE_TOOL_RE.test(t) || MCP_GH_TEXT_WRITE_RE.test(t)
   );
-  const labelOnly =
-    writerTokens.length > 0 && writerTokens.every((t) => LABEL_ONLY_TOOL_RE.test(t));
-  const textWriteTool =
-    actionComments || ((githubWriteTool || MCP_GH_TEXT_WRITE_RE.test(toolsBlob)) && !labelOnly);
+  const textWriteTool = actionComments || writerTokens.some((t) => !labelOnlyGrant(t));
   // fw#481 N2 (founder, 2026-11-21): a stranger who steers an agent that can write text to
   // GitHub (comment, edit, review) with a credential that can write threads (issues or
   // pull-requests write, or a PAT handed to it) acts with that credential: high, however narrow
@@ -2846,7 +2847,8 @@ function analyzeWorkflowInner(
   // contents: write behind narrow gh issue/pr tools edits threads only.
   const codeTool = rce || CODE_TOOL_RE.test(toolsBlob) || tagMode;
   const codeWrite = (pat || hasCodeWritePerm(wf, powerJobs)) && codeTool;
-  const metaWrite = (hasMetaWritePerm(wf, powerJobs) || pat) && (textWriteTool || githubWriteTool);
+  const metaWrite =
+    (hasMetaWritePerm(wf, powerJobs) || pat) && (actionComments || writerTokens.length > 0);
   const canDamage = rce || codeWrite || metaWrite;
   if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
   // F15: metadata-write-ONLY (no RCE, no code-write) can't be catastrophic → cap critical to high.
@@ -3206,6 +3208,7 @@ function analyzeWorkflowInner(
     shell: rce,
     pushCode: codeWrite,
     editThreads: metaWrite,
+    writesText: writeChannel,
     pat,
     publicOutput: fullOutput,
     scrubOff,

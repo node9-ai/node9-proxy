@@ -128,6 +128,29 @@ describe('N2 limits: what stays where it was', () => {
     expect(narrow.severity).toBe('high');
   });
 
+  it('tag mode with contents: write reaches code (it commits): not capped below high', () => {
+    const wf = `
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_non_write_users: "*"
+`;
+    expect(['high', 'critical']).toContain(ci2(wf).severity);
+  });
+
   it('a read-only token cannot write the comment: not high', () => {
     const f = ci2(
       issueAgent({
@@ -171,6 +194,16 @@ describe('N2 limits: what stays where it was', () => {
       'mcp__github__get_issue,mcp__github__add_labels_to_issue',
     ])
       expect(ci2(issueAgent({ perms, tools })).severity).toBe('medium');
+  });
+
+  it('a label grant that also pins --body or --title writes text: high', () => {
+    for (const tools of [
+      'Bash(gh issue edit * --body * --add-label *)',
+      'Bash(gh issue edit 12 --title * --remove-label:*)',
+    ]) {
+      const f = ci2(issueAgent({ perms: '      contents: read\n      issues: write', tools }));
+      expect(f.severity).toBe('high');
+    }
   });
 
   it('a label grant next to a comment grant is still a write channel: high', () => {
