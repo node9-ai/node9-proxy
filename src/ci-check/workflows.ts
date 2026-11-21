@@ -46,6 +46,22 @@ const EXFIL_RCE_RE =
 const GH_WRITE_TOOL_RE =
   /Bash\(\s*(gh api|gh:|gh (pr|issue) (comment|edit|merge|close|review|create|ready|lock|reopen)|gh (pr|issue)\s*[:*)]|git push|git:)/i;
 
+// N2/P2: a tool through which a write token or a PAT reaches code: git push, any git,
+// unrestricted gh or gh api, gh pr merge (also inside an unrestricted `gh pr` grant), the GitHub
+// MCP server's file, branch and merge writes. A scoped grant (`Bash(gh issue:*)`,
+// `Bash(gh api:repos/*/issues:*)`, `Bash(gh pr comment:*)`) does not.
+const CODE_TOOL_RE =
+  /Bash\(\s*(git push|git\s*:|git\s+\*|gh\s*(?::|\*|\))|gh\s+api\s*(?::\s*\*|\*|\))|gh pr merge|gh\s+pr\s*(?::|\*|\)))|mcp__github__(merge_pull_request|create_or_update_file|push_files|delete_file|create_branch)|mcp__github_file_ops__/i;
+// N2: the GitHub MCP tools that write text where others read it (a comment, an issue, a review),
+// including claude-code-action's own comment tools. Read tools (`get_*`, `list_*`) are not here.
+const MCP_GH_TEXT_WRITE_RE =
+  /mcp__github(?:_inline_comment|_comment)?__(?:create|update|add|submit)_\w+/i;
+// N2: a grant that only sets labels: a label flag pinned in the grant
+// (`Bash(gh issue edit 12 --add-label:*)`), the labels API path, a label MCP tool. It changes no
+// text that people read, so it is not a write channel. Not modelled: a trailing wildcard after
+// the label flag also lets `--body` through.
+const LABEL_ONLY_TOOL_RE = /--(?:add|remove)-label\b|\/labels\b|mcp__\w*label/i;
+
 // R4-3: a tool that can actually mint+transmit an OIDC token or exfil a secret —
 // arbitrary shell or network egress. `id-token:write` is inert without one of these.
 // Includes scoped INTERPRETERS (python/node/ruby/…) which can open a socket, and
@@ -2219,6 +2235,22 @@ function claudeActionBuild(
 
 const CLAUDE_BASE_ACTION_RE = /^\s*anthropics\/claude-code-base-action@\S/i;
 
+/** Official claude-code-action in tag mode (no `prompt`): it keeps a tracking comment the agent
+ *  edits, allows Read, Glob and Grep, and commits to a branch through its own file tool. */
+function claudeTagMode(st: Step): boolean {
+  return !!claudeActionBuild(st.uses)?.official && !str(st.with?.['prompt']).trim();
+}
+
+/** Tag mode, or `track_progress: true`: the action grants its own comment tool and the file-read
+ *  tools, whatever `--allowedTools` says. */
+function claudeOwnTools(st: Step): boolean {
+  return (
+    claudeTagMode(st) ||
+    (!!claudeActionBuild(st.uses)?.official &&
+      /^\s*["']?true/i.test(str(st.with?.['track_progress'])))
+  );
+}
+
 /** C4-c: can the scan read this agent step's whole tool policy? Only these:
  *  - official codex-action in a read-only sandbox (`sandbox: read-only` or `:read-only`);
  *  - official claude-code-action / claude-code-base-action given a prompt (agent mode, not the
@@ -2770,11 +2802,30 @@ function analyzeWorkflowInner(
   // reach (e.g. a scheduled job, or a "*" bypass on a non-untrustable trigger),
   // the workflow isn't injectable regardless of tool power → hardening advisory.
   if (reach === 0 && severity && severity !== 'advisory') severity = 'advisory';
+  const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
+  // claude-code-action in tag mode or with `track_progress` posts and edits its own comment
+  // through a tool it always grants; in tag mode it also commits to the branch.
+  const tagMode = scopedSteps.some(claudeTagMode);
+  const actionComments = scopedSteps.some(claudeOwnTools);
+  const writerTokens = toolTokens(toolsBlob).filter(
+    (t) => GH_WRITE_TOOL_RE.test(t) || MCP_GH_TEXT_WRITE_RE.test(t)
+  );
+  const labelOnly =
+    writerTokens.length > 0 && writerTokens.every((t) => LABEL_ONLY_TOOL_RE.test(t));
+  const textWriteTool =
+    actionComments || ((githubWriteTool || MCP_GH_TEXT_WRITE_RE.test(toolsBlob)) && !labelOnly);
+  // fw#481 N2 (founder, 2026-11-21): a stranger who steers an agent that can write text to
+  // GitHub (comment, edit, review) with a credential that can write threads (issues or
+  // pull-requests write, or a PAT handed to it) acts with that credential: high, however narrow
+  // the tool list. `contents: write` alone cannot comment. A grant that only sets labels is not
+  // such a tool and keeps the grade it had.
+  const writeChannel = textWriteTool && (hasMetaWritePerm(wf, powerJobs) || pat);
   // F9: tool scope caps the blast radius. Without a broad/write-capable tool
   // (bare Bash / curl / wget / git push / Write / Edit), an injected agent is
   // limited to scoped API ops (e.g. mcp github issue tools) — real but not
-  // catastrophic → cap high/critical down to medium.
-  if (!broadTools && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
+  // catastrophic → cap high/critical down to medium. N2: not when it can write to GitHub with a
+  // write credential (F15 below caps that at high).
+  if (!broadTools && !writeChannel && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
     severity = 'medium';
   // F11 + F12: catastrophe requires DAMAGE CAPABILITY = a permission AND a tool to
   // exercise it. An injected agent can only cause real harm if it can EXFIL/RCE
@@ -2784,15 +2835,18 @@ function analyzeWorkflowInner(
   // Read/Write tools — no way to touch GitHub or exfil → medium. A read-only token +
   // scoped scripts → medium. Write + `Bash(gh api:*)` → correctly stays high/critical.
   const exfilOrRce = EXFIL_RCE_RE.test(toolsBlob);
-  const githubWriteTool = GH_WRITE_TOOL_RE.test(toolsBlob);
   // F15: three damage tiers, not one. RCE (bare Bash/curl) and CODE-WRITE (contents:write
   // + a git/gh tool, or a static PAT of unknown scope) are catastrophic → critical-capable.
   // METADATA-WRITE (pull-requests/issues:write + gh tool) is bounded — comment/label/approve,
   // no code push, no shell, no secret exfil → high at most.
   const rce = exfilOrRce;
   // R4-2: damage perms/PAT scoped to the injectable jobs (powerJobs), not all agent jobs.
-  const codeWrite = pat || (hasCodeWritePerm(wf, powerJobs) && githubWriteTool);
-  const metaWrite = hasMetaWritePerm(wf, powerJobs) && githubWriteTool;
+  // N2/P2 (founder, 2026-11-21): critical needs a tool that reaches code with the token (a shell,
+  // git push, unrestricted gh / gh api, gh pr merge, MCP file writes, tag-mode commits). A PAT or
+  // contents: write behind narrow gh issue/pr tools edits threads only.
+  const codeTool = rce || CODE_TOOL_RE.test(toolsBlob) || tagMode;
+  const codeWrite = (pat || hasCodeWritePerm(wf, powerJobs)) && codeTool;
+  const metaWrite = (hasMetaWritePerm(wf, powerJobs) || pat) && (textWriteTool || githubWriteTool);
   const canDamage = rce || codeWrite || metaWrite;
   if (!canDamage && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium) severity = 'medium';
   // F15: metadata-write-ONLY (no RCE, no code-write) can't be catastrophic → cap critical to high.
@@ -2820,13 +2874,22 @@ function analyzeWorkflowInner(
       );
     if (!lasting) severity = 'high';
   }
-  // R4-4: issue-only write (issues:write, NO pull-requests:write, NO code-write) is bounded
-  // lower than PR-write — an injected agent can comment/label/close ISSUES but cannot approve
-  // a malicious PR or push code. That's medium, not high.
+  // R4-4, narrowed by N2 to label-only grants: with issues write alone (no pull-requests write,
+  // no code write) and no tool that writes text, an injected agent can relabel issues. Medium.
   const issueOnlyWrite =
     metaWrite && !hasPrWritePerm(wf, powerJobs) && !hasCodeWritePerm(wf, powerJobs);
-  if (issueOnlyWrite && !rce && severity && SEVERITY_RANK[severity] > SEVERITY_RANK.medium)
+  if (
+    issueOnlyWrite &&
+    !writeChannel &&
+    !rce &&
+    severity &&
+    SEVERITY_RANK[severity] > SEVERITY_RANK.medium
+  )
     severity = 'medium';
+  // N2 (founder, 2026-11-21): a stranger who can make the agent write text to GitHub with a
+  // write credential gets high, whatever the score of its narrow tools. The plain-pull_request,
+  // reusable and text-only caps below still apply.
+  if (writeChannel && reach > 0 && !gate && severity === 'medium') severity = 'high';
   // F14b: untrusted reach via a NON-privileged trigger (plain `pull_request` only) is
   // sandboxed — fork PRs run with a read-only token and no secrets, so an injected
   // agent can't write to the repo or exfil (worst case = an ephemeral runner). That's
@@ -2860,6 +2923,7 @@ function analyzeWorkflowInner(
     !exfilOrRce &&
     !egressTool &&
     !githubWriteTool &&
+    !writeChannel &&
     !pat;
   if (textOnly && severity && severity !== 'advisory') severity = 'advisory';
   if (!severity) severity = 'advisory';
@@ -2971,13 +3035,10 @@ function analyzeWorkflowInner(
         : 'agent has broad/write-capable tool grants'
     );
   }
-  if (!broadTools && githubWriteTool) {
-    const writers = toolTokens(toolsBlob).filter((t) => GH_WRITE_TOOL_RE.test(t));
-    if (writers.length)
-      signals.push(
-        `agent can write to GitHub with: ${writers.map((n) => `\`${safeText(n, 80)}\``).join(', ')}`
-      );
-  }
+  if (!broadTools && writerTokens.length)
+    signals.push(
+      `agent can write to GitHub with: ${writerTokens.map((n) => `\`${safeText(n, 80)}\``).join(', ')}`
+    );
   if (textOnly)
     signals.push(
       'the agent can only produce text: read-only tools, no write token it can use, no secret in its environment'
@@ -3284,13 +3345,7 @@ function evalAgentJob(
   const keyFile = injectable ? workspaceKeyFile(job, live, label) : null;
   // claude-code-action in tag mode (no `prompt`, or `track_progress`) always allows Read, Glob
   // and Grep, whatever `--allowedTools` adds.
-  const canReadFiles =
-    FILE_READ_TOOL_RE.test(tools) ||
-    live.some(
-      (s) =>
-        !!claudeActionBuild(s.uses)?.official &&
-        (!str(s.with?.['prompt']).trim() || /^\s*["']?true/i.test(str(s.with?.['track_progress'])))
-    );
+  const canReadFiles = FILE_READ_TOOL_RE.test(tools) || live.some(claudeOwnTools);
   const readsKeyFile = !!keyFile && !canReadEnv && canReadFiles;
   if (keyFile && (canReadEnv || readsKeyFile))
     secrets.push({

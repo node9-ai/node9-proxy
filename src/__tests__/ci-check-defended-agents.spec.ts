@@ -30,8 +30,9 @@ const mitigations = (f: string) => (ci2(f)?.mitigations ?? []).join(' | ');
 const TEXT_ONLY = /can only produce text/;
 
 describe('C4-a: Gemini tool grants are read', () => {
-  it('a gh write command with an issue-write token stays medium and is named', () => {
-    expect(rank('gemini-shell-gh-edit.yml')).toBe(SEVERITY_RANK.medium);
+  // fw#481 N2 (2026-11-21): a stranger who can make it write with an issues-write token: high.
+  it('a gh write command with an issue-write token is high and is named', () => {
+    expect(rank('gemini-shell-gh-edit.yml')).toBe(SEVERITY_RANK.high);
     expect(signals('gemini-shell-gh-edit.yml')).toMatch(/gh issue edit/);
     expect(signals('gemini-shell-gh-edit.yml')).not.toMatch(TEXT_ONLY);
   });
@@ -83,8 +84,8 @@ describe('C4-c: Claude with read tools only', () => {
     expect(rank('claude-read-tools-setting-sources.yml')).toBe(SEVERITY_RANK.advisory);
   });
 
-  it('a gh comment tool with an issue-write token: unchanged', () => {
-    expect(rank('claude-comment-tool.yml')).toBe(SEVERITY_RANK.medium);
+  it('a gh comment tool with an issue-write token: high (N2), not text-only', () => {
+    expect(rank('claude-comment-tool.yml')).toBe(SEVERITY_RANK.high);
     expect(signals('claude-comment-tool.yml')).not.toMatch(TEXT_ONLY);
   });
 });
@@ -126,8 +127,8 @@ describe('A10: unrestricted gh grants are broad tools', () => {
     expect(signals('a10-gh-any.yml')).toMatch(/broad\/write-capable tools: `Bash\(gh:\*\)`/);
   });
 
-  it('Bash(gh api:*) is broad, but with only an issue-write token it stays medium', () => {
-    expect(rank('a10-gh-api.yml')).toBe(SEVERITY_RANK.medium);
+  it('Bash(gh api:*) is broad; with only an issue-write token it is high (N2), not critical', () => {
+    expect(rank('a10-gh-api.yml')).toBe(SEVERITY_RANK.high);
     expect(signals('a10-gh-api.yml')).toMatch(/broad\/write-capable tools: `Bash\(gh api:\*\)`/);
   });
 

@@ -104,6 +104,8 @@ jobs:
 `;
     // Middle tier: a non-reusable, ungated-but-scoped workflow → genuinely medium.
     // (The reusable fixture is no longer usable here: it is capped by R4-1a.)
+    // N2 (2026-11-21): a comment tool with an issues-write token is high, so the middle tier
+    // holds a model key but has no tool that writes anywhere.
     const mitigated = `
 on:
   issues:
@@ -118,9 +120,10 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           github_token: \${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
           allowed_non_write_users: "*"
           prompt: 'read \${{ github.event.issue.body }}'
-          claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
+          claude_args: '--allowedTools "mcp__github__get_issue"'
 `;
     const danger = analyzeWorkflow('d.yml', dangerous)!;
     const medium = analyzeWorkflow('mid.yml', mitigated)!;
@@ -183,9 +186,10 @@ jobs:
     expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
   });
 
-  it('F9: ungated + reach but only SCOPED tools (no Bash) → medium, not high', () => {
-    // An issue-dedupe pattern: issues trigger + "*" bypass + untrusted reach, but the
-    // agent only has scoped mcp github issue tools — limited blast radius.
+  it('N2 (was F9): ungated + reach + SCOPED comment tool with an issues-write token → high', () => {
+    // An issue-dedupe pattern: issues trigger + "*" bypass + untrusted reach, scoped mcp github
+    // issue tools. fw#481 N2 (founder, 2026-11-21): a stranger makes it comment with the
+    // repository's write token, so high, not medium; no shell or code tool, so not critical.
     const wf = `
 on:
   issues:
@@ -206,7 +210,8 @@ jobs:
           claude_args: '--allowedTools "mcp__github__get_issue,mcp__github__add_issue_comment"'
 `;
     const f = analyzeWorkflow('dedupe.yml', wf)!;
-    expect(f.severity).toBe('medium');
+    expect(f.severity).toBe('high');
+    expect(f.explain?.saw.join(' ')).toMatch(/can comment on or edit issues and pull requests/);
   });
 
   it('F11: read-only token + scoped-script tools → medium, not high', () => {
@@ -1084,9 +1089,9 @@ jobs:
     expect(f.signals.join(' ')).not.toMatch(/elevated permissions/i);
   });
 
-  // R4-4: issues:write (comment/label an issue) is bounded lower than
-  // pull-requests:write (approve a malicious PR). Issue-only → medium.
-  it('R4-4: issues:write-only + gh issue edit → medium, not high', () => {
+  // R4-4 held issues:write (comment/label an issue) at medium. fw#481 N2 (founder, 2026-11-21):
+  // a stranger who makes the agent write with the repository's token is high.
+  it('N2 (replaces R4-4): issues:write-only + gh issue edit/comment → high, not critical', () => {
     const wf = `
 on:
   issues:
@@ -1106,7 +1111,7 @@ jobs:
           claude_args: '--allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Write,Read"'
 `;
     const f = analyzeWorkflow('triage.yml', wf)!;
-    expect(f.severity).toBe('medium');
+    expect(f.severity).toBe('high');
   });
 
   // R4-4 guard: the SAME shape but with pull-requests:write (can approve a PR) stays high.
