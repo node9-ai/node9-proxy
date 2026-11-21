@@ -25,13 +25,14 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const dlpHits = { current: new Set<string>() };
 const applied = { current: [] as string[] };
+const mode = { current: 'standard' };
 
 vi.mock('../../dlp', () => ({
   scanFilePath: (p: string) => (dlpHits.current.has(p) ? { severity: 'block' } : null),
 }));
 vi.mock('../../config', () => ({
   getConfig: () => ({
-    settings: { mode: 'standard' },
+    settings: { mode: mode.current },
     policy: {
       egress: { enabled: false, mode: 'off' },
       appliedShields: applied.current,
@@ -152,5 +153,45 @@ describe('N6 — fix-string honesty (the founder bug) + ship privacy contract', 
     await annotateCoverage([f], CTX);
     expect(f.coverage?.state).toBe('covered');
     expect(f.fix).toBe(STATIC_FIX);
+  });
+});
+
+describe('N6 — some files recognised, some not (founder machine, 2026-11-21)', () => {
+  beforeEach(() => {
+    dlpHits.current = new Set();
+    applied.current = ['project-jail'];
+    mode.current = 'standard';
+  });
+
+  function mixed(): Finding {
+    dlpHits.current.add(P.aws);
+    const f = fileReadFinding([P.aws, P.claude]);
+    f.detail = ['~/.aws/credentials', '~/.claude.json'];
+    return f;
+  }
+
+  it('never says the jail covers none of them when some are recognised', async () => {
+    const f = mixed();
+    await annotateCoverage([f], CTX);
+    expect(f.coverage?.state).toBe('open');
+    expect(f.fix).not.toContain('does not cover');
+    expect(f.fix).toContain('1 of these 2');
+    expect(f.fix).toContain('node9 jail add');
+  });
+
+  it('marks only the recognised files in detail and keeps paths out of fix', async () => {
+    const f = mixed();
+    await annotateCoverage([f], CTX);
+    expect(f.detail?.[0]).toMatch(/recognises/);
+    expect(f.detail?.[1]).toBe('~/.claude.json');
+    expect(f.fix).not.toContain('.claude.json');
+    expect(f.fix).not.toContain(HOME);
+  });
+
+  it('names the record-only mode as the reason recognised reads still go through', async () => {
+    mode.current = 'audit';
+    const f = mixed();
+    await annotateCoverage([f], CTX);
+    expect(f.fix).toMatch(/mode, which logs these reads/);
   });
 });

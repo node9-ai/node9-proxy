@@ -841,7 +841,12 @@ export const LONG_OUTPUT_THRESHOLD_BYTES = 100 * 1024;
 // into a credential directory (`cd ~/.ssh && cat id_rsa`) is judged under the
 // directory the command entered; the jail consults the structural walk for a
 // command that changes directory. Histories scanned under v40 re-read.
-export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v41';
+// canonical-v42 (2026-11-21): inside an entered credential directory a name
+// not known until the command runs (`cat $(ls)`) is a read of `*` there; a
+// glob cd target, `env -C`, a hard link's relative source and the session's
+// own cwd count; `..` in the entered directory is folded. Histories scanned
+// under v41 re-read.
+export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v42';
 
 // 2026-11-08, hash bumped with NO version bump (node9Firewall#451): dlp/index.ts
 // gained the Inline Secret Assignment pattern. argumentsOnly, which scanArgs
@@ -905,7 +910,7 @@ export const CANONICAL_EXTRACTOR_VERSION = 'canonical-v41';
  * files changed, this hash must change too, and you must consciously
  * decide whether to bump CANONICAL_EXTRACTOR_VERSION."
  */
-export const CANONICAL_EXTRACTOR_HASH = 'dbde5e7f06f3738a';
+export const CANONICAL_EXTRACTOR_HASH = '3e74a6cffd82db82';
 
 // Dedupe key length cap — match what scan.ts:502 uses today.
 const DEDUPE_PREVIEW_LEN = 120;
@@ -1103,7 +1108,7 @@ export function extractCanonicalFindings(
   // When the AST detector runs, regex-mirror smart rules are suppressed in
   // the smart-rules loop below — same semantics as scan.ts:1059 and the
   // engine waterfall added in PR #152.
-  const fsVerdict = analyzeFsOperation(command);
+  const fsVerdict = analyzeFsOperation(command, ctx.cwd);
   if (fsVerdict) {
     const isShield = fsVerdict.ruleName.startsWith('shield:');
     out.push(

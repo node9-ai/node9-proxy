@@ -748,7 +748,7 @@ async function evaluatePolicyCore(
     if (pipeVerdict?.logged) noteLogged(pipeVerdict);
     else if (pipeVerdict) return pipeVerdict;
 
-    const fsVerdict = analyzeFsOperation(bashCommand);
+    const fsVerdict = analyzeFsOperation(bashCommand, cwd);
     if (fsVerdict) {
       const isShieldRule = fsVerdict.ruleName.startsWith('shield:');
       const labelPrefix = isShieldRule ? 'project-jail (AST)' : 'Node9 (AST)';

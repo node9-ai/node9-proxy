@@ -3,12 +3,12 @@
 // Entry point for the new Ink-based scan scorecard renderer.
 //
 // Architecture (per the scan-redesign plan):
-//   - `render(<StaticScorecard input={input} />, { patchConsole: false })`
-//     mounts the component tree, Ink flushes JSX to stdout via Yoga
-//     flexbox layout.
-//   - `unmount()` immediately tears it down — for a one-shot CLI
-//     render there's no interactive state to retain. CodeBurn does
-//     this same pattern in src/dashboard.tsx for its non-TTY path.
+//   - `renderToString(<StaticScorecard ... />)` lays the tree out with
+//     Yoga and returns the frame as a string, written to stdout once.
+//   - Not `render()` + `unmount()`: on a TTY shorter than the report,
+//     Ink 8 redraws a viewport-filling frame on unmount after erasing
+//     only the visible rows, so the part already in scrollback stayed
+//     and the user saw the report twice.
 //
 // Why Ink for a static CLI output (rather than chalk + manual box-
 // drawing):
@@ -22,7 +22,7 @@
 // the chalk-based renderPanelScorecard layout instead.
 
 import React from 'react';
-import { Box, render } from 'ink';
+import { Box, renderToString } from 'ink';
 
 import type { CompactInput } from '../../commands/scan.js';
 import { SeverityBand } from './SeverityBand.js';
@@ -192,17 +192,13 @@ export function StaticScorecard({ input, rangeLabel, now }: Props): React.ReactE
 }
 
 /**
- * One-shot mount → render → unmount pattern for static output.
- * Returns when the component tree has flushed to stdout. The
- * `patchConsole: false` option keeps Ink from intercepting other
- * console.log calls the caller might still be using.
- *
- * No `waitUntilExit()` — there's no interactive state to wait for;
- * the render is synchronous from the caller's perspective.
+ * Render the scorecard once and write it to stdout in a single write.
+ * No live Ink instance, so nothing redraws or erases the terminal: the
+ * report appears exactly once whatever the terminal height.
  */
 export function renderScanScorecardInk(input: CompactInput, rangeLabel: string): void {
-  const { unmount } = render(<StaticScorecard input={input} rangeLabel={rangeLabel} />, {
-    patchConsole: false,
+  const output = renderToString(<StaticScorecard input={input} rangeLabel={rangeLabel} />, {
+    columns: process.stdout.columns ?? 80,
   });
-  unmount();
+  process.stdout.write(output + '\n');
 }

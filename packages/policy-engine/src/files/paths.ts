@@ -136,6 +136,13 @@ export interface FileAccessContext {
   cwd?: string;
   homeDirs?: string[];
   accesses?: FileAccess[];
+  /**
+   * Readings only the credential jail asks for: a reader operand whose name is
+   * not known until the command runs (read as `*` in each directory the command
+   * entered), a `cd` to a glob, `env -C DIR`, and a hard link's source. Off for
+   * every other user of the walk, whose accesses stay as they were.
+   */
+  credentialJail?: boolean;
 }
 
 // ── Public material under ~/.ssh (node9Firewall#308, JAIL-16) ────────────────

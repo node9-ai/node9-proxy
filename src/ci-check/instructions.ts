@@ -14,6 +14,7 @@ import type { CiFinding, Severity } from './types';
 import { lineAtIndex } from './lines';
 import { safeText } from './suppress';
 import { onlyOfficialInstaller, onlyLocal, MAX_EXCUSED_PER_LINE } from './harmless';
+import { findWithdrawnGuidance } from './withdrawn-guidance';
 
 // ── Tier 1: structural concealment — classified by LEGITIMACY, not "is it invisible" ──
 // Presence of an invisible/formatting char ≠ concealment. Four classes, distinct handling
@@ -778,6 +779,24 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         'Remove external post/upload directives from agent instructions.',
         path,
         lineAt(content, ex.index)
+      )
+    );
+  }
+
+  // Guidance the vendor withdrew from its own copy of this skill (fw#454 step 1).
+  for (const hit of findWithdrawnGuidance(content)) {
+    const { entry, count } = hit;
+    findings.push(
+      mk(
+        'CI-6.withdrawn-guidance',
+        'medium',
+        `Skill still carries guidance ${entry.vendor} withdrew on ${entry.withdrawn}`,
+        [
+          `${count} mention${count === 1 ? '' : 's'} of guidance ${entry.vendor} removed from its own copy (${entry.fixSource})`,
+        ],
+        `Update the skill from ${entry.vendor}'s current version (${entry.fixSource}) or remove it.`,
+        path,
+        lineAt(content, hit.index)
       )
     );
   }

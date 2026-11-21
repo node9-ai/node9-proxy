@@ -8,7 +8,7 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { runPosture } from '../../posture';
-import { renderPosture } from '../../posture/render';
+import { renderPosture, ranViaNpx } from '../../posture/render';
 import { shipPosture } from '../../posture/ship';
 import { readCredentials } from '../../daemon/sync';
 
@@ -24,7 +24,7 @@ export function registerPostureCommand(program: Command): void {
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
-        console.log(renderPosture(result));
+        console.log(renderPosture(result, { viaNpx: ranViaNpx() }));
       }
 
       // --ship is best-effort: it never fails the command. Status goes to
