@@ -17,6 +17,8 @@ import { getConfig, catalogSettingsFrom } from '../config';
 import { defaultSkillRoots, getRootKey, readSkillPinsSafe } from '../skill-pin';
 import { AGENT_SPECS, type McpFormat } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
+import { isCodexAppManagedServer } from '../setup';
+import { policySourceOf, remedy } from './remedy';
 import { readCappedText } from '../utils/read-capped';
 
 interface McpEntry {
@@ -24,11 +26,14 @@ interface McpEntry {
   command?: string;
   args?: string[];
   agent: string;
+  /** Written and rewritten by the agent's own app; node9 does not wrap it. */
+  appManaged: boolean;
 }
 
 interface McpServerConfig {
   command?: string;
   args?: string[];
+  env?: Record<string, unknown>;
 }
 
 // Package-runner wrappers that launch a tool by name from args.
@@ -72,6 +77,8 @@ function readServers(file: string, format: McpFormat, agent: string): McpEntry[]
       command: v?.command,
       args: Array.isArray(v?.args) ? v.args : undefined,
       agent,
+      // Only Codex's config carries such entries (the ChatGPT desktop app's own).
+      appManaged: format === 'toml' && isCodexAppManagedServer(name, v),
     }));
   } catch {
     return [];
@@ -90,7 +97,12 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
   if (servers.length === 0) return findings;
 
   // node9-wrapped servers are gated; anything else runs direct (bypasses node9).
-  const unmanaged = servers.filter((s) => s.command && !isNode9Managed(s.command, s.args));
+  // Not the servers an agent's own app manages: `node9 init` refuses to wrap them
+  // (setup.ts, isCodexAppManagedServer: wrapped, the app's server failed to start
+  // and the app rewrote the entry), and the hook still judges their tool calls.
+  // Counting one as "outside node9" offered a wrap node9 itself will not do.
+  const wrappable = servers.filter((s) => !s.appManaged);
+  const unmanaged = wrappable.filter((s) => s.command && !isNode9Managed(s.command, s.args));
 
   // Launch binaries in /tmp or world-writable dirs = anyone on the box can swap them.
   const suspect = unmanaged.filter(
@@ -115,13 +127,13 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
     findings.push({
       category: 'Supply chain',
       severity: 'medium',
-      title: `${unmanaged.length} of ${servers.length} MCP server${servers.length === 1 ? '' : 's'} run outside node9`,
+      title: `${unmanaged.length} of ${wrappable.length} MCP server${wrappable.length === 1 ? '' : 's'} run outside node9`,
       what: 'Some MCP tool-servers run without node9 watching their tool calls.',
       why: "They're launched directly, not wrapped by node9.",
       who: 'A poisoned or silently-updated server could act freely (tool-poisoning / rug-pull).',
       detail: unmanaged.slice(0, 5).map((s) => `${s.name} (${s.agent})`),
       owner: 'node9',
-      fix: 'node9 can wrap MCP servers so every tool call is gated + pinned.',
+      fix: 'Run `node9 init`: it wraps each MCP server, so every tool call is judged and its tool definitions are pinned.',
     });
   }
 
@@ -162,7 +174,7 @@ function pluginsAndPackages(ctx: CheckContext, home: string): Finding[] {
       who: 'An update or a tampered file runs with the agent on the next session, unnoticed.',
       detail: roots.slice(0, 6).map((r) => (r.startsWith(home) ? '~' + r.slice(home.length) : r)),
       owner: 'node9',
-      fix: 'Set loading.skill-tamper to block (the Checks page, or `checks.loading.skill-tamper` in the config file); node9 pins each plugin the first time it loads.',
+      fix: `Set loading.skill-tamper to block (${remedy.checkWhere(policySourceOf(ctx.cwd), 'loading.skill-tamper')}); node9 pins each plugin the first time it loads.`,
     });
   } else if (unpinned.length > 0) {
     findings.push({
@@ -190,7 +202,7 @@ function pluginsAndPackages(ctx: CheckContext, home: string): Finding[] {
       who: "A typosquat or a compromised release installs with the agent's rights.",
       detail: [],
       owner: 'node9',
-      fix: 'Set loading.malicious-package to block (the Checks page, or `checks.loading.malicious-package` in the config file).',
+      fix: `Set loading.malicious-package to block (${remedy.checkWhere(policySourceOf(ctx.cwd), 'loading.malicious-package')}).`,
     });
   }
   return findings;

@@ -21,7 +21,14 @@ import {
 import { analyzeAgentConfig, analyzeSkillGrants } from './agent-config';
 import { analyzeMcp, ownPackageNames } from './mcp';
 import { analyzeCodexConfig } from './codex';
-import { analyzeInstructionFile, appSkillDirsOf, namedDocs, skillDirsOf } from './instructions';
+import {
+  analyzeInstructionFile,
+  analyzeWithdrawnGuidance,
+  appSkillDirsOf,
+  isSkillFile,
+  namedDocs,
+  skillDirsOf,
+} from './instructions';
 import { routeOf } from './route';
 import {
   analyzeStartup,
@@ -324,6 +331,10 @@ export function scanTree(tree: RepoTree): ScanResult {
           break;
         case 'instruction':
           findings.push(...analyzeInstructionFile(file.path, content)); // CI-6: the content
+          // Withdrawn vendor guidance is a claim about a skill: a CLAUDE.md or a note that
+          // names the same domain in prose is not a stale copy.
+          if (isSkillFile(file.path, skillDirs))
+            findings.push(...analyzeWithdrawnGuidance(file.path, content));
           findings.push(...analyzeSkillGrants(file.path, content)); // CI-1: the grant
           addRefs(textPackageRefs(file.path, content, 'doc', alertsOnly));
           break;

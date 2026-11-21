@@ -783,7 +783,27 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
     );
   }
 
-  // Guidance the vendor withdrew from its own copy of this skill (fw#454 step 1).
+  return findings;
+}
+
+/** A file that belongs to a skill: a SKILL.md, or any file under a directory that holds one.
+ *  Path-only, like the other selectors, so scan-repo decides it without a second read. */
+export function isSkillFile(path: string, skillDirs: ReadonlySet<string>): boolean {
+  if (/(^|\/)[Ss][Kk][Ii][Ll][Ll]\.md$/.test(path)) return true;
+  for (let d = path.lastIndexOf('/'); d > 0; d = path.lastIndexOf('/', d - 1)) {
+    if (skillDirs.has(path.slice(0, d))) return true;
+  }
+  return false;
+}
+
+/** Guidance the vendor withdrew from its own copy of a skill (fw#454 step 1).
+ *
+ *  For SKILL files only, and the CALLER decides what a skill file is. The match is one fixed
+ *  string, so inside `analyzeInstructionFile` it fired on every note, memory file and CLAUDE.md
+ *  that names the domain in prose (2.66.0, founder's machine: three research notes reported as
+ *  "installed skill files"). Returns 0+ findings. Never throws. */
+export function analyzeWithdrawnGuidance(path: string, content: string): CiFinding[] {
+  const findings: CiFinding[] = [];
   for (const hit of findWithdrawnGuidance(content)) {
     const { entry, count } = hit;
     findings.push(
@@ -800,6 +820,5 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
       )
     );
   }
-
   return findings;
 }

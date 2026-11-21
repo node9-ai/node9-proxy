@@ -12,7 +12,8 @@ vi.mock('../../config', async () => {
 });
 
 import { checkInstructionFiles } from '../instruction-files';
-import { analyzeInstructionFile } from '../../ci-check/instructions';
+import { analyzeInstructionFile, analyzeWithdrawnGuidance } from '../../ci-check/instructions';
+import { scanTree } from '../../ci-check';
 
 const STALE = [
   '# Private services',
@@ -29,7 +30,10 @@ const FIXED = [
   'See https://render.com/docs/private-network for details.',
 ].join('\n');
 
-const ROW = /guidance its vendor withdrew/;
+const ROW = /guidance (its|their) vendor withdrew/;
+const RULE = 'CI-6.withdrawn-guidance';
+// A note that names the domain in prose, as a research note or a changelog does.
+const NOTE = 'Render removed render-internal.com from its deploy skill on 2026-08-14.';
 
 let home: string;
 let cwd: string;
@@ -52,10 +56,10 @@ afterEach(() => {
 
 describe('CI-6.withdrawn-guidance (shared by scan-repo and posture)', () => {
   it('reports one finding per file, at the first mention, with the count', () => {
-    const hits = analyzeInstructionFile(
+    const hits = analyzeWithdrawnGuidance(
       'skills/render-deploy/references/service-types.md',
       STALE
-    ).filter((h) => h.rule === 'CI-6.withdrawn-guidance');
+    );
     expect(hits).toHaveLength(1);
     expect(hits[0].line).toBe(3);
     expect(hits[0].severity).toBe('medium');
@@ -63,15 +67,70 @@ describe('CI-6.withdrawn-guidance (shared by scan-repo and posture)', () => {
   });
 
   it("stays silent on the vendor's fixed text and on look-alike words", () => {
-    const rule = (t: string) =>
-      analyzeInstructionFile('SKILL.md', t).filter((h) => h.rule === 'CI-6.withdrawn-guidance');
+    const rule = (t: string) => analyzeWithdrawnGuidance('SKILL.md', t);
     expect(rule(FIXED)).toHaveLength(0);
     expect(rule('Deploy to render.com; use internal hostnames.')).toHaveLength(0);
     expect(rule('See myrender-internal.company.dev')).toHaveLength(0);
   });
 });
 
+// 2.66.0 ran the rule inside analyzeInstructionFile, so every instruction file that
+// names the domain was reported as a stale skill (three memory notes on the founder's
+// machine). The rule is for skill files only, and the caller decides what one is.
+describe('CI-6.withdrawn-guidance applies to skill files only', () => {
+  it('is not part of the general instruction-file rules', () => {
+    for (const p of ['CLAUDE.md', 'AGENTS.md', '.claude/commands/deploy.md'])
+      expect(analyzeInstructionFile(p, STALE).filter((h) => h.rule === RULE)).toHaveLength(0);
+  });
+
+  it('scan-repo flags the files of a skill, wherever the skill sits, and no other file', () => {
+    const tree = {
+      source: 'fixture',
+      notes: [],
+      files: [
+        // A skill at the repository root: no "skills" folder in the path.
+        { path: 'render-deploy/SKILL.md', content: '# Render deploy\n\nSee references/.' },
+        { path: 'render-deploy/references/service-types.md', content: STALE },
+        { path: 'skills/.curated/render-deploy/SKILL.md', content: '# Render deploy' },
+        { path: 'skills/.curated/render-deploy/references/service-types.md', content: STALE },
+        { path: 'CLAUDE.md', content: NOTE },
+        { path: 'AGENTS.md', content: STALE },
+      ],
+    };
+    const hits = scanTree(tree).findings.filter((f) => f.rule === RULE);
+    expect(hits.map((f) => f.file).sort()).toEqual([
+      'render-deploy/references/service-types.md',
+      'skills/.curated/render-deploy/references/service-types.md',
+    ]);
+  });
+});
+
 describe('posture: installed skills with withdrawn guidance', () => {
+  it('does not report memory notes, CLAUDE.md, agents or commands that name the text', async () => {
+    write(home, '.claude/projects/-home-u/memory/research-note.md', NOTE);
+    write(home, '.claude/CLAUDE.md', NOTE);
+    write(home, '.codex/AGENTS.md', STALE);
+    write(home, '.claude/commands/deploy.md', STALE);
+    write(home, '.claude/agents/deployer.md', STALE);
+    const findings = await checkInstructionFiles({ home, cwd });
+    expect(findings.some((f) => ROW.test(f.title))).toBe(false);
+  });
+
+  it('reads the layout the desktop app syncs skills into, and external plugins', async () => {
+    const rel = 'render-deploy/references/service-types.md';
+    write(home, `.claude/skills/synced/bucket-1/${rel}`, STALE);
+    write(home, `.claude/plugins/marketplaces/m/external_plugins/p/skills/${rel}`, STALE);
+    const row = (await checkInstructionFiles({ home, cwd })).find((f) => ROW.test(f.title));
+    expect(row).toBeDefined();
+    expect(row!.detail).toHaveLength(2);
+  });
+
+  it('counts a file once when the project folder is the home folder', async () => {
+    write(home, '.claude/skills/render-deploy/references/service-types.md', STALE);
+    const row = (await checkInstructionFiles({ home, cwd: home })).find((f) => ROW.test(f.title));
+    expect(row!.detail).toHaveLength(1);
+  });
+
   it('finds a stale copy in every skill folder agents load', async () => {
     const rel = 'render-deploy/references/service-types.md';
     write(home, `.claude/skills/${rel}`, STALE);

@@ -13,6 +13,7 @@
 
 import { evaluatePolicy } from '../policy';
 import type { CheckContext, Finding } from './types';
+import { policySourceOf, remedy } from './remedy';
 
 // The obvious destructive command the gate must catch. Classifier input only —
 // never executed. Assembled (not a bare literal) to keep the source clean.
@@ -34,7 +35,7 @@ export async function checkGate(ctx: CheckContext): Promise<Finding[]> {
         detail: [],
         owner: 'node9',
         fix:
-          'Turn on the gate: run `node9 shield enable bash-safe` (or add a smart rule). ' +
+          `Turn on the gate: ${remedy.shield(policySourceOf(ctx.cwd), 'bash-safe')} (or add a smart rule). ` +
           "node9 then blocks dangerous commands and the negotiation loop tells the agent what's allowed.",
       },
     ];

@@ -8,6 +8,7 @@
 import path from 'path';
 import { getConfig } from '../config';
 import type { CheckContext, Finding } from './types';
+import { policySourceOf, remedy } from './remedy';
 
 /** A canonical jailed credential file — the coverage probe reads it through
  *  the real DLP/jail layer to prove Data/Files are actually enforcing. */
@@ -176,7 +177,7 @@ export function checkCost(ctx: CheckContext): Finding[] {
       owner: 'node9',
       node9Reduces: true,
       scoreWeight: 4,
-      fix: 'Set a ceiling for behavior.cost-budget (tuning sessionUSD or dayUSD, in ~/.node9/config.json or on the dashboard) and the check to review or block; loop detection caps the worst runaways today.',
+      fix: `Set a ceiling for behavior.cost-budget (${remedy.budget(policySourceOf(ctx.cwd))}) and the check to review or block; loop detection caps the worst runaways today.`,
     },
   ];
 }

@@ -11,6 +11,7 @@ import { isRecordOnly, levelOf } from '@node9/policy-engine';
 import { getAgentWiring } from '../agent-wiring';
 import { autostartState } from '../daemon/service';
 import type { CheckContext, Finding } from './types';
+import { cap, remedy, type PolicySource } from './remedy';
 
 export function checkCoverage(ctx: CheckContext): Finding[] {
   const home = ctx.home || os.homedir();
@@ -36,6 +37,7 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
   // Wired — but enforcing, or only observing?
   const config = getConfig(ctx.cwd);
   const mode = config.settings.mode;
+  const source: PolicySource = config.policySource === 'workspace' ? 'workspace' : 'local';
   if (isRecordOnly(mode)) {
     // One name for the level in every report (fw#421): the config may still
     // say `observe`, the user reads `audit`, as `status` prints it.
@@ -49,7 +51,7 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
       who: 'The guardrails above are observed, not enforced.',
       detail: [],
       owner: 'node9',
-      fix: 'Set mode to `standard` (or `strict`) to enforce in-path.',
+      fix: `${cap(remedy.mode(source))} to enforce in-path.`,
     });
   }
 
@@ -70,7 +72,8 @@ export function checkCoverage(ctx: CheckContext): Finding[] {
         who: 'After the next reboot, approvals time out and the policy stops syncing until the daemon is started by hand.',
         detail: [],
         owner: 'node9',
-        fix: 'Run `node9 doctor` to install and enable the autostart entry.',
+        // `node9 doctor` only reports this state; `daemon install` changes it.
+        fix: 'Run `node9 daemon install` to install and enable the autostart entry.',
       });
     }
   }

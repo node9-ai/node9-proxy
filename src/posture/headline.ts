@@ -7,6 +7,7 @@
 // findings, and picks the single highest-leverage action.
 
 import type { Finding, Headline, Severity } from './types';
+import { remedy, type PolicySource } from './remedy';
 
 const SEVERITY_RANK: Record<Severity, number> = {
   critical: 0,
@@ -52,7 +53,10 @@ function actionFromFinding(f: Finding | undefined): string | null {
  * Pick the scariest TRUE story + the one next step. Returns null when there's
  * nothing real to narrate (no findings, or only advisory ones node9 can't fix).
  */
-export function deriveHeadline(allFindings: Finding[]): Headline | null {
+export function deriveHeadline(
+  allFindings: Finding[],
+  source: PolicySource = 'local'
+): Headline | null {
   // Only OPEN findings tell the story — a covered Secrets must never feed
   // "an agent can read your credentials." Exclude covered + can't-fix.
   const findings = allFindings.filter(
@@ -105,7 +109,7 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
     action =
       'Install node9 and put it in-path: `npm i -g node9-ai && node9 init` — nothing here is enforced until you do.';
   } else if (observeOnly) {
-    action = 'Switch node9 to enforcing mode — right now it is only watching, not blocking.';
+    action = `Switch node9 to enforcing mode (${remedy.mode(source)}) — right now it is only watching, not blocking.`;
   } else if (egressOpen) {
     // Finding-first + keep the chain rationale the ladder is built on: egress
     // outranks secrets because closing the exit breaks the exfiltration chain —
@@ -123,11 +127,11 @@ export function deriveHeadline(allFindings: Finding[]): Headline | null {
     // showed "~/.ssh, ~/.aws" against a secret living in ~/.claude.json).
     action =
       actionFromFinding(worstFinding(findings.filter((f) => f.category === 'Secrets'))) ??
-      'node9 can block reads of sensitive credential files in-path (`node9 shield enable project-jail`).';
+      `node9 can block reads of sensitive credential files in-path (${remedy.shield(source, 'project-jail')}).`;
   } else if (gateWeak) {
     action =
       actionFromFinding(worstFinding(findings.filter((f) => f.category === 'Approval gate'))) ??
-      'node9 can enforce destructive-command blocking in-path (`node9 shield enable bash-safe`).';
+      `node9 can enforce destructive-command blocking in-path (${remedy.shield(source, 'bash-safe')}).`;
   } else {
     action = actionFromFinding(worstFinding(findings)) ?? 'Review the findings below.';
   }

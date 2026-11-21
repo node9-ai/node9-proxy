@@ -25,6 +25,7 @@ import {
 } from './governance';
 import { scorePosture } from './score';
 import { deriveHeadline } from './headline';
+import { policySourceOf } from './remedy';
 import { annotateCoverage } from './enforcement';
 import type { CheckContext, Finding, PostureCheck, PostureResult } from './types';
 
@@ -131,16 +132,18 @@ export async function runPosture(opts: RunPostureOptions = {}): Promise<PostureR
   for (const f of findings) f.owasp ??= postureCategoryOwasp(f.category);
 
   const { score, tier } = scorePosture(findings, POSTURE_CHECKS.length);
+  const policySource = policySourceOf(ctx.cwd);
 
   return {
     agent: opts.agent ? `${opts.agent} on this host` : 'agent on this host',
     findings,
     passedCategories,
     erroredCategories,
-    headline: deriveHeadline(findings),
+    headline: deriveHeadline(findings, policySource),
     score,
     tier,
     checksRun: POSTURE_CHECKS.length,
+    policySource,
   };
 }
 

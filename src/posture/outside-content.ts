@@ -13,6 +13,7 @@ import { checkValue } from '@node9/policy-engine';
 import { getConfig, catalogSettingsFrom } from '../config';
 import { inventoryMcp } from '../mcp-wrap';
 import type { CheckContext, Finding } from './types';
+import { cap, remedy, type PolicySource } from './remedy';
 
 export const CATEGORY = 'Outside content';
 
@@ -52,6 +53,7 @@ export function outsideSources(
 export function checkOutsideContent(ctx: CheckContext): Finding[] {
   const home = ctx.home || os.homedir();
   const config = getConfig(ctx.cwd);
+  const source: PolicySource = config.policySource === 'workspace' ? 'workspace' : 'local';
   const roles = (config.policy.untrustedContent?.roles ?? {}) as Record<
     string,
     Record<string, 'source' | 'action' | 'read'>
@@ -91,14 +93,16 @@ export function checkOutsideContent(ctx: CheckContext): Finding[] {
       what: 'An agent here reads pages, issues or messages written by others, and what it does next is not held.',
       why: gaps.join('; ') + '.',
       who: 'One poisoned page or issue is enough: the agent reads it, then sends or deletes as it says.',
-      detail: [
-        ...[...byServer]
-          .slice(0, 8)
-          .map(([name, e]) => `${name} (${e.agents.join(', ')}, by ${e.how})`),
-        ...gaps,
-      ],
+      // The servers only: the gaps are the `why` line, and printing them here
+      // too showed the same sentence twice in one row.
+      detail: [...byServer]
+        .slice(0, 8)
+        .map(([name, e]) => `${name} (${e.agents.join(', ')}, by ${e.how})`),
       owner: 'node9',
-      fix: 'Run `node9 egress watch` (or `node9 egress lock`), keep behavior.untrusted-content on, and mark each server\'s reading tools as "Brings outside content" on the Apps page so the hold applies to them.',
+      fix:
+        `${cap(remedy.egress(source))}, keep behavior.untrusted-content on, and mark each ` +
+        'server\'s reading tools as "Brings outside content" on the Protection page of the ' +
+        'dashboard so the hold applies to them.',
     },
   ];
 }

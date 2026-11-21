@@ -17,7 +17,9 @@
 // port map). Read-only — no socket is opened or probed.
 
 import fs from 'fs';
+import { getConfig } from '../config';
 import type { CheckContext, Finding } from './types';
+import { remedy, type PolicySource } from './remedy';
 
 /** Points an exposed DB that node9 can shield deducts while open — smaller than
  *  Isolation: it's a narrower, lower-blast-radius gap. */
@@ -80,7 +82,12 @@ const SHIELD_FOR_SERVICE: Record<string, { shield: string; blocks: string; rebin
  * servers (no shield) keep the plain rebind line and stay purely the user's.
  * Exported pure for tests (checkInbound itself reads /proc). Deduped by shield.
  */
-export function buildNetworkFix(labels: string[]): { fix: string; reduces: boolean } {
+export function buildNetworkFix(
+  labels: string[],
+  opts: { applied?: readonly string[]; source?: PolicySource } = {}
+): { fix: string; reduces: boolean } {
+  const applied = new Set(opts.applied ?? []);
+  const source = opts.source ?? 'local';
   const shielded = [
     ...new Map(
       labels
@@ -100,17 +107,31 @@ export function buildNetworkFix(labels: string[]): { fix: string; reduces: boole
     };
   }
 
-  const protectLines = shielded
-    .map((s) => `  • node9 shield enable ${s.shield}  — blocks ${s.blocks}`)
-    .join('\n');
   const rebindLines = shielded.map((s) => `  • ${s.rebind}`).join('\n');
+  const closePort =
+    'Close the port to other machines (your part):\n' + rebindLines + '\n  • or firewall the port';
+  // A shield that is already on is not offered again, and a step already taken
+  // costs no points: when every exposed database has its shield, what is left
+  // is the port, which is the user's.
+  const on = shielded.filter((s) => applied.has(s.shield));
+  const missing = shielded.filter((s) => !applied.has(s.shield));
+  const onLine =
+    on.length > 0
+      ? `Already on for the agent: the ${on.map((s) => s.shield).join(' and ')} ` +
+        `shield${on.length === 1 ? '' : 's'} (${on.map((s) => s.blocks).join(', ')}).\n`
+      : '';
+  if (missing.length === 0) return { fix: onLine + closePort, reduces: false };
+
+  const protectLines = missing
+    .map((s) => `  • ${remedy.shieldLine(source, s.shield)}  — blocks ${s.blocks}`)
+    .join('\n');
   return {
     fix:
       'Protect the agent now — node9 blocks destructive DB ops:\n' +
       protectLines +
-      '\nClose the port to other machines (your part):\n' +
-      rebindLines +
-      '\n  • or firewall the port',
+      '\n' +
+      onLine +
+      closePort,
     reduces: true,
   };
 }
@@ -271,7 +292,19 @@ export function checkInbound(ctx: CheckContext): Finding[] {
   const exposed = classified.filter((c) => c.kind !== 'agent');
   if (exposed.length > 0) {
     const hasDb = exposed.some((e) => DB_LABEL.test(e.label));
-    const { fix, reduces } = buildNetworkFix(exposed.map((e) => e.label));
+    let applied: readonly string[] = [];
+    let source: PolicySource = 'local';
+    try {
+      const config = getConfig(ctx.cwd);
+      applied = config.policy.appliedShields ?? [];
+      source = config.policySource === 'workspace' ? 'workspace' : 'local';
+    } catch {
+      /* no readable config: no shield is on */
+    }
+    const { fix, reduces } = buildNetworkFix(
+      exposed.map((e) => e.label),
+      { applied, source }
+    );
 
     findings.push({
       category: 'Network exposure',

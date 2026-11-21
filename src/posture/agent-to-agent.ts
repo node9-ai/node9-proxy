@@ -93,7 +93,7 @@ export function checkAgentToAgent(ctx: CheckContext): Finding[] {
             `${s.server} (${s.agents.join(', ')}, by ${s.how === 'tools' ? `tools: ${s.tools.slice(0, 4).join(', ')}` : 'name'})`
         ),
       owner: 'node9',
-      fix: 'On the Apps page, mark these servers\' tools "Brings outside content" so a send after their results is held; keep behavior.untrusted-content on.',
+      fix: 'On the Protection page of the dashboard, mark these servers\' tools "Brings outside content" so a send after their results is held; keep behavior.untrusted-content on.',
     },
   ];
 }
