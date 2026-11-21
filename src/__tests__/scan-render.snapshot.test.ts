@@ -678,6 +678,38 @@ describe('renderScanScorecardInk — output snapshots', () => {
   });
 });
 
+describe('renderScanScorecardInk — prints the report once', () => {
+  // Regression: on a TTY shorter than the report, Ink's render() + unmount()
+  // redrew the full frame on unmount, so the report reached stdout twice.
+  it('a report taller than the terminal is written exactly once', async () => {
+    const stdout = process.stdout as NodeJS.WriteStream & { rows?: number };
+    const orig = { columns: stdout.columns, rows: stdout.rows, isTTY: stdout.isTTY };
+    const set = (key: 'columns' | 'rows' | 'isTTY', value: unknown) =>
+      Object.defineProperty(stdout, key, { value, configurable: true, writable: true });
+    set('columns', 90);
+    set('rows', 12);
+    set('isTTY', true);
+    const chunks: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    try {
+      const { renderScanScorecardInk } = await import('../cli/render/ink/StaticScorecard.js');
+      renderScanScorecardInk(panelFixture(), 'last 90 days');
+    } finally {
+      spy.mockRestore();
+      set('columns', orig.columns);
+      set('rows', orig.rows);
+      set('isTTY', orig.isTTY);
+    }
+    const out = stripTerminalEscapes(chunks.join(''));
+    expect(out.split('node9 dashboard').length - 1).toBe(1);
+    expect(out).toContain('Recommended action');
+    expect(out.split('\n').length).toBeGreaterThan(12);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // N6 — state-aware phrasing. Same fixture, enabledShields injected: the
 // renderers must stop recommending what is already enforcing, flip origin
