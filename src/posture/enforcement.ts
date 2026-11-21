@@ -122,9 +122,29 @@ export async function annotateCoverage(findings: Finding[], ctx: CheckContext): 
           (config.policy.appliedShields ?? []).includes('project-jail') &&
           f.fix?.includes('shield enable project-jail')
         ) {
-          f.fix =
-            'project-jail is already enabled but does not cover the file(s) listed here. ' +
-            'Fix it now: run `node9 jail add <file>` for each file above.';
+          const known = verdicts.filter((v) => v !== null).length;
+          if (known === 0) {
+            f.fix =
+              'project-jail is already enabled but does not cover the file(s) listed here. ' +
+              'Fix it now: run `node9 jail add <file>` for each file above.';
+          } else {
+            // Some of the files ARE recognised. Saying the jail covers none of
+            // them was false (founder's machine, 2026-11-21: 5 of 6). Mark the
+            // recognised ones in detail (local only) and count them in fix
+            // (no path: fix ships to the SaaS).
+            if (f.detail && f.detail.length === probe.paths.length) {
+              f.detail = f.detail.map((d, i) =>
+                verdicts[i] !== null ? `${d} (node9 recognises reads)` : d
+              );
+            }
+            f.fix =
+              `node9 already recognises reads of ${known} of these ${verdicts.length} files ` +
+              '(marked above). For each unmarked file, run `node9 jail add <file>`.' +
+              (isRecordOnly(mode)
+                ? ` node9 is in ${levelOf(mode)} mode, which logs these reads and lets them ` +
+                  'through: set mode to `standard` (or `strict`) to stop them.'
+                : '');
+          }
         }
       } else {
         const worst: Verdict = verdicts.some((v) => v === 'review') ? 'review' : 'block';

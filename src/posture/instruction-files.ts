@@ -23,6 +23,7 @@ import type { CheckContext, Finding } from './types';
 import { readSmallFile } from '../utils/read-small-file';
 
 export const CATEGORY = 'Instruction files';
+const WITHDRAWN_RULE = 'CI-6.withdrawn-guidance';
 
 const MAX_FILES = 200;
 const MAX_FILE_BYTES = 256 * 1024;
@@ -76,6 +77,62 @@ export function instructionFiles(home: string): string[] {
   return out;
 }
 
+const MAX_SKILL_FILES = 400;
+
+/** Skill folders outside ~/.claude/skills that agents load skills from: Codex,
+ *  the shared .agents layout, the project's own folders and Claude Code plugins.
+ *  Read for withdrawn vendor guidance only; the other content rules stay on the
+ *  files listed by instructionFiles, so plugin docs do not add review noise. */
+export function extraSkillFiles(home: string, cwd: string): { files: string[]; capped: boolean } {
+  const out: string[] = [];
+  const dirs = [
+    path.join(home, '.codex', 'skills'),
+    path.join(home, '.agents', 'skills'),
+    path.join(cwd, '.claude', 'skills'),
+    path.join(cwd, '.agents', 'skills'),
+  ];
+  const marketplaces = path.join(home, '.claude', 'plugins', 'marketplaces');
+  for (const m of safeDirs(marketplaces)) {
+    for (const plugin of safeDirs(path.join(marketplaces, m, 'plugins'))) {
+      dirs.push(path.join(marketplaces, m, 'plugins', plugin, 'skills'));
+    }
+  }
+  const seen = new Set<string>([path.join(home, '.claude', 'skills')]);
+  for (const d of dirs) {
+    if (seen.has(d)) continue; // cwd may be home
+    seen.add(d);
+    listMdCapped(d, 3, out, MAX_SKILL_FILES);
+  }
+  return { files: out, capped: out.length >= MAX_SKILL_FILES };
+}
+
+function safeDirs(dir: string): string[] {
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+function listMdCapped(dir: string, depth: number, out: string[], cap: number): void {
+  if (out.length >= cap || depth < 0) return;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (out.length >= cap) return;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) listMdCapped(p, depth - 1, out, cap);
+    else if (e.isFile() && /\.md$/i.test(e.name)) out.push(p);
+  }
+}
+
 // One open, checked on its descriptor (CodeQL js/file-system-race).
 function readSmall(file: string): string | null {
   return readSmallFile(file, MAX_FILE_BYTES);
@@ -107,11 +164,14 @@ export function checkInstructionFiles(ctx: CheckContext): Finding[] {
   const detail: string[] = [];
   let worst: 'high' | 'medium' = 'medium';
   let filesHit = 0;
+  const withdrawn: CiFinding[] = [];
   for (const file of instructionFiles(home)) {
     const text = readSmall(file);
     if (text === null) continue;
     const memory = isMemory(file);
-    const hits = analyzeInstructionFile(display(file, home), text).filter((h) => counts(h, memory));
+    const all = analyzeInstructionFile(display(file, home), text);
+    for (const h of all) if (h.rule === WITHDRAWN_RULE) withdrawn.push(h);
+    const hits = all.filter((h) => h.rule !== WITHDRAWN_RULE && counts(h, memory));
     if (hits.length === 0) continue;
     filesHit++;
     for (const h of hits.slice(0, 3)) {
@@ -130,6 +190,33 @@ export function checkInstructionFiles(ctx: CheckContext): Finding[] {
       detail: detail.slice(0, 12),
       owner: 'os',
       fix: 'Open each file at the line shown and remove the text you did not write. `node9 scan-repo` grades the same shapes in a repository.',
+    });
+  }
+
+  // ── Installed skills that still carry guidance their vendor withdrew ─────
+  const extra = extraSkillFiles(home, ctx.cwd || home);
+  for (const file of extra.files) {
+    const text = readSmall(file);
+    if (text === null) continue;
+    for (const h of analyzeInstructionFile(display(file, home), text))
+      if (h.rule === WITHDRAWN_RULE) withdrawn.push(h);
+  }
+  if (withdrawn.length > 0) {
+    const detailLines = withdrawn
+      .slice(0, 12)
+      .map((h) => `${h.file}${h.line ? ` (line ${h.line})` : ''}: ${h.signals[0] ?? h.title}`);
+    if (extra.capped)
+      detailLines.push(`stopped after ${MAX_SKILL_FILES} skill files: the list may be incomplete`);
+    findings.push({
+      category: CATEGORY,
+      severity: 'medium',
+      title: `${withdrawn.length} installed skill file${withdrawn.length === 1 ? '' : 's'} still carr${withdrawn.length === 1 ? 'ies' : 'y'} guidance its vendor withdrew`,
+      what: 'A skill on this machine still tells the agent something the vendor removed from its own copy of the skill.',
+      why: 'The skill was copied from a catalog or a vendor before the vendor fixed it, and the copy was never updated.',
+      who: 'An agent that loads the skill follows the old guidance and can write it into code or config.',
+      detail: detailLines,
+      owner: 'os',
+      fix: "Update each skill from the vendor's current version, or remove it. node9 cannot update a skill for you.",
     });
   }
 

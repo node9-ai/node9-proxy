@@ -33,7 +33,8 @@ export async function checkPrivilege(ctx: CheckContext): Promise<Finding[]> {
   }
 
   const verdict = await evaluatePolicy('Bash', { command: SUDO_PROBE }, ctx.agent, ctx.cwd);
-  if (verdict.decision !== 'block') {
+  // block OR review = gated (the coverage probe below says the same); only allow is ungated.
+  if (verdict.decision === 'allow') {
     findings.push({
       category: 'Privilege',
       severity: isRoot ? 'high' : 'medium',

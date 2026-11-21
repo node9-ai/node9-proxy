@@ -142,7 +142,20 @@ export function renderPostureSection(result: PostureResult, category: string): s
   return lines.join('\n');
 }
 
-export function renderPosture(result: PostureResult): string {
+export interface RenderPostureOptions {
+  /** posture ran through npx: node9 is not installed on this machine. */
+  viaNpx?: boolean;
+}
+
+/** npx sets npm_command=exec; its cache folder is named _npx. */
+export function ranViaNpx(
+  env: NodeJS.ProcessEnv = process.env,
+  argv1 = process.argv[1] ?? ''
+): boolean {
+  return env.npm_command === 'exec' || /[\\/]_npx[\\/]/.test(argv1);
+}
+
+export function renderPosture(result: PostureResult, opts: RenderPostureOptions = {}): string {
   const lines: string[] = [];
   const tier = TIER_LABEL[result.tier];
   lines.push('');
@@ -257,6 +270,18 @@ export function renderPosture(result: PostureResult): string {
   const summary = parts.length ? parts.join(' · ') : chalk.green('no findings');
   lines.push(`  ${summary}`);
   lines.push('');
+  if (opts.viaNpx) {
+    // A reader who ran the one-off check is usually one developer on one
+    // machine: the next step that fits is a local install, before a team sign-up.
+    lines.push(
+      '  ' +
+        chalk.bold('Keep this checked: ') +
+        chalk.cyan('npm install -g node9-ai') +
+        ', then run ' +
+        chalk.cyan('node9')
+    );
+    lines.push('');
+  }
   lines.push('  ' + chalk.bold('Track this across your fleet & keep it green:'));
   lines.push(
     '  ' + chalk.dim('→ ') + chalk.cyan.underline('https://node9.ai/auth/signup?ref=cli_posture')
