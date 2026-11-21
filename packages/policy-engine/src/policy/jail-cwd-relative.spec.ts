@@ -11,6 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { evaluatePolicy, type PolicyConfig } from './index';
 import { analyzeFsOperation } from '../shell/index';
+import { collectShellFileAccesses } from '../shell/file-access';
 import projectJail from '../shields/builtin/project-jail.json';
 import type { SmartRule } from '../types';
 
@@ -26,8 +27,14 @@ const config: PolicyConfig = {
   settings: { mode: 'standard' },
 } as unknown as PolicyConfig;
 
-async function G(command: string): Promise<string> {
-  const v = await evaluatePolicy(config, 'Bash', { command }, { agent: 'claude' }, {});
+async function G(command: string, cwd?: string): Promise<string> {
+  const v = await evaluatePolicy(
+    config,
+    'Bash',
+    { command },
+    { agent: 'claude', ...(cwd ? { cwd } : {}) },
+    {}
+  );
   return String(v.decision);
 }
 
@@ -140,5 +147,157 @@ describe('what stays allowed', () => {
 
   it('a .env in the directory entered is still the read it always was', async () => {
     expect(await G('cd backend && cat .env')).toBe('block');
+  });
+});
+
+// The four findings the review of the first fix left open (2026-11-21).
+
+describe('a name that is not known until the command runs, in an entered credential directory', () => {
+  // Inside ~/.ssh every name is a credential: the verdict `cat *` gets there.
+  it.each([
+    ['a command substitution', 'cd ~/.ssh && cat $(ls)'],
+    ['backticks', 'cd ~/.ssh && cat `ls`'],
+    ['a pipe into xargs', 'cd ~/.ssh && ls | xargs cat'],
+    ['an unset variable', 'cd ~/.ssh && cat "$K"'],
+    ['a loop over a listing', 'cd ~/.ssh && for f in $(ls); do cat "$f"; done'],
+    ['a read loop over a listing', 'cd ~/.ssh && ls | while read f; do cat "$f"; done'],
+    ['a nested substitution', 'cd ~/.ssh && head -n1 $(ls -t | head -1)'],
+    ['a literal prefix', 'cd ~/.ssh && cat id_$T'],
+    ['an option value before it', 'cd ~/.ssh && head -n "$N" $(ls)'],
+    ['.aws', 'cd ~/.aws && cat $(ls)'],
+  ])('blocks: %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+
+  it.each([
+    ['a project directory', 'cd ~/project && cat $(ls)'],
+    ['a project directory, xargs', 'cd ~/project && ls | xargs cat'],
+    ['no directory entered', 'cat $(git ls-files)'],
+    ['no directory entered, xargs', 'ls | xargs cat'],
+    ['a rooted name after the cd', 'cd ~/.ssh && cat /tmp/$N'],
+    ['a deletion is not a read', 'cd ~/.ssh && rm $(ls old_*)'],
+    ['a listing is not a read', 'cd ~/.ssh && ls $(echo -la)'],
+    ['literal names into xargs', 'cd ~/.ssh && echo known_hosts | xargs cat'],
+    // /code-review: an unknown option value is not a file name.
+    ['an unknown line count', 'cd ~/.ssh && head -n $N known_hosts'],
+    ['a quoted unknown line count', 'cd ~/.ssh && tail -n "$N" known_hosts'],
+    ['an unknown option=value', 'cd ~/.ssh && cat --color=$C known_hosts'],
+  ])('quiet: %s', (_name, command) => {
+    expect(analyzeFsOperation(command)).toBeNull();
+  });
+});
+
+describe('other ways into a credential directory', () => {
+  it.each([
+    ['a glob in the cd target', 'cd ~/.s* && cat id_rsa'],
+    ['a ? in the cd target', 'cd ~/.ss? && cat id_rsa'],
+    ['a class in the cd target', 'cd ~/.[s]sh && cat id_rsa'],
+    ['env -C', 'env -C ~/.ssh cat id_rsa'],
+    ['env -C, absolute', 'env -C /home/u/.ssh cat id_rsa'],
+    ['env --chdir=', 'env --chdir=/home/u/.ssh cat id_rsa'],
+    ['env --chdir DIR', 'env --chdir ~/.aws cat credentials'],
+    ['env -C after a cd', 'cd ~ && env -C .ssh cat id_rsa'],
+    ['a script run under env -C', "env -C ~/.ssh sh -c 'cat id_rsa'"],
+    ['inline code under env -C', `env -C ~/.ssh python3 -c "print(open('id_rsa').read())"`],
+    ['inline code under a glob cd', `cd ~/.s* && python3 -c "print(open('id_rsa').read())"`],
+  ])('blocks: %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+
+  it.each([
+    ['a hard link out', 'cd ~/.ssh && ln id_rsa /tmp/k'],
+    ['a relative symbolic link made from the directory', 'cd ~/.ssh && ln -sr id_rsa /tmp/k'],
+    // /code-review: $PWD names the file only once the walk resolves it.
+    ['a copy by $PWD', 'cd ~/.ssh && cp "$PWD/id_rsa" /tmp/k'],
+    ['a symbolic link by $PWD', 'cd ~/.ssh && ln -s "$PWD/id_rsa" /tmp/k'],
+  ])('reviews: %s', async (_name, command) => {
+    expect(await G(command)).toBe('review');
+  });
+
+  it.each([
+    ['public material under a glob cd', 'cd ~/.s* && cat known_hosts'],
+    ['a glob cd into a project', 'cd ~/proj* && cat README.md'],
+    ['a glob that selects any directory', 'cd ~/* && cat id_rsa'],
+    ['env -C into a project', 'env -C ~/project cat README.md'],
+    ['env without -C', 'env -i cat README.md'],
+    // A relative symbolic link's target is relative to the link: /tmp/id_rsa.
+    ['a relative symbolic link', 'cd ~/.ssh && ln -s id_rsa /tmp/k'],
+    ['a link inside a project', 'cd ~/project && ln a.txt b.txt'],
+  ])('quiet: %s', (_name, command) => {
+    expect(analyzeFsOperation(command)).toBeNull();
+  });
+});
+
+describe("the agent's own working directory", () => {
+  // Claude Code keeps a cd inside its working directories between calls, so
+  // an agent started in $HOME reaches ~/.ssh with one call and reads with the next.
+  it.each([
+    ['a relative read', 'cat id_rsa', '/home/u/.ssh'],
+    ['./name', 'head -1 ./id_ed25519', '/home/u/.ssh'],
+    ['an unknown name', 'cat $(ls)', '/home/u/.ssh'],
+    ['a subdirectory of it', 'cat ../id_rsa', '/home/u/.ssh/keys'],
+    ['.aws', 'cat credentials', '/home/u/.aws'],
+  ])('blocks: %s', async (_name, command, cwd) => {
+    expect(await G(command, cwd)).toBe('block');
+  });
+
+  it.each([
+    ['public material', 'cat known_hosts', '/home/u/.ssh'],
+    ['a listing', 'ls -la', '/home/u/.ssh'],
+    ['a cd out first', 'cd /tmp && cat id_rsa', '/home/u/.ssh'],
+    ['a project session', 'cat id_rsa', '/home/u/project'],
+    ['a project session, unknown names', 'cat $(ls)', '/home/u/project'],
+    ['a relative cwd is not used', 'cat id_rsa', '.ssh'],
+  ])('allows: %s', async (_name, command, cwd) => {
+    expect(await G(command, cwd)).toBe('allow');
+  });
+
+  it('the plain read without a cwd is unchanged', () => {
+    expect(analyzeFsOperation('cat id_rsa')).toBeNull();
+    expect(analyzeFsOperation('cat id_rsa', '/home/u/project')).toBeNull();
+    expect(analyzeFsOperation('cat id_rsa', '/home/u/.ssh')?.ruleName).toBe(
+      'shield:project-jail:block-read-ssh'
+    );
+  });
+});
+
+describe('.. in an entered directory', () => {
+  it.each([
+    ['cd to the parent', 'cd ~/.ssh/.. && cat known_hosts'],
+    ['a dotfile in the parent', 'cd ~/.ssh/.. && cat .bashrc'],
+    ['cd .. as a second step', 'cd ~/.ssh && cd .. && cat .bashrc'],
+    ['inline code in the parent', `cd ~/.ssh/.. && python3 -c "print(open('notes.txt').read())"`],
+  ])('quiet: %s', (_name, command) => {
+    expect(analyzeFsOperation(command)).toBeNull();
+  });
+
+  it.each([
+    ['back into the directory', 'cd ~/.ssh/../.ssh && cat id_rsa'],
+    ['a sub-directory and back', 'cd ~/.ssh/keys/.. && cat id_rsa'],
+    ['in through the parent', 'cd ~/project/.. && cat .ssh/id_rsa'],
+    ['a parent step from a sub-directory', 'cd ~/.ssh/keys && cat ../id_rsa'],
+  ])('blocks: %s', async (_name, command) => {
+    expect(await G(command)).toBe('block');
+  });
+});
+
+describe('the default walk is unchanged', () => {
+  // Only the jail asks for the new readings: every other user of the walk
+  // (deletes, writes, uploads, the scanner's access list) sees what it saw.
+  const reads = (command: string) =>
+    collectShellFileAccesses(command).filter((a) => a.operation === 'read' && !a.listing);
+
+  it('records no read for a name it cannot know', () => {
+    expect(reads('cd ~/.ssh && cat $(ls)')).toEqual([]);
+    expect(reads('cd ~/.ssh && ls | xargs cat')).toEqual([]);
+  });
+
+  it('records no read for a link source', () => {
+    expect(reads('cd ~/.ssh && ln id_rsa /tmp/k')).toEqual([]);
+  });
+
+  it('follows no glob cd and no env -C', () => {
+    expect(collectShellFileAccesses('cd ~/.s* && cat id_rsa').map((a) => a.cwd)).toEqual(['']);
+    expect(collectShellFileAccesses('env -C ~/.ssh cat id_rsa').map((a) => a.cwd)).toEqual(['']);
   });
 });

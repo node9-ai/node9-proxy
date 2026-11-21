@@ -4483,7 +4483,29 @@ export function extractShellDestTokens(command: string): ShellDestToken[] {
 const FS_OP_CACHE_MAX = 5_000;
 const fsOpCache = new Map<string, FsOpVerdict | null>();
 
-export function analyzeFsOperation(command: string): FsOpVerdict | null {
+/**
+ * `cwd` is the directory the agent's shell is in when the command runs (the
+ * hook payload's cwd). Claude Code keeps a `cd` inside its working directories
+ * between calls, so an agent started in $HOME can enter ~/.ssh with one call
+ * and run `cat id_rsa` with the next. When that directory is itself a
+ * credential directory, the command is also read as `cd DIR && COMMAND` and the
+ * stricter verdict wins. Any other directory, the case of every ordinary
+ * session, changes nothing; a cwd that is not absolute is not used.
+ */
+export function analyzeFsOperation(command: string, cwd?: string): FsOpVerdict | null {
+  const own = analyzeCommandFs(command);
+  if (own?.verdict === 'block' || !cwd || !isCredentialDir(cwd)) return own;
+  const dir = cwd.replace(/\\/g, '/');
+  return stricter(own, analyzeCommandFs(`cd '${dir.replace(/'/g, `'\\''`)}' && ${command}`));
+}
+
+/** An absolute directory every file in which the jail holds (`~/.ssh`, `~/.aws`). */
+function isCredentialDir(cwd: string): boolean {
+  if (!/^(?:\/|[A-Za-z]:[/\\])/.test(cwd)) return false;
+  return matchSensitivePath(`${cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/n9-any-name`) !== null;
+}
+
+function analyzeCommandFs(command: string): FsOpVerdict | null {
   // The jail reads the command AS BASH WILL RUN IT: the raw text, parsed as-is.
   // It resolves quoting and escapes word by word itself (resolveWordLiteral:
   // `c''at .env` and `\rm` resolve), so it never needed the normalised reading
@@ -5457,7 +5479,7 @@ const feedsShellStdin = (command: string): boolean =>
  * directory each read happens in. A quote or a backtick before the word
  * counts: `sh -c 'cd ~/.ssh && cat id_rsa'` opens its payload with it.
  */
-const CHANGES_DIR_RE = /(?:^|[\s;&|({'"`])(?:cd|pushd)\s/;
+const CHANGES_DIR_RE = /(?:^|[\s;&|({'"`])(?:(?:cd|pushd)\s|env\s(?:[^;&|\n]*?\s)?(?:-C|--chdir))/;
 
 /** `source FILE` / `. FILE`: no reader word, so the prescreen needs this. */
 const SOURCES_FILE_RE = /(?:^|[;&|(\s])(?:source|\.)\s/;
@@ -5926,8 +5948,33 @@ function matchSensitiveGlob(glob: string, dotGlob: boolean): FsOpVerdict | null 
 function underEnteredDir(a: FileAccess, name: string): string {
   const dir = a.cwd ?? '';
   if (!dir || /^(?:[/\\~$]|[A-Za-z]:)/.test(name)) return name;
-  const rest = name.replace(/^(?:\.\/)+/, '');
-  return `${dir.replace(/[/\\]+$/, '')}/${rest}`;
+  return joinEntered(dir, name);
+}
+
+/**
+ * `dir/name` with `.` and `NAME/..` folded, as bash's default (logical) `cd`
+ * folds them: after `cd ~/.ssh/..` the shell is in `~`, and `known_hosts` there
+ * is `~/known_hosts`. A `..` that would climb above `~`, `/` or a variable is
+ * kept, so the result never claims a place the shell may not be.
+ */
+function joinEntered(dir: string, name: string): string {
+  const out: string[] = [];
+  for (const seg of `${dir}/${name}`.split(/[/\\]+/)) {
+    if (seg === '.') continue;
+    const last = out[out.length - 1];
+    if (seg === '..' && last !== undefined && last !== '' && last !== '..' && !/^[~$]/.test(last)) {
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+/** The jail verdict for a name joined to an entered directory: a glob when
+ *  either part is one (`cd ~/.s* && cat id_rsa`, `cat id_*`). */
+function judgeEntered(path: string, dotGlob = false): FsOpVerdict | null {
+  return GLOB_META.test(path) ? matchSensitiveGlob(path, dotGlob) : matchSensitivePath(path);
 }
 
 /** The jail applied to the reads the structural file-access walk resolves.
@@ -5937,7 +5984,7 @@ function structuralJailRead(command: string): FsOpVerdict | null {
   let accesses: FileAccess[];
   const report = { exhausted: false };
   try {
-    accesses = collectShellFileAccesses(command, {}, report);
+    accesses = collectShellFileAccesses(command, { credentialJail: true }, report);
   } catch {
     return null;
   }
@@ -5955,17 +6002,19 @@ function structuralJailRead(command: string): FsOpVerdict | null {
       // review), not as a read. The direct walk does that for a source as
       // written; a source that is relative to a directory the command entered
       // is only known here.
+      // A source the walk resolved from `$PWD` (`cp "$PWD/id_rsa" /tmp/k`) is
+      // whole, but its text never named the file, so the direct walk did not
+      // judge it either.
       const entered = underEnteredDir(a, a.path);
-      if (entered !== a.path) relativeCopy ??= copyVerdictOf(matchSensitivePath(entered));
+      const viaDir = !!a.cwd && entered === a.path && a.path.startsWith(`${a.cwd}/`);
+      if (entered !== a.path || viaDir) relativeCopy ??= copyVerdictOf(judgeEntered(entered));
       continue;
     }
     if (a.operation !== 'read' || a.listing || a.recursive) continue;
     // A loop variable keeps an item's text, not its pattern (`for f in .e*`), so
-    // a path with glob characters is judged as the glob it was.
-    const glob = a.glob ?? (GLOB_META.test(a.path) ? a.path : undefined);
-    const hit = glob
-      ? matchSensitiveGlob(underEnteredDir(a, glob), !!a.dotGlob)
-      : matchSensitivePath(underEnteredDir(a, a.path));
+    // a path with glob characters is judged as the glob it was. A directory
+    // entered by a glob (`cd ~/.s*`) makes the joined name one too.
+    const hit = judgeEntered(underEnteredDir(a, a.glob ?? a.path), !!a.dotGlob);
     if (hit?.verdict === 'block') return hit;
     review ??= hit;
   }
@@ -6013,9 +6062,9 @@ function inlineCodeJailRead(command: string, changesDir = false): FsOpVerdict | 
         // The path as written, and under each directory the command entered:
         // `cd ~/.ssh && python3 -c "open('id_rsa')"` opens ~/.ssh/id_rsa.
         const relative = !/^(?:[/\\~$]|[A-Za-z]:)/.test(p);
-        const spellings = relative ? [p, ...dirs().map((d) => `${d}/${p}`)] : [p];
+        const spellings = relative ? [p, ...dirs().map((d) => joinEntered(d, p))] : [p];
         for (const spelling of spellings) {
-          const hit = matchSensitivePath(spelling);
+          const hit = spelling === p ? matchSensitivePath(spelling) : judgeEntered(spelling);
           if (hit?.verdict === 'block') return hit;
           review ??= hit;
         }
@@ -6048,12 +6097,23 @@ function enteredDirs(command: string, depth = 0, out: string[] = []): string[] {
       let head = unwrapCommandHead(words);
       if (baseWord(words[head]) === 'builtin') head++;
       const name = baseWord(words[head]);
-      if (name !== 'cd' && name !== 'pushd') {
+      // `env -C DIR python3 -c ...` runs the code in DIR.
+      const envAt = words.findIndex((w, i) => i < head && baseWord(w) === 'env');
+      const envDir =
+        envAt < 0
+          ? null
+          : words.slice(envAt + 1, head).reduce<string | null>((found, w, i, rest) => {
+              if (found !== null || w === null) return found;
+              if (w === '-C' || w === '--chdir') return rest[i + 1] ?? null;
+              if (w.startsWith('--chdir=')) return w.slice(8);
+              return /^-C./.test(w) ? w.slice(2) : null;
+            }, null);
+      if (name !== 'cd' && name !== 'pushd' && envDir === null) {
         const payload = literalShellPayload(words, baseWord(words[0]));
         if (payload !== null) enteredDirs(payload, depth + 1, out);
         return true;
       }
-      const target = words.slice(head + 1).find((w) => w === null || !w.startsWith('-'));
+      const target = envDir ?? words.slice(head + 1).find((w) => w === null || !w.startsWith('-'));
       if (!target) return true;
       const dir = target.replace(/[/\\]+$/, '');
       const rooted = /^(?:[/\\~]|[A-Za-z]:)/.test(dir);

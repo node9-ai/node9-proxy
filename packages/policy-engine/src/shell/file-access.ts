@@ -288,6 +288,38 @@ function wordValues(word: any, state: State): Word[] {
     .map((piece) => ({ value: piece.value, pattern: piece.pattern + '*', dynamic: true }));
 }
 
+/** Reader options that take a separate value (`head -n $N`): an unknown word
+ *  after one is that value, not a file name. Only the credential jail's
+ *  unknown-name reading uses this. */
+const UNKNOWN_VALUE_FLAGS: Record<string, string[]> = {
+  head: ['-n', '-c', '--lines', '--bytes'],
+  tail: ['-n', '-c', '--lines', '--bytes', '-s', '--sleep-interval', '--pid'],
+  cut: ['-d', '-f', '-c', '-b', '--delimiter', '--fields', '--characters', '--bytes'],
+  sort: ['-k', '-t', '-S', '-o', '--key', '--field-separator', '--buffer-size'],
+  uniq: ['-f', '-s', '-w', '--skip-fields', '--skip-chars', '--check-chars'],
+  od: ['-N', '-j', '-t', '-A', '-w', '--read-bytes', '--skip-bytes', '--format'],
+  xxd: ['-l', '-s', '-c', '-g', '-o', '-cols', '-len', '-seek'],
+  hexdump: ['-n', '-s', '-e', '-f'],
+  base64: ['-w', '--wrap'],
+  fold: ['-w', '--width'],
+  nl: ['-b', '-n', '-s', '-v', '-w', '-i'],
+};
+
+/** The directory `env -C DIR` / `env --chdir[=]DIR` runs its command in: the
+ *  option among the wrapper words before the command head, or null. */
+function envChdir(tokens: Array<Word | null>, head: number): Word | null {
+  const at = tokens.findIndex((t, i) => i < head && base(t?.value ?? '') === 'env');
+  if (at < 0) return null;
+  for (let i = at + 1; i < head; i++) {
+    const t = tokens[i];
+    if (!t || t.dynamic) continue;
+    if (t.value === '-C' || t.value === '--chdir') return tokens[i + 1] ?? null;
+    if (t.value.startsWith('--chdir=')) return { ...t, value: t.value.slice(8) };
+    if (/^-C./.test(t.value)) return { ...t, value: t.value.slice(2) };
+  }
+  return null;
+}
+
 /** No verdict cache: cwd, homes, assignments, and host state belong to each call. */
 /**
  * The replacement texts of a sed script made only of `s` commands (any
@@ -352,6 +384,11 @@ export function collectShellFileAccesses(
   // The literal stdin (a heredoc or a herestring) of the statement whose
   // command is being walked; read by the handlers that write it to a file.
   let currentStdin: string | null = null;
+  // The literal text the statement being walked receives, from a heredoc, a
+  // herestring or a literal pipe (`echo NAMES | xargs cat`): a credential-jail
+  // reading only, so `xargs` with input that is not literal reads unknown names.
+  let currentFed: string | null = null;
+  const jail = !!context.credentialJail;
   let callWalks = MAX_CALL_WALKS;
   const initial: State = {
     cwd: [context.cwd ?? ''],
@@ -425,6 +462,34 @@ export function collectShellFileAccesses(
       return true;
     });
   }
+  /**
+   * The directories a command runs in after entering `target`. Null when the
+   * target cannot be followed: not literal, or a glob (a glob only for the
+   * credential jail, which judges the name under it as that glob).
+   */
+  function enter(target: Word, state: State, nested: State): string[] | null {
+    if (!target.value || target.dynamic || (target.pattern && !jail)) return null;
+    const home = nested.vars.get('HOME')?.[0] ?? '~';
+    const expanded =
+      target.value === '~' || target.value.startsWith('~/')
+        ? home + target.value.slice(1)
+        : target.value;
+    return expanded.startsWith('/') || expanded.startsWith('~')
+      ? [expanded]
+      : state.cwd.map((cwd) => `${cwd}/${expanded}`);
+  }
+  /** A reader operand whose name is not known until the command runs, as
+   *  `*` (or `DIR/*` for a relative literal prefix `DIR/`) in each directory
+   *  the command entered. The starting directory is left out: there `*` is
+   *  any file of any project, the unknown-names check's case. */
+  function addUnknownRead(token: Word | null, state: State): void {
+    const prefix = token?.value ?? '';
+    if (/^[/~$]|^[A-Za-z]:/.test(prefix)) return;
+    const pattern = `${prefix.slice(0, prefix.lastIndexOf('/') + 1)}*`;
+    for (const cwd of state.cwd)
+      if (cwd)
+        out.push({ operation: 'read', path: pattern, cwd, followFinal: true, glob: pattern });
+  }
   function fromWords(tokens: Array<Word | null>, state: State, nested: State, depth: number): void {
     const words = tokens.map((w) => (w && !w.dynamic ? w.value : null));
     let head = unwrapCommandHead(words, true);
@@ -432,6 +497,17 @@ export function collectShellFileAccesses(
     // the reads after it are recorded with no directory.
     if (base(words[head]) === 'builtin' && ['cd', 'pushd'].includes(base(words[head + 1]))) head++;
     const name = base(words[head]);
+    // `env -C DIR CMD` runs CMD in DIR, as `cd DIR && CMD` does, for this
+    // command only.
+    if (jail) {
+      const dir = envChdir(tokens, head);
+      const next = dir ? enter(dir, state, nested) : null;
+      if (next) {
+        // The command's own reads, and a script it runs (`sh -c`), are there.
+        state = { ...clone(state), cwd: unique(next) };
+        nested = { ...clone(nested), cwd: unique(next) };
+      }
+    }
     if (name === 'find') {
       findActions(tokens, words, head, state, nested, depth);
       return;
@@ -444,17 +520,10 @@ export function collectShellFileAccesses(
       if (args.some((w) => w === null || w.value === '-' || w.dynamic)) return;
       const home = nested.vars.get('HOME')?.[0] ?? '~';
       const target = args.find((w) => w && !w.value.startsWith('-')) ?? { value: home };
-      if (!target.value || target.pattern || target.dynamic) return;
-      const expanded =
-        target.value === '~' || target.value.startsWith('~/')
-          ? home + target.value.slice(1)
-          : target.value;
+      const next = enter(target, state, nested);
+      if (!next) return;
       // The cd may fail (a missing directory), so every prior directory stays
       // possible. Only a following `&&` command may assume it succeeded.
-      const next =
-        expanded.startsWith('/') || expanded.startsWith('~')
-          ? [expanded]
-          : state.cwd.map((cwd) => `${cwd}/${expanded}`);
       state.cwd = unique([...state.cwd, ...next]);
       state.onSuccess = unique(next);
       return;
@@ -548,6 +617,28 @@ export function collectShellFileAccesses(
     }
     if (FS_READ_TOOLS.has(name) && name !== 'dd') {
       for (const p of readerPaths(words, head)) add('read', locate(p), state);
+      if (jail) {
+        // The operands readerPaths would take as files, with each unknown word
+        // standing in as a marker: `cat $(ls)`, `cat "$K"`, `cat id_$T`. An
+        // unknown option value is not a name: `--color=$C`, `head -n $N` (the
+        // readers' own tables do not know every value option, and a literal
+        // value read as a file name was harmless; `*` is not).
+        const MARK = '\u0001';
+        const valueFlags = UNKNOWN_VALUE_FLAGS[name] ?? [];
+        const marked = words.map((w, i) =>
+          i > head &&
+          w === null &&
+          !(tokens[i]?.value ?? '').startsWith('-') &&
+          !valueFlags.includes(words[i - 1] ?? '')
+            ? `${MARK}${i}`
+            : w
+        );
+        for (const p of readerPaths(marked, head))
+          if (p.startsWith(MARK)) addUnknownRead(tokens[Number(p.slice(1))], state);
+        // `ls | xargs cat`: names from input that is not literal.
+        if (currentFed === null && words.slice(0, head).some((w) => base(w) === 'xargs'))
+          addUnknownRead(null, state);
+      }
     }
     // A listing names a directory's entries without opening a file: its own
     // flag, so the rules about file content (password hashes, uploads) leave
@@ -589,6 +680,8 @@ export function collectShellFileAccesses(
         strings.some((s) => /^-[^-]*[sl]/.test(s) || s === '--symbolic-link' || s === '--link');
       const replaceDestLink =
         name === 'mv' || name === 'ln' || strings.includes('--remove-destination');
+      const symbolicLink = strings.some((s) => s === '--symbolic' || /^-[^-]*s/.test(s));
+      const relativeLink = strings.some((s) => s === '--relative' || /^-[^-]*r/.test(s));
       for (let i = 0; i < args.length; i++) {
         const token = args[i];
         if (!token) continue;
@@ -643,6 +736,15 @@ export function collectShellFileAccesses(
           add('remove', source, state, { recursive: true, followFinal: false, copy: true });
         else if (name !== 'ln' && !linkOnly)
           add('read', source, state, { recursive, followFinal: !preserveSourceLink, copy: true });
+        // A hard link is the file under a second name: the jail's copy rules
+        // judge its source. A symbolic link's relative target is relative to
+        // the link, not to this directory, unless -r computes it from here.
+        else if (
+          name === 'ln' &&
+          jail &&
+          (!symbolicLink || relativeLink || /^[/~]/.test(source.value))
+        )
+          add('read', source, state, { followFinal: false, copy: true });
         if (!noDirectory)
           add(
             'write',
@@ -899,6 +1001,8 @@ export function collectShellFileAccesses(
     }
   }
   function call(cmd: any, state: State, depth: number): void {
+    // The substitutions below walk statements of their own, which set it.
+    const fed = currentFed;
     const nested = clone(state);
     assignments(cmd.Assigns, nested);
     const nodes: any[] = cmd.Args ?? [];
@@ -918,6 +1022,7 @@ export function collectShellFileAccesses(
         .slice(0, MAX_ALTERNATIVES);
     }
     for (const tokens of alternatives) {
+      currentFed = fed;
       fromWords(tokens, state, nested, depth);
       inlineCall(tokens, state, depth);
     }
@@ -1272,6 +1377,7 @@ export function collectShellFileAccesses(
     const fedText = stdinText(stmt);
     if (fedText !== null) nestedPayload(xargsPayload(stmt, fedText), clone(state), depth);
     currentStdin = fedText;
+    currentFed = fedText ?? pipedStdin.get(stmt) ?? null;
     switch (cmd.kind) {
       case 'CallExpr':
         call(cmd, state, depth);

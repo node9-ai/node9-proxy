@@ -1093,8 +1093,56 @@ describe('jail: a relative read after cd into a credential directory', () => {
     ['a listing', 'cd ~/.ssh && ls -la'],
     ['a project directory', 'cd ~/project && cat README.md'],
     ['an ordinary build', 'cd packages/app && npm test'],
+    // The four findings of the first fix's review (2026-11-21).
+    ['.. out of the directory', 'cd ~/.ssh/.. && cat known_hosts'],
+    ['an unknown name in a project', 'cd ~/project && cat $(ls)'],
+    ['an unknown option value', 'cd ~/.ssh && head -n $N known_hosts'],
   ])('%s → allowed silently', (_name, command) => {
     const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe('');
+  });
+
+  it.each([
+    ['an unknown name', 'cd ~/.ssh && cat $(ls)'],
+    ['names from a listing into xargs', 'cd ~/.ssh && ls | xargs cat'],
+    ['a glob cd target', 'cd ~/.s* && cat id_rsa'],
+    ['env -C', 'env -C ~/.ssh cat id_rsa'],
+  ])('%s → blocked by the credential jail', (_name, command) => {
+    const r = run(command);
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).toBe('deny');
+  });
+
+  it('a hard link by a relative name is held', () => {
+    const r = run('cd ~/.ssh && ln id_rsa /tmp/k');
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).not.toBe('allow');
+  });
+
+  // The hook payload's cwd: Claude Code keeps a cd inside its working
+  // directories between calls, so the agent can already be in ~/.ssh.
+  const runIn = (command: string, cwd: string) => {
+    fs.mkdirSync(cwd, { recursive: true });
+    return runCheck(
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd },
+      { HOME: tmpHome },
+      cwd
+    );
+  };
+
+  it("a relative read in the agent's own credential-directory cwd is blocked", () => {
+    const r = runIn('cat id_rsa', path.join(tmpHome, '.ssh'));
+    expect(r.status, 'spawn failed').not.toBeNull();
+    expect(decisionOf(r)).toBe('deny');
+  });
+
+  it.each([
+    ['public material there', 'cat known_hosts', '.ssh'],
+    ['the same read in a project', 'cat id_rsa', 'project'],
+  ])("%s → allowed silently (agent's cwd)", (_name, command, dir) => {
+    const r = runIn(command, path.join(tmpHome, dir));
     expect(r.status, 'spawn failed').not.toBeNull();
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('');
