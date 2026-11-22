@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
 import { forecastRun } from '../auth/forecast-context';
 import { sessionTurn } from './session-turn';
+import { MAX_REF_EIDS, RAN_AFTER_FLAG } from '../blocked-calls';
 import {
   checkIdForRule,
   checkIdForCheckedBy,
@@ -249,6 +250,33 @@ export function lastDenyAudit(): LastDenyAudit | null {
   return lastDeny;
 }
 
+/** The rows this process wrote for a call node9 flagged and let through:
+ *  an audit-mode would-block, a DLP review, a send logged after exposure.
+ *  The before-run hook reads them when it allows the call, so the after-run
+ *  hook can record that the call ran (blocked-calls.ts, `ran-after-flag`). */
+const flaggedEids: string[] = [];
+/** The flagged rows written since the last take, and clears them: a reader
+ *  never gets the rows of an earlier call. */
+export function takeFlaggedAuditEids(): string[] {
+  return flaggedEids.splice(0);
+}
+
+/** A row that says node9 would have stopped, or wanted a look at, a call it
+ *  did not stop. A block row is not one: a blocked call does not run. */
+function isFlaggedRow(checkedBy: string, exposure: { kind: string } | undefined): boolean {
+  if (checkedBy === 'dlp-review-flagged') return true;
+  if (exposure?.kind === 'logged') return true;
+  return (
+    checkedBy.startsWith('observe-mode-') &&
+    (checkedBy.endsWith('would-block') || checkedBy === 'observe-mode-file-protection')
+  );
+}
+
+// The outcome record of a flagged call that ran (blocked-calls.ts). It names
+// the flagged rows and is not a call: its `source` puts it with the other
+// execution records every local counter drops (decision.ts).
+export { RAN_AFTER_FLAG };
+
 export function appendLocalAudit(
   toolName: string,
   args: unknown,
@@ -337,6 +365,10 @@ export function appendLocalAudit(
     /** The row belongs to a test call although its own arguments do not say
      *  so: the `ran-after-block` row carries none, and follows its stop row. */
     testRun?: boolean;
+    /** On a `ran-after-flag` record: the flagged rows of the call that ran. */
+    refEids?: string[];
+    /** The hook tracks the call to its run: a flagged row says so. */
+    tracksRun?: boolean;
   },
   auditHashArgsEnabled?: boolean
 ): string {
@@ -439,6 +471,8 @@ export function appendLocalAudit(
   // eid is captured here (not generated inline) so the caller can use it as the
   // SOURCE of a taint edge — see notifyTaint(path, source, eid) at the DLP block.
   const eid = generateEventId();
+  const flagged = isFlaggedRow(checkedBy, meta?.exposure);
+  if (flagged && flaggedEids.length < MAX_REF_EIDS) flaggedEids.push(eid);
   if (decision === 'deny') {
     // A hook process judges one call. When a later deny row carries no check
     // (the person denying a review: 'local-decision'), the check that raised
@@ -486,6 +520,11 @@ export function appendLocalAudit(
     ...(meta?.decidedBy && { decidedBy: meta.decidedBy }),
     ...(meta?.channel && { channel: meta.channel }),
     ...(meta?.cardId && { cardId: meta.cardId }),
+    ...(meta?.refEids &&
+      meta.refEids.length > 0 && { refEids: meta.refEids, source: RAN_AFTER_FLAG }),
+    // A flagged row whose run the hook tracks: with no `ran-after-flag`
+    // record after it, the call did not complete.
+    ...(flagged && meta?.tracksRun === true && { tracksRun: 1 }),
     ...testRun,
     agent: meta?.agent,
     mcpServer: meta?.mcpServer,

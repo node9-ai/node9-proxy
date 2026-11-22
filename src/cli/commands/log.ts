@@ -11,6 +11,7 @@ import {
   appendLocalAudit,
   LOCAL_AUDIT_LOG,
   HOOK_DEBUG_LOG,
+  RAN_AFTER_FLAG,
 } from '../../audit';
 import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
@@ -469,7 +470,18 @@ export function registerLogCommand(program: Command): void {
           // known here, and the stop row beside it in the session shows it.
           try {
             const ranBlocked = resolveBlockedCall(payload as Record<string, unknown>);
-            if (ranBlocked) {
+            if (ranBlocked?.refEids) {
+              // Not a block: node9 flagged this call and let it through, and
+              // it ran. One record that names the flagged rows; the cloud
+              // merges it into them and stores no row of its own.
+              appendLocalAudit(tool, undefined, 'allow', RAN_AFTER_FLAG, {
+                agent: agent ?? ranBlocked.agent,
+                refEids: ranBlocked.refEids,
+                ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
+                ...(ranBlocked.testRun ? { testRun: true } : {}),
+              });
+            } else if (ranBlocked) {
               appendLocalAudit(tool, undefined, 'allow', 'ran-after-block', {
                 agent: agent ?? ranBlocked.agent,
                 ...(ranBlocked.ruleName ? { ruleName: ranBlocked.ruleName } : {}),

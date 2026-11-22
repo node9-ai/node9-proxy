@@ -35,6 +35,7 @@ const DECIDED_BY_VALUES: ReadonlySet<string> = new Set<DecidedBy>([
 ]);
 import { getConfig } from '../config/index.js';
 import { MAX_TURN } from '../audit/session-turn.js';
+import { RAN_AFTER_FLAG, validRefEids } from '../blocked-calls.js';
 import { readCredentials } from './sync.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
 import {
@@ -95,6 +96,8 @@ const CANARY_KINDS: ReadonlySet<string> = new Set<CanaryKind>([
  * the rows.
  */
 const STRIPPABLE_FIELD_GROUPS = [
+  // The outcome of a flagged call (cases-session-stage2 design, change 5).
+  ['refEids', 'tracksRun'],
   // The turn a call belongs to (cases-session-stage2 design, change 3).
   ['turn'],
   // The call's facts (cases-session-stage2 design, change 1).
@@ -115,7 +118,15 @@ export function _resetOwaspWireFields(): void {
   groupRejectedAt.fill(null);
 }
 
+/** Fields a row cannot lose and stay true: a `ran-after-flag` record without
+ *  its `refEids` would land as one more allowed call. Such a row leaves the
+ *  batch with the field. */
+const ROW_DEFINING_FIELDS: ReadonlySet<string> = new Set(['refEids']);
+
 function withoutFields(rows: WireRow[], fields: readonly string[]): WireRow[] {
+  const drop = fields.filter((k) => ROW_DEFINING_FIELDS.has(k));
+  if (drop.length > 0)
+    rows = rows.filter((r) => !drop.some((k) => k in (r as unknown as Record<string, unknown>)));
   return rows.map((r) => {
     const out = { ...r } as Record<string, unknown>;
     for (const k of fields) delete out[k];
@@ -243,6 +254,13 @@ export interface WireRow {
   /** How many prompts the session had received when the call was made
    *  (audit/session-turn.ts). A number only; no prompt text is recorded. */
   turn?: number;
+  /** On a `ran-after-flag` record (blocked-calls.ts): the flagged rows of the
+   *  call that ran. The cloud merges the record into them and stores no row
+   *  of its own; a server that predates the field never receives the record. */
+  refEids?: string[];
+  /** On a flagged row: the hook tracks the call to its run, so a missing
+   *  `ran-after-flag` record means it did not complete. */
+  tracksRun?: 1;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -313,6 +331,10 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     // Cloud-resolved row without a linkage key: the BE-origin row is the
     // record; shipping an unlinkable copy would double-count it.
     if (checkedBy === 'cloud' && !cloudRequestId) continue;
+    // A flagged call's outcome names its flagged rows or is not shipped: on
+    // its own it would read as one more allowed call.
+    const refEids = validRefEids(parsed.refEids);
+    if (checkedBy === RAN_AFTER_FLAG && refEids.length === 0) continue;
     rows.push({
       eid: parsed.eid,
       ts: parsed.ts,
@@ -345,6 +367,8 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
         ? { turn: parsed.turn }
         : {}),
       ...(cloudRequestId ? { cloudRequestId } : {}),
+      ...(checkedBy === RAN_AFTER_FLAG ? { refEids } : {}),
+      ...(parsed.tracksRun === 1 && checkedBy !== RAN_AFTER_FLAG ? { tracksRun: 1 as const } : {}),
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
       ...(typeof parsed.shellType === 'string' ? { shellType: parsed.shellType } : {}),

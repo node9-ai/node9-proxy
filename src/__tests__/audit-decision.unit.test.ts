@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyDecision, decisionTag } from '../audit/decision';
+import { classifyDecision, decisionTag, NON_DECISION_SOURCES } from '../audit/decision';
 
 /**
  * Fixtures are the EXACT (decision, checkedBy) pairs present in a real 101k-row
@@ -136,6 +136,14 @@ describe('robustness', () => {
  * of one real log, so a human APPROVING an action rendered "Auto-allowed" and a
  * human REFUSING one rendered "Blocked".
  */
+describe('the outcome record of a flagged call', () => {
+  it('reads "Ran" and is dropped by every local counter', () => {
+    const row = { decision: 'allow', checkedBy: 'ran-after-flag', source: 'ran-after-flag' };
+    expect(classifyDecision(row)).toMatchObject({ outcome: 'allow', label: 'Ran' });
+    expect(NON_DECISION_SOURCES.has(row.source)).toBe(true);
+  });
+});
+
 describe('a blocked call the agent ran anyway', () => {
   it('reads "Not enforced", never as an ordinary allow', () => {
     const view = classifyDecision({ decision: 'allow', checkedBy: 'ran-after-block' });

@@ -34,7 +34,14 @@ import {
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
-import { appendLocalAudit, isTestCall, lastDenyAudit } from '../../audit';
+import {
+  appendLocalAudit,
+  appendToLog,
+  HOOK_DEBUG_LOG,
+  isTestCall,
+  lastDenyAudit,
+  takeFlaggedAuditEids,
+} from '../../audit';
 import { noteSessionPrompt } from '../../audit/session-turn';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
@@ -42,7 +49,7 @@ import {
   recordPendingReview,
   discardPendingReview,
 } from '../../review-pending';
-import { blockedCallKey, noteBlockedCall } from '../../blocked-calls';
+import { blockedCallKey, canTrackRun, noteBlockedCall } from '../../blocked-calls';
 import {
   extractToolName,
   extractToolInput,
@@ -904,6 +911,45 @@ export function registerCheckCommand(program: Command): void {
             process.exit(2);
           };
 
+          // A call node9 flagged and is letting through, or handing to the
+          // agent's own prompt (blocked-calls.ts): note it, so its after-run
+          // hook, when it fires, records that the call ran. No hook fires for
+          // a call the person refused or that failed, so the cloud can say
+          // "ran" or "no completion seen" instead of guessing. The marker
+          // names the flagged rows, never an argument. Best-effort.
+          const noteFlaggedRun = (): void => {
+            try {
+              const refEids = takeFlaggedAuditEids();
+              if (refEids.length === 0) return;
+              const key = blockedCallKey(payload as Record<string, unknown>, agent);
+              if (!key) return;
+              const sid = (payload as Record<string, unknown>).session_id;
+              const noted = noteBlockedCall({
+                key,
+                tool: toolName || 'unknown',
+                agent,
+                ...(typeof sid === 'string' && sid && { sessionId: sid }),
+                ...(isTestCall(toolName, toolInput) && { testRun: true }),
+                refEids,
+                ts: Date.now(),
+              });
+              if (!noted) throw new Error('the marker could not be written');
+            } catch (err) {
+              // The outcome is best-effort; the decision is not. Never silent:
+              // a lost marker reads in the cloud as a call that did not run.
+              try {
+                appendToLog(HOOK_DEBUG_LOG, {
+                  ts: new Date().toISOString(),
+                  event: 'flag-marker-fail',
+                  tool: toolName,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              } catch {
+                /* the debug log itself is unwritable */
+              }
+            }
+          };
+
           // Inline-ask: route a `review` verdict to the agent's native approve/deny
           // prompt instead of node9's own approver. Only reached for ask-capable
           // agents (Claude Code / GitHub Copilot) — see resolveAskMode/agentSupportsAsk.
@@ -914,6 +960,7 @@ export function registerCheckCommand(program: Command): void {
             exposureKeys?: string[];
             exposureFromEid?: string;
           }) => {
+            noteFlaggedRun();
             const msg = buildReviewMessage(
               result.blockedByLabel,
               result.ruleDescription,
@@ -997,7 +1044,16 @@ export function registerCheckCommand(program: Command): void {
               : typeof payload.transcriptPath === 'string'
                 ? payload.transcriptPath
                 : undefined;
-          const meta = { agent, mcpServer, sessionId, transcriptPath };
+          // A call the after-run hook can vouch for (blocked-calls.ts): its
+          // flagged rows say so, so the cloud reads a missing run as one.
+          const tracksRun = canTrackRun(payload as Record<string, unknown>, agent);
+          const meta = {
+            agent,
+            mcpServer,
+            sessionId,
+            transcriptPath,
+            ...(tracksRun && { tracksRun: true }),
+          };
 
           // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
           // Off by default; opt-in via config.policy.skillPinning.enabled.
@@ -1198,6 +1254,7 @@ export function registerCheckCommand(program: Command): void {
           // A paused node9 checks nothing: no "is on" notice, and the flag stays
           // free for the first checked call after the pause.
           const allowExit = (checkedBy?: string): never => {
+            if (checkedBy !== 'paused') noteFlaggedRun();
             // Once per session, and once more when the level changes mid-session
             // or the daemon stays down (automatic start off: with it on, this
             // call already started the daemon; node9Firewall#445 follow-up).

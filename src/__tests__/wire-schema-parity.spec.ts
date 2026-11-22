@@ -84,6 +84,7 @@ const MAXIMAL_ROW = {
   risk: [{ c: 'egress', r: 'evil.example' }],
   // The turn the call belongs to (audit/session-turn.ts).
   turn: 14,
+  tracksRun: 1,
 };
 
 describe('audit wire parity with the SaaS schema', () => {
@@ -105,6 +106,23 @@ describe('audit wire parity with the SaaS schema', () => {
       unknown,
       `these keys would 400 against a ${strict ? 'strict' : 'non-strict'} BE schema`
     ).toEqual([]);
+  });
+
+  it.skipIf(!beAvailable)("a flagged call's outcome record is declared by the BE schema", () => {
+    const { keys } = beAcceptedKeys();
+    const { rows } = buildWireRows(
+      Buffer.from(
+        JSON.stringify({
+          ...MAXIMAL_ROW,
+          checkedBy: 'ran-after-flag',
+          source: 'ran-after-flag',
+          refEids: ['mh1k2l3m-0123456789ab'],
+        }) + '\n'
+      )
+    );
+    const emitted = Object.keys(rows[0] as unknown as Record<string, unknown>);
+    expect(emitted).toContain('refEids');
+    expect(emitted.filter((k) => !keys.has(k))).toEqual([]);
   });
 
   it.skipIf(!beAvailable)(

@@ -63,6 +63,8 @@ const TIMEOUT_SOURCES = new Set(['timeout']);
  *   - 'inline-review-approved' — the SAME record when it resolved an inline
  *     ask (v2 also writes a separate eid-bearing decision row alongside it)
  *   - 'response-dlp'           — an output-scan finding, not a call
+ *   - 'ran-after-flag'         — a flagged call's outcome, shipped to the
+ *     cloud, which merges it into the gate row
  * ONE set shared by all readers (/code-review fix: four hand-copied filters
  * each knew about two of the three values).
  */
@@ -70,6 +72,9 @@ export const NON_DECISION_SOURCES = new Set([
   'post-hook',
   'inline-review-approved',
   'response-dlp',
+  // A flagged call ran (blocked-calls.ts): the outcome of a call already
+  // counted by its gate row.
+  'ran-after-flag',
 ]);
 
 const has = (s: string, needle: string) => s.includes(needle);
@@ -157,6 +162,7 @@ export function classifyDecision(a: unknown, b?: unknown): DecisionView {
     if (src === 'post-hook') return { outcome: 'allow', label: 'Ran', raw };
     // node9 blocked the call and the agent ran it anyway (blocked-calls.ts).
     if (src === 'ran-after-block') return { outcome: 'allow', label: 'Not enforced', raw };
+    if (src === 'ran-after-flag') return { outcome: 'allow', label: 'Ran', raw };
     if (HUMAN_SOURCES.has(src)) {
       return { outcome: 'allow', label: 'Approved', raw };
     }
