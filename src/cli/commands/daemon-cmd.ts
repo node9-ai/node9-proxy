@@ -15,7 +15,8 @@ import {
 } from '../../daemon/index';
 import { ensureAutostartHealthy, restartDaemonService } from '../../daemon/service';
 import { getConfig } from '../../config';
-const VALID_ACTIONS = 'start | stop | restart | status | install | uninstall';
+import { describeRefresh, runDaemonRefresh } from '../../daemon/refresh';
+const VALID_ACTIONS = 'start | stop | restart | refresh | status | install | uninstall';
 
 export function registerDaemonCommand(program: Command): void {
   program
@@ -127,6 +128,17 @@ export function registerDaemonCommand(program: Command): void {
             process.exit(1);
           }
           process.exit(0);
+        }
+
+        // ── refresh ───────────────────────────────────────────────────────────
+        // Restart only when the running daemon is an older build than this
+        // install. The hook starts this detached after an upgrade; stdout is
+        // discarded there, the result is in daemon-startup.log.
+        if (cmd === 'refresh') {
+          const result = describeRefresh(await runDaemonRefresh());
+          if (result.ok) console.log(chalk.green(`✓ ${result.text}`));
+          else console.error(chalk.red(`✗ ${result.text}`));
+          process.exit(result.ok ? 0 : 1);
         }
 
         // ── status ────────────────────────────────────────────────────────────

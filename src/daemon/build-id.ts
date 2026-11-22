@@ -46,7 +46,11 @@ function readOwnVersion(): string {
 export function computeBuildId(entry: string = process.argv[1] ?? ''): BuildId {
   let mtimeMs = 0;
   try {
-    if (entry) mtimeMs = fs.statSync(entry).mtimeMs;
+    // Whole milliseconds, here at the source: the build travels as text
+    // (buildIdString) through the pid file and /health, and a stat carries
+    // fractions. Kept fractional, a build compared with its own text form was
+    // a fraction of a millisecond newer or older than itself.
+    if (entry) mtimeMs = Math.round(fs.statSync(entry).mtimeMs);
   } catch {
     /* unknown entry (REPL, deleted file) — version alone identifies */
   }
@@ -67,7 +71,7 @@ export function parseBuildId(s: unknown): BuildId | null {
   const version = s.slice(0, at);
   const mtimeMs = Number(s.slice(at + 1));
   if (!/^\d+(\.\d+){2}/.test(version) || !Number.isFinite(mtimeMs) || mtimeMs < 0) return null;
-  return { version, mtimeMs };
+  return { version, mtimeMs: Math.round(mtimeMs) };
 }
 
 /** Numeric x.y.z compare; prerelease/build suffixes beyond the third numeric

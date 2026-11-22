@@ -7,7 +7,8 @@ import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { isDaemonRunning, probeDaemonHealth, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
+import { CURRENT_BUILD, buildIdString, describeBuildDrift } from '../../daemon/build-id';
+import { readRefreshStamp } from '../../daemon/refresh-stamp';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
 import { assessCodexTrust, codexTrustInstruction } from '../../codex-trust';
@@ -364,7 +365,12 @@ export function registerDoctorCommand(program: Command, version: string): void {
           CURRENT_BUILD
         );
         if (drift) {
-          warn(drift, 'Run: node9 daemon restart');
+          // A hook of this build asks for a refresh by itself (`node9 daemon
+          // refresh`). When that was tried and changed nothing, say why: the
+          // bare restart hint would hide a cause the user has to act on.
+          const refresh = readRefreshStamp(homeDir);
+          const why = refresh?.build === buildIdString(CURRENT_BUILD) ? refresh.reason : undefined;
+          warn(drift, why ? `Automatic refresh did not work: ${why}` : 'Run: node9 daemon restart');
         }
       } else {
         warn(

@@ -29,6 +29,7 @@ import {
   autoStartDaemonAndWait,
   isTestingMode,
   logAutostartSkipThrottled,
+  refreshStaleDaemon,
 } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
@@ -688,6 +689,18 @@ export function registerCheckCommand(program: Command): void {
                 : process.env.NODE9_NO_AUTO_DAEMON
                   ? 'NODE9_NO_AUTO_DAEMON'
                   : 'unknown'
+            );
+          } else if (!daemonDown) {
+            // A daemon is running. If it is an older build than this hook (node9
+            // was upgraded and nothing restarted the daemon), ask for a refresh:
+            // a detached `node9 daemon refresh`, never waited for. The same two
+            // switches that stop the auto-start above stop this too.
+            refreshStaleDaemon(
+              !config.settings.autoStartDaemon
+                ? 'autoStartDaemon=false'
+                : process.env.NODE9_NO_AUTO_DAEMON
+                  ? 'NODE9_NO_AUTO_DAEMON'
+                  : null
             );
           }
 
