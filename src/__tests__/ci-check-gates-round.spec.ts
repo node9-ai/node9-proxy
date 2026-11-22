@@ -421,7 +421,7 @@ describe('B: a gated agent an outsider steers through a maintainer', () => {
     expect(f.explain?.happens).toMatch(/Only people with write access can start the agent, but/);
     expect(f.explain?.happens).toMatch(/a shell/);
     for (const s of [f.explain!.headline, f.explain!.happens, ...f.explain!.fix, f.fix ?? ''])
-      expect(s).not.toMatch(/—/);
+      expect(s).not.toMatch(/\u2014/);
   });
 });
 
