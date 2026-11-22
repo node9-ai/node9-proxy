@@ -34,6 +34,7 @@ const DECIDED_BY_VALUES: ReadonlySet<string> = new Set<DecidedBy>([
   'abandoned',
 ]);
 import { getConfig } from '../config/index.js';
+import { MAX_TURN } from '../audit/session-turn.js';
 import { readCredentials } from './sync.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
 import {
@@ -94,6 +95,8 @@ const CANARY_KINDS: ReadonlySet<string> = new Set<CanaryKind>([
  * the rows.
  */
 const STRIPPABLE_FIELD_GROUPS = [
+  // The turn a call belongs to (cases-session-stage2 design, change 3).
+  ['turn'],
   // The call's facts (cases-session-stage2 design, change 1).
   ['facts', 'out', 'risk'],
   // The OWASP report fields (node9Firewall#320).
@@ -237,6 +240,9 @@ export interface WireRow {
   facts?: 1;
   out?: OutFact[];
   risk?: RiskFact[];
+  /** How many prompts the session had received when the call was made
+   *  (audit/session-turn.ts). A number only; no prompt text is recorded. */
+  turn?: number;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -332,6 +338,12 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       // The facts: the marker, then only well-formed entries of the closed
       // vocabulary (the ingest rejects the whole batch for anything else).
       ...factWireFields(parsed),
+      ...(typeof parsed.turn === 'number' &&
+      Number.isInteger(parsed.turn) &&
+      parsed.turn >= 1 &&
+      parsed.turn <= MAX_TURN
+        ? { turn: parsed.turn }
+        : {}),
       ...(cloudRequestId ? { cloudRequestId } : {}),
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),

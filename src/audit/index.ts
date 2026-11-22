@@ -8,6 +8,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
 import { forecastRun } from '../auth/forecast-context';
+import { sessionTurn } from './session-turn';
 import {
   checkIdForRule,
   checkIdForCheckedBy,
@@ -224,6 +225,14 @@ export function factFields(facts: CallFacts | undefined): Record<string, unknown
     ...(out.length > 0 && { out }),
     ...(risk.length > 0 && { risk }),
   };
+}
+
+/** The turn the session is in (session-turn.ts): how many prompts it had
+ *  received when this row was written. Absent for a session whose agent has
+ *  no prompt hook. */
+function turnField(sessionId: string | undefined): { turn?: number } {
+  const turn = sessionTurn(sessionId);
+  return turn === undefined ? {} : { turn };
 }
 
 /** What the last `deny` row this process wrote recorded: its check and rule.
@@ -473,6 +482,7 @@ export function appendLocalAudit(
     ...taintFields,
     ...exposureFields,
     ...factFields(meta?.facts),
+    ...turnField(meta?.sessionId),
     ...(meta?.decidedBy && { decidedBy: meta.decidedBy }),
     ...(meta?.channel && { channel: meta.channel }),
     ...(meta?.cardId && { cardId: meta.cardId }),

@@ -246,6 +246,25 @@ describe('buildWireRows', () => {
   });
 });
 
+describe('buildWireRows: the turn of a call', () => {
+  const wire = (over: Record<string, unknown>) =>
+    buildWireRows(Buffer.from(row(over))).rows[0] as unknown as Record<string, unknown>;
+
+  it('forwards a turn number', () => {
+    expect(wire({ turn: 14 }).turn).toBe(14);
+  });
+
+  it('a row without one ships without one', () => {
+    expect('turn' in wire({})).toBe(false);
+  });
+
+  it('drops anything that is not a count the server accepts', () => {
+    for (const turn of [0, -1, 1.5, 100001, '14', null, { n: 1 }]) {
+      expect('turn' in wire({ turn }), JSON.stringify(turn)).toBe(false);
+    }
+  });
+});
+
 describe('buildWireRows: the facts of a call', () => {
   const wire = (over: Record<string, unknown>) =>
     buildWireRows(Buffer.from(row(over))).rows[0] as unknown as Record<string, unknown>;
@@ -597,6 +616,28 @@ describe('shipOnce', () => {
     expect(hasFacts(bodies[2][0])).toBe(false);
     expect('checkId' in bodies[2][0]).toBe(false);
     expect(bodies[2][0].tool).toBe('Bash');
+    _resetOwaspWireFields();
+  });
+
+  it('a server that predates the turn loses the turn and keeps the facts', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(auditLogPath, row({ checkId: 'commands.rm', turn: 3, ...FACTS }));
+    const { impl, bodies } = recording((rows) => rows.some((r) => 'turn' in r));
+
+    const res = await shipOnce(deps(impl));
+    expect(res).toEqual({ status: 'shipped', shipped: 1 });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0][0].turn).toBe(3);
+    expect('turn' in bodies[1][0]).toBe(false);
+    expect(bodies[1][0]).toMatchObject(FACTS);
+    expect(bodies[1][0].checkId).toBe('commands.rm');
+
+    // Later rows go out without the turn on the first try.
+    fs.appendFileSync(auditLogPath, row({ turn: 4, ...FACTS }));
+    await shipOnce(deps(impl));
+    expect(bodies).toHaveLength(3);
+    expect('turn' in bodies[2][0]).toBe(false);
+    expect(bodies[2][0]).toMatchObject(FACTS);
     _resetOwaspWireFields();
   });
 

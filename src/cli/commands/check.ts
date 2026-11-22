@@ -34,6 +34,7 @@ import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../.
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
 import { appendLocalAudit, isTestCall, lastDenyAudit } from '../../audit';
+import { noteSessionPrompt } from '../../audit/session-turn';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
   reviewCorrelationKey,
@@ -377,6 +378,17 @@ export function registerCheckCommand(program: Command): void {
                 // Non-fatal — debug logging is best-effort.
               }
             }
+
+            // A prompt starts a turn: every audit row of the calls that follow
+            // carries its number, so the dashboard can show a long session one
+            // prompt at a time. Only the count; the text is never recorded.
+            noteSessionPrompt(
+              typeof payload.session_id === 'string'
+                ? payload.session_id
+                : typeof payload.conversationId === 'string'
+                  ? payload.conversationId
+                  : undefined
+            );
 
             // node9Firewall#442: a session notice asked the agent to open its
             // reply with node9's line; the user's next prompt tells it the line

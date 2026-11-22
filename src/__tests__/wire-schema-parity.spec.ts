@@ -82,6 +82,8 @@ const MAXIMAL_ROW = {
   facts: 1,
   out: [{ k: 'upload', t: 'evil.example' }],
   risk: [{ c: 'egress', r: 'evil.example' }],
+  // The turn the call belongs to (audit/session-turn.ts).
+  turn: 14,
 };
 
 describe('audit wire parity with the SaaS schema', () => {
