@@ -201,6 +201,24 @@ interface WalkState {
   cwdChanged: boolean;
   /** Variables set for the rest of the command (`export GH_REPO=x &&`). */
   env: Set<string>;
+  /** When set, every call that fetches or sends is also listed here, one
+   *  entry per call (classifyShellCalls). The exposure result is the same
+   *  with or without it. */
+  calls?: ShellCall[];
+}
+
+/** One network-facing call of a command, for the audit row's facts. */
+export interface ShellCall {
+  /** What ran, in a closed shape: the binary, and for git, gh and the
+   *  publishers the subcommand words (`git push`, `gh pr merge`,
+   *  `npm publish`). Never an argument value. */
+  via: string;
+  /** The call carries something out. */
+  sends: boolean;
+  /** The call brings outside content in. */
+  fetches: boolean;
+  /** Hosts the call names, without the `host:` prefix. */
+  hosts: string[];
 }
 
 /** A repository named by `-R`/`gh repo` operands: `owner/name`,
@@ -577,6 +595,49 @@ function classifyCall(
   }
 }
 
+const LABEL_WORD = /^[a-z][a-z0-9-]{0,23}$/;
+
+/** The closed label of a call: subcommand words only when they are plain
+ *  lowercase words, so a label can never carry an argument's text. */
+function callLabel(head: string, args: (string | null)[]): string {
+  const word = (w: string | null | undefined): string | null =>
+    typeof w === 'string' && LABEL_WORD.test(w.toLowerCase()) ? w.toLowerCase() : null;
+  if (head === 'gh') {
+    const pos = positionals(args, GH_HOSTNAME_FLAGS);
+    const group = word(pos[0]);
+    if (group === 'api') return 'gh api';
+    const verb = word(pos[1]);
+    return group && verb ? `gh ${group} ${verb}` : 'gh';
+  }
+  if (head === 'git') {
+    const verb = word(positionals(args, new Set(['-C', '-c', '--git-dir', '--work-tree']))[0]);
+    return verb ? `git ${verb}` : 'git';
+  }
+  const pub = PUBLISH[head];
+  if (pub) {
+    const pos = positionals(args, new Set(pub.flag ?? []));
+    const verb = word(pos[0]);
+    if (head === 'yarn' && verb === 'npm') return 'yarn npm publish';
+    return verb ? `${head} ${verb}` : head;
+  }
+  return LABEL_WORD.test(head) ? head : 'command';
+}
+
+const bareHosts = (dests: string[]): string[] => [
+  ...new Set(dests.map((d) => (d.startsWith('host:') ? d.slice('host:'.length) : d))),
+];
+
+function fresh(): ShellExposure {
+  return {
+    ...EMPTY,
+    destinations: [],
+    gitRemotes: [],
+    repos: [],
+    fetchDestinations: [],
+    fetchKinds: [],
+  };
+}
+
 function walkCalls(command: string, out: ShellExposure, depth: number, state: WalkState): void {
   const f = parseShared(command);
   if (typeof f === 'symbol' || !f) return;
@@ -600,6 +661,7 @@ function walkCalls(command: string, out: ShellExposure, depth: number, state: Wa
         if (!h) continue;
         out.sends = true;
         out.destinations.push(`host:${h}`);
+        state.calls?.push({ via: 'redirect', sends: true, fetches: false, hosts: [h] });
       }
       return true;
     }
@@ -619,21 +681,54 @@ function walkCalls(command: string, out: ShellExposure, depth: number, state: Wa
       return true;
     }
     if (CWD_CHANGERS.has(c.head)) state.cwdChanged = true;
-    classifyCall(c.head, c.args, c.prefixes, [...c.env, ...state.env], state, out);
+    const env = [...c.env, ...state.env];
+    if (!state.calls) {
+      classifyCall(c.head, c.args, c.prefixes, env, state, out);
+      return true;
+    }
+    // Listing the calls: this one is classified on its own, noted, and
+    // folded into `out` exactly as the direct call above would have left it.
+    const one = fresh();
+    classifyCall(c.head, c.args, c.prefixes, env, state, one);
+    out.fetches ||= one.fetches;
+    out.sends ||= one.sends;
+    out.unresolved ||= one.unresolved;
+    out.destinations.push(...one.destinations);
+    out.gitRemotes.push(...one.gitRemotes);
+    out.repos.push(...one.repos);
+    out.fetchDestinations.push(...one.fetchDestinations);
+    out.fetchKinds.push(...one.fetchKinds);
+    if (one.sends || one.fetches) {
+      state.calls.push({
+        via: callLabel(c.head, c.args),
+        sends: one.sends,
+        fetches: one.fetches,
+        hosts: bareHosts(one.sends ? one.destinations : one.fetchDestinations),
+      });
+    }
     return true;
   });
 }
 
+/**
+ * The network-facing calls of a command, one entry per call, in order. The
+ * same walk as classifyShellExposure (wrappers stripped, `sh -c` payloads
+ * read), kept per call so an audit row can say `git push` and `curl` to
+ * which host instead of one merged answer. Never throws.
+ */
+export function classifyShellCalls(command: string): ShellCall[] {
+  const calls: ShellCall[] = [];
+  try {
+    walkCalls(command, fresh(), 0, { cwdChanged: false, env: new Set(), calls });
+  } catch {
+    return [];
+  }
+  return calls;
+}
+
 /** Classify a shell command as a source, a sink, both or neither. Never throws. */
 export function classifyShellExposure(command: string): ShellExposure {
-  const out: ShellExposure = {
-    ...EMPTY,
-    destinations: [],
-    gitRemotes: [],
-    repos: [],
-    fetchDestinations: [],
-    fetchKinds: [],
-  };
+  const out = fresh();
   try {
     walkCalls(command, out, 0, { cwdChanged: false, env: new Set() });
   } catch {

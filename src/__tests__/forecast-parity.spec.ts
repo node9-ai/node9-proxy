@@ -91,6 +91,7 @@ import { forecastDecision, type ForecastDecision } from '../auth/forecast';
 import { ForecastSessionState } from '../auth/forecast-state';
 import { markSessionExposed } from '../exposure/marker';
 import { _resetConfigCache, DEFAULT_CONFIG } from '../config';
+import { utcDay } from '../cost-ledger';
 
 const SESSION = 'forecast-parity-session';
 const META = { agent: 'claude', sessionId: SESSION };
@@ -421,7 +422,10 @@ describe('cascading failures (behavior.fanout and behavior.cost-budget, ASI08, n
   const ledgerFile = () => path.join(home(), '.node9', 'cost', 'sessions.json');
   const plantLedger = (usd: number, ageMs = 0) => {
     const now = new Date(Date.now() - ageMs);
-    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    // The ledger's day is the UTC day (cost-ledger.ts utcDay). The local date
+    // differs from it for the hours between local and UTC midnight, and these
+    // tests then planted a ledger the gate read as another day's.
+    const day = utcDay(now);
     fs.mkdirSync(path.dirname(ledgerFile()), { recursive: true });
     fs.writeFileSync(
       ledgerFile(),

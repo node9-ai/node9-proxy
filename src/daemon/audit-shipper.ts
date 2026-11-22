@@ -36,7 +36,18 @@ const DECIDED_BY_VALUES: ReadonlySet<string> = new Set<DecidedBy>([
 import { getConfig } from '../config/index.js';
 import { readCredentials } from './sync.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
-import { maskPersonalData } from '@node9/policy-engine';
+import {
+  maskPersonalData,
+  MAX_FACT_TEXT,
+  MAX_OUT_FACTS,
+  MAX_RISK_FACTS,
+  OUT_KINDS,
+  RISK_CATEGORIES,
+  type OutFact,
+  type OutKind,
+  type RiskCategory,
+  type RiskFact,
+} from '@node9/policy-engine';
 
 export const AUDIT_SHIP_WATERMARK = path.join(os.homedir(), '.node9', 'audit-ship.json');
 
@@ -75,32 +86,82 @@ const CANARY_KINDS: ReadonlySet<string> = new Set<CanaryKind>([
   'ssh-key',
 ]);
 
-/** The OWASP report fields: stripped and resent once if the server rejects them. */
-const OWASP_WIRE_FIELDS = ['checkId', 'canary', 'canaryKind'] as const;
+/**
+ * Fields a server may predate, newest group first. The SaaS schema is strict:
+ * an unknown key answers 400 to the whole batch. On a 400 the shipper strips
+ * one group and resends, newest first, so a server that knows the OWASP
+ * fields and not the facts loses the facts alone, and no server ever loses
+ * the rows.
+ */
+const STRIPPABLE_FIELD_GROUPS = [
+  // The call's facts (cases-session-stage2 design, change 1).
+  ['facts', 'out', 'risk'],
+  // The OWASP report fields (node9Firewall#320).
+  ['checkId', 'canary', 'canaryKind'],
+] as const;
 
-/** When a server last answered 400 to these fields and took the batch
- *  without them: it predates them. The shipper leaves them out for
- *  OWASP_FIELDS_RETRY_MS, then tries again, so a daemon that keeps running
- *  past the server deploy starts sending them within the hour instead of
- *  at its next restart. */
-let owaspFieldsRejectedAt: number | null = null;
+/** Per group: when a server last answered 400 to it and took the batch
+ *  without it. The shipper leaves the group out for OWASP_FIELDS_RETRY_MS,
+ *  then tries again, so a daemon that keeps running past the server deploy
+ *  starts sending it within the hour instead of at its next restart. */
+const groupRejectedAt: Array<number | null> = STRIPPABLE_FIELD_GROUPS.map(() => null);
 export const OWASP_FIELDS_RETRY_MS = 60 * 60 * 1000;
 
 /** Test seam. */
 export function _resetOwaspWireFields(): void {
-  owaspFieldsRejectedAt = null;
+  groupRejectedAt.fill(null);
 }
 
-function withoutOwaspFields(rows: WireRow[]): WireRow[] {
+function withoutFields(rows: WireRow[], fields: readonly string[]): WireRow[] {
   return rows.map((r) => {
     const out = { ...r } as Record<string, unknown>;
-    for (const k of OWASP_WIRE_FIELDS) delete out[k];
+    for (const k of fields) delete out[k];
     return out as unknown as WireRow;
   });
 }
 
-function hasOwaspFields(rows: WireRow[]): boolean {
-  return rows.some((r) => OWASP_WIRE_FIELDS.some((k) => k in r));
+function hasFields(rows: WireRow[], fields: readonly string[]): boolean {
+  return rows.some((r) => fields.some((k) => k in r));
+}
+
+const OUT_KIND_SET: ReadonlySet<string> = new Set(OUT_KINDS);
+const RISK_CATEGORY_SET: ReadonlySet<string> = new Set(RISK_CATEGORIES);
+
+/** The `out` facts as written, bounded; null when none is well formed. */
+function outFactsOf(v: unknown): WireRow['out'] | null {
+  if (!Array.isArray(v)) return null;
+  const out: NonNullable<WireRow['out']> = [];
+  for (const o of v.slice(0, MAX_OUT_FACTS)) {
+    const k = (o as { k?: unknown })?.k;
+    const t = (o as { t?: unknown })?.t;
+    if (typeof k !== 'string' || !OUT_KIND_SET.has(k)) continue;
+    if (typeof t !== 'string' || !t || t.length > MAX_FACT_TEXT) continue;
+    out.push({ k: k as OutKind, t });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** The `risk` facts as written, bounded; null when none is well formed. */
+function riskFactsOf(v: unknown): WireRow['risk'] | null {
+  if (!Array.isArray(v)) return null;
+  const out: NonNullable<WireRow['risk']> = [];
+  for (const o of v.slice(0, MAX_RISK_FACTS)) {
+    const c = (o as { c?: unknown })?.c;
+    const r = (o as { r?: unknown })?.r;
+    if (typeof c !== 'string' || !RISK_CATEGORY_SET.has(c)) continue;
+    const resource = typeof r === 'string' && r && r.length <= MAX_FACT_TEXT ? r : undefined;
+    out.push({ c: c as RiskCategory, ...(resource && { r: resource }) });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** The facts of a row that carries the marker: the marker, then only the
+ *  well-formed entries of the closed vocabulary. */
+function factWireFields(parsed: Record<string, unknown>): Pick<WireRow, 'facts' | 'out' | 'risk'> {
+  if (parsed.facts !== 1) return {};
+  const out = outFactsOf(parsed.out);
+  const risk = riskFactsOf(parsed.risk);
+  return { facts: 1, ...(out && { out }), ...(risk && { risk }) };
 }
 
 /** fw#318 2b: the exposure counts as written, or null when malformed. */
@@ -169,6 +230,13 @@ export interface WireRow {
   /** Approval cards: who decided an approval, and where (DecisionRecord). */
   decidedBy?: DecidedBy;
   channel?: Channel;
+  /** The call's facts, computed at the gate (policy-engine facts.ts): `facts`
+   *  marks a row whose facts were computed, `out` is what the call sends off
+   *  the machine, `risk` its risky shape. Stripped and resent once on a 400
+   *  from an older server (STRIPPABLE_FIELD_GROUPS). */
+  facts?: 1;
+  out?: OutFact[];
+  risk?: RiskFact[];
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -261,6 +329,9 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.sessionId === 'string' ? { sessionId: parsed.sessionId } : {}),
       ...(typeof parsed.dlpPattern === 'string' ? { dlpPattern: parsed.dlpPattern } : {}),
       ...(typeof parsed.dlpSample === 'string' ? { dlpSample: parsed.dlpSample } : {}),
+      // The facts: the marker, then only well-formed entries of the closed
+      // vocabulary (the ingest rejects the whole batch for anything else).
+      ...factWireFields(parsed),
       ...(cloudRequestId ? { cloudRequestId } : {}),
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
@@ -399,9 +470,12 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
       // SaaS dedups what already landed.
       for (let i = 0; i < rows.length; i += MAX_BATCH) {
         const slice = rows.slice(i, i + MAX_BATCH);
-        const stripFields =
-          owaspFieldsRejectedAt !== null && now() - owaspFieldsRejectedAt < OWASP_FIELDS_RETRY_MS;
-        let batch = stripFields ? withoutOwaspFields(slice) : slice;
+        let batch = slice;
+        STRIPPABLE_FIELD_GROUPS.forEach((fields, g) => {
+          const at = groupRejectedAt[g];
+          if (at !== null && now() - at < OWASP_FIELDS_RETRY_MS)
+            batch = withoutFields(batch, fields);
+        });
         const post = async (body: WireRow[]): Promise<Response> => {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -420,14 +494,19 @@ export async function shipOnce(deps: ShipDeps = {}): Promise<ShipResult> {
           }
         };
         let res = await post(batch);
-        // A strict server that predates the OWASP fields answers 400 to the
-        // whole batch. Resend once without them; if that lands, the server is
-        // older, so leave them out for the retry window (node9Firewall#320).
-        if (res.status === 400 && hasOwaspFields(batch)) {
-          batch = withoutOwaspFields(batch);
+        // A strict server that predates a field group answers 400 to the
+        // whole batch. Resend once per group without it, newest group first;
+        // when a resend lands, the server predates every group stripped to
+        // get there, so those are left out for the retry window.
+        const stripped: number[] = [];
+        for (let g = 0; g < STRIPPABLE_FIELD_GROUPS.length && res.status === 400; g++) {
+          const fields = STRIPPABLE_FIELD_GROUPS[g];
+          if (!hasFields(batch, fields)) continue;
+          batch = withoutFields(batch, fields);
+          stripped.push(g);
           res = await post(batch);
-          if (res.ok) owaspFieldsRejectedAt = now();
         }
+        if (res.ok) for (const g of stripped) groupRejectedAt[g] = now();
         if (!res.ok) throw new Error(`audit/batch HTTP ${res.status}`);
         shipped += batch.length;
       }

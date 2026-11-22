@@ -246,6 +246,60 @@ describe('buildWireRows', () => {
   });
 });
 
+describe('buildWireRows: the facts of a call', () => {
+  const wire = (over: Record<string, unknown>) =>
+    buildWireRows(Buffer.from(row(over))).rows[0] as unknown as Record<string, unknown>;
+
+  it('forwards the marker and the well-formed facts', () => {
+    const w = wire({
+      facts: 1,
+      out: [
+        { k: 'upload', t: 'evil.example' },
+        { k: 'push', t: 'git push' },
+      ],
+      risk: [{ c: 'secret-read', r: '.ssh/id_rsa' }, { c: 'egress' }],
+    });
+    expect(w.facts).toBe(1);
+    expect(w.out).toEqual([
+      { k: 'upload', t: 'evil.example' },
+      { k: 'push', t: 'git push' },
+    ]);
+    expect(w.risk).toEqual([{ c: 'secret-read', r: '.ssh/id_rsa' }, { c: 'egress' }]);
+  });
+
+  it('a row with the marker and no facts ships the marker alone', () => {
+    const w = wire({ facts: 1 });
+    expect(w.facts).toBe(1);
+    expect('out' in w).toBe(false);
+    expect('risk' in w).toBe(false);
+  });
+
+  it('drops what the closed vocabulary does not know, and bounds the rest', () => {
+    const w = wire({
+      facts: 1,
+      out: [
+        { k: 'teleport', t: 'x' },
+        { k: 'net', t: 'h'.repeat(500) },
+        { k: 'net', t: 7 },
+        { k: 'net', t: 'ok.example', extra: 'no' },
+        ...Array.from({ length: 20 }, (_, i) => ({ k: 'net', t: `h${i}.example` })),
+      ],
+      risk: [{ c: 'made-up' }, { c: 'egress', r: 'r'.repeat(500) }],
+    });
+    const out = w.out as Array<Record<string, unknown>>;
+    expect(out.length).toBeLessThanOrEqual(8);
+    expect(out[0]).toEqual({ k: 'net', t: 'ok.example' });
+    expect(out.every((o) => Object.keys(o).join() === 'k,t')).toBe(true);
+    expect(w.risk).toEqual([{ c: 'egress' }]);
+  });
+
+  it('without the marker nothing is forwarded (a row an older writer wrote)', () => {
+    const w = wire({ out: [{ k: 'net', t: 'x.example' }] });
+    expect('facts' in w).toBe(false);
+    expect('out' in w).toBe(false);
+  });
+});
+
 describe('buildWireRows: OWASP report fields (node9Firewall#320)', () => {
   it('carries the check id the local row names', () => {
     const { rows } = buildWireRows(
@@ -491,6 +545,68 @@ describe('shipOnce', () => {
     await shipOnce(at()); // window over: sent with the field, accepted
     expect(bodies[3][0].checkId).toBe('commands.chmod');
     _resetOwaspWireFields();
+  });
+
+  // The call's facts (cases-session-stage2 design): a second group of fields
+  // an older server answers 400 to. The newest group is stripped first, so a
+  // server that knows the OWASP fields keeps them.
+  const FACTS = { facts: 1, out: [{ k: 'push', t: 'git push' }], risk: [{ c: 'egress' }] };
+  const hasFacts = (r: Record<string, unknown>) => 'facts' in r || 'out' in r || 'risk' in r;
+  const recording = (rejects: (rows: Array<Record<string, unknown>>) => boolean) => {
+    const bodies: Array<Array<Record<string, unknown>>> = [];
+    const impl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const rows = (JSON.parse(String(init?.body)) as { rows: Array<Record<string, unknown>> })
+        .rows;
+      bodies.push(rows);
+      const no = rejects(rows);
+      return { ok: !no, status: no ? 400 : 200 } as Response;
+    }) as typeof fetch;
+    return { impl, bodies };
+  };
+
+  it('a server that predates the facts loses the facts and keeps the check id and the rows', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(auditLogPath, row({ checkId: 'commands.rm', ...FACTS }) + row(FACTS));
+    const { impl, bodies } = recording((rows) => rows.some(hasFacts));
+
+    const res = await shipOnce(deps(impl));
+    expect(res).toEqual({ status: 'shipped', shipped: 2 });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0][0].out).toEqual([{ k: 'push', t: 'git push' }]);
+    expect(bodies[1].some(hasFacts)).toBe(false);
+    expect(bodies[1][0].checkId).toBe('commands.rm');
+    expect(readWatermark(watermarkPath)?.offset).toBe(fs.statSync(auditLogPath).size);
+
+    // Later rows go out without the facts on the first try, check id intact.
+    fs.appendFileSync(auditLogPath, row({ checkId: 'commands.sudo', ...FACTS }));
+    await shipOnce(deps(impl));
+    expect(bodies).toHaveLength(3);
+    expect(hasFacts(bodies[2][0])).toBe(false);
+    expect(bodies[2][0].checkId).toBe('commands.sudo');
+    _resetOwaspWireFields();
+  });
+
+  it('a server that predates both groups gets the rows after two resends', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(auditLogPath, row({ checkId: 'commands.rm', ...FACTS }));
+    const { impl, bodies } = recording((rows) => rows.some((r) => hasFacts(r) || 'checkId' in r));
+
+    const res = await shipOnce(deps(impl));
+    expect(res).toEqual({ status: 'shipped', shipped: 1 });
+    expect(bodies).toHaveLength(3);
+    expect(hasFacts(bodies[2][0])).toBe(false);
+    expect('checkId' in bodies[2][0]).toBe(false);
+    expect(bodies[2][0].tool).toBe('Bash');
+    _resetOwaspWireFields();
+  });
+
+  it('a server that knows the facts gets them on the first try', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(auditLogPath, row(FACTS));
+    const { impl, bodies } = recording(() => false);
+    await shipOnce(deps(impl));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0][0]).toMatchObject(FACTS);
   });
 
   it('a 400 on a chunk with no OWASP fields is a plain failure: no resend, no advance', async () => {

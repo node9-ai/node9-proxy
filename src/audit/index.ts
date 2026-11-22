@@ -13,6 +13,12 @@ import {
   checkIdForCheckedBy,
   maskPersonalData,
   maskPersonalValue,
+  scanText,
+  MAX_OUT_FACTS,
+  MAX_RISK_FACTS,
+  UNKNOWN_HOST,
+  type CallFacts,
+  type OutFact,
 } from '@node9/policy-engine';
 
 export const LOCAL_AUDIT_LOG = path.join(os.homedir(), '.node9', 'audit.log');
@@ -167,6 +173,59 @@ export function filePathFromArgs(args: unknown): string | undefined {
   return undefined;
 }
 
+/** Written in place of a fact's text that may not leave the machine. */
+const WITHHELD_FACT = 'withheld';
+
+/**
+ * A fact's text may be written: no secret detector matches it, as written or
+ * uppercased (hosts arrive lowercased, and a key known by its uppercase shape
+ * would pass), and it holds no personal data (an email address in a file
+ * name). A host or a path is where neither should be; this is what holds one
+ * back if it is.
+ */
+function factTextIsSafe(text: string): boolean {
+  return (
+    redactAuditText(text) === text &&
+    scanText(text) === null &&
+    scanText(text.toUpperCase()) === null
+  );
+}
+
+/**
+ * The call's facts as row fields. `facts: 1` says the gate computed them, so
+ * a row with no `out` sent nothing the gate could see (the cloud then does not
+ * fall back to reading the preview). A fact holds a host, a command shape or a
+ * cut path. One whose text is not safe to write keeps what happened and loses
+ * the text: an `out` fact stays with its kind against an unknown host (dropping
+ * it would make the row say nothing left the machine), a `risk` fact stays
+ * with its category alone.
+ */
+export function factFields(facts: CallFacts | undefined): Record<string, unknown> {
+  if (!facts) return {};
+  const seen = new Set<string>();
+  const out: OutFact[] = [];
+  for (const o of facts.out) {
+    const t = factTextIsSafe(o.t)
+      ? o.t
+      : o.k === 'net' || o.k === 'upload'
+        ? UNKNOWN_HOST
+        : WITHHELD_FACT;
+    const key = `${o.k}|${t}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ k: o.k, t });
+    if (out.length >= MAX_OUT_FACTS) break;
+  }
+  const risk = facts.risk
+    .map((r) => (!r.r || factTextIsSafe(r.r) ? r : { c: r.c }))
+    .slice(0, MAX_RISK_FACTS);
+  return {
+    facts: 1,
+    ...(out.length > 0 && { out }),
+    ...(risk.length > 0 && { risk }),
+  };
+}
+
 /** What the last `deny` row this process wrote recorded: its check and rule.
  *  The before-run hook reads it when it notes a blocked call
  *  (blocked-calls.ts). Null when the block wrote no stop row here. */
@@ -214,6 +273,10 @@ export function appendLocalAudit(
      *  signal). */
     dlpPattern?: string;
     dlpSample?: string;
+    /** The call's facts, computed at the gate from the full arguments
+     *  (policy-engine facts.ts): what it sends off the machine and its risky
+     *  shape. Hosts, command shapes and cut paths only. */
+    facts?: CallFacts;
     /** PII attribution — the high-signal PII pattern names that fired
      *  (e.g. "SSN,Credit Card"). The raw args are hashed on PII rows, so
      *  this is the only signal carried; the value itself is never logged. */
@@ -409,6 +472,7 @@ export function appendLocalAudit(
     ...transcriptPathField,
     ...taintFields,
     ...exposureFields,
+    ...factFields(meta?.facts),
     ...(meta?.decidedBy && { decidedBy: meta.decidedBy }),
     ...(meta?.channel && { channel: meta.channel }),
     ...(meta?.cardId && { cardId: meta.cardId }),

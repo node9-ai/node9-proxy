@@ -78,6 +78,10 @@ const MAXIMAL_ROW = {
   checkId: 'data.canary',
   canaryId: 'c-1',
   canaryKind: 'aws-profile',
+  // The call's facts (policy-engine facts.ts).
+  facts: 1,
+  out: [{ k: 'upload', t: 'evil.example' }],
+  risk: [{ c: 'egress', r: 'evil.example' }],
 };
 
 describe('audit wire parity with the SaaS schema', () => {
