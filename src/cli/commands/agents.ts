@@ -63,10 +63,16 @@ const TEARDOWN_FN: Record<AgentName, () => void> = {
 
 const AGENT_NAMES = Object.keys(SETUP_FN) as AgentName[];
 
-/** Normalise user-typed agent names — `agy` is Antigravity's binary name. */
+/**
+ * Normalise user-typed agent names — `agy` is Antigravity's binary name.
+ * Matched without regard to case against the real keys: lowercasing the input
+ * and using it as the key made `claudeDesktop`, the name the help text prints,
+ * an "Unknown agent", so Claude Desktop could not be added or removed here.
+ */
 function resolveAgentName(agent: string): AgentName {
   const lower = agent.toLowerCase();
-  return (lower === 'agy' ? 'antigravity' : lower) as AgentName;
+  if (lower === 'agy') return 'antigravity';
+  return (AGENT_NAMES.find((name) => name.toLowerCase() === lower) ?? lower) as AgentName;
 }
 
 export function registerAgentsCommand(program: Command): void {

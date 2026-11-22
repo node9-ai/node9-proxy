@@ -327,9 +327,12 @@ describe('setupClaude', () => {
 
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.github.command).toBe('node9');
-    // args use the mcp --upstream gateway format
+    // The gateway format, stamped with the config key at wrap time so the
+    // gateway reports "github" and not a name derived from the command.
     expect(written.mcpServers.github.args).toEqual([
       'mcp-gateway',
+      '--config-name',
+      'github',
       '--upstream',
       'npx -y server-github',
     ]);
@@ -571,6 +574,8 @@ describe('setupCursor', () => {
     expect(written.mcpServers.brave.command).toBe('node9');
     expect(written.mcpServers.brave.args).toEqual([
       'mcp-gateway',
+      '--config-name',
+      'brave',
       '--upstream',
       'npx server-brave',
     ]);
@@ -863,7 +868,13 @@ describe('setupAntigravity', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     const written = writtenTo(mcpPath);
     expect(written.mcpServers.aws.command).toBe('node9');
-    expect(written.mcpServers.aws.args).toEqual(['mcp-gateway', '--upstream', 'npx server-aws']);
+    expect(written.mcpServers.aws.args).toEqual([
+      'mcp-gateway',
+      '--config-name',
+      'aws',
+      '--upstream',
+      'npx server-aws',
+    ]);
   });
 
   it('preserves foreign hooks in hooks.json (additive, never destructive)', async () => {
@@ -1827,6 +1838,8 @@ describe('setupCodex', () => {
     expect(written.mcp_servers.brave.command).toBe('node9');
     expect(written.mcp_servers.brave.args).toEqual([
       'mcp-gateway',
+      '--config-name',
+      'brave',
       '--upstream',
       'npx server-brave',
     ]);
