@@ -6,7 +6,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-vi.mock('../setup', () => ({ setupAgent: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../setup', () => ({
+  setupAgent: vi.fn().mockResolvedValue(undefined),
+  // heal also moves node9's MCP entries to the launcher; these rows are about
+  // hook healing, and that pass has its own integration rows.
+  moveMcpEntriesToLauncher: vi.fn(() => []),
+}));
 vi.mock('../agent-wiring', () => ({ getAgentWiring: vi.fn() }));
 // heal also reports MCP wraps corrupted by an older node9. These rows are about
 // hook healing, so stub that scan to "nothing corrupted" — mocking it here

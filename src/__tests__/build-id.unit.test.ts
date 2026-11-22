@@ -73,6 +73,26 @@ describe('computeBuildId', () => {
     }
   });
 
+  // A file's mtime carries fractions of a millisecond; the build travels as
+  // text (`version+ms`) through the pid file and /health. Kept fractional in
+  // memory, a daemon compared with ITS OWN build read back from /health was
+  // 0.4 ms "newer" than itself: a start of the same build took the port over,
+  // and a hook of the same build saw a stale daemon on every call.
+  it('a build equals itself after the round-trip, for an mtime with a fraction', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-buildid-frac-'));
+    const f = path.join(dir, 'cli.js');
+    fs.writeFileSync(f, '');
+    for (const seconds of [1795366798.2514758, 1795366798.2515]) {
+      fs.utimesSync(f, seconds, seconds);
+      const mine = computeBuildId(f);
+      const overTheWire = parseBuildId(buildIdString(mine));
+      expect(overTheWire).not.toBeNull();
+      expect(compareBuild(mine, overTheWire!)).toBe(0);
+      expect(Number.isInteger(mine.mtimeMs)).toBe(true);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('missing entry → mtime 0, version still set (never throws)', () => {
     const id = computeBuildId('/definitely/not/a/file.js');
     expect(id.mtimeMs).toBe(0);

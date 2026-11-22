@@ -8,6 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ensureOwnDir } from '../utils/own-dir';
+import { type BuildId, compareBuild } from './build-id';
 
 const KEY_FILE = 'daemon.key';
 const KEY_TEXT = /^[0-9a-f]{64}$/;
@@ -118,6 +119,11 @@ export interface PortHolder {
   /** valid: it holds this HOME's key. invalid: it sent a proof that does not
    *  check out. absent: no proof (a build before the key, or not node9). */
   proof: 'valid' | 'invalid' | 'absent';
+  /** Approval cards waiting for a decision; null when the holder does not say
+   *  (a build before the field). */
+  openCards: number | null;
+  /** How the holder says it was started; null when it does not say. */
+  autoStarted: boolean | null;
 }
 
 const MAX_PID = 4_194_304;
@@ -141,7 +147,14 @@ export async function probePortHolder(
     /* nothing answered */
   }
   if (!body || typeof body !== 'object') {
-    return { answered: false, pid: null, buildId: null, proof: 'absent' };
+    return {
+      answered: false,
+      pid: null,
+      buildId: null,
+      proof: 'absent',
+      openCards: null,
+      autoStarted: null,
+    };
   }
   const pid =
     typeof body.pid === 'number' &&
@@ -151,8 +164,35 @@ export async function probePortHolder(
       ? body.pid
       : null;
   const buildId = typeof body.buildId === 'string' ? body.buildId : null;
-  if (body.proof === undefined || key === null)
-    return { answered: true, pid, buildId, proof: 'absent' };
+  const said = {
+    answered: true,
+    pid,
+    buildId,
+    openCards:
+      typeof body.openCards === 'number' && Number.isInteger(body.openCards) && body.openCards >= 0
+        ? body.openCards
+        : null,
+    autoStarted: typeof body.autoStarted === 'boolean' ? body.autoStarted : null,
+  };
+  if (body.proof === undefined || key === null) return { ...said, proof: 'absent' };
   const valid = pid !== null && verifyHealthProof(key, nonce, pid, body.proof);
-  return { answered: true, pid, buildId, proof: valid ? 'valid' : 'invalid' };
+  return { ...said, proof: valid ? 'valid' : 'invalid' };
+}
+
+/**
+ * fw#445: a holder that answers /health but cannot prove the key, while it
+ * claims a build that has the key (`mine` or newer) or names no build at all,
+ * is not a node9 daemon of this HOME. A holder of an older build answers
+ * without a proof and keeps the pre-key handling (upgrade path). With no key
+ * of our own nothing can be checked, so nothing is refused.
+ */
+export function isUnverifiedHolder(
+  hasKey: boolean,
+  holder: Pick<PortHolder, 'answered' | 'proof'>,
+  holderBuild: BuildId | null,
+  mine: BuildId
+): boolean {
+  if (!hasKey || !holder.answered || holder.proof === 'valid') return false;
+  if (holder.proof === 'invalid') return true;
+  return !holderBuild || compareBuild(holderBuild, mine) >= 0;
 }

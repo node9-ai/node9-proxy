@@ -10,6 +10,7 @@ import {
   fromGateway,
   tokenize,
   inventoryMcp,
+  inventoryServerKeys,
   writeMcpEntry,
   type McpServer,
 } from '../mcp-wrap';
@@ -198,3 +199,113 @@ function readTomlServer(file: string, name: string): unknown {
   return (parseTomlTest(fs.readFileSync(file, 'utf-8')) as { mcp_servers: Record<string, unknown> })
     .mcp_servers[name];
 }
+
+// An entry that pins its Node (`<node> <node9 bin> <subcommand>`, written by
+// hand on a machine whose PATH holds an old Node) is still node9's. Before the
+// shared parser it read as a third-party server: status said UNGOVERNED,
+// `gateway --all` offered to wrap node9's own server, `ungateway` refused.
+describe('entries that pin their Node', () => {
+  const NODE = '/home/u/.nvm/versions/node/v25.9.0/bin/node';
+  const BIN = '/home/u/.nvm/versions/node/v25.9.0/bin/node9';
+
+  it('classifies the hand-pinned own server as node9-self', () => {
+    expect(classifyMcp({ command: NODE, args: [BIN, 'mcp-server'] })).toBe('node9-self');
+  });
+
+  it('classifies a hand-pinned wrap as gatewayed', () => {
+    expect(
+      classifyMcp({
+        command: NODE,
+        args: [BIN, 'mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y pg-mcp'],
+      })
+    ).toBe('gatewayed');
+  });
+
+  it('classifies the launcher and the hook shim as node9', () => {
+    expect(classifyMcp({ command: '/home/u/.node9/bin/node9', args: ['mcp-server'] })).toBe(
+      'node9-self'
+    );
+    expect(classifyMcp({ command: '/home/u/.node9/bin/hook', args: ['mcp-server'] })).toBe(
+      'node9-self'
+    );
+    expect(
+      classifyMcp({
+        command: '/home/u/.node9/bin/hook',
+        args: ['mcp-gateway', '--upstream', 'npx x'],
+      })
+    ).toBe('gatewayed');
+  });
+
+  it('a node runtime in front of any other script stays ungoverned', () => {
+    expect(classifyMcp({ command: 'node', args: ['/opt/tools/server.js'] })).toBe('ungoverned');
+    expect(classifyMcp({ command: NODE, args: ['/srv/node9/server.js', 'mcp-server'] })).toBe(
+      'ungoverned'
+    );
+  });
+
+  it('fromGateway reverses a hand-pinned wrap: the subcommand is not at args[0]', () => {
+    const wrapped: McpServer & { env?: Record<string, string> } = {
+      command: NODE,
+      args: [BIN, 'mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y "pg mcp" --ro'],
+      env: { A: '1' },
+    };
+    expect(fromGateway(wrapped)).toEqual({
+      command: 'npx',
+      args: ['-y', 'pg mcp', '--ro'],
+      env: { A: '1' },
+    });
+  });
+
+  it('fromGateway reverses a legacy `mcp --upstream` wrap, which now reads as gatewayed', () => {
+    const legacy = { command: 'node9', args: ['mcp', '--upstream', 'npx x'] };
+    expect(classifyMcp(legacy)).toBe('gatewayed');
+    expect(fromGateway(legacy)).toEqual({ command: 'npx', args: ['x'] });
+    // `node9 mcp status` as an entry is not a wrap.
+    expect(classifyMcp({ command: 'node9', args: ['mcp', 'status'] })).toBe('node9-self');
+  });
+
+  it('toGateway writes the launcher it is given, and `node9` by default', () => {
+    const orig = { command: 'npx', args: ['-y', 'pg-mcp'] };
+    expect(toGateway(orig, 'pg').command).toBe('node9');
+    const pinned = toGateway(orig, 'pg', [NODE, BIN]);
+    expect(pinned.command).toBe(NODE);
+    expect(pinned.args).toEqual([
+      BIN,
+      'mcp-gateway',
+      '--config-name',
+      'pg',
+      '--upstream',
+      'npx -y pg-mcp',
+    ]);
+    expect(classifyMcp(pinned)).toBe('gatewayed');
+    expect(fromGateway(pinned)).toEqual(orig);
+  });
+
+  it('inventory reads hand-pinned entries from a real config file', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-pinned-inv-'));
+    try {
+      fs.writeFileSync(
+        path.join(home, '.claude.json'),
+        JSON.stringify({
+          mcpServers: {
+            node9: { command: NODE, args: [BIN, 'mcp-server'] },
+            pg: {
+              command: NODE,
+              args: [BIN, 'mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y pg-mcp'],
+            },
+            other: { command: 'npx', args: ['other-mcp'] },
+          },
+        })
+      );
+      const states = Object.fromEntries(inventoryMcp(home).map((e) => [e.name, e.state]));
+      expect(states).toEqual({ node9: 'node9-self', pg: 'gatewayed', other: 'ungoverned' });
+      // The pin identity of the hand-pinned wrap is its upstream, as for any wrap.
+      const keys = inventoryServerKeys(inventoryMcp(home));
+      expect(keys.has(getServerKey('npx -y pg-mcp'))).toBe(true);
+      expect(keys.has(getServerKey('npx other-mcp'))).toBe(true);
+      expect(keys.size).toBe(2);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

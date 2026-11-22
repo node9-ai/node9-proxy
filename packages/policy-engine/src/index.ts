@@ -273,8 +273,28 @@ export {
   maskPersonalData,
   maskPersonalValue,
 } from './exposure/mask';
-export type { ShellExposure } from './exposure/shell';
-export { classifyShellExposure } from './exposure/shell';
+export type { ShellExposure, ShellCall } from './exposure/shell';
+export { classifyShellExposure, classifyShellCalls } from './exposure/shell';
+export type {
+  CallFacts,
+  CallFactsOptions,
+  OutFact,
+  OutKind,
+  RiskFact,
+  RiskCategory,
+  McpToolKind,
+} from './facts';
+export {
+  callFacts,
+  shellFacts,
+  mcpToolKind,
+  MAX_OUT_FACTS,
+  MAX_RISK_FACTS,
+  MAX_FACT_TEXT,
+  UNKNOWN_HOST,
+  OUT_KINDS,
+  RISK_CATEGORIES,
+} from './facts';
 
 // Smart rules — tool-name pattern match + condition evaluator.
 export {

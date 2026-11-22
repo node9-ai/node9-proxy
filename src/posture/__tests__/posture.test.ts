@@ -572,11 +572,34 @@ describe('checkSupplyChain', () => {
       JSON.stringify({
         mcpServers: {
           abs: { command: '/usr/local/bin/node9', args: ['mcp-wrap'] },
-          viaNpx: { command: 'npx', args: ['node9', 'mcp-wrap'] },
+          viaNpx: { command: 'npx', args: ['node9', 'mcp-gateway', '--upstream', 'npx a'] },
         },
       })
     );
     expect(checkSupplyChain({ home, cwd: home })).toEqual([]);
+  });
+
+  // One reading with the inventory (mcp-entry.ts): the hook shim used as an
+  // MCP command is node9's, and a runner is node9's only when it runs the
+  // node9 package, not when some argument merely ends in "node9".
+  it('reads the entries the way the inventory does', () => {
+    fs.writeFileSync(
+      mcpFile(),
+      JSON.stringify({
+        mcpServers: {
+          node9: { command: path.join(home, '.node9', 'bin', 'hook'), args: ['mcp-server'] },
+          launcher: {
+            command: path.join(home, '.node9', 'bin', 'node9'),
+            args: ['mcp-gateway', '--config-name', 'a', '--upstream', 'npx a'],
+          },
+          lookalike: { command: 'npx', args: ['some-tool', '--config', '/x/node9'] },
+        },
+      })
+    );
+    const findings = checkSupplyChain({ home, cwd: home });
+    const f = findings.find((x) => /run outside node9/.test(x.title));
+    expect(f?.title).toContain('1 of 3');
+    expect(f?.detail).toEqual(['lookalike (Claude Code)']);
   });
 
   it('flags a server launched from an untrusted path (/tmp) as high', () => {
@@ -1309,7 +1332,20 @@ describe('isNode9Managed', () => {
   });
 
   it('treats an npx node9 wrapper as managed', () => {
-    expect(isNode9Managed('npx', ['node9', 'mcp-wrap'])).toBe(true);
+    expect(isNode9Managed('npx', ['node9', 'mcp-gateway', '--upstream', 'npx a'])).toBe(true);
+    expect(isNode9Managed('npx', ['-y', 'node9-ai@2.66.3', 'mcp-server'])).toBe(true);
+  });
+
+  it('asks a runner for the node9 package and a node9 MCP subcommand', () => {
+    // 2.66.3 took any argument whose last segment is "node9".
+    expect(isNode9Managed('npx', ['some-tool', '--config', '/x/node9'])).toBe(false);
+    // `mcp-wrap` was never a node9 subcommand: such an entry does not start.
+    expect(isNode9Managed('npx', ['node9', 'mcp-wrap'])).toBe(false);
+  });
+
+  it('treats the node9 shims as managed', () => {
+    expect(isNode9Managed('/home/u/.node9/bin/hook', ['mcp-server'])).toBe(true);
+    expect(isNode9Managed('/home/u/.node9/bin/node9', ['mcp-server'])).toBe(true);
   });
 
   it('does not treat an unrelated binary as managed', () => {

@@ -329,6 +329,38 @@ describe('agent-wiring registry', () => {
     expect(cursor?.isProtected).toBe(true);
   });
 
+  it('a node9 entry that pins its Node still counts as MCP protection', () => {
+    // `<node> <node9 bin> mcp-server`: written by hand where PATH holds an old
+    // Node. An MCP-only agent with only such entries read as "not configured".
+    const node = '/home/u/.nvm/versions/node/v25.9.0/bin/node';
+    const bin = '/home/u/.nvm/versions/node/v25.9.0/bin/node9';
+    writeJson('.cursor/mcp.json', {
+      mcpServers: {
+        node9: { command: node, args: [bin, 'mcp-server'] },
+        github: {
+          command: node,
+          args: [bin, 'mcp-gateway', '--config-name', 'github', '--upstream', 'npx -y @mcp/github'],
+        },
+      },
+    });
+    const cursor = getAgentWiring(home).find((a) => a.id === 'cursor');
+    expect(cursor?.mcpProtected).toBe(true);
+    expect(cursor?.isProtected).toBe(true);
+    expect(cursor?.mcpServers).toContain(
+      'github → mcp-gateway --config-name github --upstream npx -y @mcp/github'
+    );
+    expect(cursor?.mcpServers).toContain('node9 → mcp-server');
+  });
+
+  it('a third-party server started with node is not MCP protection', () => {
+    writeJson('.cursor/mcp.json', {
+      mcpServers: { tool: { command: 'node', args: ['/opt/tools/server.js'] } },
+    });
+    const cursor = getAgentWiring(home).find((a) => a.id === 'cursor');
+    expect(cursor?.mcpProtected).toBe(false);
+    expect(cursor?.mcpServers).toEqual([]);
+  });
+
   it('exposes mcpServers=[] for an MCP-capable agent with no config, null for one without a surface', () => {
     const rows = getAgentWiring(home); // empty home
     expect(rows.find((a) => a.id === 'cursor')?.mcpServers).toEqual([]); // has surface, no file

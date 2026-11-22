@@ -10,7 +10,7 @@
 // running gateway keys mcp-tools.json by the SUBSTITUTED command (the agent
 // expands ${VAR} before spawn). So we must env-substitute here before hashing,
 // or the join silently misses every server that uses a placeholder.
-import { inventoryMcp, type McpEntry, type McpServerState } from './mcp-wrap';
+import { inventoryMcp, entryUpstream, type McpEntry, type McpServerState } from './mcp-wrap';
 import { readMcpToolsConfig } from './daemon/mcp-tools';
 import { getServerKey } from './mcp-pin';
 
@@ -68,14 +68,6 @@ export function substituteEnv(
   return { resolved, missing: [...new Set(missing)] };
 }
 
-/** Extract the raw `--upstream` string from a gatewayed entry's args, or null. */
-function upstreamOf(e: McpEntry): string | null {
-  const i = e.args.indexOf('--upstream');
-  if (i < 0) return null;
-  const u = e.args[i + 1];
-  return typeof u === 'string' && u.length > 0 ? u : null;
-}
-
 /**
  * Merge one inventory entry with the connected-side + env lint into a status row.
  * Pure over its inputs (env + the tools config are passed in) so it's trivially
@@ -107,7 +99,7 @@ export function resolveEntryStatus(
     };
   };
 
-  const upstream = upstreamOf(e);
+  const upstream = entryUpstream(e);
   if (!upstream) return { ...base, connection: 'pending-launch' };
 
   // IDENTITY JOIN (R1 Layer 1) — the ROBUST path. A launched server the gateway

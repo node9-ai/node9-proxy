@@ -29,11 +29,13 @@ import {
   autoStartDaemonAndWait,
   isTestingMode,
   logAutostartSkipThrottled,
+  refreshStaleDaemon,
 } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
 import { appendLocalAudit, isTestCall, lastDenyAudit } from '../../audit';
+import { noteSessionPrompt } from '../../audit/session-turn';
 import { isKeyedForPolicy } from '../../config/keyed-guard';
 import {
   reviewCorrelationKey,
@@ -378,6 +380,17 @@ export function registerCheckCommand(program: Command): void {
               }
             }
 
+            // A prompt starts a turn: every audit row of the calls that follow
+            // carries its number, so the dashboard can show a long session one
+            // prompt at a time. Only the count; the text is never recorded.
+            noteSessionPrompt(
+              typeof payload.session_id === 'string'
+                ? payload.session_id
+                : typeof payload.conversationId === 'string'
+                  ? payload.conversationId
+                  : undefined
+            );
+
             // node9Firewall#442: a session notice asked the agent to open its
             // reply with node9's line; the user's next prompt tells it the line
             // was shown, before the next reply is written. On every exit that
@@ -676,6 +689,18 @@ export function registerCheckCommand(program: Command): void {
                 : process.env.NODE9_NO_AUTO_DAEMON
                   ? 'NODE9_NO_AUTO_DAEMON'
                   : 'unknown'
+            );
+          } else if (!daemonDown) {
+            // A daemon is running. If it is an older build than this hook (node9
+            // was upgraded and nothing restarted the daemon), ask for a refresh:
+            // a detached `node9 daemon refresh`, never waited for. The same two
+            // switches that stop the auto-start above stop this too.
+            refreshStaleDaemon(
+              !config.settings.autoStartDaemon
+                ? 'autoStartDaemon=false'
+                : process.env.NODE9_NO_AUTO_DAEMON
+                  ? 'NODE9_NO_AUTO_DAEMON'
+                  : null
             );
           }
 

@@ -37,7 +37,13 @@ import {
 } from '../cli/commands/scan';
 import { buildScanSummary } from '../scan-summary';
 import { CURRENT_BUILD, buildIdString, parseBuildId, compareBuild } from './build-id';
-import { loadDaemonKey, healthProof, HEALTH_NONCE, probePortHolder } from './daemon-key';
+import {
+  loadDaemonKey,
+  healthProof,
+  HEALTH_NONCE,
+  probePortHolder,
+  isUnverifiedHolder,
+} from './daemon-key';
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -353,6 +359,15 @@ export function startDaemon(): void {
   // re-stat'd. CURRENT_BUILD is a module-load constant, so /health reports the
   // code this process LOADED even after a rebuild overwrites dist on disk.
   const startedAt = new Date().toISOString();
+  // The launcher this daemon runs from, links resolved. A hook reads it from
+  // the pid file to tell a REBUILD of this install from another checkout that
+  // happens to hold a newer file of the same version (refresh-stamp.ts).
+  let entry: string | undefined;
+  try {
+    if (process.argv[1]) entry = fs.realpathSync(process.argv[1]);
+  } catch {
+    /* unknown entry: a same-version rebuild then waits for a restart */
+  }
 
   // This HOME's daemon key (fw#445): /health proves with it, and a start that
   // finds the port held checks the holder's proof against it. Null when it
@@ -813,6 +828,9 @@ export function startDaemon(): void {
           pid: process.pid,
           startedAt,
           autoStarted,
+          // Cards a person has not decided yet: `node9 daemon refresh` waits
+          // for them before it replaces this process.
+          openCards: cards.open().length,
           // fw#445: the key proof, for a start that finds this port held.
           ...(daemonKey &&
             HEALTH_NONCE.test(nonce) && { proof: healthProof(daemonKey, nonce, process.pid) }),
@@ -1525,21 +1543,6 @@ export function startDaemon(): void {
     server.listen(DAEMON_PORT, DAEMON_HOST);
   }
 
-  // fw#445: a holder that answers /health but cannot prove the key, while it
-  // claims a build that has the key (this one or newer) or names no build at
-  // all, is not a node9 daemon of this HOME. A holder of an older build
-  // answers without a proof and keeps the pre-key handling (upgrade path).
-  // With no key of our own nothing can be checked, so nothing is refused.
-  function isUnverifiedHolder(
-    answered: boolean,
-    proof: 'valid' | 'invalid' | 'absent',
-    build: ReturnType<typeof parseBuildId>
-  ): boolean {
-    if (!daemonKey || !answered || proof === 'valid') return false;
-    if (proof === 'invalid') return true;
-    return !build || compareBuild(build, CURRENT_BUILD) >= 0;
-  }
-
   function refuseUnverifiedHolder(): void {
     logDaemonStartup(
       'port-held-unverified',
@@ -1564,7 +1567,7 @@ export function startDaemon(): void {
     const holder = await probePortHolder(daemonKey, DAEMON_HOST, DAEMON_PORT);
     const holderBuildId = holder.buildId;
     const holderBuild = holderBuildId ? parseBuildId(holderBuildId) : null;
-    if (isUnverifiedHolder(holder.answered, holder.proof, holderBuild)) {
+    if (isUnverifiedHolder(daemonKey !== null, holder, holderBuild, CURRENT_BUILD)) {
       return refuseUnverifiedHolder();
     }
 
@@ -1762,6 +1765,7 @@ export function startDaemon(): void {
         autoStarted,
         version: CURRENT_BUILD.version,
         buildId: buildIdString(CURRENT_BUILD),
+        ...(entry !== undefined && { entry }),
         startedAt,
         // Where the hook sends activity lines (activity-socket-ownership).
         activitySocket: getActivitySocketPath(),

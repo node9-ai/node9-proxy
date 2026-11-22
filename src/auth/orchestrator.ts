@@ -57,6 +57,8 @@ import {
   classifyShellExposure,
   fileToolOperation,
   matchesTrustedList,
+  callFacts,
+  type CallFacts,
 } from '@node9/policy-engine';
 import { knownProjectHosts } from '../exposure/known-hosts';
 import { judgeWritesAfterExposure, type WriteHold } from '../exposure/writes';
@@ -592,6 +594,7 @@ export async function _authorizeHeadlessCore(
         ruleName?: string;
         exposure?: { kind: 'source' | 'logged'; destinations: number };
         exposureFromEid?: string;
+        facts?: CallFacts;
       })
     | undefined =
     options?.cwd && !metaArg?.workingDir ? { ...metaArg, workingDir: options.cwd } : metaArg;
@@ -716,6 +719,20 @@ export async function _authorizeHeadlessCore(
     fileFinding = isManual ? null : incompleteFileVerdict();
   }
   const shellInput = resolveShellInput(toolName, args, inspectionLayers(config.policy));
+  // The facts of this call (what it sends off the machine, its risky shape),
+  // read here from the full arguments and carried on every audit row the call
+  // writes: the cloud gets a hash and a 120-character preview, never the
+  // command. The parse is the one prepareFileAccesses just made. A forecast
+  // run keeps its rows in memory and a manual check writes none.
+  if (!isManual && !forecast) {
+    meta = {
+      ...meta,
+      facts: callFacts(toolName, args, {
+        shellCommand: shellInput.kind === 'shell' ? shellInput.command : null,
+        mcpServer: meta?.mcpServer,
+      }),
+    };
+  }
   // ── A SCRIPT WRITTEN THIS SESSION (fw#372 A3) ─────────────────────────────
   // The files this call writes are recorded with the daemon; a shell command
   // that runs a script the session wrote is judged from the script's content

@@ -5,7 +5,35 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
-import { mcpUpstreamString } from './mcp-wrap';
+import {
+  mcpUpstreamString,
+  classifyMcp,
+  toGateway,
+  fromGateway,
+  migrateMcpLaunchers,
+  updateMcpServers,
+  type LauncherMigration,
+} from './mcp-wrap';
+import {
+  MCP_WRAP_SUBCOMMAND,
+  LEGACY_MCP_WRAP_SUBCOMMAND,
+  isMcpWrapSubcommand,
+  parseNode9Launch,
+} from './mcp-entry';
+import {
+  shimPath,
+  shimBody,
+  ensureShim,
+  ensureShims,
+  isShimTargetStale,
+  pinsNode,
+  pinnedNode,
+  runsOnNode,
+  resolvesToJsFile,
+  node9Argv,
+  mcpLauncherArgv,
+  toForwardSlashes,
+} from './node9-shim';
 import { codexTrustInstruction } from './codex-trust';
 import { establishCodexTrust } from './codex-app-server';
 import * as yaml from 'yaml';
@@ -48,6 +76,56 @@ export async function setupAgent(agent: string): Promise<void> {
   // Record node9's intent to govern this agent so the daemon's hook-heal pass can
   // tell "an update wiped a server we govern" (nudge) from "never governed" (ignore).
   recordHookBaseline(agent, Date.now());
+  moveMcpEntriesToLauncher();
+}
+
+/**
+ * Move the node9 MCP entries that are already in agent configs to the
+ * launcher, and say which. Called by every attended setup command (init,
+ * agents add, heal): the entries an older node9 wrote start on the agent's
+ * PATH Node, and under an old one they do not start. Covers every agent, not
+ * only the one being set up: the launcher is one per machine, and a person who
+ * fixes one agent should not have to name the others.
+ */
+export function moveMcpEntriesToLauncher(): LauncherMigration[] {
+  let moved: LauncherMigration[];
+  const failed: string[] = [];
+  try {
+    moved = migrateMcpLaunchers({
+      onError: (entry) => failed.push(`${entry.name} (${entry.agentLabel})`),
+    });
+  } catch (err) {
+    // Setup has done its own work by now; this pass must not fail it.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(chalk.yellow(`  ⚠️  Could not move MCP entries to the node9 launcher: ${msg}`));
+    return [];
+  }
+  const byAgent = new Map<string, string[]>();
+  for (const m of moved) {
+    byAgent.set(m.agentLabel, [...(byAgent.get(m.agentLabel) ?? []), m.name]);
+  }
+  for (const [label, names] of byAgent) {
+    console.log(
+      chalk.green(
+        `  ✅ ${label}: ${names.length} node9 MCP entr${names.length === 1 ? 'y' : 'ies'}`
+      ) +
+        chalk.gray(
+          ` now start${names.length === 1 ? 's' : ''} on the Node that ran this setup (${names.join(', ')})`
+        )
+    );
+  }
+  if (moved.length > 0) {
+    console.log(chalk.gray('     Restart the agent for the change to take effect.'));
+  }
+  if (failed.length > 0) {
+    console.log(
+      chalk.yellow(
+        `  ⚠️  Could not rewrite ${failed.length} node9 MCP entr${failed.length === 1 ? 'y' : 'ies'}: ${failed.join(', ')}. ` +
+          "They still start on the agent's PATH Node. Check that the config file is writable, then run: node9 heal"
+      )
+    );
+  }
+  return moved;
 }
 
 // Detect installed agents and wire each (non-interactive when the caller sets
@@ -117,25 +195,111 @@ interface GeminiSettings {
   [key: string]: unknown;
 }
 
-/** The MCP server entry node9 injects into agent configs. */
-const NODE9_MCP_SERVER_ENTRY: McpServer = { command: 'node9', args: ['mcp-server'] };
+/**
+ * The MCP server entry node9 injects into agent configs: its own server. It
+ * starts through the launcher (~/.node9/bin/node9), so it runs on the Node
+ * that ran setup. Written as `{ command: 'node9' }` it took `node` from the
+ * agent's PATH, and where that was an old Node the server never came up.
+ */
+function node9SelfEntry(): McpServer {
+  const [command, ...launcherArgs] = mcpLauncherArgv();
+  return { command, args: [...launcherArgs, 'mcp-server'] };
+}
 
-/** Returns true if the mcpServers map already has the node9 MCP server entry. */
-function hasNode9McpServer(servers: Record<string, McpServer>): boolean {
-  const entry = servers['node9'];
-  return (
-    !!entry &&
-    entry.command === 'node9' &&
-    Array.isArray(entry.args) &&
-    entry.args[0] === 'mcp-server'
-  );
+type AnyMcpEntry = { command?: unknown; args?: unknown } | undefined;
+
+/**
+ * The keys under which a servers map holds node9's own MCP server. Any key
+ * and any launch form count: setup must not add a second copy beside an entry
+ * that pins its Node, and teardown must remove the one that is there.
+ */
+function node9SelfKeys(servers: Record<string, AnyMcpEntry>): string[] {
+  return Object.keys(servers).filter((name) => {
+    const server = servers[name];
+    return !!server && parseNode9Launch(server)?.subcommand === 'mcp-server';
+  });
+}
+
+/** Returns true if the servers map already has the node9 MCP server entry. */
+function hasNode9McpServer(servers: Record<string, AnyMcpEntry>): boolean {
+  return node9SelfKeys(servers).length > 0;
 }
 
 /** Removes the node9 MCP server entry from a servers map. Returns true if removed. */
-function removeNode9McpServer(servers: Record<string, McpServer>): boolean {
-  if (!hasNode9McpServer(servers)) return false;
-  delete servers['node9'];
-  return true;
+function removeNode9McpServer(servers: Record<string, AnyMcpEntry>): boolean {
+  const keys = node9SelfKeys(servers);
+  for (const key of keys) delete servers[key];
+  return keys.length > 0;
+}
+
+/**
+ * The servers a setup flow offers to wrap: spawnable, and not started by
+ * node9 in any launch form. classifyMcp is the inventory's own reading, so
+ * setup, `mcp gateway` and the reconciler agree on what is node9's. The
+ * upstream is quoted (mcpUpstreamString): the gateway re-splits it with
+ * tokenize, and a bare join lost the separators of a Windows path and split
+ * an argument that holds a space.
+ */
+function mcpWrapCandidates(
+  servers: Record<string, McpServer>
+): Array<{ name: string; upstream: string }> {
+  return Object.entries(servers)
+    .filter(([, server]) => classifyMcp(server) === 'ungoverned')
+    .map(([name, server]) => ({ name, upstream: mcpUpstreamString(server) }));
+}
+
+/**
+ * Wrap the named servers in place: through the launcher, so they start on the
+ * Node that runs this setup, and with the config key as `--config-name`, so
+ * the gateway reports "redis-prod", not the command-derived "redis". `extra`
+ * is a flow's own fixed keys (VS Code's `type`).
+ */
+function wrapMcpServers(
+  servers: Record<string, McpServer>,
+  names: string[],
+  extra: Partial<McpServer> = {}
+): void {
+  const launcher = mcpLauncherArgv();
+  for (const name of names) {
+    servers[name] = { ...(toGateway(servers[name], name, launcher) as McpServer), ...extra };
+  }
+}
+
+/**
+ * Reverse every node9 wrap in a servers map, in place, in any launch form and
+ * whatever flags sit between the subcommand and `--upstream`. The upstream is
+ * split by tokenize (fromGateway), the inverse of how it was built, so a
+ * quoted argument with a space comes back as one argument. Returns the names
+ * restored and the names that read as wraps but carry no usable upstream:
+ * those are left as they are, and said so.
+ */
+function unwrapMcpServers(
+  servers: Record<string, McpServer>,
+  extra: Partial<McpServer> = {}
+): { unwrapped: string[]; unreadable: string[] } {
+  const unwrapped: string[] = [];
+  const unreadable: string[] = [];
+  for (const [name, server] of Object.entries(servers)) {
+    if (classifyMcp(server) !== 'gatewayed') continue;
+    const original = fromGateway(server) as McpServer | null;
+    if (!original) {
+      unreadable.push(name);
+      continue;
+    }
+    const { args, ...rest } = original;
+    servers[name] = { ...rest, ...extra, ...(args && args.length > 0 ? { args } : {}) };
+    unwrapped.push(name);
+  }
+  return { unwrapped, unreadable };
+}
+
+function printUnreadableWraps(names: string[], file: string): void {
+  if (names.length === 0) return;
+  console.log(
+    chalk.yellow(
+      `  ⚠️  Left as they are in ${file}: ${names.join(', ')} (a node9 wrap with no --upstream to restore)`
+    )
+  );
 }
 
 function printDaemonTip(): void {
@@ -232,7 +396,8 @@ export function fullPathCommand(
   // its BODY carries the absolute node + cli.js and is rewritten freely.
   // Windows keeps `node "<cli.js>"`: `node` is a PATH lookup there and the
   // cli.js path lives under the npm prefix, so it is already upgrade-stable.
-  ensureHookShim(home, pinnedNode(nodeExec, cliScript), cliScript);
+  // Both shims in one call: the launcher of the MCP entries pins the same Node.
+  ensureShims(home, pinnedNode(nodeExec, cliScript), cliScript);
   // Forward slashes: this string is a POSIX shell command, and it must not
   // depend on the separator the HOST happens to use. path.join on a Windows
   // test runner yields backslashes, which would make the emitted command vary
@@ -241,115 +406,27 @@ export function fullPathCommand(
   return `"${toForwardSlashes(hookShimPath(home))}" ${subcommand}`;
 }
 
-/**
- * Whether node9 is run as `<nodeExec> <cliScript>`, pinning the Node, rather
- * than through its bin. A .js path always is. A bin is pinned when it links to
- * JavaScript and the running binary is node: under `bunx --bun` it is bun, and
- * the bin's own `#!/usr/bin/env node` is the better choice there.
- */
-export function pinsNode(nodeExec: string, cliScript: string): boolean {
-  if (cliScript.endsWith('.js')) return true;
-  return resolvesToJsFile(cliScript) && runsOnNode(nodeExec);
-}
+// ── Shims ─────────────────────────────────────────────────────────────────────
+// ~/.node9/bin/hook and ~/.node9/bin/node9 live in node9-shim.ts with the
+// reasoning. The hook names stay exported from here: callers and tests import
+// them from setup.
+export { pinsNode, pinnedNode };
 
-function runsOnNode(execPath: string): boolean {
-  return /^node(js)?(\.exe)?$/i.test(path.basename(execPath));
-}
-
-/**
- * The node path to write into the shim. process.execPath is the resolved
- * binary, and a package manager deletes it on upgrade (Homebrew's
- * Cellar/node/<version>/bin/node). npm puts its global bin next to the node
- * that owns it (nvm, Homebrew, /usr/local), and that link survives upgrades:
- * use it when it leads to the same binary.
- */
-export function pinnedNode(nodeExec: string, cliScript: string): string {
-  const beside = toForwardSlashes(path.join(path.dirname(cliScript), 'node'));
-  try {
-    if (fs.realpathSync(beside) === fs.realpathSync(nodeExec)) return beside;
-  } catch {
-    /* no node beside the bin: keep execPath */
-  }
-  return nodeExec;
-}
-
-/** True when `bin` is, or links to, a JavaScript file that node can run. */
-function resolvesToJsFile(bin: string): boolean {
-  try {
-    return fs.realpathSync(bin).endsWith('.js');
-  } catch {
-    return false;
-  }
-}
-
-// ── Hook shim ──────────────────────────────────────────────────────────────────
-// ~/.node9/bin/hook — a two-line sh script that execs the real CLI. Exists so
-// the hook command written into agent configs is a constant per machine.
 export function hookShimPath(home: string = os.homedir()): string {
-  return path.join(home, '.node9', 'bin', 'hook');
+  return shimPath('hook', home);
 }
 
 export function hookShimBody(nodeExec: string, cliScript: string): string {
-  return (
-    '#!/bin/sh\n' +
-    '# node9 hook shim — written by `node9 init` / `node9 agents add`. Do not edit.\n' +
-    '# Agents call this fixed path; node9 rewrites the lines below on upgrade so\n' +
-    '# the hook command they trusted never changes (Codex keys trust to it).\n' +
-    "# The node that ran setup runs node9, whatever the agent's PATH holds. If an\n" +
-    '# upgrade removed it, the first node on PATH does, as a global install would.\n' +
-    `node="${nodeExec}"\n` +
-    '[ -x "$node" ] || node=node\n' +
-    `exec "$node" "${cliScript}" "$@"\n`
-  );
+  return shimBody('hook', nodeExec, cliScript);
 }
 
-/**
- * Write the shim when it is missing or its body no longer points at the
- * current node + cli.js. Idempotent and cheap (one read + compare); safe to
- * call from every setup flow. Exported so tests can pin the on-disk result.
- */
+/** Writes the hook shim alone. Setup itself calls ensureShims, which also
+ *  writes the launcher; this stays for callers that pin the hook file. */
 export function ensureHookShim(home: string, nodeExec: string, cliScript: string): boolean {
-  const shim = hookShimPath(home);
-  const body = hookShimBody(nodeExec, cliScript);
-  try {
-    if (fs.readFileSync(shim, 'utf-8') === body) return false;
-  } catch {
-    // missing — fall through and write
-  }
-  fs.mkdirSync(path.dirname(shim), { recursive: true });
-  fs.writeFileSync(shim, body, { mode: 0o755 });
-  fs.chmodSync(shim, 0o755); // writeFileSync's mode is masked by umask and ignored on overwrite
-  return true;
+  return ensureShim('hook', home, nodeExec, cliScript);
 }
 
 const SHIM_COMMAND_PATH = /[/\\]\.node9[/\\]bin[/\\]hook$/;
-
-/**
- * True when the shim at `shim` points at a node or a cli.js that no longer
- * exists (an nvm version removed, node9 reinstalled elsewhere). The command an
- * agent holds is still the shim's fixed path, so only the body tells.
- * A body that does not parse is not called stale: it is left for a human.
- */
-function isShimTargetStale(shim: string): boolean {
-  let body: string;
-  try {
-    body = fs.readFileSync(shim, 'utf-8');
-  } catch {
-    return false;
-  }
-  // Current body: node="<node>" ... exec "$node" "<cli>". Older body: exec "<node>" "<cli>".
-  const pinned = /^node="([^"]+)"$/m.exec(body)?.[1];
-  const exec = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
-  if (!exec) return false;
-  const node = exec[1] === '$node' ? pinned : exec[1];
-  if (!node) return false;
-  // A missing node still runs (PATH fallback) but no longer as set up: rewrite it.
-  return !fs.existsSync(node) || !fs.existsSync(exec[2]);
-}
-
-function toForwardSlashes(p: string): string {
-  return p.replace(/\\/g, '/');
-}
 
 /**
  * True if `command` is a node9 HUD statusLine command — across install shapes
@@ -506,27 +583,12 @@ function writeJson(filePath: string, data: unknown): void {
 
 // ── MCP wrap vocabulary ───────────────────────────────────────────────────────
 
-// The subcommand that actually accepts `--upstream`. `node9 mcp` is a PARENT
-// command (gateway | ungateway | status | pin) and has no such option, so a
-// wrap written as `node9 mcp --upstream <cmd>` dies on startup with
-// `error: unknown option '--upstream'`. Every agent's wrap carried that form.
-//
-// The damage is worse than lost governance: node9 REPLACES the user's server
-// command, so the wrap also broke the very server it was meant to protect.
-// Found 2026-09-22 in Codex's own log, not in ours — node9 had no idea the
-// server it wrapped was failing to start.
-export const MCP_WRAP_SUBCOMMAND = 'mcp-gateway';
-const LEGACY_MCP_WRAP_SUBCOMMAND = 'mcp';
+// The subcommand names and their history live in mcp-entry.ts, with the parser
+// that reads an entry. Re-exported: callers and tests import them from here.
+export { MCP_WRAP_SUBCOMMAND, isMcpWrapSubcommand };
 
 export function mcpWrapArgs(upstream: string): string[] {
   return [MCP_WRAP_SUBCOMMAND, '--upstream', upstream];
-}
-
-// Recognises the legacy subcommand too. An install still carrying it must read
-// back as OURS — otherwise teardown stops unwrapping it and the user is left
-// with a dead server and no way to undo it.
-export function isMcpWrapSubcommand(arg: unknown): boolean {
-  return arg === MCP_WRAP_SUBCOMMAND || arg === LEGACY_MCP_WRAP_SUBCOMMAND;
 }
 
 // Rewrites, in place, any node9 wrap still using the invalid subcommand, and
@@ -538,11 +600,15 @@ export function repairLegacyMcpWraps(
 ): string[] {
   const repaired: string[] = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server || server.command !== 'node9') continue;
-    const args = server.args as unknown[] | undefined;
-    if (!Array.isArray(args)) continue;
-    if (args[0] !== LEGACY_MCP_WRAP_SUBCOMMAND || args[1] !== '--upstream') continue;
-    servers[name] = { ...server, args: [MCP_WRAP_SUBCOMMAND, ...args.slice(1)] };
+    const launch = server ? parseNode9Launch(server) : null;
+    if (!server || !launch) continue;
+    if (launch.subcommand !== LEGACY_MCP_WRAP_SUBCOMMAND || launch.rest[0] !== '--upstream')
+      continue;
+    // The launcher stays: an entry that pins its Node keeps its pin.
+    servers[name] = {
+      ...server,
+      args: [...launch.launcher.slice(1), MCP_WRAP_SUBCOMMAND, ...launch.rest],
+    };
     repaired.push(name);
   }
   return repaired;
@@ -611,10 +677,88 @@ export function node9HookSubcommand(cmd: string | undefined): 'check' | 'log' | 
 
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
+// ── Claude Code's MCP file ────────────────────────────────────────────────────
+// Claude Code keeps its user-scope MCP servers in ~/.claude.json, the file
+// that also holds the rest of its state (projects, account, history) and that
+// it rewrites while it runs. node9 used to write ~/.claude/.mcp.json, a file
+// Claude Code does not load (checked against 2.1.92 and 2.1.259): `node9 init`
+// reported the MCP server added, and Claude Code never saw it or any wrap.
+//
+// Two rules follow from the file being Claude Code's own:
+//   - Every change is an edit of the servers map inside the file as it is at
+//     that moment (updateMcpServers), never a write-back of a copy read
+//     earlier. Setup waits on a prompt between its read and its write.
+//   - A file that does not parse is left alone. Replacing it with one that
+//     holds only node9's entry would cost the user their Claude Code state.
+
+function claudeMcpPath(homeDir: string): string {
+  return path.join(homeDir, '.claude.json');
+}
+
+/** The servers in ~/.claude.json as they are now, or null when the file is
+ *  there and cannot be read as a config: the caller then leaves it alone. */
+function readClaudeMcpServers(mcpPath: string): Record<string, McpServer> | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(mcpPath, 'utf-8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? {} : null;
+  }
+  try {
+    const root = JSON.parse(raw) as ClaudeConfig | null;
+    if (!root || typeof root !== 'object' || Array.isArray(root)) return null;
+    const servers = root.mcpServers;
+    return servers && typeof servers === 'object' && !Array.isArray(servers) ? servers : {};
+  } catch {
+    return null;
+  }
+}
+
+/** Edit ~/.claude.json's servers; a failure is said, and does not stop setup. */
+function updateClaudeMcp(
+  mcpPath: string,
+  mutate: (servers: Record<string, McpServer>) => boolean
+): boolean {
+  try {
+    return updateMcpServers(mcpPath, 'json', mutate);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(chalk.yellow(`  ⚠️  Could not update ~/.claude.json: ${msg}`));
+    return false;
+  }
+}
+
+/**
+ * ~/.claude/.mcp.json, the file node9 wrote before. Claude Code does not load
+ * it, so whatever node9 left there does nothing: its own server entry is
+ * removed and its wraps are undone, which gives back the entries a person may
+ * have kept there. A file that held nothing else is deleted.
+ */
+function retireLegacyClaudeMcpFile(homeDir: string): void {
+  const legacyPath = path.join(homeDir, '.claude', '.mcp.json');
+  const legacy = readJson<ClaudeConfig>(legacyPath);
+  if (!legacy?.mcpServers || typeof legacy.mcpServers !== 'object') return;
+  const removedOwn = removeNode9McpServer(legacy.mcpServers);
+  const { unwrapped } = unwrapMcpServers(legacy.mcpServers);
+  if (!removedOwn && unwrapped.length === 0) return;
+  const onlyNode9 = Object.keys(legacy.mcpServers).length === 0 && Object.keys(legacy).length === 1;
+  if (onlyNode9) {
+    fs.rmSync(legacyPath, { force: true });
+    console.log(chalk.gray('  🧹 Removed ~/.claude/.mcp.json (Claude Code does not load it)'));
+  } else {
+    writeJson(legacyPath, legacy);
+    console.log(
+      chalk.gray(
+        "  🧹 Took node9's entries out of ~/.claude/.mcp.json (Claude Code does not load it)"
+      )
+    );
+  }
+}
+
 export function teardownClaude(): void {
   const homeDir = os.homedir();
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
-  const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
+  const mcpPath = claudeMcpPath(homeDir);
   let changed = false;
 
   // Remove hook matchers from settings.json
@@ -638,42 +782,23 @@ export function teardownClaude(): void {
     }
   }
 
-  // Unwrap MCP servers in .claude.json
-  const claudeConfig = readJson<ClaudeConfig>(mcpPath);
-  if (claudeConfig?.mcpServers) {
-    let mcpChanged = false;
-
-    // Remove the node9 MCP server entry added by setup
-    if (removeNode9McpServer(claudeConfig.mcpServers)) {
-      mcpChanged = true;
-      console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude/.mcp.json'));
-    }
-
-    for (const [name, server] of Object.entries(claudeConfig.mcpServers)) {
-      const args = server.args as string[] | undefined;
-      if (
-        server.command === 'node9' &&
-        Array.isArray(args) &&
-        isMcpWrapSubcommand(args[0]) &&
-        args[1] === '--upstream' &&
-        typeof args[2] === 'string'
-      ) {
-        const [originalCmd, ...originalArgs] = args[2].split(' ');
-        claudeConfig.mcpServers[name] = {
-          ...server,
-          command: originalCmd,
-          args: originalArgs.length ? originalArgs : undefined,
-        };
-        mcpChanged = true;
-      } else if (server.command === 'node9') {
-        // Not a wrapped entry (e.g. node9 mcp-server) — skip silently.
-      }
-    }
-    if (mcpChanged) {
-      writeJson(mcpPath, claudeConfig);
-      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude/.mcp.json'));
-    }
+  // Unwrap MCP servers in ~/.claude.json
+  let removedOwn = false;
+  let unreadable: string[] = [];
+  const mcpChanged = updateClaudeMcp(mcpPath, (servers) => {
+    removedOwn = removeNode9McpServer(servers);
+    const result = unwrapMcpServers(servers);
+    unreadable = result.unreadable;
+    return removedOwn || result.unwrapped.length > 0;
+  });
+  if (removedOwn) {
+    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude.json'));
   }
+  printUnreadableWraps(unreadable, '~/.claude.json');
+  if (mcpChanged) {
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude.json'));
+  }
+  retireLegacyClaudeMcpFile(homeDir);
 }
 
 export function teardownGemini(): void {
@@ -706,24 +831,9 @@ export function teardownGemini(): void {
       console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.gemini/settings.json'));
     }
 
-    for (const [name, server] of Object.entries(settings.mcpServers)) {
-      const args = server.args as string[] | undefined;
-      if (
-        server.command === 'node9' &&
-        Array.isArray(args) &&
-        isMcpWrapSubcommand(args[0]) &&
-        args[1] === '--upstream' &&
-        typeof args[2] === 'string'
-      ) {
-        const [originalCmd, ...originalArgs] = args[2].split(' ');
-        settings.mcpServers[name] = {
-          ...server,
-          command: originalCmd,
-          args: originalArgs.length ? originalArgs : undefined,
-        };
-        changed = true;
-      }
-    }
+    const unwrapped = unwrapMcpServers(settings.mcpServers);
+    if (unwrapped.unwrapped.length > 0) changed = true;
+    printUnreadableWraps(unwrapped.unreadable, '~/.gemini/settings.json');
   }
 
   if (changed) {
@@ -752,24 +862,9 @@ export function teardownCursor(): void {
     console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.cursor/mcp.json'));
   }
 
-  for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
-    const args = server.args as string[] | undefined;
-    if (
-      server.command === 'node9' &&
-      Array.isArray(args) &&
-      isMcpWrapSubcommand(args[0]) &&
-      args[1] === '--upstream' &&
-      typeof args[2] === 'string'
-    ) {
-      const [originalCmd, ...originalArgs] = args[2].split(' ');
-      mcpConfig.mcpServers[name] = {
-        ...server,
-        command: originalCmd,
-        args: originalArgs.length ? originalArgs : undefined,
-      };
-      changed = true;
-    }
-  }
+  const unwrapped = unwrapMcpServers(mcpConfig.mcpServers);
+  if (unwrapped.unwrapped.length > 0) changed = true;
+  printUnreadableWraps(unwrapped.unreadable, '~/.cursor/mcp.json');
 
   if (changed) {
     writeJson(mcpPath, mcpConfig);
@@ -891,12 +986,20 @@ export async function setupClaude(): Promise<void> {
   seedMcpPinsIfMissing();
 
   const homeDir = os.homedir();
-  const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
+  const mcpPath = claudeMcpPath(homeDir);
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
 
-  const claudeConfig = readJson<ClaudeConfig>(mcpPath) ?? {};
   const settings = readJson<ClaudeSettings>(hooksPath) ?? {};
-  const servers = claudeConfig.mcpServers ?? {};
+  // null: ~/.claude.json is there and does not parse. The hooks are still
+  // installed; the MCP part is skipped, and said.
+  const mcpReadable = readClaudeMcpServers(mcpPath) !== null;
+  if (!mcpReadable) {
+    console.log(
+      chalk.yellow(
+        '  ⚠️  ~/.claude.json could not be read as JSON, so node9 left it alone: no MCP server added, none wrapped.'
+      )
+    );
+  }
 
   let hooksChanged = false;
   let anythingChanged = false;
@@ -923,14 +1026,19 @@ export async function setupClaude(): Promise<void> {
   // wrap loop below skips anything already commanded by node9, so without this
   // a broken wrap survives every upgrade with the user's own server dead. Like
   // the addition above there is nothing for the user to decide, so no prompt.
-  const repairedMcpWraps = repairLegacyMcpWraps(
-    servers as Record<string, { command?: string; args?: unknown }>
-  );
-  const addNode9McpServer = !hasNode9McpServer(servers);
-  if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
-    claudeConfig.mcpServers = servers;
-    writeJson(mcpPath, claudeConfig);
+  let addNode9McpServer = false;
+  let repairedMcpWraps: string[] = [];
+  const mcpAdded =
+    mcpReadable &&
+    updateClaudeMcp(mcpPath, (servers) => {
+      repairedMcpWraps = repairLegacyMcpWraps(
+        servers as Record<string, { command?: string; args?: unknown }>
+      );
+      addNode9McpServer = !hasNode9McpServer(servers);
+      if (addNode9McpServer) servers['node9'] = node9SelfEntry();
+      return addNode9McpServer || repairedMcpWraps.length > 0;
+    });
+  if (mcpAdded) {
     if (addNode9McpServer) {
       console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
     }
@@ -943,6 +1051,7 @@ export async function setupClaude(): Promise<void> {
     }
     anythingChanged = true;
   }
+  retireLegacyClaudeMcpFile(homeDir);
 
   // ── HUD (statusLine) — set alongside hooks in the same write ────────────
   const hudCommand = fullPathCommand('hud');
@@ -968,12 +1077,7 @@ export async function setupClaude(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    const upstream = mcpUpstreamString(server);
-    serversToWrap.push({ name, upstream });
-  }
+  const serversToWrap = mcpWrapCandidates(readClaudeMcpServers(mcpPath) ?? {});
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -989,17 +1093,22 @@ export async function setupClaude(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
+      // The prompt may have waited minutes, and Claude Code rewrites this file
+      // while it runs: wrap what is in it NOW, and only the servers that were
+      // shown and are still unwrapped.
+      let wrapped = 0;
+      updateClaudeMcp(mcpPath, (servers) => {
+        const names = serversToWrap
+          .map((w) => w.name)
+          .filter((name) => servers[name] && classifyMcp(servers[name]) === 'ungoverned');
+        wrapMcpServers(servers, names);
+        wrapped = names.length;
+        return wrapped > 0;
+      });
+      if (wrapped > 0) {
+        console.log(chalk.green(`\n  ✅ ${wrapped} MCP server(s) wrapped`));
+        anythingChanged = true;
       }
-      claudeConfig.mcpServers = servers;
-      writeJson(mcpPath, claudeConfig);
-      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
-      anythingChanged = true;
     } else {
       console.log(chalk.yellow('  Skipped MCP server wrapping.'));
     }
@@ -1104,7 +1213,7 @@ export async function setupGemini(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     settings.mcpServers = servers;
     if (addNode9McpServer) {
       console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
@@ -1126,12 +1235,7 @@ export async function setupGemini(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    const upstream = mcpUpstreamString(server);
-    serversToWrap.push({ name, upstream });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -1147,13 +1251,10 @@ export async function setupGemini(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       settings.mcpServers = servers;
       writeJson(settingsPath, settings);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -1311,7 +1412,7 @@ export async function setupAntigravity(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -1357,11 +1458,7 @@ export async function setupAntigravity(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -1377,13 +1474,10 @@ export async function setupAntigravity(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -1454,24 +1548,9 @@ export function teardownAntigravity(): void {
       );
     }
 
-    for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
-      const args = server.args as string[] | undefined;
-      if (
-        server.command === 'node9' &&
-        Array.isArray(args) &&
-        isMcpWrapSubcommand(args[0]) &&
-        args[1] === '--upstream' &&
-        typeof args[2] === 'string'
-      ) {
-        const [originalCmd, ...originalArgs] = args[2].split(' ');
-        mcpConfig.mcpServers[name] = {
-          ...server,
-          command: originalCmd,
-          args: originalArgs.length ? originalArgs : undefined,
-        };
-        mcpChanged = true;
-      }
-    }
+    const unwrapped = unwrapMcpServers(mcpConfig.mcpServers);
+    if (unwrapped.unwrapped.length > 0) mcpChanged = true;
+    printUnreadableWraps(unwrapped.unreadable, '~/.gemini/config/mcp_config.json');
     if (mcpChanged) {
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.gemini/config/mcp_config.json'));
@@ -1579,7 +1658,7 @@ export async function setupCopilot(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -1596,11 +1675,7 @@ export async function setupCopilot(): Promise<void> {
   }
 
   // Wrap existing non-node9 MCP servers.
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -1616,13 +1691,10 @@ export async function setupCopilot(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -1691,24 +1763,9 @@ export function teardownCopilot(): void {
         chalk.green('  ✅ Removed node9 MCP server entry from ~/.copilot/mcp-config.json')
       );
     }
-    for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
-      const args = server.args as string[] | undefined;
-      if (
-        server.command === 'node9' &&
-        Array.isArray(args) &&
-        isMcpWrapSubcommand(args[0]) &&
-        args[1] === '--upstream' &&
-        typeof args[2] === 'string'
-      ) {
-        const [originalCmd, ...originalArgs] = args[2].split(' ');
-        mcpConfig.mcpServers[name] = {
-          ...server,
-          command: originalCmd,
-          args: originalArgs.length ? originalArgs : undefined,
-        };
-        mcpChanged = true;
-      }
-    }
+    const unwrapped = unwrapMcpServers(mcpConfig.mcpServers);
+    if (unwrapped.unwrapped.length > 0) mcpChanged = true;
+    printUnreadableWraps(unwrapped.unreadable, '~/.copilot/mcp-config.json');
     if (mcpChanged) {
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.copilot/mcp-config.json'));
@@ -1897,7 +1954,7 @@ export async function setupCursor(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -1914,12 +1971,7 @@ export async function setupCursor(): Promise<void> {
   }
 
   // ── Modifications — show preview and ask ─────────────────────────
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    const upstream = mcpUpstreamString(server);
-    serversToWrap.push({ name, upstream });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -1935,13 +1987,10 @@ export async function setupCursor(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -2201,7 +2250,7 @@ export async function setupCodex(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     config.mcp_servers = servers;
     writeToml(configPath, config);
     if (addNode9McpServer) {
@@ -2220,17 +2269,15 @@ export async function setupCodex(): Promise<void> {
   // ── Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   const appManaged: string[] = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+  for (const candidate of mcpWrapCandidates(servers)) {
     // Entries the Codex app owns are not ours to wrap — see
     // isCodexAppManagedServer. Skipping them is the fix for a wrap that broke
     // the app's own tooling and never stuck.
-    if (isCodexAppManagedServer(name, server)) {
-      appManaged.push(name);
+    if (isCodexAppManagedServer(candidate.name, servers[candidate.name])) {
+      appManaged.push(candidate.name);
       continue;
     }
-    const upstream = mcpUpstreamString(server);
-    serversToWrap.push({ name, upstream });
+    serversToWrap.push(candidate);
   }
 
   if (appManaged.length > 0) {
@@ -2253,13 +2300,10 @@ export async function setupCodex(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       config.mcp_servers = servers;
       writeToml(configPath, config);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -2379,24 +2423,9 @@ export function teardownCodex(): void {
     console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.codex/config.toml'));
   }
 
-  for (const [name, server] of Object.entries(config.mcp_servers)) {
-    const args = server.args as string[] | undefined;
-    if (
-      server.command === 'node9' &&
-      Array.isArray(args) &&
-      isMcpWrapSubcommand(args[0]) &&
-      args[1] === '--upstream' &&
-      typeof args[2] === 'string'
-    ) {
-      const [originalCmd, ...originalArgs] = args[2].split(' ');
-      config.mcp_servers[name] = {
-        ...server,
-        command: originalCmd,
-        args: originalArgs.length ? originalArgs : undefined,
-      };
-      changed = true;
-    }
-  }
+  const unwrapped = unwrapMcpServers(config.mcp_servers);
+  if (unwrapped.unwrapped.length > 0) changed = true;
+  printUnreadableWraps(unwrapped.unreadable, '~/.codex/config.toml');
 
   if (changed) {
     writeToml(configPath, config);
@@ -2500,7 +2529,7 @@ export async function setupWindsurf(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -2517,11 +2546,7 @@ export async function setupWindsurf(): Promise<void> {
   }
 
   // Wrap existing non-node9 MCP servers
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -2536,13 +2561,10 @@ export async function setupWindsurf(): Promise<void> {
     console.log('');
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       mcpConfig.mcpServers = servers;
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -2594,24 +2616,9 @@ export function teardownWindsurf(): void {
     );
   }
 
-  for (const [name, server] of Object.entries(mcpConfig.mcpServers)) {
-    const args = server.args as string[] | undefined;
-    if (
-      server.command === 'node9' &&
-      Array.isArray(args) &&
-      isMcpWrapSubcommand(args[0]) &&
-      args[1] === '--upstream' &&
-      typeof args[2] === 'string'
-    ) {
-      const [originalCmd, ...originalArgs] = args[2].split(' ');
-      mcpConfig.mcpServers[name] = {
-        ...server,
-        command: originalCmd,
-        args: originalArgs.length ? originalArgs : undefined,
-      };
-      changed = true;
-    }
-  }
+  const unwrapped = unwrapMcpServers(mcpConfig.mcpServers);
+  if (unwrapped.unwrapped.length > 0) changed = true;
+  printUnreadableWraps(unwrapped.unreadable, '~/.codeium/windsurf/mcp_config.json');
 
   if (changed) {
     writeJson(mcpPath, mcpConfig);
@@ -2641,16 +2648,6 @@ interface VSCodeMcpConfig {
   [key: string]: unknown;
 }
 
-function hasNode9McpServerVSCode(servers: Record<string, VSCodeMcpServer>): boolean {
-  const entry = servers['node9'];
-  return (
-    !!entry &&
-    entry.command === 'node9' &&
-    Array.isArray(entry.args) &&
-    entry.args[0] === 'mcp-server'
-  );
-}
-
 export async function setupVSCode(): Promise<void> {
   seedMcpPinsIfMissing(); // #179
   const homeDir = os.homedir();
@@ -2669,10 +2666,10 @@ export async function setupVSCode(): Promise<void> {
   const repairedMcpWraps = repairLegacyMcpWraps(
     servers as unknown as Record<string, { command?: string; args?: unknown }>
   );
-  const addNode9McpServer = !hasNode9McpServerVSCode(servers);
+  const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
     if (addNode9McpServer) {
-      servers['node9'] = { type: 'stdio', command: 'node9', args: ['mcp-server'] };
+      servers['node9'] = { type: 'stdio', ...node9SelfEntry() };
     }
     mcpConfig.servers = servers;
     writeJson(mcpPath, mcpConfig);
@@ -2690,11 +2687,7 @@ export async function setupVSCode(): Promise<void> {
   }
 
   // Wrap existing non-node9 MCP servers
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -2709,14 +2702,11 @@ export async function setupVSCode(): Promise<void> {
     console.log('');
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          type: 'stdio',
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name),
+        { type: 'stdio' }
+      );
       mcpConfig.servers = servers;
       writeJson(mcpPath, mcpConfig);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -2760,31 +2750,14 @@ export function teardownVSCode(): void {
 
   let changed = false;
 
-  if (hasNode9McpServerVSCode(mcpConfig.servers)) {
-    delete mcpConfig.servers['node9'];
+  if (removeNode9McpServer(mcpConfig.servers)) {
     changed = true;
     console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.vscode/mcp.json'));
   }
 
-  for (const [name, server] of Object.entries(mcpConfig.servers)) {
-    const args = server.args as string[] | undefined;
-    if (
-      server.command === 'node9' &&
-      Array.isArray(args) &&
-      isMcpWrapSubcommand(args[0]) &&
-      args[1] === '--upstream' &&
-      typeof args[2] === 'string'
-    ) {
-      const [originalCmd, ...originalArgs] = args[2].split(' ');
-      mcpConfig.servers[name] = {
-        ...server,
-        type: 'stdio',
-        command: originalCmd,
-        args: originalArgs.length ? originalArgs : undefined,
-      };
-      changed = true;
-    }
-  }
+  const unwrapped = unwrapMcpServers(mcpConfig.servers, { type: 'stdio' });
+  if (unwrapped.unwrapped.length > 0) changed = true;
+  printUnreadableWraps(unwrapped.unreadable, '~/.vscode/mcp.json');
 
   if (changed) {
     writeJson(mcpPath, mcpConfig);
@@ -2822,7 +2795,7 @@ export async function setupClaudeDesktop(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     config.mcpServers = servers;
     writeJson(configPath, config);
     if (addNode9McpServer) {
@@ -2838,11 +2811,7 @@ export async function setupClaudeDesktop(): Promise<void> {
     anythingChanged = true;
   }
 
-  const serversToWrap: Array<{ name: string; upstream: string }> = [];
-  for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
-    serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
-  }
+  const serversToWrap = mcpWrapCandidates(servers);
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -2857,13 +2826,10 @@ export async function setupClaudeDesktop(): Promise<void> {
     console.log('');
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      for (const { name, upstream } of serversToWrap) {
-        servers[name] = {
-          ...servers[name],
-          command: 'node9',
-          args: mcpWrapArgs(upstream),
-        };
-      }
+      wrapMcpServers(
+        servers,
+        serversToWrap.map((w) => w.name)
+      );
       config.mcpServers = servers;
       writeJson(configPath, config);
       console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
@@ -2915,24 +2881,9 @@ export function teardownClaudeDesktop(): void {
     console.log(chalk.green(`  ✅ Removed node9 MCP server entry from ${configPath}`));
   }
 
-  for (const [name, server] of Object.entries(config.mcpServers)) {
-    const args = server.args as string[] | undefined;
-    if (
-      server.command === 'node9' &&
-      Array.isArray(args) &&
-      isMcpWrapSubcommand(args[0]) &&
-      args[1] === '--upstream' &&
-      typeof args[2] === 'string'
-    ) {
-      const [originalCmd, ...originalArgs] = args[2].split(' ');
-      config.mcpServers[name] = {
-        ...server,
-        command: originalCmd,
-        args: originalArgs.length ? originalArgs : undefined,
-      };
-      changed = true;
-    }
-  }
+  const unwrapped = unwrapMcpServers(config.mcpServers);
+  if (unwrapped.unwrapped.length > 0) changed = true;
+  printUnreadableWraps(unwrapped.unreadable, 'Claude Desktop config');
 
   if (changed) {
     writeJson(configPath, config);
@@ -2984,37 +2935,6 @@ interface OpencodeConfig {
 }
 
 /**
- * Resolves the argv prefix used to invoke the node9 CLI from a child
- * process. Two production shapes mirroring fullPathCommand's logic:
- *
- *   - Global install whose bin links to cli.js (npm, bun), or a cli.js
- *     path: on POSIX the shared hook shim (~/.node9/bin/hook), as
- *     fullPathCommand writes for the other agents; on Windows node + cli.js.
- *     A bin that is not JavaScript (pnpm's shell wrapper) is spawned directly.
- *
- *   - Dev / npm-link: argv[1] is the cli.js file with a #!/usr/bin/env
- *     node shebang. Invoke via the current node executable + cli.js.
- *
- * Under NODE9_TESTING=1 the resolution collapses to the bare ['node9']
- * form so unit tests don't depend on the local filesystem layout.
- */
-function node9ArgvForShim(): string[] {
-  if (process.env.NODE9_TESTING === '1') return ['node9'];
-  const nodeExec = process.execPath;
-  const cliScript = process.argv[1];
-  if (!cliScript || !pinsNode(nodeExec, cliScript)) return [cliScript];
-  // POSIX: the shared hook shim, so these plugins run on the Node that set them
-  // up, fall back to PATH when an upgrade removed it, and are healed with the
-  // other agents. Both plugins fail closed, so a dead node path in them would
-  // block every tool call.
-  if (process.platform !== 'win32') {
-    ensureHookShim(os.homedir(), pinnedNode(nodeExec, cliScript), cliScript);
-    return [hookShimPath(os.homedir())];
-  }
-  return [nodeExec, cliScript];
-}
-
-/**
  * Reads the current node9 version from the installed package.json.
  * Embedded as a constant in the shim so subsequent `node9 init` runs
  * can self-heal mismatched shims. Also consumed by the init telemetry
@@ -3057,7 +2977,7 @@ export async function setupOpencode(): Promise<void> {
   }
 
   const shimContent = renderOpencodeShim({
-    node9Argv: node9ArgvForShim(),
+    node9Argv: node9Argv('hook'),
     version: node9Version(),
   });
 
@@ -3096,7 +3016,10 @@ export async function setupOpencode(): Promise<void> {
   let configChanged = false;
 
   // Build the canonical mcp.node9 entry. command[] is [...argv, 'mcp-server'].
-  const desiredCommand = [...node9ArgvForShim(), 'mcp-server'];
+  // POSIX: the launcher, like every other agent's entry. Windows keeps
+  // node + cli.js, which starts there today.
+  const node9Launch = process.platform === 'win32' ? node9Argv('hook') : mcpLauncherArgv();
+  const desiredCommand = [...node9Launch, 'mcp-server'];
   const desiredEntry: OpencodeMcpEntry = {
     type: 'local',
     command: desiredCommand,
@@ -3222,7 +3145,7 @@ export async function setupPi(): Promise<void> {
   }
 
   const shimContent = renderPiShim({
-    node9Argv: node9ArgvForShim(),
+    node9Argv: node9Argv('hook'),
     version: node9Version(),
   });
 

@@ -7,7 +7,8 @@ import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { isDaemonRunning, probeDaemonHealth, DAEMON_PORT, DAEMON_HOST } from '../../auth/daemon';
-import { CURRENT_BUILD, describeBuildDrift } from '../../daemon/build-id';
+import { CURRENT_BUILD, buildIdString, describeBuildDrift } from '../../daemon/build-id';
+import { readRefreshStamp } from '../../daemon/refresh-stamp';
 import { getConfig } from '../../config';
 import { getAgentWiring } from '../../agent-wiring';
 import { assessCodexTrust, codexTrustInstruction } from '../../codex-trust';
@@ -23,6 +24,8 @@ import { agoLabel } from '../../lib/relative-time';
 import { readStartupCause } from '../../daemon/startup-log';
 import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 import { locatorCommand } from '../../utils/platform-shell';
+import { mcpLaunchHealth, readMcpNodeFailures, launcherState } from '../../mcp-launch-health';
+import { pinsNode } from '../../node9-shim';
 
 /**
  * Did the cloud REJECT this machine's key? A 401 in the sync-health record is
@@ -266,6 +269,79 @@ export function registerDoctorCommand(program: Command, version: string): void {
         );
       }
 
+      // ── MCP servers ───────────────────────────────────────────────────────────
+      // node9's own MCP server and the servers it wrapped start node9 from the
+      // agent's config. An entry written as the bare `node9` starts on the Node
+      // the AGENT's PATH holds; under an old one node9 refuses to run, and the
+      // agent says only "failed to connect". Nothing above this section can
+      // see that: the entry is present, so the agent reads as protected.
+      // POSIX only: the launcher these checks point to does not exist on Windows.
+      if (process.platform !== 'win32') {
+        const mcp = mcpLaunchHealth(homeDir);
+        const failures = readMcpNodeFailures(homeDir);
+        const launcher = launcherState(homeDir);
+        // A node9 that is not JavaScript run by node (pnpm's wrapper, bun) has
+        // no launcher to move entries to: telling its user to run heal would
+        // name a fix that changes nothing.
+        const canPin = pinsNode(process.execPath, process.argv[1] ?? '');
+        const dependent = canPin ? mcp.pathDependent : [];
+        if (mcp.total > 0 || failures) {
+          section('MCP servers');
+          const failedOn = failures
+            ? `Node.js ${failures.version} (${failures.execPath}) is too old for node9`
+            : '';
+          const times = failures
+            ? `${failures.partial ? 'at least ' : ''}${failures.count} time${failures.count === 1 ? '' : 's'}`
+            : '';
+          if (dependent.length > 0) {
+            // One warning for the machine, not one per agent: the fix is one
+            // command, and six agents would otherwise print six warnings.
+            const n = dependent.reduce((sum, g) => sum + g.names.length, 0);
+            warn(
+              `${n} node9 MCP entr${n === 1 ? 'y starts' : 'ies start'} on whatever Node the agent's PATH holds`,
+              [
+                ...dependent.map((g) => `${g.agentLabel}: ${g.names.join(', ')}`),
+                'Run: node9 heal   (moves them to ~/.node9/bin/node9, which pins the Node)',
+              ].join('\n       ')
+            );
+          }
+          if (launcher.state === 'stale' && mcp.onLauncher > 0) {
+            warn(
+              `The node9 launcher points at a Node or a node9 that no longer exists (${launcher.node ?? launcher.path}); MCP servers fall back to PATH's node`,
+              'Run: node9 init'
+            );
+          }
+          if (failures && (dependent.length > 0 || launcher.state === 'stale')) {
+            fail(
+              `node9's MCP entries failed to start ${times} in the last 7 days: ${failedOn}`,
+              'Run: node9 heal   (then restart the agent)'
+            );
+          } else if (failures && failures.lastAt > mcp.newestConfigChange) {
+            // Still failing after the last change to every config node9 reads,
+            // and none of them holds an entry that depends on PATH.
+            warn(
+              `A node9 MCP entry failed to start ${times} in the last 7 days, last ${agoLabel(new Date(failures.lastAt).toISOString())}: ${failedOn}`,
+              'No agent config node9 reads holds such an entry. A project-scoped server (.mcp.json, or a project in ~/.claude.json) may: start it through ~/.node9/bin/node9'
+            );
+          } else if (failures) {
+            pass(
+              `MCP entries failed to start on an old Node until ${agoLabel(new Date(failures.lastAt).toISOString())}; no entry depends on the agent's PATH now`
+            );
+          }
+          const steady = mcp.onLauncher + mcp.pinnedByHand;
+          if (steady > 0 && launcher.state !== 'stale') {
+            const parts = [];
+            if (mcp.onLauncher > 0) {
+              parts.push(
+                `${mcp.onLauncher} start${mcp.onLauncher === 1 ? 's' : ''} through ~/.node9/bin/node9${launcher.node ? ` (Node: ${launcher.node})` : ''}`
+              );
+            }
+            if (mcp.pinnedByHand > 0) parts.push(`${mcp.pinnedByHand} pinned by hand`);
+            pass(`node9 MCP entries: ${parts.join(', ')}`);
+          }
+        }
+      }
+
       // ── Daemon ────────────────────────────────────────────────────────────────
       // "(optional)" only when this machine doesn't ship to the cloud. With
       // cloud on, the daemon carries policy sync AND the audit shipper — calling
@@ -289,7 +365,12 @@ export function registerDoctorCommand(program: Command, version: string): void {
           CURRENT_BUILD
         );
         if (drift) {
-          warn(drift, 'Run: node9 daemon restart');
+          // A hook of this build asks for a refresh by itself (`node9 daemon
+          // refresh`). When that was tried and changed nothing, say why: the
+          // bare restart hint would hide a cause the user has to act on.
+          const refresh = readRefreshStamp(homeDir);
+          const why = refresh?.build === buildIdString(CURRENT_BUILD) ? refresh.reason : undefined;
+          warn(drift, why ? `Automatic refresh did not work: ${why}` : 'Run: node9 daemon restart');
         }
       } else {
         warn(

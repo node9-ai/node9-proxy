@@ -628,14 +628,46 @@ export function scheduleAutostartSelfHeal(
 }
 
 /**
+ * Does the installed login service start `binary` (this install's cli.js)?
+ * Read from the unit or plist text, exactly as `systemdUnit` / `launchdPlist`
+ * write it. False when there is no unit, on Windows (its startup entry cannot
+ * be restarted through a service manager), or when the unit starts another
+ * install: a global node9 under another Node after an nvm switch. Never throws.
+ */
+export function serviceUnitNamesBinary(
+  binary: string,
+  platform: NodeJS.Platform = process.platform,
+  files: { systemd: string; launchd: string } = { systemd: SYSTEMD_UNIT, launchd: LAUNCHD_PLIST }
+): boolean {
+  try {
+    if (platform === 'linux') {
+      return fs
+        .readFileSync(files.systemd, 'utf-8')
+        .split('\n')
+        .some((line) => line.startsWith('ExecStart=') && line.endsWith(` ${binary} daemon`));
+    }
+    if (platform === 'darwin') {
+      return fs
+        .readFileSync(files.launchd, 'utf-8')
+        .includes(`<string>${xmlEscape(binary)}</string>`);
+    }
+  } catch {
+    /* no unit */
+  }
+  return false;
+}
+
+/**
  * Restart the daemon through the service manager when its unit is enabled, so
  * the new process is the one systemd / launchd supervises (fw#409). Returns
  * false when no enabled unit exists, or the restart failed: the caller then
- * spawns the daemon itself, as before. Never throws.
+ * spawns the daemon itself, as before. A caller that has just asked
+ * `isDaemonServiceEnabled()` passes the answer, so the blocking probe runs
+ * once. Never throws.
  */
-export function restartDaemonService(): boolean {
+export function restartDaemonService(enabled: boolean = isDaemonServiceEnabled()): boolean {
   try {
-    if (!isDaemonServiceEnabled()) return false;
+    if (!enabled) return false;
     if (process.platform === 'linux') {
       const r = spawnSync('systemctl', ['--user', 'restart', 'node9-daemon'], {
         encoding: 'utf8',
