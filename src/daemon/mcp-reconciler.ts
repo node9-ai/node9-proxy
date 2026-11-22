@@ -21,6 +21,7 @@ import { getConfig, getCredentials } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { readMcpPins, writeMcpPins, type PinsFile } from '../mcp-pin';
+import { readyLauncherArgv } from '../node9-shim';
 
 const BASELINE_FILE = path.join(os.homedir(), '.node9', 'mcp-baseline.json');
 const BASELINE_CAP = 500;
@@ -139,7 +140,11 @@ export function runMcpReconcile(): void {
     let wrapped = false;
     if (doWrap) {
       try {
-        writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw, e.name));
+        // The launcher setup left, when there is one: a wrap written as the bare
+        // `node9` starts on the agent's PATH Node, and where that is an old Node
+        // the wrap takes the user's server down. The daemon never writes the
+        // launcher itself (readyLauncherArgv).
+        writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw, e.name, readyLauncherArgv()));
         wrappedAgents.add(e.agentLabel);
         wrappedCount++;
         wrapped = true;

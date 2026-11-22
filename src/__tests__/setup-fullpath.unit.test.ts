@@ -35,6 +35,14 @@ import {
   hookShimBody,
   ensureHookShim,
 } from '../setup.js';
+import {
+  shimPath,
+  shimBody,
+  ensureShims,
+  isShimTargetStale,
+  mcpLauncherArgv,
+  readyLauncherArgv,
+} from '../node9-shim.js';
 import os from 'os';
 import path from 'path';
 
@@ -666,3 +674,150 @@ describe.skipIf(process.platform === 'win32')(
     });
   }
 );
+
+// MCP entries get a file of their own beside the hook shim: ~/.node9/bin/node9.
+// The same script, so node9's own server and every wrapped server start on the
+// Node that ran setup. Written as the bare `node9`, they started on the Node
+// the agent's PATH held, and under an old one neither came up (2026-11-21).
+describe.skipIf(process.platform === 'win32')('the launcher beside the hook shim', () => {
+  let home = '';
+  let restoreProcess: () => void = () => {};
+  const NODE_PATH = '/opt/node-v25/bin/node';
+  const CLI_PATH = '/opt/node9/dist/cli.js';
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.stubEnv('NODE9_TESTING', '');
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-launcher-'));
+  });
+
+  afterEach(() => {
+    restoreProcess();
+    restoreProcess = () => {};
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('ensureShims writes both files, executable, and nothing on a second call', () => {
+    expect(ensureShims(home, NODE_PATH, CLI_PATH)).toBe(true);
+    const hook = shimPath('hook', home);
+    const launcher = shimPath('node9', home);
+    expect(hook).toBe(path.join(home, '.node9', 'bin', 'hook'));
+    expect(launcher).toBe(path.join(home, '.node9', 'bin', 'node9'));
+    expect(fs.statSync(hook).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(launcher).mode & 0o777).toBe(0o755);
+
+    const before = [fs.statSync(hook).mtimeMs, fs.statSync(launcher).mtimeMs];
+    expect(ensureShims(home, NODE_PATH, CLI_PATH)).toBe(false);
+    expect([fs.statSync(hook).mtimeMs, fs.statSync(launcher).mtimeMs]).toEqual(before);
+
+    // A Node upgrade rewrites both bodies; the paths agents hold do not move.
+    expect(ensureShims(home, '/opt/node-v26/bin/node', CLI_PATH)).toBe(true);
+    expect(fs.readFileSync(hook, 'utf-8')).toContain('node="/opt/node-v26/bin/node"');
+    expect(fs.readFileSync(launcher, 'utf-8')).toContain('node="/opt/node-v26/bin/node"');
+  });
+
+  it('writes the missing one when only the hook shim is there (an upgrade)', () => {
+    ensureHookShim(home, NODE_PATH, CLI_PATH);
+    const hookMtime = fs.statSync(shimPath('hook', home)).mtimeMs;
+    expect(fs.existsSync(shimPath('node9', home))).toBe(false);
+    expect(ensureShims(home, NODE_PATH, CLI_PATH)).toBe(true);
+    expect(fs.existsSync(shimPath('node9', home))).toBe(true);
+    expect(fs.statSync(shimPath('hook', home)).mtimeMs).toBe(hookMtime);
+  });
+
+  // Every machine holds this file. A changed byte rewrites it on each of them.
+  it('keeps the hook shim body byte for byte', () => {
+    const expected =
+      '#!/bin/sh\n' +
+      '# node9 hook shim \u2014 written by `node9 init` / `node9 agents add`. Do not edit.\n' +
+      '# Agents call this fixed path; node9 rewrites the lines below on upgrade so\n' +
+      '# the hook command they trusted never changes (Codex keys trust to it).\n' +
+      "# The node that ran setup runs node9, whatever the agent's PATH holds. If an\n" +
+      '# upgrade removed it, the first node on PATH does, as a global install would.\n' +
+      'node="/opt/node-v25/bin/node"\n' +
+      '[ -x "$node" ] || node=node\n' +
+      'exec "$node" "/opt/node9/dist/cli.js" "$@"\n';
+    expect(shimBody('hook', NODE_PATH, CLI_PATH)).toBe(expected);
+    expect(hookShimBody(NODE_PATH, CLI_PATH)).toBe(expected);
+  });
+
+  it('gives the launcher the same three lines that run node9', () => {
+    const lines = (body: string) => body.split('\n').filter((l) => !l.startsWith('# '));
+    expect(lines(shimBody('node9', NODE_PATH, CLI_PATH))).toEqual(
+      lines(shimBody('hook', NODE_PATH, CLI_PATH))
+    );
+    expect(shimBody('node9', NODE_PATH, CLI_PATH)).toContain('# node9 launcher');
+  });
+
+  it('fullPathCommand writes the launcher with the hook shim', () => {
+    restoreProcess = stubProcess(NODE_PATH, CLI_PATH);
+    fullPathCommand('check', 'linux', home);
+    expect(fs.readFileSync(shimPath('node9', home), 'utf-8')).toBe(
+      shimBody('node9', NODE_PATH, CLI_PATH)
+    );
+  });
+
+  it('isShimTargetStale reads the launcher as it reads the hook shim', () => {
+    const cli = path.join(home, 'cli.js');
+    fs.writeFileSync(cli, '');
+    ensureShims(home, process.execPath, cli);
+    expect(isShimTargetStale(shimPath('node9', home))).toBe(false);
+    ensureShims(home, path.join(home, 'gone', 'node'), cli);
+    expect(isShimTargetStale(shimPath('node9', home))).toBe(true);
+    ensureShims(home, process.execPath, path.join(home, 'gone.js'));
+    expect(isShimTargetStale(shimPath('node9', home))).toBe(true);
+    // No file is not stale: there is nothing to rewrite.
+    expect(isShimTargetStale(path.join(home, 'absent'))).toBe(false);
+  });
+
+  it('mcpLauncherArgv is the launcher, written by the call', () => {
+    restoreProcess = stubProcess(NODE_PATH, CLI_PATH);
+    expect(mcpLauncherArgv(home)).toEqual([shimPath('node9', home)]);
+    expect(fs.readFileSync(shimPath('node9', home), 'utf-8')).toBe(
+      shimBody('node9', NODE_PATH, CLI_PATH)
+    );
+  });
+
+  it('mcpLauncherArgv keeps a bin that is not JavaScript, and the bare name in tests', () => {
+    // pnpm writes a shell wrapper: node cannot run it, so it is the command itself.
+    const wrapper = path.join(home, 'pnpm', 'node9');
+    fs.mkdirSync(path.dirname(wrapper), { recursive: true });
+    fs.writeFileSync(wrapper, '#!/bin/sh\nexec node "$basedir/cli.js" "$@"\n', { mode: 0o755 });
+    restoreProcess = stubProcess(NODE_PATH, wrapper);
+    expect(mcpLauncherArgv(home)).toEqual([wrapper]);
+    expect(fs.existsSync(shimPath('node9', home))).toBe(false);
+
+    vi.stubEnv('NODE9_TESTING', '1');
+    expect(mcpLauncherArgv(home)).toEqual(['node9']);
+  });
+
+  // Setup skips what it reads as node9's and wraps the rest. An entry node9
+  // wrote but does not read back would be wrapped on the next run.
+  it('mcpLauncherArgv never returns a command node9 would not read back as its own', () => {
+    const odd = path.join(home, 'bin', 'n9-wrapper');
+    fs.mkdirSync(path.dirname(odd), { recursive: true });
+    fs.writeFileSync(odd, '#!/bin/sh\nexec node "$basedir/cli.js" "$@"\n', { mode: 0o755 });
+    restoreProcess = stubProcess(NODE_PATH, odd);
+    expect(mcpLauncherArgv(home)).toEqual(['node9']);
+  });
+
+  it('readyLauncherArgv reads the launcher and never writes it', () => {
+    expect(readyLauncherArgv(home)).toEqual(['node9']);
+    expect(fs.existsSync(path.join(home, '.node9'))).toBe(false);
+
+    const cli = path.join(home, 'cli.js');
+    fs.writeFileSync(cli, '');
+    ensureShims(home, process.execPath, cli);
+    expect(readyLauncherArgv(home)).toEqual([shimPath('node9', home)]);
+
+    // Not executable: an agent could not start it either.
+    fs.chmodSync(shimPath('node9', home), 0o644);
+    expect(readyLauncherArgv(home)).toEqual(['node9']);
+    fs.chmodSync(shimPath('node9', home), 0o755);
+
+    // Its node9 is gone: the bare name may still find an install on PATH.
+    ensureShims(home, process.execPath, path.join(home, 'gone.js'));
+    expect(readyLauncherArgv(home)).toEqual(['node9']);
+  });
+});

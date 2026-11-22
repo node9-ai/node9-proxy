@@ -70,6 +70,56 @@ describe('mcp reconcile pass', () => {
     expect(wrapped.env).toEqual({ A: '1' }); // preserved
   });
 
+  // A wrap written as the bare `node9` starts on the agent's PATH Node. Where
+  // that is an old Node the wrap does not start, and the user's server is down.
+  it.skipIf(process.platform === 'win32')(
+    'auto-wraps through the launcher when setup left one, and never writes it',
+    () => {
+      const launcher = path.join(home, '.node9', 'bin', 'node9');
+      const cli = path.join(home, 'cli.js');
+      fs.writeFileSync(cli, '');
+      fs.mkdirSync(path.dirname(launcher), { recursive: true });
+      const body = `#!/bin/sh\nnode="${process.execPath}"\n[ -x "$node" ] || node=node\nexec "$node" "${cli}" "$@"\n`;
+      fs.writeFileSync(launcher, body, { mode: 0o755 });
+
+      writeConfig({ mode: 'standard', mcpAutoWrap: true });
+      writeClaude({ gmail: { command: 'npx', args: ['gmail-mcp'], env: { A: '1' } } });
+      runMcpReconcile();
+      expect(gmailEntry()).toEqual({
+        command: launcher,
+        args: ['mcp-gateway', '--config-name', 'gmail', '--upstream', 'npx gmail-mcp'],
+        env: { A: '1' },
+      });
+      // The daemon may run on another Node than setup did: the body is not its to write.
+      expect(fs.readFileSync(launcher, 'utf-8')).toBe(body);
+    }
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'auto-wraps with the bare name when the launcher is missing or points nowhere',
+    () => {
+      writeConfig({ mode: 'standard', mcpAutoWrap: true });
+      writeClaude({ gmail: { command: 'npx', args: ['gmail-mcp'] } });
+      runMcpReconcile();
+      expect(gmailEntry().command).toBe('node9');
+      expect(fs.existsSync(path.join(home, '.node9', 'bin'))).toBe(false);
+
+      // A launcher whose node9 is gone: the bare name may still find an install.
+      const launcher = path.join(home, '.node9', 'bin', 'node9');
+      fs.mkdirSync(path.dirname(launcher), { recursive: true });
+      fs.writeFileSync(
+        launcher,
+        `#!/bin/sh\nnode="${process.execPath}"\n[ -x "$node" ] || node=node\nexec "$node" "${path.join(home, 'gone.js')}" "$@"\n`,
+        { mode: 0o755 }
+      );
+      writeClaude({ slack: { command: 'npx', args: ['slack-mcp'] } });
+      runMcpReconcile();
+      const slack = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf-8')).mcpServers
+        .slack;
+      expect(slack.command).toBe('node9');
+    }
+  );
+
   it('a failed auto-wrap is NOT baselined (retried next tick) and NOT counted (fix #3)', () => {
     writeConfig({ mode: 'standard', mcpAutoWrap: true });
     writeClaude({ gmail: { command: 'npx', args: ['gmail-mcp'] } });

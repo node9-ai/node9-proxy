@@ -14,6 +14,7 @@ import {
   type McpEntry,
 } from '../../mcp-wrap';
 import { resolveMcpStatus, type McpStatusEntry } from '../../mcp-status';
+import { mcpLauncherArgv } from '../../node9-shim';
 
 // Plain state word, padded so the CONNECTED column lines up across colored rows
 // (chalk-wrapped strings can't be padEnd'd — pad first, colour after).
@@ -70,8 +71,9 @@ function resolve(name: string, agent?: string): McpEntry[] {
 function wrapEntry(e: McpEntry): void {
   // toGateway on the RAW entry so env/type/… are preserved. Pass the config key
   // as the display name (--config-name) so the dashboard/audit show "redis-dev",
-  // not the command-derived "redis".
-  writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw, e.name));
+  // not the command-derived "redis". The wrap starts through the launcher, so
+  // it runs on the Node that runs this command, whatever the agent's PATH holds.
+  writeMcpEntry(e.mcpFile, e.format, e.name, toGateway(e.raw, e.name, mcpLauncherArgv()));
 }
 
 // Re-wrap an ALREADY-gatewayed server: unwrap to the original upstream, then

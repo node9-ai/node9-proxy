@@ -6,7 +6,26 @@ import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { mcpUpstreamString } from './mcp-wrap';
-import { MCP_WRAP_SUBCOMMAND, LEGACY_MCP_WRAP_SUBCOMMAND, isMcpWrapSubcommand } from './mcp-entry';
+import {
+  MCP_WRAP_SUBCOMMAND,
+  LEGACY_MCP_WRAP_SUBCOMMAND,
+  isMcpWrapSubcommand,
+  parseNode9Launch,
+} from './mcp-entry';
+import {
+  shimPath,
+  shimBody,
+  ensureShim,
+  ensureShims,
+  isShimTargetStale,
+  pinsNode,
+  pinnedNode,
+  runsOnNode,
+  resolvesToJsFile,
+  node9Argv,
+  mcpLauncherArgv,
+  toForwardSlashes,
+} from './node9-shim';
 import { codexTrustInstruction } from './codex-trust';
 import { establishCodexTrust } from './codex-app-server';
 import * as yaml from 'yaml';
@@ -118,25 +137,47 @@ interface GeminiSettings {
   [key: string]: unknown;
 }
 
-/** The MCP server entry node9 injects into agent configs. */
-const NODE9_MCP_SERVER_ENTRY: McpServer = { command: 'node9', args: ['mcp-server'] };
+/**
+ * The MCP server entry node9 injects into agent configs: its own server. It
+ * starts through the launcher (~/.node9/bin/node9), so it runs on the Node
+ * that ran setup. Written as `{ command: 'node9' }` it took `node` from the
+ * agent's PATH, and where that was an old Node the server never came up.
+ */
+function node9SelfEntry(): McpServer {
+  const [command, ...launcherArgs] = mcpLauncherArgv();
+  return { command, args: [...launcherArgs, 'mcp-server'] };
+}
 
-/** Returns true if the mcpServers map already has the node9 MCP server entry. */
-function hasNode9McpServer(servers: Record<string, McpServer>): boolean {
-  const entry = servers['node9'];
-  return (
-    !!entry &&
-    entry.command === 'node9' &&
-    Array.isArray(entry.args) &&
-    entry.args[0] === 'mcp-server'
-  );
+type AnyMcpEntry = { command?: unknown; args?: unknown } | undefined;
+
+/** True when the entry starts node9, in any of the forms the shared parser
+ *  reads: the bare name, the launcher, a Node pinned in front of the bin. */
+function startsNode9(server: AnyMcpEntry): boolean {
+  return !!server && parseNode9Launch(server) !== null;
+}
+
+/**
+ * The keys under which a servers map holds node9's own MCP server. Any key
+ * and any launch form count: setup must not add a second copy beside an entry
+ * that pins its Node, and teardown must remove the one that is there.
+ */
+function node9SelfKeys(servers: Record<string, AnyMcpEntry>): string[] {
+  return Object.keys(servers).filter((name) => {
+    const server = servers[name];
+    return !!server && parseNode9Launch(server)?.subcommand === 'mcp-server';
+  });
+}
+
+/** Returns true if the servers map already has the node9 MCP server entry. */
+function hasNode9McpServer(servers: Record<string, AnyMcpEntry>): boolean {
+  return node9SelfKeys(servers).length > 0;
 }
 
 /** Removes the node9 MCP server entry from a servers map. Returns true if removed. */
-function removeNode9McpServer(servers: Record<string, McpServer>): boolean {
-  if (!hasNode9McpServer(servers)) return false;
-  delete servers['node9'];
-  return true;
+function removeNode9McpServer(servers: Record<string, AnyMcpEntry>): boolean {
+  const keys = node9SelfKeys(servers);
+  for (const key of keys) delete servers[key];
+  return keys.length > 0;
 }
 
 function printDaemonTip(): void {
@@ -233,7 +274,8 @@ export function fullPathCommand(
   // its BODY carries the absolute node + cli.js and is rewritten freely.
   // Windows keeps `node "<cli.js>"`: `node` is a PATH lookup there and the
   // cli.js path lives under the npm prefix, so it is already upgrade-stable.
-  ensureHookShim(home, pinnedNode(nodeExec, cliScript), cliScript);
+  // Both shims in one call: the launcher of the MCP entries pins the same Node.
+  ensureShims(home, pinnedNode(nodeExec, cliScript), cliScript);
   // Forward slashes: this string is a POSIX shell command, and it must not
   // depend on the separator the HOST happens to use. path.join on a Windows
   // test runner yields backslashes, which would make the emitted command vary
@@ -242,115 +284,27 @@ export function fullPathCommand(
   return `"${toForwardSlashes(hookShimPath(home))}" ${subcommand}`;
 }
 
-/**
- * Whether node9 is run as `<nodeExec> <cliScript>`, pinning the Node, rather
- * than through its bin. A .js path always is. A bin is pinned when it links to
- * JavaScript and the running binary is node: under `bunx --bun` it is bun, and
- * the bin's own `#!/usr/bin/env node` is the better choice there.
- */
-export function pinsNode(nodeExec: string, cliScript: string): boolean {
-  if (cliScript.endsWith('.js')) return true;
-  return resolvesToJsFile(cliScript) && runsOnNode(nodeExec);
-}
+// ── Shims ─────────────────────────────────────────────────────────────────────
+// ~/.node9/bin/hook and ~/.node9/bin/node9 live in node9-shim.ts with the
+// reasoning. The hook names stay exported from here: callers and tests import
+// them from setup.
+export { pinsNode, pinnedNode };
 
-function runsOnNode(execPath: string): boolean {
-  return /^node(js)?(\.exe)?$/i.test(path.basename(execPath));
-}
-
-/**
- * The node path to write into the shim. process.execPath is the resolved
- * binary, and a package manager deletes it on upgrade (Homebrew's
- * Cellar/node/<version>/bin/node). npm puts its global bin next to the node
- * that owns it (nvm, Homebrew, /usr/local), and that link survives upgrades:
- * use it when it leads to the same binary.
- */
-export function pinnedNode(nodeExec: string, cliScript: string): string {
-  const beside = toForwardSlashes(path.join(path.dirname(cliScript), 'node'));
-  try {
-    if (fs.realpathSync(beside) === fs.realpathSync(nodeExec)) return beside;
-  } catch {
-    /* no node beside the bin: keep execPath */
-  }
-  return nodeExec;
-}
-
-/** True when `bin` is, or links to, a JavaScript file that node can run. */
-function resolvesToJsFile(bin: string): boolean {
-  try {
-    return fs.realpathSync(bin).endsWith('.js');
-  } catch {
-    return false;
-  }
-}
-
-// ── Hook shim ──────────────────────────────────────────────────────────────────
-// ~/.node9/bin/hook — a two-line sh script that execs the real CLI. Exists so
-// the hook command written into agent configs is a constant per machine.
 export function hookShimPath(home: string = os.homedir()): string {
-  return path.join(home, '.node9', 'bin', 'hook');
+  return shimPath('hook', home);
 }
 
 export function hookShimBody(nodeExec: string, cliScript: string): string {
-  return (
-    '#!/bin/sh\n' +
-    '# node9 hook shim — written by `node9 init` / `node9 agents add`. Do not edit.\n' +
-    '# Agents call this fixed path; node9 rewrites the lines below on upgrade so\n' +
-    '# the hook command they trusted never changes (Codex keys trust to it).\n' +
-    "# The node that ran setup runs node9, whatever the agent's PATH holds. If an\n" +
-    '# upgrade removed it, the first node on PATH does, as a global install would.\n' +
-    `node="${nodeExec}"\n` +
-    '[ -x "$node" ] || node=node\n' +
-    `exec "$node" "${cliScript}" "$@"\n`
-  );
+  return shimBody('hook', nodeExec, cliScript);
 }
 
-/**
- * Write the shim when it is missing or its body no longer points at the
- * current node + cli.js. Idempotent and cheap (one read + compare); safe to
- * call from every setup flow. Exported so tests can pin the on-disk result.
- */
+/** Writes the hook shim alone. Setup itself calls ensureShims, which also
+ *  writes the launcher; this stays for callers that pin the hook file. */
 export function ensureHookShim(home: string, nodeExec: string, cliScript: string): boolean {
-  const shim = hookShimPath(home);
-  const body = hookShimBody(nodeExec, cliScript);
-  try {
-    if (fs.readFileSync(shim, 'utf-8') === body) return false;
-  } catch {
-    // missing — fall through and write
-  }
-  fs.mkdirSync(path.dirname(shim), { recursive: true });
-  fs.writeFileSync(shim, body, { mode: 0o755 });
-  fs.chmodSync(shim, 0o755); // writeFileSync's mode is masked by umask and ignored on overwrite
-  return true;
+  return ensureShim('hook', home, nodeExec, cliScript);
 }
 
 const SHIM_COMMAND_PATH = /[/\\]\.node9[/\\]bin[/\\]hook$/;
-
-/**
- * True when the shim at `shim` points at a node or a cli.js that no longer
- * exists (an nvm version removed, node9 reinstalled elsewhere). The command an
- * agent holds is still the shim's fixed path, so only the body tells.
- * A body that does not parse is not called stale: it is left for a human.
- */
-function isShimTargetStale(shim: string): boolean {
-  let body: string;
-  try {
-    body = fs.readFileSync(shim, 'utf-8');
-  } catch {
-    return false;
-  }
-  // Current body: node="<node>" ... exec "$node" "<cli>". Older body: exec "<node>" "<cli>".
-  const pinned = /^node="([^"]+)"$/m.exec(body)?.[1];
-  const exec = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
-  if (!exec) return false;
-  const node = exec[1] === '$node' ? pinned : exec[1];
-  if (!node) return false;
-  // A missing node still runs (PATH fallback) but no longer as set up: rewrite it.
-  return !fs.existsSync(node) || !fs.existsSync(exec[2]);
-}
-
-function toForwardSlashes(p: string): string {
-  return p.replace(/\\/g, '/');
-}
 
 /**
  * True if `command` is a node9 HUD statusLine command — across install shapes
@@ -914,7 +868,7 @@ export async function setupClaude(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     claudeConfig.mcpServers = servers;
     writeJson(mcpPath, claudeConfig);
     if (addNode9McpServer) {
@@ -956,7 +910,7 @@ export async function setupClaude(): Promise<void> {
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
   }
@@ -1090,7 +1044,7 @@ export async function setupGemini(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     settings.mcpServers = servers;
     if (addNode9McpServer) {
       console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
@@ -1114,7 +1068,7 @@ export async function setupGemini(): Promise<void> {
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
   }
@@ -1297,7 +1251,7 @@ export async function setupAntigravity(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -1345,7 +1299,7 @@ export async function setupAntigravity(): Promise<void> {
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
   }
 
@@ -1565,7 +1519,7 @@ export async function setupCopilot(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -1584,7 +1538,7 @@ export async function setupCopilot(): Promise<void> {
   // Wrap existing non-node9 MCP servers.
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
   }
 
@@ -1883,7 +1837,7 @@ export async function setupCursor(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -1902,7 +1856,7 @@ export async function setupCursor(): Promise<void> {
   // ── Modifications — show preview and ask ─────────────────────────
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     const upstream = mcpUpstreamString(server);
     serversToWrap.push({ name, upstream });
   }
@@ -2187,7 +2141,7 @@ export async function setupCodex(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     config.mcp_servers = servers;
     writeToml(configPath, config);
     if (addNode9McpServer) {
@@ -2207,7 +2161,7 @@ export async function setupCodex(): Promise<void> {
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   const appManaged: string[] = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     // Entries the Codex app owns are not ours to wrap — see
     // isCodexAppManagedServer. Skipping them is the fix for a wrap that broke
     // the app's own tooling and never stuck.
@@ -2486,7 +2440,7 @@ export async function setupWindsurf(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     mcpConfig.mcpServers = servers;
     writeJson(mcpPath, mcpConfig);
     if (addNode9McpServer) {
@@ -2505,7 +2459,7 @@ export async function setupWindsurf(): Promise<void> {
   // Wrap existing non-node9 MCP servers
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
   }
 
@@ -2627,16 +2581,6 @@ interface VSCodeMcpConfig {
   [key: string]: unknown;
 }
 
-function hasNode9McpServerVSCode(servers: Record<string, VSCodeMcpServer>): boolean {
-  const entry = servers['node9'];
-  return (
-    !!entry &&
-    entry.command === 'node9' &&
-    Array.isArray(entry.args) &&
-    entry.args[0] === 'mcp-server'
-  );
-}
-
 export async function setupVSCode(): Promise<void> {
   seedMcpPinsIfMissing(); // #179
   const homeDir = os.homedir();
@@ -2655,10 +2599,10 @@ export async function setupVSCode(): Promise<void> {
   const repairedMcpWraps = repairLegacyMcpWraps(
     servers as unknown as Record<string, { command?: string; args?: unknown }>
   );
-  const addNode9McpServer = !hasNode9McpServerVSCode(servers);
+  const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
     if (addNode9McpServer) {
-      servers['node9'] = { type: 'stdio', command: 'node9', args: ['mcp-server'] };
+      servers['node9'] = { type: 'stdio', ...node9SelfEntry() };
     }
     mcpConfig.servers = servers;
     writeJson(mcpPath, mcpConfig);
@@ -2678,7 +2622,7 @@ export async function setupVSCode(): Promise<void> {
   // Wrap existing non-node9 MCP servers
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
   }
 
@@ -2746,8 +2690,7 @@ export function teardownVSCode(): void {
 
   let changed = false;
 
-  if (hasNode9McpServerVSCode(mcpConfig.servers)) {
-    delete mcpConfig.servers['node9'];
+  if (removeNode9McpServer(mcpConfig.servers)) {
     changed = true;
     console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.vscode/mcp.json'));
   }
@@ -2808,7 +2751,7 @@ export async function setupClaudeDesktop(): Promise<void> {
   );
   const addNode9McpServer = !hasNode9McpServer(servers);
   if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = NODE9_MCP_SERVER_ENTRY;
+    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
     config.mcpServers = servers;
     writeJson(configPath, config);
     if (addNode9McpServer) {
@@ -2826,7 +2769,7 @@ export async function setupClaudeDesktop(): Promise<void> {
 
   const serversToWrap: Array<{ name: string; upstream: string }> = [];
   for (const [name, server] of Object.entries(servers)) {
-    if (!server.command || server.command === 'node9') continue;
+    if (!server.command || startsNode9(server)) continue;
     serversToWrap.push({ name, upstream: [server.command, ...(server.args ?? [])].join(' ') });
   }
 
@@ -2970,37 +2913,6 @@ interface OpencodeConfig {
 }
 
 /**
- * Resolves the argv prefix used to invoke the node9 CLI from a child
- * process. Two production shapes mirroring fullPathCommand's logic:
- *
- *   - Global install whose bin links to cli.js (npm, bun), or a cli.js
- *     path: on POSIX the shared hook shim (~/.node9/bin/hook), as
- *     fullPathCommand writes for the other agents; on Windows node + cli.js.
- *     A bin that is not JavaScript (pnpm's shell wrapper) is spawned directly.
- *
- *   - Dev / npm-link: argv[1] is the cli.js file with a #!/usr/bin/env
- *     node shebang. Invoke via the current node executable + cli.js.
- *
- * Under NODE9_TESTING=1 the resolution collapses to the bare ['node9']
- * form so unit tests don't depend on the local filesystem layout.
- */
-function node9ArgvForShim(): string[] {
-  if (process.env.NODE9_TESTING === '1') return ['node9'];
-  const nodeExec = process.execPath;
-  const cliScript = process.argv[1];
-  if (!cliScript || !pinsNode(nodeExec, cliScript)) return [cliScript];
-  // POSIX: the shared hook shim, so these plugins run on the Node that set them
-  // up, fall back to PATH when an upgrade removed it, and are healed with the
-  // other agents. Both plugins fail closed, so a dead node path in them would
-  // block every tool call.
-  if (process.platform !== 'win32') {
-    ensureHookShim(os.homedir(), pinnedNode(nodeExec, cliScript), cliScript);
-    return [hookShimPath(os.homedir())];
-  }
-  return [nodeExec, cliScript];
-}
-
-/**
  * Reads the current node9 version from the installed package.json.
  * Embedded as a constant in the shim so subsequent `node9 init` runs
  * can self-heal mismatched shims. Also consumed by the init telemetry
@@ -3043,7 +2955,7 @@ export async function setupOpencode(): Promise<void> {
   }
 
   const shimContent = renderOpencodeShim({
-    node9Argv: node9ArgvForShim(),
+    node9Argv: node9Argv('hook'),
     version: node9Version(),
   });
 
@@ -3082,7 +2994,10 @@ export async function setupOpencode(): Promise<void> {
   let configChanged = false;
 
   // Build the canonical mcp.node9 entry. command[] is [...argv, 'mcp-server'].
-  const desiredCommand = [...node9ArgvForShim(), 'mcp-server'];
+  // POSIX: the launcher, like every other agent's entry. Windows keeps
+  // node + cli.js, which starts there today.
+  const node9Launch = process.platform === 'win32' ? node9Argv('hook') : mcpLauncherArgv();
+  const desiredCommand = [...node9Launch, 'mcp-server'];
   const desiredEntry: OpencodeMcpEntry = {
     type: 'local',
     command: desiredCommand,
@@ -3208,7 +3123,7 @@ export async function setupPi(): Promise<void> {
   }
 
   const shimContent = renderPiShim({
-    node9Argv: node9ArgvForShim(),
+    node9Argv: node9Argv('hook'),
     version: node9Version(),
   });
 
