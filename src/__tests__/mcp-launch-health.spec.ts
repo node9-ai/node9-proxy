@@ -2,7 +2,7 @@
 // anything: which entries depend on the agent's PATH Node, the launcher's
 // state, and the refusals node9 logged when an entry started on an old Node.
 // Real files in a temp HOME.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -29,8 +29,15 @@ const writeLog = (lines: string[]) => {
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-launch-health-'));
+  // On Windows Claude Desktop's config is under %APPDATA%, not under the home
+  // these functions are given (claudeDesktopConfigPath). Without this the
+  // "no node9 entry" row read the machine's real config: on the Windows CI
+  // runner it held a node9 entry another test had left there, and the row
+  // counted it.
+  vi.stubEnv('APPDATA', path.join(home, 'AppData', 'Roaming'));
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(home, { recursive: true, force: true });
 });
 
