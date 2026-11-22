@@ -161,7 +161,11 @@ jobs:
 
   it('the env form is safe and keeps the gate', () => {
     const safe = inject.replace('BODY="${{ github.event.comment.body }}"', 'BODY="$COMMENT_BODY"');
-    expect(ci2(safe).severity).toBe('advisory');
+    const f = ci2(safe);
+    expect(f.signals.join(' ')).not.toMatch(/shell injection|no effective actor gate/);
+    // Gates round B: the member's comment starts an agent that reads the thread with `gh` and
+    // has a shell: high through that route, not through the script.
+    expect(f.signals.join(' ')).toMatch(/comment command or mention starts the agent/);
   });
 
   it('in the agent job itself it is a shell, whatever the tool list', () => {
@@ -325,9 +329,11 @@ jobs:
 
   it('a label made with the default token starts nothing', () => {
     const plain = labeler.replace('secrets.TRIAGE_PAT', 'secrets.GITHUB_TOKEN');
-    expect(
-      fix({ '.github/workflows/label.yml': plain, '.github/workflows/fix.yml': fixer })?.severity
-    ).toBe('advisory');
+    const f = fix({ '.github/workflows/label.yml': plain, '.github/workflows/fix.yml': fixer });
+    // The label is a gate again (no automation-label signal); gates round B grades what a
+    // maintainer's label then hands the agent.
+    expect((f?.signals ?? []).join(' ')).not.toMatch(/no effective actor gate/);
+    expect((f?.signals ?? []).join(' ')).toMatch(/label starts the agent/);
   });
 });
 

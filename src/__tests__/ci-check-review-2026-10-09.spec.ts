@@ -71,7 +71,11 @@ describe('4 — no quadratic regex on scanned-repo text', () => {
 
 describe('5 — workflow_run is decided per job', () => {
   it('a job pinned to issue_comment keeps the entity-event gate in a workflow that also has workflow_run', () => {
-    expect(rank('fp_mixed.yml')).toBeLessThanOrEqual(ADVISORY);
+    // The gate holds (no ungated signal). Gates round B: a maintainer's mention hands the
+    // outsider's thread to an agent with a shell: high through that route only.
+    const f = analyzeWorkflow('.github/workflows/fp_mixed.yml', read('fp_mixed.yml'))!;
+    expect(f.signals.join(' ')).not.toMatch(/no effective actor gate/);
+    expect(f.signals.join(' ')).toMatch(/comment command or mention starts the agent/);
   });
 });
 
@@ -79,7 +83,8 @@ describe('6 — every v0 predates v1.0.185', () => {
   it('@v0.0.63 and @v0 on workflow_run are ungated; @v1 stays gated', () => {
     expect(rank('s4c_v0.0.63.yml')).toBeGreaterThanOrEqual(MEDIUM);
     expect(rank('s4c_v0.yml')).toBeGreaterThanOrEqual(MEDIUM);
-    expect(rank('s4c_v1.yml')).toBeLessThanOrEqual(ADVISORY);
+    // @v1 keeps the check: only a maintainer's re-run reaches the fork's code (gates round B).
+    expect(rank('s4c_v1.yml')).toBeLessThanOrEqual(MEDIUM);
   });
 });
 

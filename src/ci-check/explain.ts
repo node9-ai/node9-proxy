@@ -54,6 +54,9 @@ export interface WorkflowFacts {
   editThreads: boolean;
   /** N2: it can write text (comment, edit, review) with a token that can write threads. */
   writesText?: boolean;
+  /** Gates round B: a maintainer's action starts the gated agent on an outsider's item, and the
+   *  agent then reads what the outsider wrote. Plain-language parts, set when B decided the grade. */
+  steered?: { start: string; content: string; reach: string };
   pat: boolean;
   /** `show_full_output: true`: everything the agent prints is in the public Actions log. */
   publicOutput: boolean;
@@ -128,6 +131,21 @@ export function explainWorkflow(f: WorkflowFacts): Explain {
         'Who can reach this agent depends on the workflows that call this one. If a caller runs on pull requests or issues from strangers, they can tell the agent what to do.',
       saw,
       fix: fix.length ? fix : ['Check every workflow that calls this one: only trusted events.'],
+    };
+
+  if (f.steered && (f.severity === 'high' || f.severity === 'medium'))
+    return {
+      headline:
+        f.severity === 'high'
+          ? "An outsider can steer this repository's AI agent through a maintainer's routine action"
+          : "An outsider can steer this repository's AI agent once a maintainer acts",
+      happens: `Only people with write access can start the agent, but ${f.steered.start} starts it on an outsider's issue or pull request. The agent then reads ${f.steered.content}, and instructions hidden there act with ${f.steered.reach}.`,
+      saw,
+      fix: [
+        "Give the agent the diff or the item's text as a file, not a checkout of the pull request.",
+        'Take the shell and the write token out of the job the agent runs in.',
+        'Or let it read only comments from people with write access (`include_comments_by_actor`).',
+      ],
     };
 
   if (f.severity === 'critical' || f.severity === 'high')

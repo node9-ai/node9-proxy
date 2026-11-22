@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { analyzeWorkflow } from '../ci-check/workflows';
+import { SEVERITY_RANK } from '../ci-check/types';
 
 const ci2 = (wf: string) => analyzeWorkflow('w.yml', wf)!;
 
@@ -216,13 +217,16 @@ jobs:
     expect(f.severity).toBe('high');
   });
 
-  it("the action's default gate (no allowed_non_write_users): advisory", () => {
+  it("the action's default gate (no allowed_non_write_users): not N2's high", () => {
     const wf = issueAgent({ perms: WRITE, tools: 'Bash(gh issue comment:*)' }).replace(
       '          allowed_non_write_users: "*"\n',
       ''
     );
-    // Gated with no other signal: no finding at all, or a hardening note.
-    expect(analyzeWorkflow('w.yml', wf)?.severity ?? 'none').toMatch(/^(advisory|none)$/);
+    // Gated: N2 does not apply. Gates round B grades a maintainer's comment that hands the
+    // outsider's issue to a commenting agent: medium at most.
+    const f = analyzeWorkflow('w.yml', wf);
+    expect(SEVERITY_RANK[f?.severity ?? 'advisory']).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+    expect((f?.signals ?? []).join(' ')).not.toMatch(/no effective actor gate/);
   });
 
   it('plain pull_request (read-only token for forks): advisory', () => {

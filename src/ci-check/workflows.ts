@@ -351,9 +351,87 @@ function triggerReach(wf: Workflow, raw: Record<string, unknown>) {
 /** Job values, dropping null entries. An empty job block (`notify:` with no body) parses
  *  to `null`; a bare `.steps`/`.permissions`/`.if` deref on it throws, and since the caller
  *  (scanTree) try/catches analyzeWorkflow, the throw SILENTLY SUPPRESSES the finding — an
- *  attacker can disable CI-2 for the whole file by adding one empty job. Filter once here. */
+ *  attacker can disable CI-2 for the whole file by adding one empty job. Filter once here.
+ *  Gates round C: a job that runs only in another repository is dropped too (see awayJobs). */
 function jobList(wf: Workflow): Job[] {
-  return Object.values(wf.jobs ?? {}).filter((j): j is Job => j != null);
+  const jobs = Object.entries(wf.jobs ?? {}).filter((e): e is [string, Job] => e[1] != null);
+  if (!SCAN_REPO) return jobs.map(([, j]) => j);
+  const away = awayJobs(wf, jobs);
+  return jobs.filter(([n]) => !away.has(n)).map(([, j]) => j);
+}
+
+/** Gates round C (2026-11-22): the repository this scan reads, lower case, when the reader knows
+ *  it (hosted scan and CLI by URL: the URL; local scan: the `origin` remote). Set by scanTree for
+ *  one scan. A copied workflow often keeps its upstream's `if: github.repository == 'up/name'`;
+ *  in the copy that job never runs. */
+let SCAN_REPO: { owner: string; repo?: string } | null = null;
+export function setScanRepository(owner?: string, repo?: string): void {
+  SCAN_REPO = owner
+    ? { owner: owner.toLowerCase(), ...(repo ? { repo: repo.toLowerCase() } : {}) }
+    : null;
+}
+
+// `github.repository == 'o/r'` or `github.repository_owner == 'o'`, either side, one literal.
+const REPO_PIN_ATOM_RE =
+  /^(?:github\.(repository|repository_owner)\s*==\s*'([^'\s]{1,200})'|'([^'\s]{1,200})'\s*==\s*github\.(repository|repository_owner))$/i;
+
+/** Does this atom pin a repository other than the scanned one? GitHub compares strings without
+ *  case. Unknown name: never. */
+function pinsOtherRepository(atom: string): boolean {
+  if (!SCAN_REPO) return false;
+  const m = REPO_PIN_ATOM_RE.exec(atom.trim());
+  if (!m) return false;
+  const field = (m[1] ?? m[4]).toLowerCase();
+  const want = (m[2] ?? m[3]).toLowerCase();
+  if (field === 'repository_owner') return want !== SCAN_REPO.owner;
+  if (!SCAN_REPO.repo || want === `${SCAN_REPO.owner}/${SCAN_REPO.repo}`) return false;
+  // Same owner, another name: more likely this repository under its new name (a rename keeps the
+  // owner; the scan may use the old name, which GitHub redirects) than a copy. Not dropped.
+  return !want.startsWith(`${SCAN_REPO.owner}/`);
+}
+
+/** Does every way through this job `if:` need another repository's name? */
+function runsOnlyElsewhere(jobIf: unknown): boolean {
+  if (!SCAN_REPO || typeof jobIf !== 'string' || !jobIf.trim()) return false;
+  const x = parseIf(jobIf);
+  if (!x) return false;
+  const req = (e: IfExpr): boolean => {
+    switch (e.k) {
+      case 'atom':
+        return pinsOtherRepository(e.t);
+      case 'not':
+        return false;
+      case 'and':
+        return e.c.some(req);
+      case 'or':
+        return e.c.every(req);
+    }
+  };
+  return req(x);
+}
+
+const AWAY_MEMO = new WeakMap<Workflow, { key: string; away: Set<string> }>();
+/** The jobs that never run in the scanned repository: their own `if:` needs another
+ *  repository's name, or they need such a job and do not call a status function (GitHub skips a
+ *  job whose dependency was skipped unless its `if:` says `always()` and the like). */
+function awayJobs(wf: Workflow, jobs: [string, Job][]): Set<string> {
+  const key = `${SCAN_REPO?.owner}/${SCAN_REPO?.repo ?? ''}`;
+  const hit = AWAY_MEMO.get(wf);
+  if (hit && hit.key === key) return hit.away;
+  const away = new Set(jobs.filter(([, j]) => runsOnlyElsewhere(j.if)).map(([n]) => n));
+  // Bounded fixed point: each round adds a job or stops.
+  for (let grew = away.size > 0, round = 0; grew && round <= jobs.length; round++) {
+    grew = false;
+    for (const [n, j] of jobs) {
+      if (away.has(n) || STATUS_FN_RE.test(str(j.if))) continue;
+      if (needsOf(j).some((d) => away.has(d))) {
+        away.add(n);
+        grew = true;
+      }
+    }
+  }
+  AWAY_MEMO.set(wf, { key, away });
+  return away;
 }
 
 // T.6 (2026-10-10): read the workflow the way the runner does, before any check runs.
@@ -694,7 +772,14 @@ function isWrapperAgent(step: Step): boolean {
   const env = { ...(step.scopeEnv ?? {}), ...(step.env ?? {}) };
   const fuelEnv = Object.keys(env).some((k) => RUN_FUEL_ENV_RE.test(k));
   // `uses: ./…`: the repository's own action (or, after a head checkout, the fork's).
-  if (/^\s*\.\//.test(uses)) return fuelEnv; // the job env reaches the action too (review, round 2)
+  // The job env reaches the action too (review, round 2). Gates round: a local action whose path
+  // names an agent runtime and that takes a prompt is a wrapper too (`./.github/actions/claude-x`
+  // with `prompt:` and an OAuth token under its own input name).
+  if (/^\s*\.\//.test(uses))
+    return (
+      fuelEnv ||
+      (AGENT_PATH_RE.test(uses.trim()) && Object.keys(w).some((k) => PROMPT_INPUT_RE.test(k)))
+    );
   if (isPrAgent(step)) return true;
   const pathPart = actionPath(uses);
   return (
@@ -1302,6 +1387,15 @@ const NONCONTAINS_GATE_RE = new RegExp(
     String.raw`github\.actor\s*==`,
     String.raw`user\.login\s*==`,
     String.raw`head\.repo\.full_name\s*==\s*github\.repository`,
+    // Gates round E (2026-11-22): the same "this repository's own branch" test in its other
+    // spellings (the workflow_run head, either side, the head owner). Only a person with write
+    // access pushes a branch here. Read per way through the `if:` like every gate atom, so a test
+    // on one trigger does not hold another trigger that skips it. Not `fork == false` or
+    // `!...fork`: on an event without that payload GitHub reads `null == false` and `!null` as
+    // true, so a comment from anyone passes.
+    String.raw`head_repository\.full_name\s*==\s*github\.repository\b`,
+    String.raw`github\.repository\s*==\s*github\.event\.(?:pull_request\.head\.repo|workflow_run\.head_repository)\.full_name`,
+    String.raw`head(?:\.repo|_repository)\.owner\.login\s*==\s*github\.repository_owner`,
   ].join('|'),
   'i'
 );
@@ -1737,8 +1831,77 @@ function jobActorGate(job: Job, wf: Workflow, raw: Record<string, unknown>): boo
       return x !== null && exprGated(x, labelConfigured);
     });
   return (
-    jobIfGated(str(job.if), labelConfigured) || agentStepsGated || hasStepMembershipGate(job) // R4-5
+    jobIfGated(str(job.if), labelConfigured) ||
+    agentStepsGated ||
+    hasStepMembershipGate(job) || // R4-5
+    jobFailsForOutsiders(job, wf, raw)
   );
+}
+
+// Gates round D: the actor's association with the repository, tested in a script against the
+// trusted roles (`case "$ASSOC" in OWNER|MEMBER|COLLABORATOR) ;; *) exit 1`).
+const ASSOCIATION_REF_RE = /author_association|AUTHOR_ASSOCIATION/;
+const TRUSTED_ROLE_RE = /\b(?:OWNER|MEMBER|COLLABORATOR)\b/;
+const PERMISSION_LEVEL_RE = /\/permission\b|getCollaboratorPermissionLevel/i;
+const PRIVILEGED_LEVEL_RE = /\b(?:admin|write|maintain)\b/i;
+// An agent step that still runs after an earlier step failed.
+const RUNS_AFTER_FAILURE_RE = /\b(?:always|failure|cancelled)\s*\(/i;
+// An `if:` atom that only names the event.
+const EVENT_NAME_ATOM_RE = /^github\.event_name\s*(?:==|!=)\s*'[\w-]{1,60}'$/i;
+
+/** Gates round D (2026-11-22): a step before the agent checks who started the run (a permission
+ *  or membership call, an actor allowlist, or the actor's association against the trusted roles)
+ *  and fails the job for anyone else (`exit 1`, `core.setFailed`). The failed step ends the job
+ *  before the agent starts. Not credited when the failure is ignored (`continue-on-error`), when
+ *  an agent step runs after a failure (`always()`), when an earlier step pastes a stranger's text
+ *  into its script (L4-b: their code runs first), or when the check's own `if:` skips it on an
+ *  event a stranger can fire. Like the upstream-job rule, the check and the failing exit must
+ *  sit in the same step; which branch exits is not read. */
+function jobFailsForOutsiders(job: Job, wf: Workflow, raw: Record<string, unknown>): boolean {
+  const steps = job.steps ?? [];
+  const first = steps.findIndex(isAgentStep);
+  if (first <= 0) return false;
+  if (steps.some((st) => isAgentStep(st) && RUNS_AFTER_FAILURE_RE.test(str(st.if)))) return false;
+  // The events a stranger can fire that reach this job: the check must run on each of them.
+  // Computed once a candidate step is found.
+  let events: string[] | null = null;
+  const strangerEvents = (): string[] => {
+    const reach = triggerReach(wf, raw);
+    const keys = 'firable' in reach && reach.firable ? reach.firable : reach.keys;
+    const jobIf = parseIf(str(job.if));
+    return keys
+      .map((k) => k.toLowerCase())
+      .filter((ev) => jobIf === null || exprAllowsEvent(jobIf, ev));
+  };
+  for (let i = 0; i < first; i++) {
+    const st = steps[i];
+    if (/^\s*["']?true/i.test(str((st as { 'continue-on-error'?: unknown })['continue-on-error'])))
+      continue;
+    const code = str(st.run) + ' ' + str(st.with?.['script']);
+    if (code.length > 200_000 || !FAILING_STEP_RE.test(code)) continue;
+    const checks =
+      isMembershipCheck(code) ||
+      scriptAllowsByActor(code) ||
+      (ASSOCIATION_REF_RE.test(code + ' ' + str(st.env)) && TRUSTED_ROLE_RE.test(code));
+    if (!checks) continue;
+    // A permission-level lookup gates only when the level is compared: `... /permission || exit 1`
+    // exits on an API error, and an outsider's 'read' passes it.
+    if (PERMISSION_LEVEL_RE.test(code) && !PRIVILEGED_LEVEL_RE.test(code)) continue;
+    if (jobInjectsUntrusted({ steps: steps.slice(0, i + 1) } as Job)) return false;
+    if (stepRunsOnAll(str(st.if), (events ??= strangerEvents()))) return true;
+  }
+  return false;
+}
+
+/** Does a step with this `if:` run on every one of `events`? Only an `if:` made of event-name
+ *  tests is read; anything else may skip the step. */
+function stepRunsOnAll(stepIf: string, events: string[]): boolean {
+  if (!stepIf.trim()) return true;
+  const x = parseIf(stepIf);
+  if (!x) return false;
+  const onlyEvents = (e: IfExpr): boolean =>
+    e.k === 'atom' ? EVENT_NAME_ATOM_RE.test(e.t) : e.k !== 'not' && e.c.every(onlyEvents);
+  return onlyEvents(x) && events.every((ev) => exprAllowsEvent(x, ev));
 }
 
 /** Is this job actor-gated, either on its own or through its `needs:` chain?
@@ -2135,10 +2298,43 @@ function codexCheckTooLate(job: Job): boolean {
 const ACTOR_BOUND_RE =
   /\$\{\{[^}]{0,200}\b(github\.event\.[\w.]{0,80}\b(?:user|sender)\.login|github\.event\.sender\.login|github\.actor|github\.triggering_actor)\b/i;
 
+// Gates round A (2026-11-22): `${{ github.event_name == 'pull_request_target' && '*' || '' }}`
+// opens the action to everyone on the named events and keeps the write check on the others.
+const STAR_WHEN_RE = /^\$\{\{\s*([^{}]{1,500}?)\s*&&\s*'\*'\s*\|\|\s*''\s*\}\}$/;
+const EVENT_IS_ATOM_RE = /^github\.event_name\s*==\s*'([\w-]{1,60})'$/i;
+/** The events on which this value is `"*"`, or null for any other shape. */
+function starEvents(v: string): string[] | null {
+  const m = STAR_WHEN_RE.exec(v);
+  if (!m) return null;
+  const x = parseIf(m[1]);
+  if (!x) return null;
+  const evs: string[] = [];
+  for (const a of x.k === 'or' ? x.c : [x]) {
+    const e = a.k === 'atom' ? EVENT_IS_ATOM_RE.exec(a.t) : null;
+    if (!e) return null;
+    evs.push(e[1].toLowerCase());
+  }
+  return evs;
+}
+/** The stranger-firable events of the workflow being analysed, set by every analysis right after
+ *  its callers (useStarEvents), so CI-2, CI-4 and the other workflow rules read the same doors. */
+let STAR_EVENTS_OPEN: ReadonlySet<string> | null = null;
+function useStarEvents(wf: Workflow, raw: Record<string, unknown>): string[] {
+  const reach = triggerReach(wf, raw);
+  const keys =
+    'firable' in reach && reach.firable ? reach.firable : reach.untrusted ? reach.keys : [];
+  STAR_EVENTS_OPEN = new Set(keys.map((k) => k.toLowerCase()));
+  return keys;
+}
+
 /** Does this allowed_non_write_users value admit any user? */
 function nonWriteOpen(v: string): boolean {
   const t = v.trim();
   if (t === '*') return true;
+  // Gates round A: `"*"` on some events only. Open when one of them is an event a stranger can
+  // fire in the workflow being graded; outside that analysis it is read as closed, as before.
+  const evs = starEvents(t);
+  if (evs) return !!STAR_EVENTS_OPEN && evs.some((ev) => STAR_EVENTS_OPEN!.has(ev));
   // A real value is a login list or one expression; a megabyte of text is neither, and the
   // regex below costs ~100 steps a character on it (review, round 2).
   return t.length <= 1_000 && ACTOR_BOUND_RE.test(t);
@@ -2614,6 +2810,7 @@ export function analyzeWorkflow(
     TRUSTED_RUN_SOURCES = new Set();
     UPSTREAM_TRUSTED = false;
     ENVIRONMENTS = null;
+    STAR_EVENTS_OPEN = null;
   }
 }
 
@@ -2633,6 +2830,7 @@ function analyzeWorkflowInner(
   // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  useStarEvents(wf, raw);
   UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
   UNGATED_MEMO = new WeakMap();
   const steps = allSteps(wf).map((s) => s.step);
@@ -2657,6 +2855,7 @@ function analyzeWorkflowInner(
   const { keys: triggers, untrusted: forkInput, reusable, workflowRun } = reachOf;
   // Narrowed below (C6-b) to the events an injectable job runs on without a gate.
   let { secretExposed, privileged } = reachOf;
+  const strangerKeys = useStarEvents(wf, raw);
 
   const nonWrite = str(agentSteps.map((s) => s.with?.['allowed_non_write_users']).find(Boolean));
   const nonWriteStar = bypassArmed(agentSteps);
@@ -2667,8 +2866,9 @@ function analyzeWorkflowInner(
   const codexList =
     !codexOpenStep &&
     agentSteps.some((s) => !!codexActionBuild(s.uses) && !!str(s.with?.['allow-users']).trim());
-  const nonWriteList = (!!nonWrite && !nonWriteOpen(nonWrite)) || codexList;
-  const nonWriteActor = nonWrite.trim() !== '*' && nonWriteOpen(nonWrite);
+  const nonWriteStarWhen = starEvents(nonWrite.trim()) !== null;
+  const nonWriteList = (!!nonWrite && !nonWriteStarWhen && !nonWriteOpen(nonWrite)) || codexList;
+  const nonWriteActor = nonWrite.trim() !== '*' && !nonWriteStarWhen && nonWriteOpen(nonWrite);
 
   // reusable (workflow_call) is scored as potentially-untrusted — its caller may wire an
   // untrusted trigger — but capped at medium below since we can't see the caller.
@@ -2684,6 +2884,7 @@ function analyzeWorkflowInner(
   // gated sibling job's tools/perms/PAT can't be reached by the untrusted trigger, and
   // must NOT downgrade (mask) an ungated sibling either. Compute injectable jobs FIRST.
   let injJobs = injectableJobs(wf, raw, untrustedTrigger);
+  let c6Open: string[] | null = null; // C6-b: the events an injectable job runs on ungated
   // C6-b: a job `if:` can gate some events and not others (`pull_request` open, the comment
   // command gated to members). Keep only the stranger-firable events an injectable job runs on
   // WITHOUT a gate, and judge privilege and base secrets by those. Only for the workflow's own
@@ -2693,6 +2894,7 @@ function analyzeWorkflowInner(
     const label = labelTypeConfigured(wf, raw);
     const openOn = (j: Job) => openEventsOf(j, wf, firable, label); // S4-a: own gate + inherited
     const open = [...new Set(injJobs.flatMap(openOn))];
+    c6Open = open;
     if (open.length < firable.length) {
       injJobs = injJobs.filter((j) => openOn(j).length > 0);
       // Every event gated: the jobs are held, and the finding stays a hardening note about the
@@ -2702,6 +2904,28 @@ function analyzeWorkflowInner(
         secretExposed = open.some((t) => /pull_request_target|workflow_run/i.test(t));
       }
     }
+  }
+  // Gates round A: when every open door is a value that is "*" on some events only, the other
+  // events keep the action's write check: judge privilege and base secrets by the open ones (after
+  // C6-b, so both narrowings hold).
+  const armed = agentSteps.filter((s) => claudeBypassArmed(s) || codexOpen(s));
+  const armedEvents = armed.map((s) =>
+    starEvents(
+      str(s.with?.[codexActionBuild(s.uses) ? 'allow-users' : 'allowed_non_write_users']).trim()
+    )
+  );
+  if (
+    bypassActive &&
+    armedEvents.every((e) => e !== null) &&
+    agentSteps.every(
+      (s) => claudeActionBuild(s.uses)?.official || codexActionBuild(s.uses)?.official
+    )
+  ) {
+    const open = (c6Open ?? strangerKeys).filter((k) =>
+      armedEvents.some((e) => e!.includes(k.toLowerCase()))
+    );
+    privileged = open.some((t) => PRIVILEGED_EVENT_RE.test(t));
+    secretExposed = open.some((t) => /pull_request_target|workflow_run/i.test(t));
   }
   // Fallback to all agent jobs only matters for the signal strings when NO job is
   // injectable — in that case reach is 0 (below), so the fallback never drives severity.
@@ -2792,7 +3016,17 @@ function analyzeWorkflowInner(
   // tools) has nothing to report. EXCEPT R4-1a: a reusable (workflow_call) agent
   // workflow always surfaces as an advisory — its safety depends on how callers wire
   // the trigger + gate, which we can't see, so we flag it for a caller review.
-  if (score === 0 && !secretExposed && !reusable) return null;
+  // Gates round B: a gated agent job that a maintainer's action starts and an outsider steers.
+  // The jobs a stranger cannot start themselves: every agent job when no trigger of this file is
+  // stranger-firable (a label, a dispatch), else the agent jobs outside injJobs.
+  const steerJobs = untrustedTrigger ? agentJobs.filter((j) => !injJobs.includes(j)) : agentJobs;
+  const steered =
+    steerJobs
+      .map((j) => steeredGrade(j, wf, raw))
+      .filter((x): x is Steered => x !== null)
+      .sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity])[0] ?? null;
+
+  if (score === 0 && !secretExposed && !reusable && !steered) return null;
 
   let severity = severityFromScore(score);
   // F8: a GATED workflow (explicit `if:` OR claude-code-action's default write-
@@ -2928,6 +3162,12 @@ function analyzeWorkflowInner(
     !writeChannel &&
     !pat;
   if (textOnly && severity && severity !== 'advisory') severity = 'advisory';
+  // Gates round B, after the caps of the open path: they judge what a stranger reaches without
+  // a maintainer, which a gated job does not offer. The plain `pull_request` cap (F14b) is not
+  // applied: B never reads a plain `pull_request` start.
+  const steerRaises =
+    steered !== null && SEVERITY_RANK[steered.severity] > SEVERITY_RANK[severity ?? 'advisory'];
+  if (steerRaises) severity = steered!.severity;
   if (!severity) severity = 'advisory';
 
   // Build the transparent record of WHY this severity.
@@ -3049,7 +3289,9 @@ function analyzeWorkflowInner(
     signals.push(
       nonWriteActor
         ? "allowed_non_write_users is the triggering user's own login, with github_token, so any user can trigger the agent"
-        : 'allowed_non_write_users: "*" with github_token, so any user can trigger the agent'
+        : nonWriteStarWhen
+          ? `allowed_non_write_users is "*" on ${(starEvents(nonWrite.trim()) ?? []).map((e) => `\`${safeText(e, 40)}\``).join(', ')}, with github_token, so any user can trigger the agent there`
+          : 'allowed_non_write_users: "*" with github_token, so any user can trigger the agent'
     );
   if (bypassActive && codexOpenStep)
     signals.push(
@@ -3074,6 +3316,7 @@ function analyzeWorkflowInner(
     signals.push(
       "`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is switched off, so the action no longer scrubs the Anthropic key, cloud credentials and Actions runtime tokens from the agent's shell"
     );
+  if (steerRaises) signals.push(steeredSignal(steered!));
   if (!gate && reach > 0) signals.push('no effective actor gate');
   if (!gate && reach > 0 && gatedSiblings > 0) {
     const siblings = agentJobs.filter((j) => !injJobs.includes(j));
@@ -3144,8 +3387,11 @@ function analyzeWorkflowInner(
       'allowed_non_write_users: "*" is set without github_token, so the action keeps its default write gate'
     );
 
-  const title =
-    severity === 'critical' || severity === 'high'
+  const title = steerRaises
+    ? severity === 'high'
+      ? "A maintainer's routine action hands an outsider's content to a powerful agent"
+      : 'An outsider can steer the agent once a maintainer acts'
+    : severity === 'critical' || severity === 'high'
       ? 'Injectable agent workflow: untrusted input reaches a tool-using agent with secrets'
       : severity === 'medium'
         ? 'Agent workflow with a risky pattern (partially mitigated)'
@@ -3176,8 +3422,9 @@ function analyzeWorkflowInner(
     file: path,
     signals,
     mitigations: mitigations.length ? mitigations : undefined,
-    fix:
-      head === 'root' && privileged
+    fix: steerRaises
+      ? "Do not hand the agent what an outsider wrote with this much power: give it the diff or the item's text as a file instead of a checkout, take the shell and the write token out of this job, or let it read only comments from people with write access (claude-code-action `include_comments_by_actor`)."
+      : head === 'root' && privileged
         ? 'Do not check out the untrusted PR head into the workspace root under a privileged trigger (pull_request_target/workflow_run): check out the base ref, or isolate the head in a subdir (--add-dir). Add an actor gate and scope the agent tools.'
         : head === 'root'
           ? 'This runs under `pull_request` (fork PRs get a read-only token), so the head checkout is low-risk today: keep it on `pull_request` (not `pull_request_target`) and keep the actor gate + scoped tools.'
@@ -3213,8 +3460,204 @@ function analyzeWorkflowInner(
     publicOutput: fullOutput,
     scrubOff,
     reusable,
+    ...(steerRaises
+      ? {
+          steered: {
+            start: STEER_START_TEXT[steered!.start],
+            content: STEER_CONTENT_TEXT[steered!.content],
+            reach: STEER_REACH_TEXT[steered!.reach],
+          },
+        }
+      : {}),
   });
   return finding;
+}
+
+// --- Gates round B: a gated agent an outsider still steers (founder, 2026-11-21/22) ---
+// The gate is real: only a person with write access starts the agent. But a maintainer's
+// routine action (a comment command or mention, a label) starts it on an outsider's issue or
+// pull request, and the agent then reads what the outsider wrote: the pull request's code, the
+// item's text, its whole comment thread. The stranger never passes the gate and still tells the
+// agent what to do. Grade, by the hand read of 2026-11-21 (section 6 of the gates design):
+//   routine start + outsider content + strong reach (a shell, code write, a PAT or App token
+//   with a code tool, the PR's own code run next to secrets)       = high;
+//   routine start + outsider content + write reach (text or a token behind narrow tools) = medium;
+//   non-routine start (a push to the PR branch, ready for review, a re-run) + outsider
+//   content + strong or write reach                                = medium.
+// Never critical: a maintainer still has to act. Plain `pull_request` is left out (a fork's run
+// gets a read-only token and no secrets), and so are push, schedule, dispatch, an `opened`
+// event (the actor is the author) and merge-time readers (the trusted-reader rule).
+
+const MAINTAINER_COMMENT_EVENTS = new Set([
+  'issue_comment',
+  'pull_request_review_comment',
+  'pull_request_review',
+  'discussion_comment',
+]);
+// The default activity types of `pull_request_target` when `types:` is absent.
+const PR_TARGET_DEFAULT_TYPES = ['opened', 'synchronize', 'reopened'];
+
+type SteerStart = 'comment' | 'label' | 'assign' | 'push' | 'ready' | 'rerun';
+type SteerContent = 'code' | 'thread' | 'text' | 'artifact';
+export interface Steered {
+  severity: 'high' | 'medium';
+  start: SteerStart;
+  content: SteerContent;
+  /** What the agent can do with it: a shell, code write, or text with a write token. */
+  reach: 'shell' | 'code' | 'write';
+}
+
+/** How a person with write access starts this job: routine starts first. */
+function maintainerStarts(job: Job, wf: Workflow, raw: Record<string, unknown>): SteerStart[] {
+  const on = onObject(wf, raw) ?? {};
+  const jobIf = parseIf(str(job.if));
+  const runs = (ev: string) => jobIf === null || exprAllowsEvent(jobIf, ev);
+  const routine = new Set<SteerStart>();
+  const other = new Set<SteerStart>();
+  for (const key of triggerKeys(wf, raw).map((k) => k.toLowerCase())) {
+    // C6-c: a reviewer approves each run of a protected environment, a second deliberate act.
+    if (!runs(key) || environmentHoldsOn(job, key)) continue;
+    if (MAINTAINER_COMMENT_EVENTS.has(key)) routine.add('comment');
+    else if (key === 'issues' || key === 'pull_request_target') {
+      const given = activityTypes(on[key]);
+      const types = given.length
+        ? given
+        : key === 'issues'
+          ? ['labeled', 'assigned']
+          : PR_TARGET_DEFAULT_TYPES;
+      if (types.includes('labeled')) routine.add('label');
+      if (types.includes('assigned')) routine.add('assign');
+      if (key === 'pull_request_target') {
+        if (types.includes('synchronize')) other.add('push');
+        if (types.includes('ready_for_review')) other.add('ready');
+      }
+    } else if (key === 'workflow_run' && !upstreamRunTrusted(wf, raw)) other.add('rerun');
+  }
+  return [...routine, ...other];
+}
+
+// Item text the person who passed the gate did not write. `comment.body` is not here: on a
+// comment event that is the maintainer's own comment.
+const OUTSIDER_TEXT_RE = /github\.event\.(?:issue|pull_request)\.(?:body|title)/i;
+// A review command, or the pull request's number: the agent reads the outsider's diff.
+const PR_REVIEW_RE = /pull_request\.number|(?<![\w./-])\/(?:code-)?review(?![\w-])/i;
+
+/** What an outsider wrote that reaches the agent of this gated job, or null. */
+function outsiderContent(job: Job, starts: SteerStart[]): SteerContent | null {
+  const steps = job.steps ?? [];
+  const agents = steps.filter(isAgentStep);
+  if (untrustedHeadCheckout(steps)) return 'code';
+  // Tag mode puts the issue or pull request body and every comment before the trigger into the
+  // prompt (claude-code-action create-prompt; only include_comments_by_actor narrows the
+  // comments, never the body).
+  if (agents.some(claudeTagMode) && starts.some((s) => s !== 'rerun')) return 'thread';
+  for (const st of agents) {
+    const blob =
+      str(st.with?.['prompt']) +
+      ' ' +
+      str(st.with?.['direct_prompt']) +
+      (isRunAgent(st) ? ' ' + str(st.run) + ' ' + str(st.env) + ' ' + str(st.scopeEnv) : '');
+    if (OUTSIDER_TEXT_RE.test(blob)) return 'text';
+    if (PR_REVIEW_RE.test(blob)) return 'code';
+  }
+  const read = jobReadsUntrustedItem(job);
+  if (read === 'artifact') return 'artifact';
+  if (read) return 'thread';
+  return null;
+}
+
+/** The reach of this job's agent: 'shell' or 'code' (strong), 'write' (text or a token behind
+ *  narrow tools), or null (read-only, nothing to write with). */
+function steerReach(wf: Workflow, job: Job): Steered['reach'] | null {
+  const steps = job.steps ?? [];
+  const agents = steps.filter(isAgentStep);
+  const tools = collectTools(agents) + ' ' + committedGrantsFor(job, agents);
+  if (EXFIL_RCE_RE.test(tools)) return 'shell';
+  if (untrustedHeadCheckout(steps) === 'root' && jobRunsHeadScript(job)) return 'shell';
+  const tag = agents.some(claudeTagMode);
+  const codeTool = CODE_TOOL_RE.test(tools) || tag;
+  const pat = usesPatIn([job]);
+  const app = stepsHoldAppToken(job, agents);
+  const codePerm = hasCodeWritePerm(wf, [job]);
+  if (codeTool && (pat || app || codePerm)) return 'code';
+  const writers = toolTokens(tools).filter(
+    (t) => GH_WRITE_TOOL_RE.test(t) || MCP_GH_TEXT_WRITE_RE.test(t)
+  );
+  const textWrite = agents.some(claudeOwnTools) || writers.some((t) => !labelOnlyGrant(t));
+  if (textWrite && (hasMetaWritePerm(wf, [job]) || pat || app || codePerm)) return 'write';
+  // A PAT in the agent's step counts when a tool can use it (a GitHub write tool, or a gh/MCP
+  // tool that reads with it and writes text).
+  if (stepsHoldPat(agents) && (writers.length > 0 || codeTool)) return 'write';
+  return null;
+}
+
+/** The `if:`s of the jobs upstream of `job` in its `needs:` chain, for the jobs reached through
+ *  implicit `success()` links only (a job with a status function in its `if:` runs after a
+ *  skipped dependency, so nothing above it carries over). Bounded like gatingAncestors. */
+function ancestorIfs(job: Job, wf: Workflow): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const queue = [...needsOf(job)];
+  while (queue.length && seen.size < HOLDERS_MAX) {
+    const name = queue.shift()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const dep = wf.jobs?.[name];
+    if (!dep) continue;
+    out.push(str(dep.if));
+    if (!STATUS_FN_RE.test(str(dep.if))) queue.push(...needsOf(dep));
+  }
+  return out;
+}
+
+/** Gates round B: the grade an outsider can reach through this gated agent job, or null. */
+function steeredGrade(job: Job, wf: Workflow, raw: Record<string, unknown>): Steered | null {
+  // Only branches of this repository reach the job, or the gate tests who wrote the item (an
+  // author allowlist, the author's association): what the agent reads is not an outsider's. The
+  // test may sit on a job this one needs (a gate job): GitHub skips this job when that one is
+  // skipped, unless this job's `if:` calls a status function.
+  const ifs = [str(job.if)];
+  if (!STATUS_FN_RE.test(str(job.if))) ifs.push(...ancestorIfs(job, wf));
+  if (ifs.some((x) => requiresAtom(x, SAME_REPO_GATE_RE) || requiresTrustedAuthor(x))) return null;
+  const starts = maintainerStarts(job, wf, raw);
+  if (!starts.length) return null;
+  const content = outsiderContent(job, starts);
+  if (!content) return null;
+  const reach = steerReach(wf, job);
+  if (!reach) return null;
+  const routine = (['comment', 'label', 'assign'] as const).find((s) => starts.includes(s));
+  const strong = reach !== 'write';
+  return {
+    severity: routine && strong ? 'high' : 'medium',
+    start: routine ?? starts[0],
+    content,
+    reach,
+  };
+}
+
+const STEER_START_TEXT: Record<SteerStart, string> = {
+  comment: "a maintainer's comment command or mention",
+  label: "a maintainer's label",
+  assign: "a maintainer's assignment",
+  push: "a maintainer's push to the pull request branch",
+  ready: 'a maintainer marking the pull request ready for review',
+  rerun: "a maintainer's re-run",
+};
+const STEER_CONTENT_TEXT: Record<SteerContent, string> = {
+  code: "the outsider's pull request code",
+  thread: 'the issue or pull request and its comments, which outsiders write',
+  text: "the outsider's issue or pull request text",
+  artifact: "the files of the outsider's run",
+};
+const STEER_REACH_TEXT: Record<Steered['reach'], string> = {
+  shell: 'a shell',
+  code: 'a token and a tool that can change code',
+  write: 'a token that can comment on and edit issues and pull requests',
+};
+
+/** The signal line for a steered grade. */
+export function steeredSignal(s: Steered): string {
+  return `${STEER_START_TEXT[s.start]} starts the agent on an outsider's issue or pull request; the agent then reads ${STEER_CONTENT_TEXT[s.content]}, with ${STEER_REACH_TEXT[s.reach]}`;
 }
 
 // ─── CI-4: agent-reachable secrets ───────────────────────────────────────────
@@ -3432,6 +3875,7 @@ function analyzeWorkflowSecretsInner(
   // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  useStarEvents(wf, raw);
   UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
   UNGATED_MEMO = new WeakMap();
   const all = allSteps(wf);
@@ -3614,6 +4058,7 @@ function analyzeTrustedReadersInner(
   const wf = raw as Workflow; // normalised by loadWorkflow
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  useStarEvents(wf, raw);
   const reach = triggerReach(wf, raw);
   // Stranger-firable workflows are CI-2's; a template with no caller is judged by its callers.
   if (reach.untrusted || reach.reusable) return [];
@@ -3749,7 +4194,7 @@ const NOT_FORK_ATOM_RE =
   /^github\.event\.(?:pull_request\.head\.repo|workflow_run\.head_repository)\.fork$/i;
 
 const TRUSTED_AUTHOR_GATE_RE =
-  /\b(?:pull_request|issue)\.user\.login\s*==|github\.event\.(?:pull_request|issue)\.author_association\s*==\s*['"](?:OWNER|MEMBER|COLLABORATOR)|contains\(\s*fromjson\(\s*['"][^'"]{0,200}\b(?:OWNER|MEMBER|COLLABORATOR)\b[^'"]{0,200}['"]\s*\)\s*,\s*github\.event\.(?:pull_request|issue)\.author_association/i;
+  /\b(?:pull_request|issue)\.user\.login\s*==|github\.event\.(?:pull_request|issue)\.author_association\s*==\s*['"](?:OWNER|MEMBER|COLLABORATOR)|contains\(\s*fromjson\(\s*(?:'[^']{0,200}\b(?:OWNER|MEMBER|COLLABORATOR)\b[^']{0,200}'|"[^"]{0,200}\b(?:OWNER|MEMBER|COLLABORATOR)\b[^"]{0,200}")\s*\)\s*,\s*github\.event\.(?:pull_request|issue)\.author_association|contains\(\s*fromjson\(\s*'[\d\s,\[\]]{1,400}'\s*\)\s*,\s*github\.event\.(?:pull_request|issue)\.user\.id\s*\)|github\.event\.(?:pull_request|issue)\.user\.id\s*==\s*\d/i;
 
 /** Does every way through this `if:` hold an atom matching `re`, unnegated and unchained? A way
  *  that cannot run on any of `events` (when given) needs none. */
@@ -3875,6 +4320,7 @@ function analyzeForkCodeOnTrustInner(
   // are set or cleared on every analysis, never left from another path.
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  useStarEvents(wf, raw);
   const reach = triggerReach(wf, raw);
   const forkKeys = keysWithCallers(reach.keys, callers).filter((k) => FORK_PR_TRIGGER_RE.test(k));
   if (!forkKeys.length) return [];
@@ -3996,6 +4442,7 @@ function analyzeAgentOutputToEnvInner(
   const wf = raw as Workflow; // normalised by loadWorkflow
   if (callers?.length) CALLERS.set(wf, callers);
   else CALLERS.delete(wf);
+  useStarEvents(wf, raw);
   UPSTREAM_TRUSTED = upstreamRunTrusted(wf, raw);
   UNGATED_MEMO = new WeakMap();
   const reach = triggerReach(wf, raw);

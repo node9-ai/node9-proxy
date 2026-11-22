@@ -71,12 +71,15 @@ describe('CI-2 workflow analyzer — the severity nuance (the moat)', () => {
     expect(f!.mitigations?.join(' ')).toMatch(/subdir|env-denied|pinned/i);
   });
 
-  it('rates a label-gated workflow SAFE/advisory — base checkout, scoped tools', () => {
+  it('rates a label-gated workflow medium at most: base checkout, scoped tools', () => {
+    // Gates round B: the maintainer's label hands the outsider's pull request to an agent that
+    // comments with a write token (narrow tools): medium, never high.
     const f = analyzeWorkflow(
       '.github/workflows/needs-qa-checklist.yml',
       read('label-gated-base-checkout.yml')
-    );
-    if (f) expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+    )!;
+    expect(f.severity).toBe('medium');
+    expect(f.signals.join(' ')).toMatch(/label starts the agent/);
   });
 
   it('THE MOAT: a truly-ungated workflow > a mitigated one > a gated one', () => {
@@ -1013,7 +1016,10 @@ jobs:
           claude_args: '--allowedTools "Bash(gh:*),Write"'
 `;
     const f = analyzeWorkflow('add-benefit.yml', wf)!;
-    expect(SEVERITY_RANK[f.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+    // Not stranger-firable: no open-path signal. Gates round B: a maintainer's label hands the
+    // outsider's issue body to an agent with a shell (`Bash(gh:*)`): high, never critical.
+    expect(f.signals.join(' ')).not.toMatch(/any user can trigger|no effective actor gate/);
+    expect(f.severity).toBe('high');
   });
 
   // R4-2: a power signal (contents:write / PAT) in an actor-GATED job must not
@@ -1531,8 +1537,10 @@ jobs:
       )
     ).toBe('advisory');
   });
-  it('github.actor == a trusted login is a gate → advisory', () => {
-    expect(sev("github.actor == 'trusted-maintainer'")).toBe('advisory');
+  // Gates round B: with the gate credited, only a maintainer's push to the PR branch (not
+  // routine) reaches the fork's code: medium, below the ungated high/critical above.
+  it('github.actor == a trusted login is a gate → medium (maintainer push only)', () => {
+    expect(sev("github.actor == 'trusted-maintainer'")).toBe('medium');
   });
 
   // Batch /code-review follow-ups on the polarity rewrite.
@@ -1554,8 +1562,8 @@ jobs:
   });
   // Finding [2]: a positive permission-check STEP OUTPUT gate (marketplace `uses:` action)
   // must be credited (the round-5 bare-`permission` token drop lost this real gate shape).
-  it('steps.<id>.outputs.<permission> == true is a gate → advisory', () => {
-    expect(sev("steps.check.outputs.has-permission == 'true'")).toBe('advisory');
+  it('steps.<id>.outputs.<permission> == true is a gate → medium (maintainer push only)', () => {
+    expect(sev("steps.check.outputs.has-permission == 'true'")).toBe('medium');
   });
   it('but an inverted permission-output check (== false) is NOT a gate', () => {
     expect(
