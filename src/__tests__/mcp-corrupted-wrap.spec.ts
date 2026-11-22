@@ -83,13 +83,11 @@ describe('findCorruptedMcpWraps — reads real agent configs', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  // ⚠️ ~/.claude.json, which is what inventoryMcp reads (agent-wiring's
-  // mcpFile for claude). NOTE: setupClaude WRITES ~/.claude/.mcp.json — a
-  // different file. That discrepancy is real and out of scope here; it means
-  // the inventory (and therefore this detector, `mcp status`, and the
-  // reconciler) do not see what setupClaude wrapped for Claude. Tracked
-  // separately; do not "fix" it by pointing this test at the other path,
-  // which would only hide it.
+  // ~/.claude.json, which is what inventoryMcp reads (agent-wiring's mcpFile
+  // for claude) and what Claude Code loads. setupClaude used to write a
+  // different file, ~/.claude/.mcp.json, so the inventory (and this detector,
+  // `mcp status` and the reconciler) did not see what setup wrapped for
+  // Claude. It writes ~/.claude.json now.
   function writeClaudeMcp(servers: Record<string, unknown>): void {
     const p = path.join(home, '.claude.json');
     fs.writeFileSync(p, JSON.stringify({ mcpServers: servers }, null, 2));

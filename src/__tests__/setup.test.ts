@@ -129,7 +129,10 @@ afterEach(() => {
 
 describe('setupClaude', () => {
   const hooksPath = path.join(os.homedir(), '.claude', 'settings.json');
-  const mcpPath = path.join(os.homedir(), '.claude', '.mcp.json');
+  // Claude Code's user-scope MCP servers live in ~/.claude.json. node9 edits
+  // that file through a temp file and a rename, so the write lands on mcpTmp.
+  const mcpPath = path.join(os.homedir(), '.claude.json');
+  const mcpTmp = `${mcpPath}.${process.pid}.tmp`;
 
   it('adds both hooks immediately on a fresh install — no prompt', async () => {
     const confirm = await getConfirm();
@@ -316,6 +319,40 @@ describe('setupClaude', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
   });
 
+  // ~/.claude.json is Claude Code's own state file, and Claude Code rewrites
+  // it while it runs. Setup reads it, then waits on the wrap prompt. Writing
+  // back the copy it read would undo whatever Claude Code wrote meanwhile.
+  it('wraps into the file as it is after the prompt, not the copy read before it', async () => {
+    const node9Entry = { command: 'node9', args: ['mcp-server'] };
+    const github = { command: 'npx', args: ['-y', 'server-github'] };
+    const slack = { command: 'npx', args: ['-y', 'server-slack'] };
+    withExistingFile(mcpPath, {
+      numStartups: 1,
+      mcpServers: { node9: node9Entry, github, slack },
+    });
+    const confirm = await getConfirm();
+    confirm.mockImplementation(async () => {
+      // While the prompt is open, Claude Code saves its state, and the user
+      // removes one of the servers the prompt listed.
+      withExistingFile(mcpPath, {
+        numStartups: 2,
+        projects: { '/work/app': { allowedTools: ['Bash(ls:*)'] } },
+        mcpServers: { node9: node9Entry, github },
+      });
+      return true;
+    });
+
+    await setupClaude();
+
+    const written = writtenTo(mcpTmp);
+    expect(written.numStartups).toBe(2);
+    expect(written.projects).toEqual({ '/work/app': { allowedTools: ['Bash(ls:*)'] } });
+    expect(written.mcpServers.github.args[0]).toBe('mcp-gateway');
+    // Removed during the prompt: not brought back.
+    expect(written.mcpServers.slack).toBeUndefined();
+    expect(Object.keys(written.mcpServers).sort()).toEqual(['github', 'node9']);
+  });
+
   it('wraps MCP servers when user confirms', async () => {
     withExistingFile(mcpPath, {
       mcpServers: { github: { command: 'npx', args: ['-y', 'server-github'] } },
@@ -325,7 +362,7 @@ describe('setupClaude', () => {
 
     await setupClaude();
 
-    const written = writtenTo(mcpPath);
+    const written = writtenTo(mcpTmp);
     expect(written.mcpServers.github.command).toBe('node9');
     // The gateway format, stamped with the config key at wrap time so the
     // gateway reports "github" and not a name derived from the command.
@@ -349,7 +386,7 @@ describe('setupClaude', () => {
     confirm.mockResolvedValue(false);
 
     await setupClaude();
-    expect(writtenTo(mcpPath)).toBeNull();
+    expect(writtenTo(mcpTmp)).toBeNull();
   });
 
   it('skips MCP servers that are already wrapped', async () => {
@@ -363,7 +400,7 @@ describe('setupClaude', () => {
 
     await setupClaude();
     expect(confirm).not.toHaveBeenCalled();
-    expect(writtenTo(mcpPath)).toBeNull();
+    expect(writtenTo(mcpTmp)).toBeNull();
   });
 
   it('prints "already configured" when everything is in place', async () => {
@@ -600,7 +637,10 @@ describe('setupCursor', () => {
 
 describe('teardownClaude', () => {
   const hooksPath = path.join(os.homedir(), '.claude', 'settings.json');
-  const mcpPath = path.join(os.homedir(), '.claude', '.mcp.json');
+  // Claude Code's user-scope MCP servers live in ~/.claude.json. node9 edits
+  // that file through a temp file and a rename, so the write lands on mcpTmp.
+  const mcpPath = path.join(os.homedir(), '.claude.json');
+  const mcpTmp = `${mcpPath}.${process.pid}.tmp`;
 
   it('removes node9 PreToolUse and PostToolUse hook matchers', () => {
     withExistingFile(hooksPath, {
@@ -645,7 +685,7 @@ describe('teardownClaude', () => {
     expect(written.hooks.PreToolUse).toBeUndefined();
   });
 
-  it('unwraps node9-wrapped MCP servers in .claude/.mcp.json', () => {
+  it('unwraps node9-wrapped MCP servers in ~/.claude.json', () => {
     withExistingFile(mcpPath, {
       mcpServers: {
         myServer: { command: 'node9', args: ['mcp-gateway', '--upstream', 'npx -y some-mcp'] },
@@ -655,7 +695,7 @@ describe('teardownClaude', () => {
 
     teardownClaude();
 
-    const written = writtenTo(mcpPath);
+    const written = writtenTo(mcpTmp);
     expect(written.mcpServers.myServer.command).toBe('npx');
     expect(written.mcpServers.myServer.args).toEqual(['-y', 'some-mcp']);
     // Non-node9 server untouched
@@ -671,7 +711,7 @@ describe('teardownClaude', () => {
 
     teardownClaude();
 
-    const written = writtenTo(mcpPath);
+    const written = writtenTo(mcpTmp);
     expect(written.mcpServers.solo.command).toBe('my-binary');
     // No original args — should be omitted, not set to []
     expect(written.mcpServers.solo.args).toBeUndefined();
@@ -687,7 +727,7 @@ describe('teardownClaude', () => {
     teardownClaude();
     // node9 mcp-server entry is removed by removeNode9McpServer, not this loop
     // but with no other changes, verify graceful handling
-    expect(writtenTo(mcpPath)).not.toBeNull(); // node9 entry removed
+    expect(writtenTo(mcpTmp)).not.toBeNull(); // node9 entry removed
   });
 
   it('does nothing when settings.json has no node9 hooks', () => {
@@ -706,7 +746,7 @@ describe('teardownClaude', () => {
     // existsSync returns false (default beforeEach state) — no files present
     teardownClaude();
     expect(writtenTo(hooksPath)).toBeNull();
-    expect(writtenTo(mcpPath)).toBeNull();
+    expect(writtenTo(mcpTmp)).toBeNull();
   });
 
   it('does not throw when settings.json contains malformed JSON', () => {

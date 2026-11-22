@@ -11,6 +11,7 @@ import {
   toGateway,
   fromGateway,
   migrateMcpLaunchers,
+  updateMcpServers,
   type LauncherMigration,
 } from './mcp-wrap';
 import {
@@ -676,10 +677,88 @@ export function node9HookSubcommand(cmd: string | undefined): 'check' | 'log' | 
 
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
+// ── Claude Code's MCP file ────────────────────────────────────────────────────
+// Claude Code keeps its user-scope MCP servers in ~/.claude.json, the file
+// that also holds the rest of its state (projects, account, history) and that
+// it rewrites while it runs. node9 used to write ~/.claude/.mcp.json, a file
+// Claude Code does not load (checked against 2.1.92 and 2.1.259): `node9 init`
+// reported the MCP server added, and Claude Code never saw it or any wrap.
+//
+// Two rules follow from the file being Claude Code's own:
+//   - Every change is an edit of the servers map inside the file as it is at
+//     that moment (updateMcpServers), never a write-back of a copy read
+//     earlier. Setup waits on a prompt between its read and its write.
+//   - A file that does not parse is left alone. Replacing it with one that
+//     holds only node9's entry would cost the user their Claude Code state.
+
+function claudeMcpPath(homeDir: string): string {
+  return path.join(homeDir, '.claude.json');
+}
+
+/** The servers in ~/.claude.json as they are now, or null when the file is
+ *  there and cannot be read as a config: the caller then leaves it alone. */
+function readClaudeMcpServers(mcpPath: string): Record<string, McpServer> | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(mcpPath, 'utf-8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? {} : null;
+  }
+  try {
+    const root = JSON.parse(raw) as ClaudeConfig | null;
+    if (!root || typeof root !== 'object' || Array.isArray(root)) return null;
+    const servers = root.mcpServers;
+    return servers && typeof servers === 'object' && !Array.isArray(servers) ? servers : {};
+  } catch {
+    return null;
+  }
+}
+
+/** Edit ~/.claude.json's servers; a failure is said, and does not stop setup. */
+function updateClaudeMcp(
+  mcpPath: string,
+  mutate: (servers: Record<string, McpServer>) => boolean
+): boolean {
+  try {
+    return updateMcpServers(mcpPath, 'json', mutate);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(chalk.yellow(`  ⚠️  Could not update ~/.claude.json: ${msg}`));
+    return false;
+  }
+}
+
+/**
+ * ~/.claude/.mcp.json, the file node9 wrote before. Claude Code does not load
+ * it, so whatever node9 left there does nothing: its own server entry is
+ * removed and its wraps are undone, which gives back the entries a person may
+ * have kept there. A file that held nothing else is deleted.
+ */
+function retireLegacyClaudeMcpFile(homeDir: string): void {
+  const legacyPath = path.join(homeDir, '.claude', '.mcp.json');
+  const legacy = readJson<ClaudeConfig>(legacyPath);
+  if (!legacy?.mcpServers || typeof legacy.mcpServers !== 'object') return;
+  const removedOwn = removeNode9McpServer(legacy.mcpServers);
+  const { unwrapped } = unwrapMcpServers(legacy.mcpServers);
+  if (!removedOwn && unwrapped.length === 0) return;
+  const onlyNode9 = Object.keys(legacy.mcpServers).length === 0 && Object.keys(legacy).length === 1;
+  if (onlyNode9) {
+    fs.rmSync(legacyPath, { force: true });
+    console.log(chalk.gray('  🧹 Removed ~/.claude/.mcp.json (Claude Code does not load it)'));
+  } else {
+    writeJson(legacyPath, legacy);
+    console.log(
+      chalk.gray(
+        "  🧹 Took node9's entries out of ~/.claude/.mcp.json (Claude Code does not load it)"
+      )
+    );
+  }
+}
+
 export function teardownClaude(): void {
   const homeDir = os.homedir();
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
-  const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
+  const mcpPath = claudeMcpPath(homeDir);
   let changed = false;
 
   // Remove hook matchers from settings.json
@@ -703,25 +782,23 @@ export function teardownClaude(): void {
     }
   }
 
-  // Unwrap MCP servers in .claude.json
-  const claudeConfig = readJson<ClaudeConfig>(mcpPath);
-  if (claudeConfig?.mcpServers) {
-    let mcpChanged = false;
-
-    // Remove the node9 MCP server entry added by setup
-    if (removeNode9McpServer(claudeConfig.mcpServers)) {
-      mcpChanged = true;
-      console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude/.mcp.json'));
-    }
-
-    const unwrapped = unwrapMcpServers(claudeConfig.mcpServers);
-    if (unwrapped.unwrapped.length > 0) mcpChanged = true;
-    printUnreadableWraps(unwrapped.unreadable, '~/.claude/.mcp.json');
-    if (mcpChanged) {
-      writeJson(mcpPath, claudeConfig);
-      console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude/.mcp.json'));
-    }
+  // Unwrap MCP servers in ~/.claude.json
+  let removedOwn = false;
+  let unreadable: string[] = [];
+  const mcpChanged = updateClaudeMcp(mcpPath, (servers) => {
+    removedOwn = removeNode9McpServer(servers);
+    const result = unwrapMcpServers(servers);
+    unreadable = result.unreadable;
+    return removedOwn || result.unwrapped.length > 0;
+  });
+  if (removedOwn) {
+    console.log(chalk.green('  ✅ Removed node9 MCP server entry from ~/.claude.json'));
   }
+  printUnreadableWraps(unreadable, '~/.claude.json');
+  if (mcpChanged) {
+    console.log(chalk.green('  ✅ Unwrapped MCP servers in ~/.claude.json'));
+  }
+  retireLegacyClaudeMcpFile(homeDir);
 }
 
 export function teardownGemini(): void {
@@ -909,12 +986,20 @@ export async function setupClaude(): Promise<void> {
   seedMcpPinsIfMissing();
 
   const homeDir = os.homedir();
-  const mcpPath = path.join(homeDir, '.claude', '.mcp.json');
+  const mcpPath = claudeMcpPath(homeDir);
   const hooksPath = path.join(homeDir, '.claude', 'settings.json');
 
-  const claudeConfig = readJson<ClaudeConfig>(mcpPath) ?? {};
   const settings = readJson<ClaudeSettings>(hooksPath) ?? {};
-  const servers = claudeConfig.mcpServers ?? {};
+  // null: ~/.claude.json is there and does not parse. The hooks are still
+  // installed; the MCP part is skipped, and said.
+  const mcpReadable = readClaudeMcpServers(mcpPath) !== null;
+  if (!mcpReadable) {
+    console.log(
+      chalk.yellow(
+        '  ⚠️  ~/.claude.json could not be read as JSON, so node9 left it alone: no MCP server added, none wrapped.'
+      )
+    );
+  }
 
   let hooksChanged = false;
   let anythingChanged = false;
@@ -941,14 +1026,19 @@ export async function setupClaude(): Promise<void> {
   // wrap loop below skips anything already commanded by node9, so without this
   // a broken wrap survives every upgrade with the user's own server dead. Like
   // the addition above there is nothing for the user to decide, so no prompt.
-  const repairedMcpWraps = repairLegacyMcpWraps(
-    servers as Record<string, { command?: string; args?: unknown }>
-  );
-  const addNode9McpServer = !hasNode9McpServer(servers);
-  if (addNode9McpServer || repairedMcpWraps.length > 0) {
-    if (addNode9McpServer) servers['node9'] = node9SelfEntry();
-    claudeConfig.mcpServers = servers;
-    writeJson(mcpPath, claudeConfig);
+  let addNode9McpServer = false;
+  let repairedMcpWraps: string[] = [];
+  const mcpAdded =
+    mcpReadable &&
+    updateClaudeMcp(mcpPath, (servers) => {
+      repairedMcpWraps = repairLegacyMcpWraps(
+        servers as Record<string, { command?: string; args?: unknown }>
+      );
+      addNode9McpServer = !hasNode9McpServer(servers);
+      if (addNode9McpServer) servers['node9'] = node9SelfEntry();
+      return addNode9McpServer || repairedMcpWraps.length > 0;
+    });
+  if (mcpAdded) {
     if (addNode9McpServer) {
       console.log(chalk.green('  ✅ node9 MCP server added   → node9 mcp-server'));
     }
@@ -961,6 +1051,7 @@ export async function setupClaude(): Promise<void> {
     }
     anythingChanged = true;
   }
+  retireLegacyClaudeMcpFile(homeDir);
 
   // ── HUD (statusLine) — set alongside hooks in the same write ────────────
   const hudCommand = fullPathCommand('hud');
@@ -986,7 +1077,7 @@ export async function setupClaude(): Promise<void> {
   }
 
   // ── Step 2: Modifications — show preview and ask ─────────────────────────
-  const serversToWrap = mcpWrapCandidates(servers);
+  const serversToWrap = mcpWrapCandidates(readClaudeMcpServers(mcpPath) ?? {});
 
   if (serversToWrap.length > 0) {
     console.log(chalk.bold('The following existing entries will be modified:\n'));
@@ -1002,14 +1093,22 @@ export async function setupClaude(): Promise<void> {
 
     const proceed = await confirm({ message: 'Wrap these MCP servers?', default: true });
     if (proceed) {
-      wrapMcpServers(
-        servers,
-        serversToWrap.map((w) => w.name)
-      );
-      claudeConfig.mcpServers = servers;
-      writeJson(mcpPath, claudeConfig);
-      console.log(chalk.green(`\n  ✅ ${serversToWrap.length} MCP server(s) wrapped`));
-      anythingChanged = true;
+      // The prompt may have waited minutes, and Claude Code rewrites this file
+      // while it runs: wrap what is in it NOW, and only the servers that were
+      // shown and are still unwrapped.
+      let wrapped = 0;
+      updateClaudeMcp(mcpPath, (servers) => {
+        const names = serversToWrap
+          .map((w) => w.name)
+          .filter((name) => servers[name] && classifyMcp(servers[name]) === 'ungoverned');
+        wrapMcpServers(servers, names);
+        wrapped = names.length;
+        return wrapped > 0;
+      });
+      if (wrapped > 0) {
+        console.log(chalk.green(`\n  ✅ ${wrapped} MCP server(s) wrapped`));
+        anythingChanged = true;
+      }
     } else {
       console.log(chalk.yellow('  Skipped MCP server wrapping.'));
     }

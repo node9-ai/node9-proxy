@@ -108,7 +108,8 @@ function upstreamOf(args: string[]): string {
 
 describe('every agent setup wraps Windows paths so the gateway can spawn them', () => {
   it('setupClaude', async () => {
-    const mcpPath = path.join(home, '.claude', '.mcp.json');
+    // ~/.claude.json: the file Claude Code loads its servers from.
+    const mcpPath = path.join(home, '.claude.json');
     writeJson(mcpPath, { mcpServers: { acme: { command: WIN_CMD, args: WIN_ARGS } } });
     const { setupClaude } = await import('../setup.js');
     await setupClaude();

@@ -248,30 +248,51 @@ const MCP_FILE_KEY: Record<McpFormat, string> = {
 };
 
 /**
- * Set servers[name] = entry in an agent's config, backing the file up once
- * (`<mcpFile>.node9-bak`) before the first rewrite. Atomic (tmp + rename).
+ * Change the servers map of an agent's config through `mutate`, which edits
+ * the map in place and returns whether it changed anything. Returns the same.
+ *
+ * The file is backed up once (`<mcpFile>.node9-bak`) before node9's first
+ * rewrite, and replaced atomically (tmp + rename).
  * NOTE: JSON/TOML round-trip reformats the file (drops comments/layout) — the
  * backup preserves the original; agents re-read the rewritten file fine.
- * Concurrency (#6): this re-reads the CURRENT file, so a server added by another
- * process BEFORE this read is preserved (only servers[name] is set). The only
- * loss window is a concurrent write to the SAME file between this read and the
- * rename — sub-millisecond, and agents read their MCP config at launch rather
- * than continuously, so this is accepted for v1 (no file lock).
+ * Concurrency (#6): this re-reads the CURRENT file, so whatever another
+ * process wrote BEFORE this read is preserved: only the servers map is
+ * edited. The only loss window is a concurrent write to the SAME file between
+ * this read and the rename — sub-millisecond, and agents read their MCP
+ * config at launch rather than continuously, so this is accepted for v1 (no
+ * file lock). A caller must therefore pass its change as `mutate`, never a
+ * map it read earlier: Claude Code keeps its whole state in the file its MCP
+ * servers live in, and rewrites it while it runs.
+ *
+ * Throws when the file exists and does not parse, and writes nothing: a
+ * config node9 cannot read is never replaced by one that holds only node9's
+ * entries.
  */
-export function writeMcpEntry(
+export function updateMcpServers(
   mcpFile: string,
   format: McpFormat,
-  name: string,
-  entry: McpServer
-): void {
+  mutate: (servers: Record<string, McpServer>) => boolean
+): boolean {
   // VS Code keeps its servers under `servers`. This wrote them under
   // `mcpServers`, a key VS Code does not read: the entry it meant to change
   // stayed as it was and the file grew a second map.
   const key = MCP_FILE_KEY[format];
   let root: Record<string, unknown> = {};
+  let raw: string | null = null;
   if (fs.existsSync(mcpFile)) {
-    const raw = fs.readFileSync(mcpFile, 'utf-8');
+    raw = fs.readFileSync(mcpFile, 'utf-8');
     root = (format === 'toml' ? parseToml(raw) : JSON.parse(raw)) as Record<string, unknown>;
+    if (!root || typeof root !== 'object' || Array.isArray(root)) {
+      throw new Error(`${mcpFile} does not hold a config object`);
+    }
+  }
+  const existing = root[key];
+  const servers: Record<string, McpServer> =
+    existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? (existing as Record<string, McpServer>)
+      : {};
+  if (!mutate(servers)) return false;
+  if (raw !== null) {
     // Back up ONCE, on the first node9 write to this file, so the backup is the
     // user's PRISTINE original. (Re-review corrected the earlier "refresh every
     // write" — for a file with 2+ servers, the 2nd wrap would back up the
@@ -289,17 +310,25 @@ export function writeMcpEntry(
       // Backup already present; never overwrite it.
     }
   }
-  const existing = root[key];
-  const servers: Record<string, McpServer> =
-    existing && typeof existing === 'object' && !Array.isArray(existing)
-      ? (existing as Record<string, McpServer>)
-      : {};
-  servers[name] = entry;
   root[key] = servers;
   const serialized = format === 'toml' ? stringifyToml(root) : JSON.stringify(root, null, 2);
   const tmp = `${mcpFile}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, serialized, { mode: 0o600 });
   fs.renameSync(tmp, mcpFile);
+  return true;
+}
+
+/** Set servers[name] = entry in an agent's config. See updateMcpServers. */
+export function writeMcpEntry(
+  mcpFile: string,
+  format: McpFormat,
+  name: string,
+  entry: McpServer
+): void {
+  updateMcpServers(mcpFile, format, (servers) => {
+    servers[name] = entry;
+    return true;
+  });
 }
 
 // ── Moving existing entries to the launcher ───────────────────────────────────
