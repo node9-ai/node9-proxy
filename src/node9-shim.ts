@@ -156,21 +156,27 @@ export function createLauncherFromHookShim(
 ): { node: string; cli: string } | null {
   if (process.platform === 'win32') return null;
   const launcher = shimPath('node9', home);
-  if (fs.existsSync(launcher)) return null;
   const hook = shimPath('hook', home);
   const targets = readShimTargets(hook);
   if (!targets || isShimTargetStale(hook)) return null;
-  // Exclusive create: a setup command running at this moment wins, whole.
+  // Exclusive create is the only test for "a launcher is already there": an
+  // exists-then-write pair leaves a gap in which a setup command, or a link
+  // planted at that path, gets its file overwritten. With `wx` the one that
+  // is there wins, whole. The body and the mode then go through the
+  // descriptor, so they land in the file this call created and no other.
+  let fd: number;
   try {
-    fs.writeFileSync(launcher, shimBody('node9', targets.node, targets.cli), {
-      mode: 0o755,
-      flag: 'wx',
-    });
+    fd = fs.openSync(launcher, 'wx', 0o755);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
     throw err;
   }
-  fs.chmodSync(launcher, 0o755); // writeFileSync's mode is masked by umask
+  try {
+    fs.writeFileSync(fd, shimBody('node9', targets.node, targets.cli));
+    fs.fchmodSync(fd, 0o755); // the mode given to open is masked by umask
+  } finally {
+    fs.closeSync(fd);
+  }
   return targets;
 }
 

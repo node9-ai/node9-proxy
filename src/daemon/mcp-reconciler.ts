@@ -155,7 +155,15 @@ function nudgeAboutNodeFailures(home: string): void {
     fs.rmSync(flag, { force: true });
     return;
   }
-  if (fs.existsSync(flag)) return;
+  // Told already in this episode. Reading the flag is the test, and the write
+  // below creates it exclusively: an exists-then-write pair would let a second
+  // pass replace the record of the first.
+  try {
+    fs.readFileSync(flag);
+    return;
+  } catch {
+    /* no flag: not told yet */
+  }
   // A node9 that is not JavaScript run by node (pnpm's wrapper, bun) has no
   // launcher to move to: `node9 heal` would change nothing for it.
   if (!pinsNode(process.execPath, process.argv[1] ?? '')) return;
@@ -174,7 +182,10 @@ function nudgeAboutNodeFailures(home: string): void {
     node: failures.version,
   });
   try {
-    fs.writeFileSync(flag, JSON.stringify({ notifiedAt: Date.now() }), { mode: 0o600 });
+    fs.writeFileSync(flag, JSON.stringify({ notifiedAt: Date.now() }), {
+      mode: 0o600,
+      flag: 'wx',
+    });
   } catch {
     /* not recorded: the next pass tells again, which is the safer side */
   }
