@@ -147,7 +147,7 @@ export function unsupportedNodeMessage(version: string, execPath: string): strin
   return (
     `node9: Node.js ${version} (${execPath}) cannot run node9; it needs Node.js 22.12 or later. ` +
     'Put a newer Node first on the agent\'s PATH, or run "node9 agents add <agent>" ' +
-    'in a terminal where node9 works, so the hook uses that Node.'
+    "in a terminal where node9 works, so node9's hooks and MCP servers use that Node."
   );
 }
 

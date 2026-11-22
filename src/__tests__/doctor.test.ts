@@ -519,3 +519,140 @@ describe('node9 doctor — Codex trust', () => {
     expect(output).toMatch(/Codex — hooks wired but DISABLED/);
   });
 });
+
+// ── MCP servers ──────────────────────────────────────────────────────────────
+// An MCP entry written as the bare `node9` starts on the Node the agent's PATH
+// holds. Under an old Node node9 refuses to run and the agent reports only
+// "failed to connect". The entry is still in the config, so every other
+// section read the agent as protected (found 2026-11-21, with 78 refusals in
+// hook-debug.log and a doctor that printed a tick for the agent).
+describe.skipIf(process.platform === 'win32')('node9 doctor — MCP servers', () => {
+  const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+  const HOUR = 60 * 60 * 1000;
+  const refusal = (when: string, sub: string) =>
+    `[${when}] UNSUPPORTED NODE (${sub}): node9: Node.js v18.19.1 (/usr/bin/node) cannot run node9; it needs Node.js 22.12 or later.`;
+  const bareServers = {
+    node9: { command: 'node9', args: ['mcp-server'] },
+    gmail: {
+      command: 'node9',
+      args: ['mcp-gateway', '--config-name', 'gmail', '--upstream', 'npx -y gmail-mcp'],
+    },
+  };
+  function homeWith(name: string, servers: Record<string, unknown>, log: string[] = []): string {
+    const home = path.join(tmpBase, name);
+    writeJson(path.join(home, '.node9', 'config.json'), { settings: { mode: 'standard' } });
+    writeJson(path.join(home, '.cursor', 'mcp.json'), { mcpServers: servers });
+    if (log.length > 0) {
+      fs.writeFileSync(path.join(home, '.node9', 'hook-debug.log'), log.join('\n') + '\n');
+    }
+    return home;
+  }
+  const section = (output: string): string => /MCP servers\n([\s\S]*?)\n\n/.exec(output)?.[1] ?? '';
+
+  it('warns about entries that depend on the agent PATH, and fails when node9 already refused to start', () => {
+    const quoted = refusal(iso(HOUR), 'mcp-gateway');
+    const home = homeWith('mcp-bare', bareServers, [
+      refusal(iso(9 * 24 * HOUR), 'mcp-gateway'), // older than 7 days
+      refusal(iso(2 * HOUR), 'mcp-server'),
+      refusal(iso(HOUR), 'mcp-gateway'),
+      refusal(iso(HOUR), 'check'), // a hook, not an MCP entry
+      `[${iso(HOUR)}] STDIN: ${JSON.stringify(`a prompt that quotes: ${quoted}`)}`,
+    ]);
+    const { output, exitCode } = runDoctor(home);
+    const mcp = section(output);
+    expect(mcp).toMatch(/⚠️ {2}2 node9 MCP entries start on whatever Node the agent's PATH holds/);
+    expect(mcp).toContain('Cursor: node9, gmail');
+    expect(mcp).toContain('Run: node9 heal');
+    expect(mcp).toMatch(
+      /❌ node9's MCP entries failed to start 2 times in the last 7 days: Node\.js v18\.19\.1 \(\/usr\/bin\/node\) is too old for node9/
+    );
+    expect(exitCode).toBe(1);
+  }, 20000);
+
+  it('only warns when nothing has failed: the entries may be working', () => {
+    const { output } = runDoctor(homeWith('mcp-bare-quiet', bareServers));
+    const mcp = section(output);
+    expect(mcp).toMatch(/2 node9 MCP entries start on whatever Node/);
+    expect(mcp).not.toContain('❌');
+  }, 20000);
+
+  it('passes once the entries start through a launcher that points somewhere', () => {
+    const home = path.join(tmpBase, 'mcp-launcher');
+    const launcher = path.join(home, '.node9', 'bin', 'node9');
+    const cli = path.join(home, 'cli.js');
+    writeJson(cli, {});
+    writeJson(path.join(home, '.node9', 'config.json'), { settings: { mode: 'standard' } });
+    // The refusals are from before the entries were moved.
+    fs.writeFileSync(
+      path.join(home, '.node9', 'hook-debug.log'),
+      refusal(iso(HOUR), 'mcp-gateway') + '\n'
+    );
+    fs.mkdirSync(path.dirname(launcher), { recursive: true });
+    fs.writeFileSync(
+      launcher,
+      `#!/bin/sh\nnode="${NODE}"\n[ -x "$node" ] || node=node\nexec "$node" "${cli}" "$@"\n`,
+      { mode: 0o755 }
+    );
+    writeJson(path.join(home, '.cursor', 'mcp.json'), {
+      mcpServers: {
+        node9: { command: launcher, args: ['mcp-server'] },
+        gmail: {
+          command: launcher,
+          args: ['mcp-gateway', '--config-name', 'gmail', '--upstream', 'npx -y gmail-mcp'],
+        },
+      },
+    });
+    const mcp = section(runDoctor(home).output);
+    expect(mcp).toContain(
+      `✅ node9 MCP entries: 2 start through ~/.node9/bin/node9 (Node: ${NODE})`
+    );
+    expect(mcp).toMatch(/✅ MCP entries failed to start on an old Node until 1 hour ago/);
+    expect(mcp).not.toContain('❌');
+    expect(mcp).not.toContain('⚠️');
+
+    // The same machine after the pinned Node was removed.
+    fs.writeFileSync(
+      launcher,
+      `#!/bin/sh\nnode="${path.join(home, 'gone', 'node')}"\n[ -x "$node" ] || node=node\nexec "$node" "${cli}" "$@"\n`,
+      { mode: 0o755 }
+    );
+    const stale = section(runDoctor(home).output);
+    expect(stale).toMatch(
+      /⚠️ {2}The node9 launcher points at a Node or a node9 that no longer exists/
+    );
+    expect(stale).toContain('Run: node9 init');
+    expect(stale).toMatch(/❌ node9's MCP entries failed to start 1 time in the last 7 days/);
+  }, 40000);
+
+  it('says so when an entry still fails and no config node9 reads explains it', () => {
+    const home = path.join(tmpBase, 'mcp-elsewhere');
+    const launcher = path.join(home, '.node9', 'bin', 'node9');
+    const cli = path.join(home, 'cli.js');
+    writeJson(cli, {});
+    writeJson(path.join(home, '.node9', 'config.json'), { settings: { mode: 'standard' } });
+    fs.mkdirSync(path.dirname(launcher), { recursive: true });
+    fs.writeFileSync(
+      launcher,
+      `#!/bin/sh\nnode="${NODE}"\n[ -x "$node" ] || node=node\nexec "$node" "${cli}" "$@"\n`,
+      { mode: 0o755 }
+    );
+    const config = path.join(home, '.cursor', 'mcp.json');
+    writeJson(config, { mcpServers: { node9: { command: launcher, args: ['mcp-server'] } } });
+    // The config was last changed a day ago; node9 refused to start a minute ago.
+    const dayAgo = new Date(Date.now() - 24 * HOUR);
+    fs.utimesSync(config, dayAgo, dayAgo);
+    fs.writeFileSync(
+      path.join(home, '.node9', 'hook-debug.log'),
+      refusal(iso(60_000), 'mcp-gateway') + '\n'
+    );
+    const mcp = section(runDoctor(home).output);
+    expect(mcp).toMatch(/⚠️ {2}A node9 MCP entry failed to start 1 time in the last 7 days/);
+    expect(mcp).toContain('project-scoped server');
+    expect(mcp).not.toContain('❌');
+  }, 20000);
+
+  it('prints no section on a machine with no node9 MCP entry and no refusal', () => {
+    const home = homeWith('mcp-none', { plain: { command: 'npx', args: ['plain-mcp'] } });
+    expect(runDoctor(home).output).not.toContain('MCP servers');
+  }, 20000);
+});
