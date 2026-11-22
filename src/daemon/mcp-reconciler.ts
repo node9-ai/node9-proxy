@@ -14,6 +14,7 @@ import {
   toGateway,
   regateway,
   writeMcpEntry,
+  migrateMcpLaunchers,
   type McpEntry,
 } from '../mcp-wrap';
 import { sendDesktopNotification } from '../ui/native';
@@ -21,7 +22,8 @@ import { getConfig, getCredentials } from '../config';
 import { auditLocalAllow } from '../auth/cloud';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { readMcpPins, writeMcpPins, type PinsFile } from '../mcp-pin';
-import { readyLauncherArgv } from '../node9-shim';
+import { readyLauncherArgv, createLauncherFromHookShim, pinsNode } from '../node9-shim';
+import { mcpLaunchHealth, readMcpNodeFailures } from '../mcp-launch-health';
 
 const BASELINE_FILE = path.join(os.homedir(), '.node9', 'mcp-baseline.json');
 const BASELINE_CAP = 500;
@@ -78,8 +80,119 @@ function reportToCloud(
   }
 }
 
+// ── Launcher pass ─────────────────────────────────────────────────────────────
+// node9's own MCP entries that start as the bare `node9` run on the Node the
+// agent's PATH holds. Under an old Node node9 refuses to run, and the agent
+// reports only "failed to connect" for node9's server and for every server
+// node9 wrapped. Attended setup moves those entries to the launcher
+// (~/.node9/bin/node9), but an npm upgrade runs no setup, and a user who runs
+// none keeps the dead entries. This pass is what reaches them.
+//
+//   1. No launcher: make it from the hook shim (the Node attended setup chose).
+//   2. Move the entries to it. JSON only; an entry a person pinned and that
+//      works is left. Silent, like the --config-name refresh: one log line each.
+//   3. Entries still depend on PATH and node9 has refused to start this week:
+//      tell the user once, with the command that fixes it.
+
+const NODE_NUDGE_FILE = (): string => path.join(os.homedir(), '.node9', 'mcp-node-nudged.json');
+
+function runLauncherPass(): void {
+  if (process.platform === 'win32') return; // the launcher is a POSIX script
+  const home = os.homedir();
+
+  try {
+    const made = createLauncherFromHookShim(home);
+    if (made) {
+      appendToLog(HOOK_DEBUG_LOG, {
+        event: 'mcp-launcher-created',
+        node: made.node,
+        cli: made.cli,
+      });
+    }
+  } catch (err) {
+    appendToLog(HOOK_DEBUG_LOG, {
+      event: 'mcp-launcher-create-failed',
+      error: (err as Error)?.message,
+    });
+  }
+
+  const moved = migrateMcpLaunchers({
+    home,
+    unattended: true,
+    onError: (entry, err) =>
+      appendToLog(HOOK_DEBUG_LOG, {
+        event: 'mcp-launcher-migrate-failed',
+        agent: entry.agent,
+        name: entry.name,
+        error: (err as Error)?.message,
+      }),
+  });
+  for (const m of moved) {
+    appendToLog(HOOK_DEBUG_LOG, {
+      event: 'mcp-launcher-migrated',
+      agent: m.agent,
+      name: m.name,
+      from: m.from,
+    });
+  }
+
+  nudgeAboutNodeFailures(home);
+}
+
+/**
+ * One desktop notification when node9's MCP entries are known to fail and this
+ * pass could not fix them: there was no hook shim to make the launcher from,
+ * the entry is in a TOML file the daemon does not rewrite, or the config is
+ * not writable. Only where hook-debug.log holds a refusal from the last 7
+ * days: a user whose bare `node9` works is never told about it. Once per
+ * episode; the flag clears when no entry depends on PATH, so a later
+ * regression is told again.
+ */
+function nudgeAboutNodeFailures(home: string): void {
+  const flag = NODE_NUDGE_FILE();
+  const dependent = mcpLaunchHealth(home).pathDependent;
+  if (dependent.length === 0) {
+    fs.rmSync(flag, { force: true });
+    return;
+  }
+  if (fs.existsSync(flag)) return;
+  // A node9 that is not JavaScript run by node (pnpm's wrapper, bun) has no
+  // launcher to move to: `node9 heal` would change nothing for it.
+  if (!pinsNode(process.execPath, process.argv[1] ?? '')) return;
+  const failures = readMcpNodeFailures(home);
+  if (!failures) return;
+  const count = dependent.reduce((sum, g) => sum + g.names.length, 0);
+  sendDesktopNotification(
+    '⚠️ node9: MCP servers fail to start',
+    `Node.js ${failures.version} is too old for node9, and ${count} MCP entr${count === 1 ? 'y' : 'ies'} (${dependent
+      .map((g) => g.agentLabel)
+      .join(', ')}) start on it. Run: node9 heal`
+  );
+  appendToLog(HOOK_DEBUG_LOG, {
+    event: 'mcp-node-nudged',
+    entries: count,
+    node: failures.version,
+  });
+  try {
+    fs.writeFileSync(flag, JSON.stringify({ notifiedAt: Date.now() }), { mode: 0o600 });
+  } catch {
+    /* not recorded: the next pass tells again, which is the safer side */
+  }
+}
+
 /** One reconcile pass. Exported for tests. */
 export function runMcpReconcile(): void {
+  // Before the inventory: the refresh and wrap passes below then read the
+  // entries as this pass left them. It must never stop the reconcile.
+  try {
+    runLauncherPass();
+  } catch (err) {
+    appendToLog(HOOK_DEBUG_LOG, {
+      event: 'mcp-launcher-pass-failed',
+      error: (err as Error)?.message,
+    });
+  }
+
   // Auto-wrap does NOT touch TOML (Codex): smol-toml.stringify would reformat the
   // whole file (drop comments, risk value-shape drift on other tables). Codex is
   // nudge-only unattended; the user can wrap it explicitly via the CLI (which

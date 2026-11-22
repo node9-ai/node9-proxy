@@ -101,26 +101,77 @@ export function ensureShims(home: string, nodeExec: string, cliScript: string): 
 }
 
 /**
+ * The node and the node9 script a shim runs, read from its body. null when
+ * the file is missing or its body is not one node9 wrote.
+ * Current body: node="<node>" ... exec "$node" "<cli>". Older body: exec "<node>" "<cli>".
+ */
+export function readShimTargets(shim: string): { node: string; cli: string } | null {
+  let body: string;
+  try {
+    body = fs.readFileSync(shim, 'utf-8');
+  } catch {
+    return null;
+  }
+  const pinned = /^node="([^"]+)"$/m.exec(body)?.[1];
+  const exec = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
+  if (!exec) return null;
+  const node = exec[1] === '$node' ? pinned : exec[1];
+  return node ? { node, cli: exec[2] } : null;
+}
+
+/**
  * True when the shim at `shim` points at a node or a cli.js that no longer
  * exists (an nvm version removed, node9 reinstalled elsewhere). The command an
  * agent holds is still the shim's fixed path, so only the body tells.
  * A body that does not parse is not called stale: it is left for a human.
  */
 export function isShimTargetStale(shim: string): boolean {
-  let body: string;
-  try {
-    body = fs.readFileSync(shim, 'utf-8');
-  } catch {
-    return false;
-  }
-  // Current body: node="<node>" ... exec "$node" "<cli>". Older body: exec "<node>" "<cli>".
-  const pinned = /^node="([^"]+)"$/m.exec(body)?.[1];
-  const exec = /^exec "([^"]+)" "([^"]+)" "\$@"$/m.exec(body);
-  if (!exec) return false;
-  const node = exec[1] === '$node' ? pinned : exec[1];
-  if (!node) return false;
+  const targets = readShimTargets(shim);
+  if (!targets) return false;
   // A missing node still runs (PATH fallback) but no longer as set up: rewrite it.
-  return !fs.existsSync(node) || !fs.existsSync(exec[2]);
+  return !fs.existsSync(targets.node) || !fs.existsSync(targets.cli);
+}
+
+/**
+ * The daemon's one write to ~/.node9/bin: when there is no launcher, make it
+ * from the hook shim.
+ *
+ * Why the daemon needs it. A user who upgrades node9 and runs no setup command
+ * has no launcher, so nothing the daemon does could move their MCP entries to
+ * one, and those entries keep failing on an old Node. The hook shim is there
+ * on any machine that ran setup since it shipped.
+ *
+ * Why this is not "the daemon choosing a Node". It copies the node and the
+ * node9 the hook shim names, the choice an attended setup made. It never uses
+ * its own process.execPath (the daemon may run on another Node), and it never
+ * touches a launcher that exists, stale or not: rewriting is setup's job, so
+ * there is one writer of a pinned Node and it cannot flap.
+ *
+ * Returns the targets it wrote, or null when it wrote nothing: a launcher is
+ * already there, there is no hook shim, or the hook shim does not parse or
+ * points at something that is gone.
+ */
+export function createLauncherFromHookShim(
+  home: string = os.homedir()
+): { node: string; cli: string } | null {
+  if (process.platform === 'win32') return null;
+  const launcher = shimPath('node9', home);
+  if (fs.existsSync(launcher)) return null;
+  const hook = shimPath('hook', home);
+  const targets = readShimTargets(hook);
+  if (!targets || isShimTargetStale(hook)) return null;
+  // Exclusive create: a setup command running at this moment wins, whole.
+  try {
+    fs.writeFileSync(launcher, shimBody('node9', targets.node, targets.cli), {
+      mode: 0o755,
+      flag: 'wx',
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    throw err;
+  }
+  fs.chmodSync(launcher, 0o755); // writeFileSync's mode is masked by umask
+  return targets;
 }
 
 /**

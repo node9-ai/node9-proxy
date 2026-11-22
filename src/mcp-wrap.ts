@@ -17,7 +17,7 @@ import {
   type Node9Launch,
   type Node9LaunchForm,
 } from './mcp-entry';
-import { mcpLauncherArgv } from './node9-shim';
+import { mcpLauncherArgv, readyLauncherArgv, readShimTargets } from './node9-shim';
 export type { McpServer, McpFormat } from './agent-wiring';
 export { tokenize } from './mcp-cmd';
 
@@ -325,43 +325,62 @@ function sameFile(a: string, b: string): boolean {
 }
 
 /**
- * Whether an attended command moves this entry to the launcher.
+ * Whether this entry moves to the launcher.
  *
  *   bin        The bare name: yes, it starts on whatever Node the agent's PATH
  *              holds. A path to a bin: yes when it is this node9, or is gone.
  *   runtime    A Node written in front of the node9 script by hand. Yes when
- *              the script is this node9, or the Node or the script is gone.
- *   hook-shim  Yes: the same body, under a name older node9 versions read as a
- *              third-party server.
+ *              the Node or the script is gone. When both exist and the script
+ *              is this node9: yes for an attended command, no for the daemon.
+ *              It works, and a person wrote it.
+ *   hook-shim  The same body, under a name older node9 versions read as a
+ *              third-party server. Attended: yes. The daemon leaves it: it
+ *              starts on a pinned Node already.
  *   launcher   Already there.
  *   runner     `npx node9-ai ...` is a choice to run without an install: no.
  *
- * "This node9" is the script running now. An entry that names ANOTHER node9
- * that exists (a development checkout beside the installed one, a wrapper
- * that is not JavaScript) is someone's choice of which node9 to run: the
- * launcher would silently swap it for this one, so it is left alone.
+ * "This node9" is the script the launcher runs. An entry that names ANOTHER
+ * node9 that exists (a development checkout beside the installed one, a
+ * wrapper that is not JavaScript) is someone's choice of which node9 to run:
+ * the launcher would silently swap it for this one, so it is left alone.
  */
-function movesToLauncher(launch: Node9Launch, cliScript: string): boolean {
+function movesToLauncher(launch: Node9Launch, cliScript: string, unattended: boolean): boolean {
   const [command, script] = launch.launcher;
   switch (launch.form) {
     case 'hook-shim':
-      return true;
+      return !unattended;
     case 'bin':
       if (!hasPathSeparator(command)) return true;
       return !fs.existsSync(command) || sameFile(command, cliScript);
     case 'runtime':
       if (hasPathSeparator(command) && !fs.existsSync(command)) return true;
-      return !fs.existsSync(script) || sameFile(script, cliScript);
+      if (!fs.existsSync(script)) return true;
+      return !unattended && sameFile(script, cliScript);
     default:
       return false;
   }
 }
 
+export interface LauncherMigrationOptions {
+  home?: string;
+  /** The node9 script running an attended command. Default: process.argv[1]. */
+  cliScript?: string;
+  /**
+   * True for the daemon. It never writes the launcher (it uses the one on
+   * disk, when that one is usable), never rewrites TOML (smol-toml reformats
+   * the whole file, comments included), and leaves an entry that works and
+   * that a person pinned by hand.
+   */
+  unattended?: boolean;
+  /** Called for an entry that should have moved and could not be written. */
+  onError?: (entry: Omit<LauncherMigration, 'from'>, err: unknown) => void;
+}
+
 /**
  * Move node9's own MCP entries, in every agent's config, to the launcher
- * (~/.node9/bin/node9), so they start on the Node that ran setup. For an
- * ATTENDED command (init, agents add, heal): it writes or refreshes the
- * launcher.
+ * (~/.node9/bin/node9), so they start on the Node that ran setup. An attended
+ * command (init, agents add, heal) writes or refreshes the launcher on the
+ * way; the daemon passes `unattended`.
  *
  * Driven by the registry, not by each setup flow, so it reaches the file each
  * agent really loads, and the three agents the inventory leaves out (Windsurf,
@@ -372,18 +391,27 @@ function movesToLauncher(launch: Node9Launch, cliScript: string): boolean {
  * arguments, `env`, `type` and every other key stay, so the `--upstream`
  * string, and with it the serverKey that pins and app-permission rules hang
  * on, does not change. A wrap with no `--config-name` gets the config key, as
- * the daemon's refresh pass would give it. A legacy `mcp --upstream` wrap
- * becomes `mcp-gateway`. An entry already on the launcher is skipped, so a
- * second call writes nothing.
+ * the daemon's refresh pass would give it; without it a daemon still running
+ * older code would "refresh" the entry back to the bare `node9`. A legacy
+ * `mcp --upstream` wrap becomes `mcp-gateway`. An entry already on the
+ * launcher is skipped, so a second call writes nothing.
  *
- * A file that cannot be read or written is skipped: a setup command must not
- * fail because another agent's config is broken.
+ * A file that cannot be read or written is skipped: one agent's broken config
+ * must not stop the others.
  */
-export function migrateMcpLaunchers(
-  opts: { home?: string; cliScript?: string } = {}
-): LauncherMigration[] {
+export function migrateMcpLaunchers(opts: LauncherMigrationOptions = {}): LauncherMigration[] {
   const home = opts.home ?? os.homedir();
-  const cliScript = opts.cliScript ?? process.argv[1] ?? '';
+  const unattended = opts.unattended === true;
+
+  // The daemon reads the launcher first: with none on disk it has nothing to
+  // move to, and "this node9" is whatever that launcher runs.
+  let launcher: string[] | null = null;
+  let cliScript = opts.cliScript ?? process.argv[1] ?? '';
+  if (unattended) {
+    launcher = readyLauncherArgv(home);
+    if (!isLauncherArgv(launcher)) return [];
+    cliScript = readShimTargets(launcher[0])?.cli ?? '';
+  }
 
   // Read first, write after: with nothing to move, nothing is created either.
   interface Candidate {
@@ -400,6 +428,7 @@ export function migrateMcpLaunchers(
     if (!spec.mcpFile) continue;
     const mcpFile = spec.mcpFile(home);
     const format: McpFormat = spec.mcpFormat ?? 'json';
+    if (unattended && format === 'toml') continue;
     for (const [name, server] of Object.entries(readMcpServers(mcpFile, format))) {
       if (!server || typeof server !== 'object') continue;
       const launch = parseNode9Launch(server);
@@ -408,18 +437,16 @@ export function migrateMcpLaunchers(
       const isWrap = state === 'gatewayed';
       const isOwnServer = state === 'node9-self' && launch.subcommand === 'mcp-server';
       if (!isWrap && !isOwnServer) continue;
-      if (!movesToLauncher(launch, cliScript)) continue;
+      if (!movesToLauncher(launch, cliScript, unattended)) continue;
       candidates.push({ spec, mcpFile, format, name, server, launch, isWrap });
     }
   }
   if (candidates.length === 0) return [];
 
-  const launcher = mcpLauncherArgv(home);
   // Nothing to move to: Windows, a test run, or a node9 that is not started by
   // node (mcpLauncherArgv returns the bare name or the bin itself for those).
-  if (parseNode9Launch({ command: launcher[0], args: ['mcp-server'] })?.form !== 'launcher') {
-    return [];
-  }
+  launcher ??= mcpLauncherArgv(home);
+  if (!isLauncherArgv(launcher)) return [];
 
   const moved: LauncherMigration[] = [];
   for (const { spec, mcpFile, format, name, server, launch, isWrap } of candidates) {
@@ -437,18 +464,19 @@ export function migrateMcpLaunchers(
         ...launch.rest,
       ],
     };
+    const row = { agent: String(spec.id), agentLabel: spec.label, mcpFile, name };
     try {
       writeMcpEntry(mcpFile, format, name, entry);
-      moved.push({
-        agent: String(spec.id),
-        agentLabel: spec.label,
-        mcpFile,
-        name,
-        from: launch.form,
-      });
-    } catch {
+      moved.push({ ...row, from: launch.form });
+    } catch (err) {
       // Read-only or changed under us: leave the entry, the next run retries.
+      opts.onError?.(row, err);
     }
   }
   return moved;
+}
+
+/** True when the argv is the launcher itself, not the bare name or a bin. */
+function isLauncherArgv(argv: string[]): boolean {
+  return parseNode9Launch({ command: argv[0], args: ['mcp-server'] })?.form === 'launcher';
 }

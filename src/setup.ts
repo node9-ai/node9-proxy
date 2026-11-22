@@ -88,8 +88,11 @@ export async function setupAgent(agent: string): Promise<void> {
  */
 export function moveMcpEntriesToLauncher(): LauncherMigration[] {
   let moved: LauncherMigration[];
+  const failed: string[] = [];
   try {
-    moved = migrateMcpLaunchers();
+    moved = migrateMcpLaunchers({
+      onError: (entry) => failed.push(`${entry.name} (${entry.agentLabel})`),
+    });
   } catch (err) {
     // Setup has done its own work by now; this pass must not fail it.
     const msg = err instanceof Error ? err.message : String(err);
@@ -112,6 +115,14 @@ export function moveMcpEntriesToLauncher(): LauncherMigration[] {
   }
   if (moved.length > 0) {
     console.log(chalk.gray('     Restart the agent for the change to take effect.'));
+  }
+  if (failed.length > 0) {
+    console.log(
+      chalk.yellow(
+        `  ⚠️  Could not rewrite ${failed.length} node9 MCP entr${failed.length === 1 ? 'y' : 'ies'}: ${failed.join(', ')}. ` +
+          "They still start on the agent's PATH Node. Check that the config file is writable, then run: node9 heal"
+      )
+    );
   }
   return moved;
 }
