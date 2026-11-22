@@ -12,6 +12,12 @@
 // and the after-run hook claims a marker by removing its file, so two hooks
 // for one call write one row. Every operation is best-effort and MUST NOT
 // throw into a hook path: losing a marker loses the proof, never the block.
+//
+// The same marker proves the other way round for a call node9 FLAGGED and let
+// through (audit-mode would-block, DLP review, exposure logged): the marker
+// then names the flagged rows (`refEids`), and the after-run hook writes one
+// `ran-after-flag` record saying that call ran (cases-session-stage2 design,
+// change 5). A call is either blocked or allowed, so one marker per call.
 import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -48,8 +54,18 @@ export interface BlockedCall {
   /** The block's own row is a test call's and stays on the machine; so does
    *  the row written for a run of this call. */
   testRun?: boolean;
+  /** Set on a call node9 flagged and allowed: the eids of its flagged rows.
+   *  A marker with these is a flag marker, without them a block marker. */
+  refEids?: string[];
   ts: number;
 }
+
+/** Shape of an audit row id (audit/index.ts generateEventId). */
+export const EVENT_ID_RE = /^[0-9a-z]{1,12}-[0-9a-f]{12}$/;
+/** A call writes few flagged rows; a marker never names more. */
+export const MAX_REF_EIDS = 4;
+/** checkedBy of the record the after-run hook writes for a flagged call. */
+export const RAN_AFTER_FLAG = 'ran-after-flag';
 
 /**
  * The per-call id both hook payloads of one call carry, within its session.
@@ -80,8 +96,8 @@ function fileOf(key: string): string {
   return path.join(storeDir(), `${createHash('sha256').update(key).digest('hex')}.json`);
 }
 
-/** Removes expired markers and, past the cap, the oldest. Run on a block
- *  only: a rare event, and the after-run hook never lists the directory. */
+/** Removes expired markers and, past the cap, the oldest. Run on a block or
+ *  a flag only: rare events, and the after-run hook never lists the directory. */
 function sweep(now: number): void {
   try {
     const dir = storeDir();
@@ -107,8 +123,9 @@ function sweep(now: number): void {
   }
 }
 
-/** Note that node9 delivered a block for this call. */
-export function noteBlockedCall(entry: BlockedCall): void {
+/** Note that node9 delivered a block for this call, or let a flagged one
+ *  through. False when the marker could not be written. */
+export function noteBlockedCall(entry: BlockedCall): boolean {
   try {
     const dir = storeDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -119,8 +136,42 @@ export function noteBlockedCall(entry: BlockedCall): void {
     fs.renameSync(tmp, file);
     fs.utimesSync(file, entry.ts / 1000, entry.ts / 1000);
     sweep(entry.ts);
+    return true;
   } catch {
     /* never affect the block */
+    return false;
+  }
+}
+
+/** The well-formed row ids in a value, at most MAX_REF_EIDS. Shared by the
+ *  marker reader and the audit shipper. */
+export function validRefEids(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((v): v is string => typeof v === 'string' && EVENT_ID_RE.test(v))
+    .slice(0, MAX_REF_EIDS);
+}
+
+function refEidsOf(value: unknown): { refEids?: string[] } {
+  const ids = validRefEids(value);
+  return ids.length > 0 ? { refEids: ids } : {};
+}
+
+/**
+ * Whether a marker for this call can be written: the call is one the
+ * after-run hook can vouch for (`blockedCallKey`), and the store accepts a
+ * file. A flagged row says its run is tracked only then, so a store that
+ * cannot be written never reads as "the call did not run".
+ */
+export function canTrackRun(payload: Record<string, unknown>, agent: string | undefined): boolean {
+  if (blockedCallKey(payload, agent) === null) return false;
+  try {
+    const dir = storeDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.accessSync(dir, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -152,6 +203,7 @@ export function resolveBlockedCall(
       ...(typeof parsed.checkId === 'string' && { checkId: parsed.checkId }),
       ...(typeof parsed.ruleName === 'string' && { ruleName: parsed.ruleName }),
       ...(parsed.testRun === true && { testRun: true }),
+      ...refEidsOf(parsed.refEids),
       ts: parsed.ts,
     };
   } catch {

@@ -90,7 +90,10 @@ function startEntry(
   requests: object[]
 ): SpawnSyncReturns<string> {
   return spawnSync(entry.command, entry.args, {
-    input: requests.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    // No requests: stdin is closed at once. A process that refuses to run
+    // exits without reading it, and writing to it then fails with EPIPE
+    // whenever the exit wins the race (seen on CI ubuntu).
+    input: requests.length > 0 ? requests.map((r) => JSON.stringify(r)).join('\n') + '\n' : '',
     encoding: 'utf-8',
     timeout: 30000,
     cwd: home,
@@ -184,11 +187,7 @@ afterAll(() => {
 
 describe("node9's own MCP server under an old Node on PATH", () => {
   itUnix("the fixture reproduces the incident: the bare `node9` runs on PATH's node", () => {
-    const r = startEntry(
-      { command: 'node9', args: ['mcp-server'] },
-      [oldNodeDir, bareBinDir],
-      [INITIALIZE]
-    );
+    const r = startEntry({ command: 'node9', args: ['mcp-server'] }, [oldNodeDir, bareBinDir], []);
     expect(r.error).toBeUndefined();
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(FAKE_NODE_MARK);
@@ -265,7 +264,7 @@ describe('the launcher when its pinned Node is gone', () => {
     expect(pinned).toBeTruthy();
     fs.writeFileSync(launcher(), body.replace(pinned as string, path.join(root, 'gone', 'node')));
     try {
-      const r = startEntry(readEntry('node9'), [oldNodeDir], [INITIALIZE]);
+      const r = startEntry(readEntry('node9'), [oldNodeDir], []);
       expect(r.error).toBeUndefined();
       expect(r.status).toBe(1);
       expect(r.stderr).toContain(FAKE_NODE_MARK);

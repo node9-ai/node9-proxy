@@ -265,6 +265,45 @@ describe('buildWireRows: the turn of a call', () => {
   });
 });
 
+describe('buildWireRows: the outcome of a flagged call', () => {
+  const FLAGGED = generateEventId();
+  const outcome = (over: Record<string, unknown> = {}) =>
+    row({ args: undefined, checkedBy: 'ran-after-flag', source: 'ran-after-flag', ...over });
+
+  it('forwards the flagged rows it names', () => {
+    const { rows } = buildWireRows(Buffer.from(outcome({ refEids: [FLAGGED] })));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ checkedBy: 'ran-after-flag', refEids: [FLAGGED] });
+  });
+
+  it('an outcome that names no valid row is not shipped: alone it reads as a call', () => {
+    for (const refEids of [undefined, [], ['not an id'], 'x', [42]]) {
+      const { rows, consumed } = buildWireRows(Buffer.from(outcome({ refEids })));
+      expect(rows, JSON.stringify(refEids)).toHaveLength(0);
+      expect(consumed).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps the valid ids and at most four', () => {
+    const ids = [1, 2, 3, 4, 5].map(() => generateEventId());
+    const { rows } = buildWireRows(Buffer.from(outcome({ refEids: ['bad', ...ids] })));
+    expect(rows[0].refEids).toEqual(ids.slice(0, 4));
+  });
+
+  it('no other row carries the field', () => {
+    const { rows } = buildWireRows(Buffer.from(row({ refEids: [FLAGGED] })));
+    expect('refEids' in rows[0]).toBe(false);
+  });
+
+  it('forwards the tracked-run mark of a flagged row, and only the value 1', () => {
+    const ship = (tracksRun: unknown) =>
+      buildWireRows(Buffer.from(row({ checkedBy: 'observe-mode-would-block', tracksRun })))
+        .rows[0] as unknown as Record<string, unknown>;
+    expect(ship(1).tracksRun).toBe(1);
+    for (const v of [true, 2, '1', null]) expect('tracksRun' in ship(v)).toBe(false);
+  });
+});
+
 describe('buildWireRows: the facts of a call', () => {
   const wire = (over: Record<string, unknown>) =>
     buildWireRows(Buffer.from(row(over))).rows[0] as unknown as Record<string, unknown>;
@@ -638,6 +677,29 @@ describe('shipOnce', () => {
     expect(bodies).toHaveLength(3);
     expect('turn' in bodies[2][0]).toBe(false);
     expect(bodies[2][0]).toMatchObject(FACTS);
+    _resetOwaspWireFields();
+  });
+
+  it('a server that predates the outcome record never gets it, and keeps every call', async () => {
+    _resetOwaspWireFields();
+    const flagged = generateEventId();
+    fs.writeFileSync(
+      auditLogPath,
+      row({ eid: flagged, checkedBy: 'observe-mode-would-block', turn: 2, tracksRun: 1 }) +
+        row({ args: undefined, checkedBy: 'ran-after-flag', refEids: [flagged], turn: 2 })
+    );
+    const { impl, bodies } = recording((rows) => rows.some((r) => 'refEids' in r));
+
+    const res = await shipOnce(deps(impl));
+    expect(res).toEqual({ status: 'shipped', shipped: 1 });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toHaveLength(2);
+    // The record left with its field, not as a bare allowed call; the
+    // flagged row kept its turn.
+    expect(bodies[1]).toHaveLength(1);
+    expect(bodies[0][0].tracksRun).toBe(1);
+    expect(bodies[1][0]).toMatchObject({ eid: flagged, turn: 2 });
+    expect('tracksRun' in bodies[1][0]).toBe(false);
     _resetOwaspWireFields();
   });
 

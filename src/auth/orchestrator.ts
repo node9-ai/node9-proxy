@@ -453,6 +453,8 @@ export async function authorizeHeadless(
     serverKey?: string;
     sessionId?: string;
     transcriptPath?: string;
+    /** The hook tracks this call to its run (blocked-calls.ts). */
+    tracksRun?: boolean;
   },
   options?: {
     calledFromDaemon?: boolean;
@@ -570,6 +572,7 @@ export async function _authorizeHeadlessCore(
     sessionId?: string;
     transcriptPath?: string;
     workingDir?: string;
+    tracksRun?: boolean;
   },
   options?: {
     calledFromDaemon?: boolean;
