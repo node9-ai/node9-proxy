@@ -10,7 +10,14 @@ import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { AGENT_SPECS, readMcpServers, type McpServer, type McpFormat } from './agent-wiring';
 import { tokenize, quoteArg } from './mcp-cmd';
 import { getServerKey } from './mcp-pin';
-import { parseNode9Launch, gatewayUpstream, MCP_WRAP_SUBCOMMAND } from './mcp-entry';
+import {
+  parseNode9Launch,
+  gatewayUpstream,
+  MCP_WRAP_SUBCOMMAND,
+  type Node9Launch,
+  type Node9LaunchForm,
+} from './mcp-entry';
+import { mcpLauncherArgv } from './node9-shim';
 export type { McpServer, McpFormat } from './agent-wiring';
 export { tokenize } from './mcp-cmd';
 
@@ -233,6 +240,13 @@ export function inventoryServerKeys(inv: McpEntry[]): Set<string> {
   return keys;
 }
 
+/** The key each config format keeps its servers under. */
+const MCP_FILE_KEY: Record<McpFormat, string> = {
+  json: 'mcpServers',
+  toml: 'mcp_servers',
+  vscode: 'servers',
+};
+
 /**
  * Set servers[name] = entry in an agent's config, backing the file up once
  * (`<mcpFile>.node9-bak`) before the first rewrite. Atomic (tmp + rename).
@@ -250,7 +264,10 @@ export function writeMcpEntry(
   name: string,
   entry: McpServer
 ): void {
-  const key = format === 'toml' ? 'mcp_servers' : 'mcpServers';
+  // VS Code keeps its servers under `servers`. This wrote them under
+  // `mcpServers`, a key VS Code does not read: the entry it meant to change
+  // stayed as it was and the file grew a second map.
+  const key = MCP_FILE_KEY[format];
   let root: Record<string, unknown> = {};
   if (fs.existsSync(mcpFile)) {
     const raw = fs.readFileSync(mcpFile, 'utf-8');
@@ -283,4 +300,155 @@ export function writeMcpEntry(
   const tmp = `${mcpFile}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, serialized, { mode: 0o600 });
   fs.renameSync(tmp, mcpFile);
+}
+
+// ── Moving existing entries to the launcher ───────────────────────────────────
+
+export interface LauncherMigration {
+  agent: string; // AgentSpec.id
+  agentLabel: string;
+  mcpFile: string;
+  name: string;
+  /** How the entry started node9 before it was moved. */
+  from: Node9LaunchForm;
+}
+
+const hasPathSeparator = (p: string): boolean => /[\\/]/.test(p);
+
+/** True when both paths lead to the same file. False when either is missing. */
+function sameFile(a: string, b: string): boolean {
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether an attended command moves this entry to the launcher.
+ *
+ *   bin        The bare name: yes, it starts on whatever Node the agent's PATH
+ *              holds. A path to a bin: yes when it is this node9, or is gone.
+ *   runtime    A Node written in front of the node9 script by hand. Yes when
+ *              the script is this node9, or the Node or the script is gone.
+ *   hook-shim  Yes: the same body, under a name older node9 versions read as a
+ *              third-party server.
+ *   launcher   Already there.
+ *   runner     `npx node9-ai ...` is a choice to run without an install: no.
+ *
+ * "This node9" is the script running now. An entry that names ANOTHER node9
+ * that exists (a development checkout beside the installed one, a wrapper
+ * that is not JavaScript) is someone's choice of which node9 to run: the
+ * launcher would silently swap it for this one, so it is left alone.
+ */
+function movesToLauncher(launch: Node9Launch, cliScript: string): boolean {
+  const [command, script] = launch.launcher;
+  switch (launch.form) {
+    case 'hook-shim':
+      return true;
+    case 'bin':
+      if (!hasPathSeparator(command)) return true;
+      return !fs.existsSync(command) || sameFile(command, cliScript);
+    case 'runtime':
+      if (hasPathSeparator(command) && !fs.existsSync(command)) return true;
+      return !fs.existsSync(script) || sameFile(script, cliScript);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Move node9's own MCP entries, in every agent's config, to the launcher
+ * (~/.node9/bin/node9), so they start on the Node that ran setup. For an
+ * ATTENDED command (init, agents add, heal): it writes or refreshes the
+ * launcher.
+ *
+ * Driven by the registry, not by each setup flow, so it reaches the file each
+ * agent really loads, and the three agents the inventory leaves out (Windsurf,
+ * VS Code, Claude Desktop): desktop apps, the ones most likely to start
+ * servers with a short PATH.
+ *
+ * It rewrites only the part of an entry that starts node9. The subcommand's
+ * arguments, `env`, `type` and every other key stay, so the `--upstream`
+ * string, and with it the serverKey that pins and app-permission rules hang
+ * on, does not change. A wrap with no `--config-name` gets the config key, as
+ * the daemon's refresh pass would give it. A legacy `mcp --upstream` wrap
+ * becomes `mcp-gateway`. An entry already on the launcher is skipped, so a
+ * second call writes nothing.
+ *
+ * A file that cannot be read or written is skipped: a setup command must not
+ * fail because another agent's config is broken.
+ */
+export function migrateMcpLaunchers(
+  opts: { home?: string; cliScript?: string } = {}
+): LauncherMigration[] {
+  const home = opts.home ?? os.homedir();
+  const cliScript = opts.cliScript ?? process.argv[1] ?? '';
+
+  // Read first, write after: with nothing to move, nothing is created either.
+  interface Candidate {
+    spec: (typeof AGENT_SPECS)[number];
+    mcpFile: string;
+    format: McpFormat;
+    name: string;
+    server: McpServer;
+    launch: Node9Launch;
+    isWrap: boolean;
+  }
+  const candidates: Candidate[] = [];
+  for (const spec of AGENT_SPECS) {
+    if (!spec.mcpFile) continue;
+    const mcpFile = spec.mcpFile(home);
+    const format: McpFormat = spec.mcpFormat ?? 'json';
+    for (const [name, server] of Object.entries(readMcpServers(mcpFile, format))) {
+      if (!server || typeof server !== 'object') continue;
+      const launch = parseNode9Launch(server);
+      if (!launch) continue;
+      const state = classifyMcp(server);
+      const isWrap = state === 'gatewayed';
+      const isOwnServer = state === 'node9-self' && launch.subcommand === 'mcp-server';
+      if (!isWrap && !isOwnServer) continue;
+      if (!movesToLauncher(launch, cliScript)) continue;
+      candidates.push({ spec, mcpFile, format, name, server, launch, isWrap });
+    }
+  }
+  if (candidates.length === 0) return [];
+
+  const launcher = mcpLauncherArgv(home);
+  // Nothing to move to: Windows, a test run, or a node9 that is not started by
+  // node (mcpLauncherArgv returns the bare name or the bin itself for those).
+  if (parseNode9Launch({ command: launcher[0], args: ['mcp-server'] })?.form !== 'launcher') {
+    return [];
+  }
+
+  const moved: LauncherMigration[] = [];
+  for (const { spec, mcpFile, format, name, server, launch, isWrap } of candidates) {
+    const stamp =
+      isWrap && !launch.rest.includes('--config-name') && !name.startsWith('-')
+        ? ['--config-name', name]
+        : [];
+    const entry: McpServer = {
+      ...server,
+      command: launcher[0],
+      args: [
+        ...launcher.slice(1),
+        isWrap ? MCP_WRAP_SUBCOMMAND : launch.subcommand,
+        ...stamp,
+        ...launch.rest,
+      ],
+    };
+    try {
+      writeMcpEntry(mcpFile, format, name, entry);
+      moved.push({
+        agent: String(spec.id),
+        agentLabel: spec.label,
+        mcpFile,
+        name,
+        from: launch.form,
+      });
+    } catch {
+      // Read-only or changed under us: leave the entry, the next run retries.
+    }
+  }
+  return moved;
 }

@@ -246,19 +246,25 @@ describe.skipIf(skip).each(FORMATS)('setup and teardown on a real $agent config'
       expect(Object.keys(servers).sort()).toEqual(Object.keys(before).sort());
       expect(rest).toEqual({ unrelated: { keep: [1, 2, 3] } });
 
-      // node9's own server: still there, under the keys it had, not a second copy.
-      expect(servers.node9.args?.at(-1)).toBe('mcp-server');
-      expect(servers['node9-pinned'].args?.at(-1)).toBe('mcp-server');
+      // node9's own server: under the keys it had, not a second copy, and
+      // started by the launcher now (the pinned Node of the fixture is gone).
+      expect(servers.node9).toEqual({
+        ...format.entryExtra,
+        command: launcher(),
+        args: ['mcp-server'],
+      });
+      expect(servers['node9-pinned']).toEqual(servers.node9);
 
-      // No wrap is wrapped a second time, and each keeps its upstream and env.
+      // No wrap is wrapped a second time. Each moves to the launcher, named by
+      // its config key, with the upstream and the env it had: the upstream is
+      // what the serverKey is hashed from, so pins and rules stay attached.
       for (const name of ['stamped', 'unstamped', 'pinned', 'quoted']) {
-        const args = servers[name].args ?? [];
-        expect(
-          args.filter((a) => a === 'mcp-gateway'),
-          name
-        ).toHaveLength(1);
-        expect(upstreamOf(servers[name]), name).toBe(upstreamOf(before[name]));
-        expect(servers[name].env, name).toEqual(before[name].env);
+        expect(servers[name], name).toEqual({
+          ...format.entryExtra,
+          ...(before[name].env ? { env: before[name].env } : {}),
+          command: launcher(),
+          args: ['mcp-gateway', '--config-name', name, '--upstream', upstreamOf(before[name])],
+        });
       }
 
       // The plain server: wrapped through the launcher, named, and its argument

@@ -27,6 +27,7 @@ import {
   teardownOpencode,
   teardownPi,
   teardownHermes,
+  moveMcpEntriesToLauncher,
   type AgentName,
 } from '../../setup';
 import { getAgentWiring } from '../../agent-wiring';
@@ -159,6 +160,7 @@ export function registerAgentsCommand(program: Command): void {
         process.exit(1);
       }
       await fn();
+      moveMcpEntriesToLauncher();
     });
 
   // ── remove ────────────────────────────────────────────────────────────────

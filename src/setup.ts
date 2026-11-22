@@ -5,7 +5,14 @@ import os from 'os';
 import chalk from 'chalk';
 import { confirm as rawConfirm } from '@inquirer/prompts';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
-import { mcpUpstreamString, classifyMcp, toGateway, fromGateway } from './mcp-wrap';
+import {
+  mcpUpstreamString,
+  classifyMcp,
+  toGateway,
+  fromGateway,
+  migrateMcpLaunchers,
+  type LauncherMigration,
+} from './mcp-wrap';
 import {
   MCP_WRAP_SUBCOMMAND,
   LEGACY_MCP_WRAP_SUBCOMMAND,
@@ -68,6 +75,45 @@ export async function setupAgent(agent: string): Promise<void> {
   // Record node9's intent to govern this agent so the daemon's hook-heal pass can
   // tell "an update wiped a server we govern" (nudge) from "never governed" (ignore).
   recordHookBaseline(agent, Date.now());
+  moveMcpEntriesToLauncher();
+}
+
+/**
+ * Move the node9 MCP entries that are already in agent configs to the
+ * launcher, and say which. Called by every attended setup command (init,
+ * agents add, heal): the entries an older node9 wrote start on the agent's
+ * PATH Node, and under an old one they do not start. Covers every agent, not
+ * only the one being set up: the launcher is one per machine, and a person who
+ * fixes one agent should not have to name the others.
+ */
+export function moveMcpEntriesToLauncher(): LauncherMigration[] {
+  let moved: LauncherMigration[];
+  try {
+    moved = migrateMcpLaunchers();
+  } catch (err) {
+    // Setup has done its own work by now; this pass must not fail it.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(chalk.yellow(`  ⚠️  Could not move MCP entries to the node9 launcher: ${msg}`));
+    return [];
+  }
+  const byAgent = new Map<string, string[]>();
+  for (const m of moved) {
+    byAgent.set(m.agentLabel, [...(byAgent.get(m.agentLabel) ?? []), m.name]);
+  }
+  for (const [label, names] of byAgent) {
+    console.log(
+      chalk.green(
+        `  ✅ ${label}: ${names.length} node9 MCP entr${names.length === 1 ? 'y' : 'ies'}`
+      ) +
+        chalk.gray(
+          ` now start${names.length === 1 ? 's' : ''} on the Node that ran this setup (${names.join(', ')})`
+        )
+    );
+  }
+  if (moved.length > 0) {
+    console.log(chalk.gray('     Restart the agent for the change to take effect.'));
+  }
+  return moved;
 }
 
 // Detect installed agents and wire each (non-interactive when the caller sets

@@ -280,18 +280,14 @@ describe('the launcher when its pinned Node is gone', () => {
 // "node9", so it put the bare entry back over the pinned one and wrapped the
 // pinned wraps a second time.
 describe('setup on a config whose entries pin their Node by hand', () => {
-  const PIN = ['/opt/node-v25/bin/node', '/opt/node-v25/bin/node9'];
-  const handPinned = {
-    node9: { command: PIN[0], args: [PIN[1], 'mcp-server'] },
-    pg: {
-      command: PIN[0],
-      args: [PIN[1], 'mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y pg-mcp'],
-      env: { PGHOST: 'db' },
-    },
-    remote: { url: 'https://example.invalid/mcp' },
-  };
+  // The bin a global install links: named node9, leading to the CLI that runs
+  // these commands. That is what a person writes behind the Node they pin.
+  const bin = () => path.join(bareBinDir, 'node9');
   let home2: string;
+  let otherNode9: string; // another node9 that exists: a development checkout
+  let handPinned: Record<string, Entry | { url: string }>;
   const file = () => path.join(home2, '.cursor', 'mcp.json');
+  const launcher2 = () => path.join(home2, '.node9', 'bin', 'node9');
   const servers = () =>
     (JSON.parse(fs.readFileSync(file(), 'utf-8')) as { mcpServers: Record<string, Entry> })
       .mcpServers;
@@ -300,6 +296,26 @@ describe('setup on a config whose entries pin their Node by hand', () => {
     if (skip) return;
     home2 = path.join(root, 'home-hand-pinned');
     fs.mkdirSync(path.join(home2, '.cursor'), { recursive: true });
+    otherNode9 = path.join(root, 'checkout', 'node9-proxy', 'dist', 'cli.js');
+    fs.mkdirSync(path.dirname(otherNode9), { recursive: true });
+    fs.writeFileSync(otherNode9, '#!/usr/bin/env node\n');
+    handPinned = {
+      // The node9 that runs this setup, with its Node written in front.
+      node9: { command: NODE, args: [bin(), 'mcp-server'] },
+      pg: {
+        command: NODE,
+        args: [bin(), 'mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y pg-mcp'],
+        env: { PGHOST: 'db' },
+      },
+      // A Node that was removed since: the entry is dead.
+      stale: {
+        command: path.join(root, 'removed', 'node'),
+        args: [bin(), 'mcp-gateway', '--upstream', 'npx -y stale-mcp'],
+      },
+      // Another node9 that exists. Which node9 runs it is that person's choice.
+      dev: { command: NODE, args: [otherNode9, 'mcp-gateway', '--upstream', 'npx -y dev-mcp'] },
+      remote: { url: 'https://example.invalid/mcp' },
+    };
     fs.writeFileSync(
       file(),
       JSON.stringify(
@@ -310,17 +326,38 @@ describe('setup on a config whose entries pin their Node by hand', () => {
     );
   });
 
-  itUnix('`agents add` leaves them as they are and wraps only the plain server', () => {
+  itUnix('`agents add` moves them to the launcher and wraps only the plain server', () => {
     const r = node9(['agents', 'add', 'cursor'], home2);
     expect(r.error).toBeUndefined();
     expect(r.status).toBe(0);
     const after = servers();
-    expect(Object.keys(after).sort()).toEqual(['node9', 'pg', 'plain', 'remote']);
-    expect(after.node9).toEqual(handPinned.node9);
-    expect(after.pg).toEqual(handPinned.pg);
+    expect(Object.keys(after).sort()).toEqual(['dev', 'node9', 'pg', 'plain', 'remote', 'stale']);
+    // Moved: the same subcommand and arguments, started by the launcher.
+    expect(after.node9).toEqual({ command: launcher2(), args: ['mcp-server'] });
+    expect(after.pg).toEqual({
+      command: launcher2(),
+      args: ['mcp-gateway', '--config-name', 'pg', '--upstream', 'npx -y pg-mcp'],
+      env: { PGHOST: 'db' },
+    });
+    expect(after.stale).toEqual({
+      command: launcher2(),
+      args: ['mcp-gateway', '--config-name', 'stale', '--upstream', 'npx -y stale-mcp'],
+    });
+    // Not moved, and not wrapped a second time.
+    expect(after.dev).toEqual(handPinned.dev);
     expect(after.remote).toEqual(handPinned.remote);
-    expect(after.plain.args).toContain('mcp-gateway');
+    expect(after.plain.command).toBe(launcher2());
     expect(after.plain.args[after.plain.args.indexOf('--upstream') + 1]).toBe('npx -y plain-mcp');
+    expect(r.stdout).toMatch(/Cursor: 3 node9 MCP entries/);
+  });
+
+  itUnix('a second `agents add` moves nothing and says nothing about it', () => {
+    const before = fs.readFileSync(file(), 'utf-8');
+    const r = node9(['agents', 'add', 'cursor'], home2);
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(file(), 'utf-8')).toBe(before);
+    expect(r.stdout).not.toMatch(/node9 MCP entr/);
   });
 
   itUnix("`agents remove` takes node9's own entry out, whatever starts it", () => {
@@ -331,6 +368,98 @@ describe('setup on a config whose entries pin their Node by hand', () => {
     expect(after.node9).toBeUndefined();
     expect(after.remote).toEqual(handPinned.remote);
     expect(after.plain).toEqual({ command: 'npx', args: ['-y', 'plain-mcp'] });
+    expect(after.dev).toEqual({ command: 'npx', args: ['-y', 'dev-mcp'] });
+  });
+});
+
+// The machine the incident was found on: Claude Code's ~/.claude.json, a large
+// file node9's setup for Claude does not write, holding wraps node9 wrote as
+// the bare `node9` and an own entry pinned by hand. `node9 heal` reaches it
+// through the registry.
+describe('`node9 heal` on a Claude Code config with bare entries', () => {
+  const bin = () => path.join(bareBinDir, 'node9');
+  let home3: string;
+  const file = () => path.join(home3, '.claude.json');
+  const launcher3 = () => path.join(home3, '.node9', 'bin', 'node9');
+  const other = {
+    numStartups: 412,
+    projects: {
+      '/work/app': { allowedTools: ['Bash(ls:*)'], mcpServers: { local: { command: 'x' } } },
+    },
+    oauthAccount: { emailAddress: 'someone@example.invalid' },
+  };
+  const WRAPS = ['gmail', 'postgres-dev', 'postgres-prod', 'redis-prod'];
+
+  beforeAll(() => {
+    if (skip) return;
+    home3 = path.join(root, 'home-claude');
+    fs.mkdirSync(home3, { recursive: true });
+    const mcpServers: Record<string, Entry> = {
+      node9: { command: NODE, args: [bin(), 'mcp-server'] },
+    };
+    for (const name of WRAPS) {
+      mcpServers[name] = {
+        command: 'node9',
+        args: ['mcp-gateway', '--config-name', name, '--upstream', `npx -y ${name}-mcp`],
+        env: { NAME: name },
+      };
+    }
+    fs.writeFileSync(file(), JSON.stringify({ ...other, mcpServers }, null, 2));
+  });
+
+  itUnix('moves every entry to the launcher and leaves the rest of the file alone', () => {
+    const r = node9(['heal'], home3);
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Claude Code: 5 node9 MCP entries/);
+    for (const name of WRAPS) expect(r.stdout).toContain(name);
+
+    const { mcpServers, ...rest } = JSON.parse(fs.readFileSync(file(), 'utf-8')) as {
+      mcpServers: Record<string, Entry>;
+    } & Record<string, unknown>;
+    expect(rest).toEqual(other);
+    expect(mcpServers.node9).toEqual({ command: launcher3(), args: ['mcp-server'] });
+    for (const name of WRAPS) {
+      expect(mcpServers[name], name).toEqual({
+        command: launcher3(),
+        args: ['mcp-gateway', '--config-name', name, '--upstream', `npx -y ${name}-mcp`],
+        env: { NAME: name },
+      });
+    }
+    // The file as it was is kept once, beside it.
+    const backup = JSON.parse(fs.readFileSync(`${file()}.node9-bak`, 'utf-8')) as {
+      mcpServers: Record<string, Entry>;
+    };
+    expect(backup.mcpServers.gmail.command).toBe('node9');
+  });
+
+  itUnix('the moved own entry answers initialize under an old Node on PATH', () => {
+    const entry = (
+      JSON.parse(fs.readFileSync(file(), 'utf-8')) as { mcpServers: Record<string, Entry> }
+    ).mcpServers.node9;
+    const r = spawnSync(entry.command, entry.args, {
+      input: JSON.stringify(INITIALIZE) + '\n',
+      encoding: 'utf-8',
+      timeout: 30000,
+      cwd: home3,
+      env: {
+        ...baseEnv(home3),
+        NODE9_TESTING: '1',
+        PATH: [oldNodeDir, '/usr/bin', '/bin'].join(':'),
+      },
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    expect(replies(r.stdout).find((m) => m.id === 1)?.result?.serverInfo?.name).toBe('node9');
+  });
+
+  itUnix('a second `heal` moves nothing', () => {
+    const before = fs.readFileSync(file(), 'utf-8');
+    const r = node9(['heal'], home3);
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(file(), 'utf-8')).toBe(before);
+    expect(r.stdout).not.toMatch(/node9 MCP entr/);
   });
 });
 

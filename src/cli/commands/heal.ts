@@ -10,7 +10,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import { getAgentWiring, type AgentWiringRow } from '../../agent-wiring';
 import { findCorruptedMcpWraps } from '../../mcp-wrap';
-import { setupAgent } from '../../setup';
+import { setupAgent, moveMcpEntriesToLauncher } from '../../setup';
 import { loadHookBaseline, loadNotified, saveNotified } from '../../daemon/hook-baseline';
 
 // A restorable hook/shim surface exists (excludes MCP-only agents like Cursor,
@@ -69,6 +69,11 @@ export async function runHeal(name?: string): Promise<{ healed: string[] }> {
   // stops. A rewrite here would put a broken path back as the user's own
   // command and stop looking like node9's doing.
   reportCorruptedMcpWraps();
+
+  // node9's MCP entries move to the launcher here too, and for the same
+  // reason first and unconditionally: an entry that starts on the agent's
+  // PATH Node may be dead right now, whether or not any hook needs healing.
+  moveMcpEntriesToLauncher();
 
   const baseline = loadHookBaseline();
   const wiring = getAgentWiring();
