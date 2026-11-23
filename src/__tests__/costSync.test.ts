@@ -106,9 +106,7 @@ describe('cost upload batching (survives the SaaS 200-row cap)', () => {
       .mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);
     const entries = Array.from({ length: 250 }, () => row('claude-opus-4-8'));
-    await expect(
-      postCostBatches('https://api.example', 'k', 'mach', entries)
-    ).resolves.toBeUndefined();
+    await expect(postCostBatches('https://api.example', 'k', 'mach', entries)).resolves.toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(2); // second batch still attempted
     vi.unstubAllGlobals();
   });
