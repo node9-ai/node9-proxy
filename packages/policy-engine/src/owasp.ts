@@ -135,6 +135,10 @@ const SCAN_REPO_RULE_OWASP: readonly (readonly [prefix: string, risk: AsiId])[] 
   ['CI-1.worm-startup', 'ASI04'],
   ['CI-1.worm-loader', 'ASI04'],
   ['CI-1.folder-open-task', 'ASI05'],
+  // A11: a hook's script that fetches and runs remote code, and a committed SessionStart hook:
+  // code that runs by itself on every machine that opens the repository.
+  ['CI-1.hook-runs-remote-code', 'ASI05'],
+  ['CI-1.session-start-hook', 'ASI05'],
   // CI-2: workflows that run agents on outside content
   ['CI-2.', 'ASI01'],
   // CI-3: MCP servers and plugins

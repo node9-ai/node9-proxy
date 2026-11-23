@@ -69,8 +69,10 @@ function reviewQuestion(rule) {
     return 'Why does this script hold invisible characters? A list of them to detect is fine.';
   if (/exec-escape/.test(rule))
     return 'Does the agent need this command with any arguments, or only one exact form?';
+  if (/session-start-hook|folder-open-task/.test(rule))
+    return 'This runs by itself when the repository is opened. Does it only set up or build, and does anything it runs come from the network?';
   if (/unscanned/.test(rule))
-    return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
+    return 'node9 did not read this script (too large, or a link). What does it run?';
   if (/^CI-1\.(broad-allow|hook-remote-code|codex-unsafe-defaults)$|^CI-3\.mcp-/.test(rule))
     return 'This config sits in a test or example folder. Does anyone open that folder as a project?';
   return 'Is this an instruction the agent follows, or text for a person?';

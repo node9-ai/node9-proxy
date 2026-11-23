@@ -35,6 +35,7 @@ import {
   analyzeStartup,
   claudeHookTriggers,
   inspectStartupScript,
+  triggerScriptsOf,
   vscodeTaskTriggers,
   type StartupScriptInfo,
   type StartupTrigger,
@@ -54,6 +55,7 @@ import {
 } from './packages';
 import { checkPackageRefs, type PackageCheckOptions } from './package-check';
 import type { CiFinding, ScanResult, Severity, RepoTree } from './types';
+import { createHash } from 'node:crypto';
 import { SEVERITY_RANK } from './types';
 
 // The routes whose findings are about file CONTENT: graded per tier, skipped in fixture trees.
@@ -108,6 +110,26 @@ function committedAllowOf(files: RepoTree['files']): string {
   }
   return out.join(' ');
 }
+
+/** A11: the counted form of a remote-exec finding in a script a start-up or hook trigger runs. */
+function hookRunsRemote(f: CiFinding): CiFinding {
+  return {
+    ...f,
+    check: 'CI-1',
+    rule: 'CI-1.hook-runs-remote-code',
+    dimension: 'toolRules',
+    severity: 'medium',
+    title: 'Agent hook runs a script that fetches and runs remote code',
+    signals: [
+      ...f.signals,
+      'a committed hook or folder-open task runs this script by itself, on every machine that opens the repository',
+    ],
+    fix: 'Vendor what the script downloads and pin it, or remove the download. A hook should never run code fetched from the network.',
+  };
+}
+
+const digest12 = (text: string) =>
+  createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 
 export function scanTree(tree: RepoTree): ScanResult {
   setCommittedAgentAllow('');
@@ -239,11 +261,28 @@ export function scanTree(tree: RepoTree): ScanResult {
   // together after the loop (a trigger and its loader are different files).
   const startupTriggers: StartupTrigger[] = [];
   const startupScripts = new Map<string, StartupScriptInfo>();
+  // A11: the scripts a start-up trigger runs are graded as hook scripts wherever they are
+  // committed (the readers fetch them). Collected first: a script may come before its trigger.
+  const triggerScripts = new Set<string>();
+  for (const file of tree.files) {
+    const r = routeOfFile(file);
+    if (r !== 'agent-config' && r !== 'vscode-tasks') continue;
+    try {
+      for (const p of triggerScriptsOf(file.path, file.content)) triggerScripts.add(p);
+    } catch {
+      /* unreadable: the main loop reports it */
+    }
+  }
+  // sha256 (12 hex) of each trigger script graded, so a changed script is a new finding in a PR.
+  const triggerDigests = new Map<string, string>();
   // A1: the registry packages an agent would fetch, checked online after the scan (scanRepo).
   const packageRefs: PackageRef[] = [];
   for (const file of tree.files) {
     // The reader routed each path over the whole plan (K.4); a hand-built tree has no route.
     let route = file.route !== undefined ? file.route : routeOf(file.path, skillDirs, appDirs);
+    // A11: a script a start-up trigger runs, outside the paths read by name.
+    const triggered = triggerScripts.has(file.path);
+    if (route === null && triggered) route = 'hook-script';
     if (route === 'app-doc') {
       if (!namedBy(file.path)) continue; // the app's own doc: not graded, not inspected
       route = 'instruction';
@@ -315,6 +354,10 @@ export function scanTree(tree: RepoTree): ScanResult {
           break;
         case 'startup-script':
           startupScripts.set(file.path, inspectStartupScript(content));
+          if (triggered) {
+            findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
+            addRefs(textPackageRefs(file.path, content, 'hook-script', alertsOnly));
+          }
           break;
         case 'hook-script':
           findings.push(...analyzeScript(file.path, content, 'CI-1.hook-script'));
@@ -342,6 +385,14 @@ export function scanTree(tree: RepoTree): ScanResult {
           addRefs(textPackageRefs(file.path, content, 'doc', alertsOnly));
           break;
       }
+      // A11: a trigger script read under any route (a skill's script too) was graded.
+      if (triggered) triggerDigests.set(file.path, digest12(content));
+      // A11 (founder, 2026-11-23): a script a committed hook or folder-open task runs that fetches
+      // and runs remote code counts at medium: the same line written in the hook command itself
+      // already does (CI-1.hook-remote-code, capped at medium by S1). Outside test trees only.
+      if (triggered && testKind === 'none')
+        for (let i = before; i < findings.length; i++)
+          if (/\.remote-exec$/.test(findings[i].rule)) findings[i] = hookRunsRemote(findings[i]);
     } catch (err) {
       // A checker that throws has not looked: the result may be INCOMPLETE, never clean.
       notes.push(
@@ -361,7 +412,13 @@ export function scanTree(tree: RepoTree): ScanResult {
   }
 
   try {
-    const startup = analyzeStartup(startupTriggers, startupScripts, listing);
+    const startup = analyzeStartup(startupTriggers, startupScripts, listing, triggerDigests);
+    // A11: a hook whose script was read and graded is not "not graded".
+    for (let i = findings.length - 1; i >= 0; i--) {
+      const f = findings[i];
+      if (f.rule === 'CI-1.hook-script-unscanned' && triggerDigests.has(f.locator ?? ''))
+        findings.splice(i, 1);
+    }
     // A worm finding already says what the hook's script is; the "not graded" review item for
     // the same hook would contradict it. Same file, same script path (both from hookScriptPath).
     const wormHooks = new Set(

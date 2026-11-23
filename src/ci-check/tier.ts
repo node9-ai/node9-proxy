@@ -39,6 +39,8 @@ export function tierOf(f: Pick<CiFinding, 'rule' | 'severity' | 'fixtureTree'>):
   if (rule === 'CI-1.local-settings-committed') return 'review';
   // A9: a folder-open task is normal (build watchers); listed so a reviewer knows it starts by itself.
   if (rule === 'CI-1.folder-open-task') return 'review';
+  // A11: the same for a committed Claude Code SessionStart hook.
+  if (rule === 'CI-1.session-start-hook') return 'review';
   // T.5 (founder, node9Firewall#337): counted at the lowest level.
   if (
     rule === 'CI-2.trusted-trigger-reader' ||
@@ -92,8 +94,10 @@ export function reviewQuestion(rule: string): string {
     return 'Does the agent need this command with any arguments, or only one exact form?';
   if (/local-settings-committed/.test(rule))
     return 'Is this file meant to be committed? Claude Code writes approved commands here, secrets included.';
+  if (/session-start-hook|folder-open-task/.test(rule))
+    return 'This runs by itself when the repository is opened. Does it only set up or build, and does anything it runs come from the network?';
   if (/unscanned/.test(rule))
-    return 'node9 did not read this script (too large, or outside the folders it reads). What does it run?';
+    return 'node9 did not read this script (too large, or a link). What does it run?';
   // Config rules are review items only under a test, fixture or example tree (fw#481 S2).
   if (/^CI-1\.(broad-allow|hook-remote-code|codex-unsafe-defaults)$|^CI-3\.mcp-/.test(rule))
     return 'This config sits in a test or example folder. Does anyone open that folder as a project?';
