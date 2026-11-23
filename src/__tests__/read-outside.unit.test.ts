@@ -1,8 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { projectRootOf, readOutsidePath } from '../audit/read-outside';
+import {
+  _resetProjectRootMemo,
+  findProjectRoot,
+  projectRootOf,
+  readOutsidePath,
+} from '../audit/read-outside';
 
 // The test setup points HOME at an empty temp folder (helpers/isolate-home).
 describe('projectRootOf', () => {
@@ -63,5 +68,26 @@ describe('readOutsidePath', () => {
     expect(readOutsidePath('Read', { file_path: path.join(cwd, '..env.local') }, cwd)).toBe(
       undefined
     );
+  });
+});
+
+describe('findProjectRoot memo', () => {
+  it('looks again after a minute, so a new repository shows up', () => {
+    const dir = fs.mkdtempSync(path.join(os.homedir(), 'memo-'));
+    try {
+      _resetProjectRootMemo();
+      const now = Date.now();
+      const spy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      expect(findProjectRoot(dir)).toBeNull();
+      fs.mkdirSync(path.join(dir, '.git'));
+      // Inside the minute: the memo answers.
+      spy.mockReturnValue(now + 30_000);
+      expect(findProjectRoot(dir)).toBeNull();
+      spy.mockReturnValue(now + 61_000);
+      expect(findProjectRoot(dir)).toBe(dir);
+      spy.mockRestore();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

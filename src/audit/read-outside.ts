@@ -13,6 +13,8 @@ import { truncateBlastPath } from '@node9/policy-engine';
 
 /** Longest shortened path sent; the cloud schema caps it at the same value. */
 export const MAX_READ_OUTSIDE_PATH = 256;
+/** Longest project root sent; the cloud schema caps it at the same value. */
+export const MAX_PROJECT_ROOT = 1024;
 
 /** Tools whose only effect is reading the file in its path argument. Grep and
  *  Glob are left out: their path is a directory to search, not a file read. */
@@ -50,26 +52,52 @@ function isTemp(target: string): boolean {
   return roots.some((r) => within(target, r));
 }
 
+const rootMemo = new Map<string, { root: string | null; at: number }>();
+const ROOT_MEMO_MAX = 64;
+/** A long-lived process (the daemon, the MCP gateway) looks again after a
+ *  minute, so a `git init` or a removed repository shows up. */
+const ROOT_MEMO_MS = 60_000;
+
 /**
- * The project a working directory belongs to: the nearest ancestor that holds
- * `.git`, so a session started in `repo/be` treats `repo/fe` as inside. The
- * home folder and the filesystem root never count, even when they hold
- * `.git`: a dotfiles repository would make every read "inside". Without a
- * repository the working directory itself is the project.
+ * The git repository a working directory is in: the nearest ancestor that
+ * holds `.git` (a folder, or a file in a worktree), or null when there is
+ * none. The home folder and the filesystem root never count, even when they
+ * hold `.git`: a dotfiles repository would make every read "inside".
+ * Memoized for a minute: a hook writes a row or two, the daemon many.
  */
-export function projectRootOf(cwd: string): string {
+export function findProjectRoot(cwd: string): string | null {
+  const known = rootMemo.get(cwd);
+  if (known && Date.now() - known.at < ROOT_MEMO_MS) return known.root;
   const home = os.homedir();
+  let found: string | null = null;
   let dir = cwd;
   for (let i = 0; i < 64; i++) {
     if (samePath(dir, home) || dir === path.dirname(dir)) break;
     try {
-      if (fs.existsSync(path.join(dir, '.git'))) return dir;
+      if (fs.existsSync(path.join(dir, '.git'))) {
+        found = dir;
+        break;
+      }
     } catch {
       break;
     }
     dir = path.dirname(dir);
   }
-  return cwd;
+  if (rootMemo.size >= ROOT_MEMO_MAX) rootMemo.clear();
+  rootMemo.set(cwd, { root: found, at: Date.now() });
+  return found;
+}
+
+/** The project a working directory belongs to: its repository, so a
+ *  session started in `repo/be` treats `repo/fe` as inside; without one,
+ *  the working directory itself. */
+export function projectRootOf(cwd: string): string {
+  return findProjectRoot(cwd) ?? cwd;
+}
+
+/** Test seam. */
+export function _resetProjectRootMemo(): void {
+  rootMemo.clear();
 }
 
 /**
