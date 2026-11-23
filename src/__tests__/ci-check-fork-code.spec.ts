@@ -35,12 +35,16 @@ describe('T.7 — a maintainer-started agent inside the fork head', () => {
 });
 
 describe('T.7 — what stays as it is', () => {
-  it.each([
-    'same-repo-test.yml',
-    'base-checkout.yml',
-    'codex-read-only-sandbox.yml',
-    'trusted-author-gate.yml',
-  ])('%s: no alert', (f) => {
-    expect(rules(f)).toEqual([]);
+  it.each(['same-repo-test.yml', 'codex-read-only-sandbox.yml', 'trusted-author-gate.yml'])(
+    '%s: no alert',
+    (f) => {
+      expect(rules(f)).toEqual([]);
+    }
+  );
+
+  // Gates round B: no fork code in the workspace (T.7 stays silent), but a maintainer's label
+  // hands the outsider's pull request to an agent that can comment with a write token: medium.
+  it('base-checkout.yml: no fork-code alert, medium under the steered-agent rule', () => {
+    expect(rules('base-checkout.yml')).toEqual(['CI-2.injectable-workflow:medium']);
   });
 });

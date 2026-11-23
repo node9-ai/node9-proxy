@@ -92,16 +92,33 @@ describe('R: an injectable agent workflow, at each severity', () => {
   });
 
   it('advisory: held by the action default gate, so protected today', () => {
-    // The common claude.yml shape: untrusted triggers, write permissions, and
-    // claude-code-action's default write-access gate.
+    // A gated agent that reads nothing an outsider wrote: its prompt is fixed text.
     const f = find(
-      { '.github/workflows/claude.yml': FX('claude-default-gated.yml') },
+      {
+        '.github/workflows/claude.yml': FX('claude-default-gated.yml').replace(
+          'claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}',
+          'claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}\n          prompt: Update the changelog.'
+        ),
+      },
       'CI-2.injectable-workflow'
     );
     expect(f.severity).toBe('advisory');
     wellFormed(f);
     expect(f.explain!.headline).toBe('An AI agent workflow that is protected today');
     expect(f.explain!.fix).toEqual(['Nothing to do now. Keep the check on who can start it.']);
+  });
+
+  it('high: gated, but a maintainer mention hands the outsider thread to an agent that can change code', () => {
+    // Gates round B: the common @claude shape in tag mode with contents: write.
+    const f = find(
+      { '.github/workflows/claude.yml': FX('claude-default-gated.yml') },
+      'CI-2.injectable-workflow'
+    );
+    expect(f.severity).toBe('high');
+    wellFormed(f);
+    expect(f.explain!.headline).toMatch(/through a maintainer's routine action/);
+    expect(f.explain!.happens).toMatch(/Only people with write access can start the agent, but/);
+    expect(f.explain!.fix[0]).toMatch(/as a file, not a checkout/);
   });
 });
 

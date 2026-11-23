@@ -47,14 +47,20 @@ describe('S.4b — the official action on workflow_run, by release', () => {
     expect(rank('upstream-old-pin-workflow-run.yml')).toBeGreaterThanOrEqual(SEVERITY_RANK.medium);
   });
 
-  it('@v1 has the check: advisory at most', () => {
-    expect(rank('upstream-v1-workflow-run.yml')).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+  // Gates round B: the check holds, so only a maintainer's re-run starts the agent on the fork's
+  // run, and then it works in the fork's code with a shell: medium (non-routine start), never more.
+  it('@v1 has the check: held, medium only through a maintainer re-run', () => {
+    const f = ci2('upstream-v1-workflow-run.yml')!;
+    expect(f.severity).toBe('medium');
+    expect(f.signals.join(' ')).toMatch(/re-run starts the agent/);
+    expect(f.signals.join(' ')).not.toMatch(/no effective actor gate/);
   });
 
   it('a SHA pin keeps the gate and the finding asks to confirm v1.0.185 or newer', () => {
     const f = ci2('upstream-sha-workflow-run.yml');
     expect(f).not.toBeNull();
-    expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+    expect(SEVERITY_RANK[f!.severity]).toBeLessThanOrEqual(SEVERITY_RANK.medium);
+    expect(f!.signals.join(' ')).not.toMatch(/no effective actor gate/);
     expect(f!.signals.join(' ')).toMatch(/v1\.0\.185/);
   });
 });

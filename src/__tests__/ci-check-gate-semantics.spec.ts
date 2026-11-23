@@ -15,6 +15,7 @@ const rank = (f: string) => {
   return r ? SEVERITY_RANK[r.severity] : -1;
 };
 const mitigations = (f: string) => (ci2(f)?.mitigations ?? []).join(' ');
+const signals = (f: string) => (ci2(f)?.signals ?? []).join(' ');
 
 describe('T.6.1 — a sibling step `if:` does not gate the agent step', () => {
   it('the same-repo step is gated, the fork step beside it is not', () => {
@@ -48,7 +49,13 @@ describe('T.6.3 — action inputs are case-insensitive', () => {
   });
 
   it('"*" with no token in any spelling keeps the gate', () => {
-    expect(rank('star-without-token.yml')).toBeLessThanOrEqual(SEVERITY_RANK.advisory);
+    // The gate holds (no "any user" signal); gates round B grades what a maintainer's comment
+    // then hands the agent: the outsider's thread, with a shell.
+    expect(mitigations('star-without-token.yml')).toMatch(/keeps its default write gate/i);
+    expect(signals('star-without-token.yml')).not.toMatch(/any user can trigger/);
+    expect(signals('star-without-token.yml')).toMatch(
+      /comment command or mention starts the agent/
+    );
   });
 });
 

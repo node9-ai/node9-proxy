@@ -45,11 +45,22 @@ describe('batch 3c: safe shapes stay clean', () => {
     ['a scheduled agent that looks up a PR number', 'scheduled-agent-number-lookup'],
     ['a fork gate written as a head/base repository compare', 'fork-gate-base-repo-compare'],
     ['a review-approved follow-up (review events carry no secrets)', 'fork-gate-review-approved'],
-    ['the common review-trigger template with a fallback ref', 'fork-gate-review-triggers'],
     ['artifacts of a scheduled upstream run', 'artifacts-of-scheduled-upstream'],
     ['a read-only codex reviewer on the PR merge ref', 'codex-read-only-pr-merge-ref'],
   ])('%s', (_n, dir) => {
     expect(alerts(load(dir))).toEqual([]);
+  });
+});
+
+// Gates round B: the template keeps its fork-code verdict (no fork-code alert), but a member's
+// @claude comment hands the outsider's pull request to an agent that comments with a write
+// token: medium under the steered-agent rule.
+describe('batch 3c: the common review-trigger template', () => {
+  it('with a fallback ref: medium, from the steered-agent rule only', () => {
+    const t = load('fork-gate-review-triggers');
+    const ci2 = scanTree(t).findings.filter(isAlert);
+    expect(ci2.map((f) => `${f.rule}:${f.severity}`)).toEqual(['CI-2.injectable-workflow:medium']);
+    expect(ci2[0].signals.join(' ')).toMatch(/comment command or mention starts the agent/);
   });
 });
 

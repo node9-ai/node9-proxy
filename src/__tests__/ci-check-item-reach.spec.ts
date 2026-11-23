@@ -53,8 +53,13 @@ describe('S.1 — the agent fetches the triggering item itself', () => {
 });
 
 describe('S.1 — what must not change', () => {
-  it('a labeled-only trigger is not stranger-firable: no finding', () => {
-    expect(ci2('neg-labeled-only.yml')).toBeNull();
+  // Gates round B: a stranger cannot fire it, but a maintainer's label hands the outsider's issue
+  // to an agent that edits issues with a write token: medium, not the open path's grade.
+  it('a labeled-only trigger is not stranger-firable: medium through the label only', () => {
+    const f = ci2('neg-labeled-only.yml')!;
+    expect(f.severity).toBe('medium');
+    expect(f.signals.join(' ')).toMatch(/label starts the agent/);
+    expect(f.signals.join(' ')).not.toMatch(/no effective actor gate/);
   });
 
   it('a job gated on a trusted author stays advisory at most', () => {

@@ -8,6 +8,7 @@ import {
   analyzeWorkflow,
   analyzeWorkflowSecrets,
   setCommittedAgentAllow,
+  setScanRepository,
   analyzeWorkflowPlugins,
   analyzeTrustedReaders,
   analyzeForkCodeOnTrust,
@@ -110,6 +111,8 @@ function committedAllowOf(files: RepoTree['files']): string {
 
 export function scanTree(tree: RepoTree): ScanResult {
   setCommittedAgentAllow('');
+  // Gates round C: a job pinned to another repository's name never runs in this one.
+  setScanRepository(tree.owner, tree.repo);
   const findings: CiFinding[] = [];
   const inspected: string[] = [];
   const notes = [...tree.notes];
@@ -416,6 +419,7 @@ export function scanTree(tree: RepoTree): ScanResult {
   }
 
   setCommittedAgentAllow(''); // L6: one scan's settings, never left for the next caller
+  setScanRepository(); // one scan's repository, never left for the next caller
   // Every finding says whether it counts (§Q); only alerts set the result.
   for (const f of findings) f.tier = tierOf(f);
 
