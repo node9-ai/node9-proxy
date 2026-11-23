@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { auditLocalAllow } from '../auth/cloud.js';
+import { sensitivePathMatch } from '@node9/policy-engine';
 
 interface CapturedRequest {
   url: string;
@@ -76,6 +77,20 @@ describe('auditLocalAllow — sensitive-args redaction', () => {
     const sent = captured[0].body.dlpSample as string;
     expect(typeof sent).toBe('string');
     expect(sent.length).toBeLessThanOrEqual(200);
+  });
+
+  it('sends a sensitive file as its last two segments', async () => {
+    const hit = sensitivePathMatch('/home/alice/.ssh/id_rsa');
+    await auditLocalAllow(
+      'Read',
+      { file_path: '/home/alice/.ssh/id_rsa' },
+      'dlp-block',
+      creds,
+      undefined,
+      { pattern: hit.patternName, redactedSample: hit.redactedSample },
+      true
+    );
+    expect(captured[0].body.dlpSample).toBe('.ssh/id_rsa');
   });
 
   it('caps dlpInfo.pattern length before transmission', async () => {

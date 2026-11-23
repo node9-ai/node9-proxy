@@ -16,6 +16,7 @@ import {
   OWASP_FIELDS_RETRY_MS,
 } from '../daemon/audit-shipper';
 import { generateEventId, buildArgsPreview } from '../audit';
+import { sensitivePathMatch } from '@node9/policy-engine';
 
 // The real host: buildBatchEndpoint runs the apiUrl pin, which refuses any
 // other https host. The old fixture (api.example.com) passed only while the
@@ -262,6 +263,31 @@ describe('buildWireRows: the turn of a call', () => {
     for (const turn of [0, -1, 1.5, 100001, '14', null, { n: 1 }]) {
       expect('turn' in wire({ turn }), JSON.stringify(turn)).toBe(false);
     }
+  });
+});
+
+// The cloud gets a sensitive file as its last two segments, never the full
+// path with the home folder name.
+describe('buildWireRows: the sample of a sensitive file', () => {
+  const wire = (over: Record<string, unknown>) =>
+    buildWireRows(Buffer.from(row(over))).rows[0] as unknown as Record<string, unknown>;
+  // What the gate writes: the engine's own match for the path the agent read.
+  const hit = sensitivePathMatch('/home/alice/.ssh/id_rsa');
+
+  it('ships the last two segments of the path', () => {
+    expect(wire({ dlpPattern: hit.patternName, dlpSample: hit.redactedSample }).dlpSample).toBe(
+      '.ssh/id_rsa'
+    );
+    expect(
+      wire({ dlpPattern: hit.patternName, dlpSample: 'C:\\Users\\alice\\.aws\\credentials' })
+        .dlpSample
+    ).toBe('.aws/credentials');
+  });
+
+  it('leaves a masked secret sample as it is', () => {
+    expect(wire({ dlpPattern: 'GitHub Token', dlpSample: 'ghp_****jgfd' }).dlpSample).toBe(
+      'ghp_****jgfd'
+    );
   });
 });
 

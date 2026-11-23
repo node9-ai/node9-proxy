@@ -7,6 +7,7 @@ import { type RiskMetadata } from '../context-sniper';
 import { HOOK_DEBUG_LOG } from '../audit';
 import { safeMessage } from '../utils/safe-text';
 import { readCappedText } from '../utils/read-capped';
+import { cloudDlpSample } from '../audit/cloud-sample';
 import {
   destinationValue,
   hashDestination,
@@ -183,7 +184,7 @@ export function auditLocalAllow(
     : maskArgsForCloud(args);
   const dlpSample =
     dlpInfo && typeof dlpInfo.redactedSample === 'string'
-      ? dlpInfo.redactedSample.slice(0, DLP_SAMPLE_MAX_LEN)
+      ? cloudDlpSample(dlpInfo.pattern, dlpInfo.redactedSample)?.slice(0, DLP_SAMPLE_MAX_LEN)
       : undefined;
   const dlpPattern =
     dlpInfo && typeof dlpInfo.pattern === 'string'
