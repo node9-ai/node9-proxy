@@ -38,6 +38,7 @@ import { MAX_TURN } from '../audit/session-turn.js';
 import { RAN_AFTER_FLAG, validRefEids } from '../blocked-calls.js';
 import { readCredentials } from './sync.js';
 import { noteReadOutside } from './reads-outside.js';
+import { cloudDlpSample } from '../audit/cloud-sample.js';
 import { MAX_PROJECT_ROOT } from '../audit/read-outside.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
 import {
@@ -361,6 +362,11 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     const refEids = validRefEids(parsed.refEids);
     if (checkedBy === RAN_AFTER_FLAG && refEids.length === 0) continue;
     const projectRoot = projectRootOf(parsed);
+    // A sensitive path goes out shortened; rows queued by older versions too.
+    const dlpSample = cloudDlpSample(
+      typeof parsed.dlpPattern === 'string' ? parsed.dlpPattern : undefined,
+      typeof parsed.dlpSample === 'string' ? parsed.dlpSample : undefined
+    );
     rows.push({
       eid: parsed.eid,
       ts: parsed.ts,
@@ -382,7 +388,7 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(typeof parsed.mcpServer === 'string' ? { mcpServer: parsed.mcpServer } : {}),
       ...(typeof parsed.sessionId === 'string' ? { sessionId: parsed.sessionId } : {}),
       ...(typeof parsed.dlpPattern === 'string' ? { dlpPattern: parsed.dlpPattern } : {}),
-      ...(typeof parsed.dlpSample === 'string' ? { dlpSample: parsed.dlpSample } : {}),
+      ...(dlpSample ? { dlpSample } : {}),
       // The facts: the marker, then only well-formed entries of the closed
       // vocabulary (the ingest rejects the whole batch for anything else).
       ...factWireFields(parsed),
