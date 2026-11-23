@@ -62,6 +62,7 @@ import {
 } from '../../tool-output';
 import { hashArgs } from '../../audit/hasher';
 import { derivedWrites } from '@node9/policy-engine';
+import { readOutsidePath } from '../../audit/read-outside';
 import { scanFilePath } from '../../dlp';
 import {
   extractToolName,
@@ -327,11 +328,6 @@ export function registerLogCommand(program: Command): void {
           const payloadSessionId = payload.session_id ?? payload.conversationId;
           if (payloadSessionId) entry.sessionId = payloadSessionId;
 
-          const logPath = path.join(os.homedir(), '.node9', 'audit.log');
-          if (!fs.existsSync(path.dirname(logPath)))
-            fs.mkdirSync(path.dirname(logPath), { recursive: true });
-          fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
-
           // Validate cwd is absolute before passing to getConfig() — prevents path
           // traversal via a crafted hook payload (e.g. cwd: "../../../../etc").
           // A relative or empty cwd falls back to ambient process.cwd().
@@ -346,6 +342,30 @@ export function registerLogCommand(program: Command): void {
                 : undefined;
           const safeCwd =
             typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
+          // Reads outside the project (stage 2, change 6): the shortened path
+          // on this row, for the daemon to send on its heartbeat. Pure path
+          // work plus a few stat calls; it must never cost the audit write.
+          try {
+            const outside = readOutsidePath(tool, rawInput, safeCwd);
+            if (outside && typeof payloadSessionId === 'string') entry.readOutside = outside;
+          } catch (err) {
+            // The row is still written, without the mark.
+            try {
+              appendToLog(HOOK_DEBUG_LOG, {
+                ts: new Date().toISOString(),
+                event: 'read-outside-fail',
+                tool,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            } catch {
+              /* diagnostics only */
+            }
+          }
+
+          const logPath = path.join(os.homedir(), '.node9', 'audit.log');
+          if (!fs.existsSync(path.dirname(logPath)))
+            fs.mkdirSync(path.dirname(logPath), { recursive: true });
+          fs.appendFileSync(logPath, JSON.stringify(entry) + '\n');
 
           // Taint across a copy (node9Firewall#415 item 2): a file the completed
           // command wrote from a tainted file, or from a credential or protected

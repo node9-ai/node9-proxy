@@ -37,6 +37,7 @@ import { getConfig } from '../config/index.js';
 import { MAX_TURN } from '../audit/session-turn.js';
 import { RAN_AFTER_FLAG, validRefEids } from '../blocked-calls.js';
 import { readCredentials } from './sync.js';
+import { noteReadOutside } from './reads-outside.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
 import {
   maskPersonalData,
@@ -318,6 +319,11 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     } catch {
       continue; // torn/corrupt line — skip, never wedge the shipper
     }
+    // A read outside the project (stage 2, change 6) rides the heartbeat,
+    // never the batch: the post-hook row that carries it has no eid and is
+    // skipped just below.
+    if (typeof parsed.readOutside === 'string')
+      noteReadOutside(parsed.sessionId, parsed.readOutside);
     if (typeof parsed.eid !== 'string' || parsed.eid.length < 8) continue;
     if (typeof parsed.tool !== 'string' || !parsed.tool) continue;
     if (parsed.decision !== 'allow' && parsed.decision !== 'deny') continue;

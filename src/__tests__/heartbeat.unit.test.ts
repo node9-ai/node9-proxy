@@ -3,7 +3,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { outboxBacklog, fileSignature, writeWatermark } from '../daemon/audit-shipper';
-import { heartbeatOnce, startHeartbeat } from '../daemon/heartbeat';
+import { heartbeatOnce, startHeartbeat, _resetHeartbeatReads } from '../daemon/heartbeat';
+import { buildWireRows } from '../daemon/audit-shipper';
+import { _resetReadsOutside, noteReadOutside, takeReadsOutside } from '../daemon/reads-outside';
 
 vi.mock('../daemon/sync', () => ({
   readCredentials: () => null,
@@ -117,5 +119,100 @@ describe('heartbeat transport and cadence', () => {
     stop();
     await vi.advanceTimersByTimeAsync(300_000);
     expect(once).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Cases-session stage 2, change 6: reads outside the project ride the beat.
+describe('heartbeat reads outside the project', () => {
+  beforeEach(() => {
+    _resetReadsOutside();
+    _resetHeartbeatReads();
+  });
+  const deps = {
+    cloudEnabled: true,
+    creds: {
+      apiKey: 'n9_live_test',
+      apiUrl: 'https://api.node9.ai/api/v1/intercept/policies/sync',
+    },
+    backlog: () => ({ outboxPending: 0, outboxOldestAt: null, outboxTruncated: false }),
+  };
+  const ok = () => new Response(JSON.stringify({ policyChanged: false }), { status: 200 });
+  const bodyOf = (fetchImpl: ReturnType<typeof vi.fn>, call = 0) =>
+    JSON.parse(fetchImpl.mock.calls[call][1].body);
+
+  // The row the log hook writes (log.ts): a post-hook row with no eid.
+  const postHookRow = (sessionId: string, readOutside: string) =>
+    JSON.stringify({
+      ts: '2026-11-23T10:00:00Z',
+      tool: 'Read',
+      decision: 'allowed',
+      source: 'post-hook',
+      sessionId,
+      readOutside,
+    }) + '\n';
+
+  it('the shipper notes a marked post-hook row and never ships it', () => {
+    const { rows } = buildWireRows(Buffer.from(postHookRow('sess-1', '.aws/config')));
+    expect(rows).toEqual([]);
+    expect(takeReadsOutside()).toEqual([{ sessionId: 'sess-1', paths: ['.aws/config'] }]);
+  });
+
+  it('sends pending reads once, then not again after delivery', async () => {
+    noteReadOutside('sess-1', '.aws/config');
+    noteReadOutside('sess-1', '.aws/config');
+    noteReadOutside('sess-2', 'other/notes.md');
+    const fetchImpl = vi.fn().mockImplementation(async () => ok());
+    expect(await heartbeatOnce({ ...deps, fetchImpl })).toBe('sent');
+    expect(bodyOf(fetchImpl).readsOutside).toEqual([
+      { sessionId: 'sess-1', paths: ['.aws/config'] },
+      { sessionId: 'sess-2', paths: ['other/notes.md'] },
+    ]);
+    // Read again in the same session: already delivered, not resent.
+    noteReadOutside('sess-1', '.aws/config');
+    await heartbeatOnce({ ...deps, fetchImpl });
+    expect(bodyOf(fetchImpl, 1)).not.toHaveProperty('readsOutside');
+  });
+
+  it('keeps the reads for the next beat when the beat fails', async () => {
+    noteReadOutside('sess-1', '.aws/config');
+    const down = vi.fn().mockRejectedValue(new Error('offline'));
+    expect(await heartbeatOnce({ ...deps, fetchImpl: down })).toBe('error');
+    const up = vi.fn().mockImplementation(async () => ok());
+    await heartbeatOnce({ ...deps, fetchImpl: up });
+    expect(bodyOf(up).readsOutside).toEqual([{ sessionId: 'sess-1', paths: ['.aws/config'] }]);
+  });
+
+  it('an older server that refuses the list still gets the beat, and the list rests an hour', async () => {
+    noteReadOutside('sess-1', '.aws/config');
+    const fetchImpl = vi
+      .fn()
+      .mockImplementation(async (_url: string, init: { body: string }) =>
+        'readsOutside' in JSON.parse(init.body) ? new Response('{}', { status: 400 }) : ok()
+      );
+    expect(await heartbeatOnce({ ...deps, fetchImpl })).toBe('sent');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(bodyOf(fetchImpl, 1)).not.toHaveProperty('readsOutside');
+    noteReadOutside('sess-1', 'other/notes.md');
+    await heartbeatOnce({ ...deps, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(bodyOf(fetchImpl, 2)).not.toHaveProperty('readsOutside');
+  });
+
+  it('caps one beat at the server bounds and keeps the rest', () => {
+    for (let i = 0; i < 120; i++) noteReadOutside(`s${i}`, 'a/b');
+    for (let i = 0; i < 60; i++) noteReadOutside('s0', `p/${i}`);
+    const first = takeReadsOutside();
+    expect(first).toHaveLength(100);
+    expect(first[0].paths).toHaveLength(50);
+    const rest = takeReadsOutside();
+    expect(rest.map((r) => r.sessionId)).toContain('s0');
+    expect(rest).toHaveLength(21);
+  });
+
+  it('drops a malformed session id or path', () => {
+    noteReadOutside('a b', 'x/y');
+    noteReadOutside('sess', 'x'.repeat(257));
+    noteReadOutside(undefined, 'x/y');
+    expect(takeReadsOutside()).toEqual([]);
   });
 });
