@@ -22,6 +22,7 @@ import {
 } from './instructions';
 import { isCommentLine, inPrintedMessage, MAX_EXCUSED_PER_LINE } from './harmless';
 import { safeText } from './suppress';
+import { findDownloadRun, findInlineFetchRun, findFileFetchEval } from './fetch-exec';
 
 /** A script larger than this is not read. It is REPORTED as unread — the third state — never
  *  silently skipped. 64 KiB covers every hook and skill script measured (the largest, a
@@ -198,8 +199,28 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
     }
     return n > 0;
   };
-  for (const { text, line, next, emitted } of logicalLines(content)) {
+  const logical = logicalLines(content);
+  const remoteFinding = (text: string, line: number, why: string) =>
+    mk(
+      'remote-exec',
+      'high',
+      'Committed agent script fetches and runs remote code',
+      `\`${safeText(text.trim(), 100)}\`: ${why}`,
+      'Vendor the script and pin it; never pipe a download into a shell from a hook or skill.',
+      line
+    );
+  for (const { text, line, next, emitted } of logical) {
     if (!emitted && isCommentLine(text)) continue;
+    // A11: an interpreter one-liner that fetches and runs what it gets.
+    const inline = emitted ? null : findInlineFetchRun(text, (at) => inPrintedMessage(text, at));
+    if (inline)
+      once(
+        remoteFinding(
+          text,
+          line,
+          'an inline program fetches over the network and runs what it gets'
+        )
+      );
     // The first fetch that runs remote code: not a parser reading JSON, not the vendor's own
     // installer or this machine, not a message printed for a person.
     const fo = findFetchObeyUnless(
@@ -286,6 +307,43 @@ export function analyzeScript(path: string, content: string, rulePrefix: string)
         )
       );
     }
+  }
+
+  // A11: a file downloaded on one line and run on a later one (`curl -o f URL`, `chmod +x f`,
+  // `./f`). Code lines only: a comment or a heredoc body is not run.
+  const code: string[] = [];
+  const lineOfCode: number[] = [];
+  for (const l of logical) {
+    code.push(l.emitted || isCommentLine(l.text) ? '' : l.text);
+    lineOfCode.push(l.line);
+  }
+  const joined = code.join('\n');
+  const run = findDownloadRun(joined, (at) => {
+    const s0 = joined.lastIndexOf('\n', at - 1) + 1;
+    const e0 = joined.indexOf('\n', at);
+    return inPrintedMessage(joined.slice(s0, e0 < 0 ? undefined : e0), at - s0);
+  });
+  if (run) {
+    const idx = joined.slice(0, run.at).split('\n').length - 1;
+    once(
+      remoteFinding(
+        code[idx],
+        lineOfCode[idx],
+        `runs \`${safeText(run.path, 80)}\`, which this script downloaded: whatever that URL serves runs here, for everyone`
+      )
+    );
+  }
+  // A11: a script in a language with eval that fetches over the network and evaluates code.
+  const evalLine = findFileFetchEval(path, content, isCommentLine);
+  if (evalLine) {
+    const text = content.split('\n')[evalLine - 1] ?? '';
+    once(
+      remoteFinding(
+        text,
+        evalLine,
+        'this script fetches over the network and evaluates code: what it fetches can run here'
+      )
+    );
   }
 
   return findings;

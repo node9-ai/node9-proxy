@@ -339,12 +339,12 @@ describe('A9: a worm finding replaces the "not graded" review item for the same 
     expect(res.findings.filter((f) => f.rule === 'CI-1.hook-script-unscanned')).toEqual([]);
   });
 
-  it('a hook with no worm finding keeps its review item', () => {
+  it('a hook with no worm finding keeps its review item while its script is unread', () => {
+    // Listed but not read (A11 reads and grades a script it can read, so only an unread one stays).
     const res = scanTree(
-      tree({
-        '.claude/settings.json': HOOK('node .claude/statusline.mjs'),
-        '.claude/statusline.mjs': '// synthetic statusline\n',
-      })
+      tree({ '.claude/settings.json': HOOK('node .claude/statusline.mjs') }, [
+        '.claude/statusline.mjs',
+      ])
     );
     const u = res.findings.filter((f) => f.rule === 'CI-1.hook-script-unscanned');
     expect(u.map((f) => f.locator)).toEqual(['.claude/statusline.mjs']);

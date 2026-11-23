@@ -13,7 +13,7 @@
 import crypto from 'crypto';
 import path from 'path';
 import type { CiFinding } from './types';
-import { hookScriptPath, hookCommandsOf, type TreeListing } from './agent-config';
+import { hookScriptPath, hookScriptFor, hookCommandsOf, type TreeListing } from './agent-config';
 import { lineAtIndex } from './lines';
 import { SCRIPT_EXT_RE } from './instructions';
 
@@ -93,6 +93,8 @@ interface Trigger {
   /** Repo-relative script the trigger runs, or null when it names none. */
   script: string | null;
   label?: string;
+  /** The Claude Code hook event (`SessionStart`, `PreToolUse`, ...). */
+  event?: string;
 }
 
 /** Strip `//` and `/* *\/` comments outside strings, and trailing commas: tasks.json is JSONC. */
@@ -209,7 +211,8 @@ export function vscodeTaskTriggers(file: string, content: string): Trigger[] {
   return out;
 }
 
-/** Hook commands in a committed Claude settings file. */
+/** Hook commands in a committed Claude settings file. A11: the script path is read from the
+ *  folder that holds the `.claude/` (a nested project runs its hooks from there). */
 export function claudeHookTriggers(file: string, content: string): Trigger[] {
   let cfg: { hooks?: Record<string, unknown[]> };
   try {
@@ -217,13 +220,30 @@ export function claudeHookTriggers(file: string, content: string): Trigger[] {
   } catch {
     return [];
   }
-  return hookCommandsOf(cfg.hooks).map((command) => ({
-    kind: 'claude-hook' as const,
-    file,
-    line: lineOf(content, JSON.stringify(command).slice(1, -1)),
-    command,
-    script: hookScriptPath(command),
-  }));
+  const hooks = cfg?.hooks && typeof cfg.hooks === 'object' ? cfg.hooks : {};
+  const out: Trigger[] = [];
+  for (const [event, groups] of Object.entries(hooks))
+    for (const command of hookCommandsOf({ [event]: groups }))
+      out.push({
+        kind: 'claude-hook' as const,
+        file,
+        line: lineOf(content, JSON.stringify(command).slice(1, -1)),
+        command,
+        script: hookScriptFor(file, command),
+        event,
+      });
+  return out;
+}
+
+/** A11: the repository scripts the start-up triggers in one file run. Readers use it to read
+ *  those scripts wherever they are committed; scanTree uses it to grade them. */
+export function triggerScriptsOf(file: string, content: string): string[] {
+  const t = VSCODE_TASKS_RE.test(file)
+    ? vscodeTaskTriggers(file, content)
+    : /(^|\/)\.claude\/settings(\.local)?\.json$/.test(file)
+      ? claudeHookTriggers(file, content)
+      : [];
+  return [...new Set(t.map((x) => x.script).filter((x): x is string => !!x))];
 }
 
 const inFolder = (p: string, folder: '.claude' | '.vscode') =>
@@ -242,7 +262,9 @@ const WORM_FIX = `Delete the trigger, the task and the loader files (\`.claude/s
 export function analyzeStartup(
   triggers: Trigger[],
   scripts: ReadonlyMap<string, StartupScriptInfo>,
-  listing?: TreeListing
+  listing?: TreeListing,
+  /** A11: sha256 (12 hex) of each trigger script scanTree read, by path. */
+  digests: ReadonlyMap<string, string> = new Map()
 ): CiFinding[] {
   const findings: CiFinding[] = [];
   const triggered = new Set<string>();
@@ -315,6 +337,43 @@ export function analyzeStartup(
       });
     }
   }
+  // A11: every committed SessionStart hook, once per command, unless a worm finding already names
+  // it. Its own pass: the dedupe above is per script, across hook events.
+  const wormAt = new Set(
+    findings.filter((f) => f.rule === 'CI-1.worm-startup').map((f) => `${f.file}\u0000${f.locator}`)
+  );
+  const listed = new Set<string>();
+  for (const t of triggers) {
+    if (t.kind !== 'claude-hook' || t.event !== 'SessionStart') continue;
+    if (wormAt.has(`${t.file}\u0000${t.script ?? t.command}`)) continue;
+    if (listed.has(`${t.file}\u0000${t.command}`)) continue;
+    listed.add(`${t.file}\u0000${t.command}`);
+    const where = `Claude Code hook runs by itself in every session: \`${safe(t.command, 120)}\``;
+    // A11: a committed start-up hook is common and legitimate, so it is listed, never counted.
+    // Its identity is the command and the bytes of the script it runs, so a change that adds
+    // a start-up hook, or edits the script one runs, shows as new in a pull request (CI-5).
+    const digest = t.script ? digests.get(t.script) : undefined;
+    findings.push({
+      check: 'CI-1',
+      rule: 'CI-1.session-start-hook',
+      locator: digest ? `${t.command}#${digest}` : t.command,
+      dimension: 'files',
+      severity: 'advisory',
+      title: 'Claude Code hook runs by itself when a session starts',
+      file: t.file,
+      ...(t.line ? { line: t.line } : {}),
+      signals: [
+        where,
+        t.script
+          ? digest
+            ? `runs \`${safe(t.script, 200)}\` (read and graded by this scan) on every machine that opens the repository in Claude Code`
+            : `runs \`${safe(t.script, 200)}\`, which this scan did not read`
+          : 'runs on every machine that opens the repository in Claude Code, before anyone reads it',
+      ],
+      fix: 'Check what the hook and its script do; a start-up hook should not download or run anything from the network. Changes to it deserve the same review as a CI workflow.',
+    });
+  }
+
   // Q2: a loader nothing runs. Inert on its own, but it is malware in the tree. When a trigger
   // already alerts, an untriggered copy (the worm commits the loader twice) is named on that
   // finding instead of being a second one.

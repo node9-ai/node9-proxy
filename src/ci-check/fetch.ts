@@ -15,7 +15,7 @@ import { request } from 'undici';
 import { TarReader, TarError } from './tar';
 import type { RepoTree, RepoFile, UnfollowedLink } from './types';
 import { routeOf, type Route, ISSUE_FORM_RE } from './route';
-import { isStartupScript } from './startup';
+import { isStartupScript, triggerScriptsOf } from './startup';
 import {
   isInstructionFile,
   isSkillSupportFile,
@@ -805,6 +805,40 @@ const overLimit = (text: string) => Buffer.byteLength(text, 'utf8') > MAX_FILE_B
 /** Raw bytes above this are over the limit whatever their line endings. */
 const RAW_LIMIT = 2 * MAX_FILE_BYTES;
 
+/** A11: how many scripts named by start-up triggers one scan reads beyond the planned surface.
+ *  Real repositories name one or two. */
+export const MAX_TRIGGER_SCRIPTS = 25;
+
+/** A11: the scripts that committed start-up triggers (Claude Code hooks, VS Code folder-open
+ *  tasks) run, that the plan did not read. Only the trigger's text names them, so they are
+ *  picked after the first read. Plain committed files only: a link stays "not read", and the
+ *  hook check says so. */
+function triggerScriptReads(
+  files: RepoFile[],
+  isFile: (p: string) => boolean,
+  notes: string[]
+): string[] {
+  const have = new Set(files.map((f) => f.path));
+  const want = new Set<string>();
+  for (const f of files) {
+    if (f.route !== 'agent-config' && f.route !== 'vscode-tasks') continue;
+    let text: string;
+    try {
+      text = f.content;
+    } catch {
+      continue; // unreadable: scanTree reports it
+    }
+    for (const p of triggerScriptsOf(f.path, text))
+      if (!have.has(p) && !isUnwalked(p) && isFile(p)) want.add(p);
+  }
+  const list = [...want];
+  if (list.length > MAX_TRIGGER_SCRIPTS)
+    notes.push(
+      `${list.length} scripts are run by start-up hooks or tasks; read the first ${MAX_TRIGGER_SCRIPTS}: results ${INCOMPLETE}.`
+    );
+  return list.slice(0, MAX_TRIGGER_SCRIPTS);
+}
+
 // ── local working tree ───────────────────────────────────────────────────────
 
 // O_NONBLOCK: a FIFO swapped in after the walk must not hang the scan on open.
@@ -959,6 +993,26 @@ export function readLocalTree(dir: string): RepoTree {
       },
     });
   }
+  for (const rel of triggerScriptReads(files, (p) => walked.kinds.get(p) === 'file', notes)) {
+    const abs = path.join(root, rel);
+    let size = 0;
+    try {
+      size = fs.lstatSync(abs).size;
+    } catch {
+      /* gone since the walk: the getter reports it */
+    }
+    if (size > RAW_LIMIT) {
+      notes.push(tooLargeNote(rel));
+      continue;
+    }
+    files.push({
+      path: rel,
+      route: 'hook-script',
+      get content(): string {
+        return readLocalFile(abs, rel);
+      },
+    });
+  }
   const { owner, repo } = localGitHubRepo(root);
   return {
     source: root,
@@ -1108,6 +1162,28 @@ export function readGitRefTree(dir: string, ref: string): RepoTree | null {
         continue;
       }
       files.push({ path: rel, content, route });
+    }
+    // A11: the scripts start-up triggers run, wherever they are committed.
+    const extra = triggerScriptReads(files, (p) => entries.get(p)?.kind === 'file', notes).filter(
+      (rel) => {
+        if (entries.get(rel)!.size <= RAW_LIMIT) return true;
+        notes.push(tooLargeNote(rel));
+        return false;
+      }
+    );
+    const extraBytes = catFileBatch(root, [...new Set(extra.map((r) => entries.get(r)!.sha))]);
+    for (const rel of extra) {
+      const raw = extraBytes.get(entries.get(rel)!.sha);
+      if (raw === undefined) {
+        notes.push(unreadNote(rel, 'object missing from this clone'));
+        continue;
+      }
+      const content = lf(raw);
+      if (overLimit(content)) {
+        notes.push(tooLargeNote(rel));
+        continue;
+      }
+      files.push({ path: rel, content, route: 'hook-script' });
     }
     // The same owner as the head read (review, round 2): without it, a same-owner plugin
     // marketplace was exempt on the head and flagged on the base, a false "fixed" in every PR.
@@ -1579,8 +1655,34 @@ export async function fetchGitHubTree(
       notes.push(
         `read ${session.archiveUsed.size} file(s) from the repository archive, each checked against GitHub's tree by its git hash.`
       );
-    notes.push(...session.closingNotes());
     const files = fetched.filter((f): f is RepoFile => !!f);
+    // A11: the scripts start-up triggers run, wherever they are committed. Same session, same
+    // budget, same hash check as every other read.
+    const extra = triggerScriptReads(files, (p) => kinds.get(p) === 'file', notes).filter((rel) => {
+      if ((entries.get(rel)!.size ?? 0) <= RAW_LIMIT) return true;
+      notes.push(tooLargeNote(rel));
+      return false;
+    });
+    const extraFiles = await pooled(
+      extra,
+      FETCH_CONCURRENCY,
+      async (rel): Promise<RepoFile | null> => {
+        const e = entries.get(rel)!;
+        const r = await session.blob(e.sha, e.size ?? 0);
+        if ('error' in r) {
+          if (r.error !== 'budget') session.failed.push(`${rel}: ${r.error}`);
+          return null;
+        }
+        const content = lf(r.text);
+        if (overLimit(content)) {
+          notes.push(tooLargeNote(rel));
+          return null;
+        }
+        return { path: rel, content, route: 'hook-script' };
+      }
+    );
+    for (const f of extraFiles) if (f) files.push(f);
+    notes.push(...session.closingNotes());
     const environments = await readEnvironments(owner, repo, files, () => session.take());
     return {
       source: `${owner}/${repo}`,

@@ -10,6 +10,7 @@ import { DLP_SCAN_LIMITS, matchArgumentText } from '@node9/policy-engine';
 import type { CiFinding } from './types';
 import { parseFrontmatter, allowedToolsOf } from './frontmatter';
 import { SCRIPT_EXT_RE, isHookScript } from './instructions';
+import { findInlineFetchRun } from './fetch-exec';
 import { lineAtIndex, jsonValueIndex } from './lines';
 import { safeText } from './suppress';
 import { sanitizedListing } from './listing';
@@ -290,6 +291,7 @@ export function hookScriptPath(cmd: string): string | null {
   for (const raw of shellTokens(cmd)) {
     let t = raw.replace(/^\$\{CLAUDE_PROJECT_DIR\}\/|^\$CLAUDE_PROJECT_DIR\//, '');
     if (t === raw && (t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t))) continue; // absolute
+    if (/^(~|\$HOME\b|\$\{HOME\})/.test(t)) continue; // the user's home, not the repository
     if (/^(https?:|\$|-)/.test(t)) continue; // a URL, another variable, a flag
     t = t.replace(/^\.\//, '');
     if (!SCRIPT_EXT_RE.test(t) && !/(^|\/)\.claude\/hooks\//.test(t)) continue;
@@ -298,6 +300,17 @@ export function hookScriptPath(cmd: string): string | null {
     return norm;
   }
   return null;
+}
+
+/** The script a hook in `settingsPath` runs, relative to the repository: Claude Code runs a
+ *  project's hooks from the folder that holds its `.claude/`, so a nested settings file names
+ *  paths from its own folder. */
+export function hookScriptFor(settingsPath: string, cmd: string): string | null {
+  const rel = hookScriptPath(cmd);
+  if (!rel) return null;
+  const parts = settingsPath.split('/');
+  const root = parts.slice(0, Math.max(0, parts.length - 2)).join('/');
+  return root ? path.posix.join(root, rel) : rel;
 }
 
 /** What the reader knew about the whole tree, so a hook can be placed in one of three states:
@@ -317,6 +330,13 @@ function cmdLine(content: string, cmd: string): number | undefined {
   return i >= 0 ? lineAtIndex(content, i) : undefined;
 }
 
+/** `words` used as a command in a hook line: after the start, a space, a shell operator, `(` or
+ *  a path's `/`, and followed by a space or the end. A script named `block-npx-tsc.sh` or
+ *  `curl-check.sh` is not npx or curl (fw#481 A11 A/B, 2026-11-23). */
+function commandWord(cmd: string, words: string): boolean {
+  return new RegExp(`(^|[\\s;&|(\`/])(${words})(?=\\s|$)`, 'i').test(cmd);
+}
+
 export function analyzeAgentConfig(path: string, content: string, tree?: TreeListing): CiFinding[] {
   const findings: CiFinding[] = [];
   if (LOCAL_SETTINGS_RE.test(path)) findings.push(localSettingsCommitted(path));
@@ -331,8 +351,12 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   for (const cmd of hookCommandsOf(cfg.hooks)) {
     // fetch-and-run: a `curl|wget … | sh/bash` or a bare fetch tool → remote code that CANNOT be
     // pinned; an npx invocation is remote but pinnable.
-    const remoteExec = /\|\s*(sh|bash|zsh)\b/.test(cmd) || /\b(curl|wget|iwr|irm)\b/.test(cmd);
-    const isNpx = /\bnpx\b/.test(cmd);
+    // A11: an interpreter one-liner that fetches and evaluates (`node -e "https.get(...eval)"`)
+    // is the same thing without a fetch word.
+    const inline = findInlineFetchRun(cmd);
+    const remoteExec =
+      /\|\s*(sh|bash|zsh)\b/.test(cmd) || commandWord(cmd, 'curl|wget|iwr|irm') || !!inline;
+    const isNpx = commandWord(cmd, 'npx');
     if (!remoteExec && !isNpx) continue;
     const unpinned = /@latest\b/.test(cmd) || (isNpx && !/@\d/.test(cmd));
     // 1d: unpinnable remote-exec (curl|bash) and an unpinned npx are the worse form; a PINNED
@@ -357,11 +381,13 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
       ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
       signals: [
         `hook command: \`${safeText(cmd, 120)}\``,
-        remoteExec
-          ? 'fetch-and-run (curl|wget / pipe-to-shell): unpinnable remote code execution on every contributor'
-          : unpinned
-            ? 'unpinned: a compromised/yanked package = code execution on every contributor'
-            : 'pinned, but still a standing supply-chain dependency in the agent hot path',
+        inline
+          ? 'an inline interpreter program fetches over the network and runs what it gets: unpinnable remote code execution on every contributor'
+          : remoteExec
+            ? 'fetch-and-run (curl|wget / pipe-to-shell): unpinnable remote code execution on every contributor'
+            : unpinned
+              ? 'unpinned: a compromised/yanked package = code execution on every contributor'
+              : 'pinned, but still a standing supply-chain dependency in the agent hot path',
       ],
       fix: 'Vendor the command as a committed local script, or pin an exact version and treat updates as security-reviewed.',
     });
@@ -370,7 +396,7 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
   // The script a hook names: three states, never two. Decided only from a complete listing.
   if (tree?.complete) {
     for (const cmd of hookCommandsOf(cfg.hooks)) {
-      const script = hookScriptPath(cmd);
+      const script = hookScriptFor(path, cmd);
       if (!script || tree.unknown?.(script)) continue;
       if (!tree.paths.has(script)) {
         findings.push({
@@ -389,6 +415,8 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           fix: 'Commit the script the hook runs, or remove the hook.',
         });
       } else if (!isHookScript(script)) {
+        // Under `.claude/hooks/` a script is always read. A11: elsewhere, scanTree reads and grades
+        // the script a hook runs and drops this item when it did; what is left was not read.
         findings.push({
           check: 'CI-1',
           rule: 'CI-1.hook-script-unscanned',
@@ -400,9 +428,9 @@ export function analyzeAgentConfig(path: string, content: string, tree?: TreeLis
           ...(cmdLine(content, cmd) ? { line: cmdLine(content, cmd) } : {}),
           signals: [
             `hook command: \`${safeText(cmd, 120)}\``,
-            `\`${safeText(script, 200)}\` is committed but outside \`.claude/hooks/\` (the paths this scan reads), so its contents were not graded`,
+            `\`${safeText(script, 200)}\` is committed, but this scan could not read it (a link, or over the size limit), so its contents were not graded`,
           ],
-          fix: 'Move the script under `.claude/hooks/` so it is scanned with the hook that runs it, or review it by hand.',
+          fix: 'Review the script by hand: it runs with the agent, for everyone who opens the repository.',
         });
       }
     }

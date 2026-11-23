@@ -37,6 +37,8 @@ import { getConfig } from '../config/index.js';
 import { MAX_TURN } from '../audit/session-turn.js';
 import { RAN_AFTER_FLAG, validRefEids } from '../blocked-calls.js';
 import { readCredentials } from './sync.js';
+import { noteReadOutside } from './reads-outside.js';
+import { MAX_PROJECT_ROOT } from '../audit/read-outside.js';
 import { maskArgsForCloud, validateApiUrl } from '../auth/cloud.js';
 import {
   maskPersonalData,
@@ -96,6 +98,8 @@ const CANARY_KINDS: ReadonlySet<string> = new Set<CanaryKind>([
  * the rows.
  */
 const STRIPPABLE_FIELD_GROUPS = [
+  // The repository the call ran in (cases-session-stage2 design, change 7).
+  ['projectRoot'],
   // The outcome of a flagged call (cases-session-stage2 design, change 5).
   ['refEids', 'tracksRun'],
   // The turn a call belongs to (cases-session-stage2 design, change 3).
@@ -176,6 +180,19 @@ function factWireFields(parsed: Record<string, unknown>): Pick<WireRow, 'facts' 
   const out = outFactsOf(parsed.out);
   const risk = riskFactsOf(parsed.risk);
   return { facts: 1, ...(out && { out }), ...(risk && { risk }) };
+}
+
+/** The row's repository root when it is its working folder or an ancestor
+ *  of it, segment by segment; anything else never leaves the machine. */
+function projectRootOf(parsed: Record<string, unknown>): string | null {
+  const root = parsed.projectRoot;
+  const dir = parsed.workingDir;
+  if (typeof root !== 'string' || typeof dir !== 'string') return null;
+  if (!root || root.length > MAX_PROJECT_ROOT) return null;
+  const segs = (p: string) => p.split(/[\\/]+/).filter(Boolean);
+  const r = segs(root);
+  const d = segs(dir);
+  return r.length > 0 && r.length <= d.length && r.every((x, i) => x === d[i]) ? root : null;
 }
 
 /** fw#318 2b: the exposure counts as written, or null when malformed. */
@@ -261,6 +278,9 @@ export interface WireRow {
   /** On a flagged row: the hook tracks the call to its run, so a missing
    *  `ran-after-flag` record means it did not complete. */
   tracksRun?: 1;
+  /** The git repository the call ran in (audit/read-outside.ts
+   *  findProjectRoot): workingDir or one of its ancestors. */
+  projectRoot?: string;
 }
 
 /** Identity of the log file, so a rotated/recreated log resets the offset
@@ -318,6 +338,11 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     } catch {
       continue; // torn/corrupt line — skip, never wedge the shipper
     }
+    // A read outside the project (stage 2, change 6) rides the heartbeat,
+    // never the batch: the post-hook row that carries it has no eid and is
+    // skipped just below.
+    if (typeof parsed.readOutside === 'string')
+      noteReadOutside(parsed.sessionId, parsed.readOutside);
     if (typeof parsed.eid !== 'string' || parsed.eid.length < 8) continue;
     if (typeof parsed.tool !== 'string' || !parsed.tool) continue;
     if (parsed.decision !== 'allow' && parsed.decision !== 'deny') continue;
@@ -335,6 +360,7 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
     // its own it would read as one more allowed call.
     const refEids = validRefEids(parsed.refEids);
     if (checkedBy === RAN_AFTER_FLAG && refEids.length === 0) continue;
+    const projectRoot = projectRootOf(parsed);
     rows.push({
       eid: parsed.eid,
       ts: parsed.ts,
@@ -370,6 +396,7 @@ export function buildWireRows(chunk: Buffer): { rows: WireRow[]; consumed: numbe
       ...(checkedBy === RAN_AFTER_FLAG ? { refEids } : {}),
       ...(parsed.tracksRun === 1 && checkedBy !== RAN_AFTER_FLAG ? { tracksRun: 1 as const } : {}),
       ...(typeof parsed.workingDir === 'string' ? { workingDir: parsed.workingDir } : {}),
+      ...(projectRoot ? { projectRoot } : {}),
       ...(typeof parsed.platform === 'string' ? { platform: parsed.platform } : {}),
       ...(typeof parsed.shellType === 'string' ? { shellType: parsed.shellType } : {}),
       // Phase B — rich detail; forwarded only when the writer recorded it

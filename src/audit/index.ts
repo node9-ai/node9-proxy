@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { hashArgs } from './hasher.js';
 import { forecastRun } from '../auth/forecast-context';
 import { sessionTurn } from './session-turn';
+import { findProjectRoot, MAX_PROJECT_ROOT } from './read-outside';
 import { MAX_REF_EIDS, RAN_AFTER_FLAG } from '../blocked-calls';
 import {
   checkIdForRule,
@@ -448,6 +449,19 @@ export function appendLocalAudit(
   // workingDir rides from the orchestrator's cwd; shellType is best-effort
   // from $SHELL. The SaaS event-detail Context block reads these.
   const workingDirField = meta?.workingDir ? { workingDir: meta.workingDir } : {};
+  // The repository the call ran in (cases-session stage 2, change 7): the
+  // cloud names the project by it and measures "outside" against it. A
+  // failure leaves the field out, never the row.
+  let projectRootField: { projectRoot?: string } = {};
+  try {
+    const root =
+      meta?.workingDir && path.isAbsolute(meta.workingDir)
+        ? findProjectRoot(meta.workingDir)
+        : null;
+    if (root && root.length <= MAX_PROJECT_ROOT) projectRootField = { projectRoot: root };
+  } catch {
+    /* the row is written without the field */
+  }
   const shell = process.env.SHELL ? path.basename(process.env.SHELL) : undefined;
   const shellTypeField = shell ? { shellType: shell } : {};
   // Phase B — rich per-event detail for batch-only rows. editFilePath is
@@ -509,6 +523,7 @@ export function appendLocalAudit(
     ...canaryFields,
     ...cloudLinkField,
     ...workingDirField,
+    ...projectRootField,
     ...shellTypeField,
     ...editFilePathField,
     ...loopCountField,

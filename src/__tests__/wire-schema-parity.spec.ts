@@ -85,6 +85,8 @@ const MAXIMAL_ROW = {
   // The turn the call belongs to (audit/session-turn.ts).
   turn: 14,
   tracksRun: 1,
+  // The repository the call ran in (audit/read-outside.ts).
+  projectRoot: '/tmp',
 };
 
 describe('audit wire parity with the SaaS schema', () => {

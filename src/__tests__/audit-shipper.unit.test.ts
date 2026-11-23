@@ -265,6 +265,31 @@ describe('buildWireRows: the turn of a call', () => {
   });
 });
 
+// Cases-session stage 2, change 7: the repository the call ran in.
+describe('buildWireRows: the project root of a call', () => {
+  const wire = (over: Record<string, unknown>) =>
+    buildWireRows(Buffer.from(row(over))).rows[0] as unknown as Record<string, unknown>;
+
+  it('forwards a root that is the working folder or above it', () => {
+    expect(wire({ workingDir: '/r/repo/be', projectRoot: '/r/repo' }).projectRoot).toBe('/r/repo');
+    expect(wire({ workingDir: '/r/repo', projectRoot: '/r/repo' }).projectRoot).toBe('/r/repo');
+  });
+
+  it('drops a root that is not above the working folder, or has no folder', () => {
+    expect(wire({ workingDir: '/r/repo/be', projectRoot: '/elsewhere' })).not.toHaveProperty(
+      'projectRoot'
+    );
+    // Shares a prefix, not a folder.
+    expect(wire({ workingDir: '/r/repo2/be', projectRoot: '/r/repo' })).not.toHaveProperty(
+      'projectRoot'
+    );
+    expect(wire({ projectRoot: '/r/repo' })).not.toHaveProperty('projectRoot');
+    expect(
+      wire({ workingDir: '/r/' + 'x'.repeat(1100), projectRoot: '/r/' + 'x'.repeat(1100) })
+    ).not.toHaveProperty('projectRoot');
+  });
+});
+
 describe('buildWireRows: the outcome of a flagged call', () => {
   const FLAGGED = generateEventId();
   const outcome = (over: Record<string, unknown> = {}) =>
@@ -641,6 +666,22 @@ describe('shipOnce', () => {
     expect(bodies).toHaveLength(3);
     expect(hasFacts(bodies[2][0])).toBe(false);
     expect(bodies[2][0].checkId).toBe('commands.sudo');
+    _resetOwaspWireFields();
+  });
+
+  it('a server that predates the project root loses that field first and keeps the facts', async () => {
+    _resetOwaspWireFields();
+    fs.writeFileSync(
+      auditLogPath,
+      row({ workingDir: '/r/repo/be', projectRoot: '/r/repo', ...FACTS })
+    );
+    const { impl, bodies } = recording((rows) => rows.some((r) => 'projectRoot' in r));
+    const res = await shipOnce(deps(impl));
+    expect(res).toEqual({ status: 'shipped', shipped: 1 });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0][0].projectRoot).toBe('/r/repo');
+    expect('projectRoot' in bodies[1][0]).toBe(false);
+    expect(hasFacts(bodies[1][0])).toBe(true);
     _resetOwaspWireFields();
   });
 
