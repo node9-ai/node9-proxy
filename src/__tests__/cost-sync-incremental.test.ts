@@ -1,4 +1,4 @@
-// The daemon's cost upload: deferred past startup, and incremental.
+// The daemon's cost upload: deferred past startup, forward only, incremental.
 //
 // A full-history parse is synchronous and took tens of seconds on a heavy
 // machine. Run at daemon startup it blocked the event loop through the
@@ -75,13 +75,31 @@ afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
-describe('syncCost: incremental upload', () => {
-  const old = new Date(Date.now() - 3 * 24 * 3600_000);
+describe('syncCost: forward only, then incremental', () => {
+  // A fixed clock, so the day boundary and the upload overlap are exact.
+  const NOW = new Date('2026-11-23T12:00:00Z');
+  const old = new Date('2026-11-20T10:00:00Z');
+  const hourAgo = new Date('2026-11-23T11:00:00Z');
+  const minuteAgo = new Date('2026-11-23T11:59:00Z');
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+  });
 
-  it('sends all history once, then only the sessions written since', async () => {
-    writeSession('sid-old', [assistantRow('2026-11-20T10:00:00Z', 100)], old);
+  it('uploads nothing dated before the day the daemon started watching', async () => {
+    writeSession('sid-old', [assistantRow(old.toISOString(), 100)], old);
     await syncCost();
-    expect(postedRunIds()).toEqual(['sid-old']);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const state = JSON.parse(
+      fs.readFileSync(path.join(home, '.node9', 'cost-sync-state.json'), 'utf-8')
+    );
+    expect(state.watchFrom).toBe(Date.parse('2026-11-23T00:00:00Z'));
+  });
+
+  it('sends what happened since, then only the sessions written since the last upload', async () => {
+    writeSession('sid-old', [assistantRow(old.toISOString(), 100)], old);
+    writeSession('sid-today', [assistantRow(hourAgo.toISOString(), 3)], hourAgo);
+    await syncCost();
+    expect(postedRunIds()).toEqual(['sid-today']);
 
     // Nothing changed: nothing is parsed or sent.
     fetchMock.mockClear();
@@ -92,8 +110,8 @@ describe('syncCost: incremental upload', () => {
     fetchMock.mockClear();
     writeSession(
       'sid-new',
-      [assistantRow('2026-11-23T10:00:00Z', 5), assistantRow('2026-11-23T10:01:00Z', 7)],
-      new Date()
+      [assistantRow(minuteAgo.toISOString(), 5), assistantRow(minuteAgo.toISOString(), 7)],
+      minuteAgo
     );
     await syncCost();
     expect(postedRunIds()).toEqual(['sid-new']);
@@ -102,16 +120,17 @@ describe('syncCost: incremental upload', () => {
   });
 
   it('sends the same sessions again after a failed batch', async () => {
-    writeSession('sid-old', [assistantRow('2026-11-20T10:00:00Z', 100)], old);
+    writeSession('sid-today', [assistantRow(hourAgo.toISOString(), 3)], hourAgo);
     fetchMock.mockResolvedValueOnce({ ok: false, status: 503 });
     await syncCost();
     fetchMock.mockClear();
     await syncCost();
-    expect(postedRunIds()).toEqual(['sid-old']);
+    expect(postedRunIds()).toEqual(['sid-today']);
   });
 
-  it('starts from all history for another account', async () => {
-    writeSession('sid-old', [assistantRow('2026-11-20T10:00:00Z', 100)], old);
+  it('another account gets what happened since watching began, never older', async () => {
+    writeSession('sid-old', [assistantRow(old.toISOString(), 100)], old);
+    writeSession('sid-today', [assistantRow(hourAgo.toISOString(), 3)], hourAgo);
     await syncCost();
     fetchMock.mockClear();
     creds.apiKey = 'key-2';
@@ -120,7 +139,7 @@ describe('syncCost: incremental upload', () => {
     } finally {
       creds.apiKey = 'key-1';
     }
-    expect(postedRunIds()).toEqual(['sid-old']);
+    expect(postedRunIds()).toEqual(['sid-today']);
   });
 });
 

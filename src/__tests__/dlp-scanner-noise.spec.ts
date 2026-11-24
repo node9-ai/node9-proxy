@@ -37,6 +37,9 @@ describe('dlp-scanner noise fix', () => {
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
     auditFile = path.join(tmpHome, '.node9', 'audit.log');
     indexFile = path.join(tmpHome, '.node9', 'dlp-index.json');
+    // The daemon is already watching: these tests are about what it reads
+    // after its first pass (the first pass itself is tested below).
+    runDlpScan();
   });
 
   afterEach(() => {
@@ -63,6 +66,41 @@ describe('dlp-scanner noise fix', () => {
     (fs.existsSync(auditFile) ? fs.readFileSync(auditFile, 'utf-8').trim().split('\n') : [])
       .filter(Boolean)
       .filter((l) => l.includes('"source":"response-dlp"'));
+
+  describe('forward only', () => {
+    beforeEach(() => {
+      fs.rmSync(indexFile, { force: true }); // a daemon that has never run
+    });
+
+    it('the first pass reads nothing written before watching began', () => {
+      writeTranscript('a.jsonl', [JWT]);
+      runDlpScan();
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(dlpAuditRows()).toHaveLength(0);
+      const idx = JSON.parse(fs.readFileSync(indexFile, 'utf-8'));
+      expect(idx[path.join(projDir, 'a.jsonl')]).toBe(
+        fs.statSync(path.join(projDir, 'a.jsonl')).size
+      );
+    });
+
+    it('after the first pass, new text in an old file and a new file are read', () => {
+      writeTranscript('a.jsonl', ['nothing here']);
+      runDlpScan();
+      writeTranscript('a.jsonl', [JWT], true);
+      writeTranscript('b.jsonl', [BEARER]);
+      runDlpScan();
+      expect(dlpAuditRows()).toHaveLength(2);
+    });
+
+    it('watching begins even before Claude Code has written anything', () => {
+      fs.rmSync(path.join(tmpHome, '.claude'), { recursive: true, force: true });
+      runDlpScan();
+      fs.mkdirSync(projDir, { recursive: true });
+      writeTranscript('a.jsonl', [JWT]);
+      runDlpScan();
+      expect(dlpAuditRows()).toHaveLength(1);
+    });
+  });
 
   it('same secret ×5 in one pass → 1 notification, 5 audit rows', () => {
     writeTranscript('a.jsonl', [JWT, JWT, JWT, JWT, JWT]);

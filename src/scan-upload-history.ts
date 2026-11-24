@@ -7,7 +7,7 @@
 //
 // Diverges from the live scanner in three ways:
 //   1. No watermark — always reads files from byte 0
-//   2. Filtered by --since (default 3 months) on JSONL mtime
+//   2. Filtered by --since (default 30 days, the `node9 scan` window) on JSONL mtime
 //   3. Emits the new `sessionTotals` field on /scan/report; existing
 //      `sessionDeltas` field is unused by this path
 //
@@ -35,7 +35,7 @@ import { getCredentials, getConfig } from './config/index.js';
 import { collectEntries, decodeProjectDirName } from './costSync.js';
 
 interface UploadHistoryOptions {
-  /** Window: '3m' | '6m' | '1y' | 'YYYY-MM-DD' | 'all'. */
+  /** Window: '30d' | '3m' | '6m' | '1y' | 'YYYY-MM-DD' | 'all'. */
   since: string;
 }
 
@@ -77,7 +77,7 @@ function emptySignals(): ScanSignals {
 
 /**
  * Parse the --since value into an epoch-millis cutoff. Invalid input
- * falls back to 3 months ago — never throws (the CLI already validated
+ * falls back to 30 days ago — never throws (the CLI already validated
  * shape, this is defence-in-depth).
  *
  * Exported for unit tests.
@@ -101,8 +101,8 @@ export function parseSinceCutoff(raw: string, now: Date = new Date()): number {
     const t = Date.parse(raw + 'T00:00:00Z');
     if (!Number.isNaN(t)) return t;
   }
-  // Bad input — default to 3 months.
-  return now.getTime() - 90 * 86_400_000;
+  // Bad input: the default window, 30 days.
+  return now.getTime() - 30 * 86_400_000;
 }
 
 /**

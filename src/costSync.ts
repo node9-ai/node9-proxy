@@ -371,10 +371,27 @@ function debugLog(line: string): void {
   }
 }
 
-/** Where the last complete upload stands, per account: the next run reads
- *  only the session files written since (each such file is parsed whole, and
- *  the cloud upserts each row, so its totals stay complete). Another account,
- *  or no state, starts from all history again. */
+/**
+ * The cost sync's state (`~/.node9/cost-sync-state.json`):
+ *
+ * - `watchFrom`: the start of the UTC day the daemon's cost sync first ran.
+ *   Nothing dated before it is uploaded: the daemon reads forward only, the
+ *   rule the watermark scanner follows (src/daemon/scan-watermark.ts). A day,
+ *   not an instant: a cost row is an absolute total per (date, model, working
+ *   dir, session), so a cut inside a day would overwrite an uploaded total
+ *   with a partial one. History is uploaded only on request
+ *   (`node9 scan --upload-history`).
+ * - `account` / `syncedAt`: where the last complete upload stands. The next
+ *   run reads only the session files written since (each such file whole; the
+ *   cloud upserts each row, so its totals stay complete). Another account
+ *   starts again from `watchFrom`.
+ */
+interface CostSyncState {
+  watchFrom?: number;
+  account?: string;
+  syncedAt?: number;
+}
+
 function costSyncStatePath(): string {
   return path.join(os.homedir(), '.node9', 'cost-sync-state.json');
 }
@@ -383,37 +400,50 @@ function accountOf(apiUrl: string, apiKey: string): string {
   return crypto.createHash('sha256').update(`${apiUrl}\n${apiKey}`).digest('hex').slice(0, 16);
 }
 
-/** The mtime cutoff for this account's next sync, or undefined for all history. */
-export function costSyncSince(apiUrl: string, apiKey: string): number | undefined {
+function readCostSyncState(): CostSyncState {
   try {
-    const raw = JSON.parse(fs.readFileSync(costSyncStatePath(), 'utf-8')) as {
-      account?: unknown;
-      syncedAt?: unknown;
+    const raw = JSON.parse(fs.readFileSync(costSyncStatePath(), 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    // A time in the future (a clock set back) would skip files forever.
+    const past = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) && v <= Date.now() ? v : undefined;
+    return {
+      watchFrom: past(raw.watchFrom),
+      account: typeof raw.account === 'string' ? raw.account : undefined,
+      syncedAt: past(raw.syncedAt),
     };
-    if (raw.account !== accountOf(apiUrl, apiKey)) return undefined;
-    if (typeof raw.syncedAt !== 'number' || !Number.isFinite(raw.syncedAt)) return undefined;
-    // A clock set back would otherwise skip files forever.
-    if (raw.syncedAt > Date.now()) return undefined;
-    return raw.syncedAt - SINCE_OVERLAP_MS;
   } catch {
-    return undefined;
+    return {};
   }
 }
 
-function recordCostSync(apiUrl: string, apiKey: string, syncedAt: number): void {
+function writeCostSyncState(state: CostSyncState): void {
   try {
     fs.mkdirSync(path.dirname(costSyncStatePath()), { recursive: true });
-    fs.writeFileSync(
-      costSyncStatePath(),
-      JSON.stringify({ account: accountOf(apiUrl, apiKey), syncedAt }) + '\n',
-      { mode: 0o600 }
-    );
+    fs.writeFileSync(costSyncStatePath(), JSON.stringify(state) + '\n', { mode: 0o600 });
   } catch (err) {
     debugLog(`[cost-sync] could not record the sync: ${safeMessage(err)}\n`);
   }
 }
 
+/** The start of the UTC day of `ms`. */
+function utcDayStart(ms: number): number {
+  const d = new Date(ms);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
 export async function syncCost(): Promise<void> {
+  // Recorded on the first run, signed in or not: the day the daemon started
+  // watching.
+  const state = readCostSyncState();
+  if (state.watchFrom === undefined) {
+    state.watchFrom = utcDayStart(Date.now());
+    writeCostSyncState(state);
+  }
+  const watchFrom = state.watchFrom;
+
   const creds = getCredentials();
   if (!creds?.apiKey || !creds?.apiUrl) return;
 
@@ -422,10 +452,18 @@ export async function syncCost(): Promise<void> {
   // we never block cost-sync on a network hiccup.
   await ensurePricingLoaded();
 
+  const account = accountOf(creds.apiUrl, creds.apiKey);
+  const since =
+    state.account === account && state.syncedAt !== undefined
+      ? Math.max(watchFrom, state.syncedAt - SINCE_OVERLAP_MS)
+      : watchFrom;
+  const watchDay = new Date(watchFrom).toISOString().slice(0, 10);
+
   const startedAt = Date.now();
-  const entries = collectEntries(costSyncSince(creds.apiUrl, creds.apiKey));
+  const entries = collectEntries(since).filter((e) => e.date >= watchDay);
+  const done = (): void => writeCostSyncState({ watchFrom, account, syncedAt: startedAt });
   if (entries.length === 0) {
-    recordCostSync(creds.apiUrl, creds.apiKey, startedAt);
+    done();
     return;
   }
 
@@ -438,7 +476,7 @@ export async function syncCost(): Promise<void> {
   const failed = await postCostBatches(creds.apiUrl, creds.apiKey, machineId, entries);
   // A batch that did not land in full is sent again next time: the cutoff
   // only moves after a complete upload.
-  if (failed === 0) recordCostSync(creds.apiUrl, creds.apiKey, startedAt);
+  if (failed === 0) done();
 }
 
 /** Today's spend per session, for behavior.cost-budget (node9Firewall#427).

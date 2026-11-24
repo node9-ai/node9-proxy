@@ -3662,12 +3662,12 @@ export function registerScanCommand(program: Command): void {
     .option(
       '--upload-history',
       'Upload aggregate counts from existing JSONL sessions to the SaaS dashboard. ' +
-        'Defaults to last 3 months; override with --since. Idempotent (safe to re-run).'
+        'Defaults to the last 30 days, the window of `node9 scan`; override with --since. Idempotent (safe to re-run).'
     )
     .option(
       '--since <window>',
-      'Backfill window: 3m | 6m | 1y | YYYY-MM-DD. Only used with --upload-history.',
-      '3m'
+      'Backfill window: 30d | 3m | 6m | 1y | YYYY-MM-DD. Only used with --upload-history.',
+      '30d'
     )
     .action(
       async (options: {
@@ -3697,7 +3697,7 @@ export function registerScanCommand(program: Command): void {
         // posts to the SaaS.
         if (options.uploadHistory) {
           const { runUploadHistory } = await import('../../scan-upload-history.js');
-          await runUploadHistory({ since: options.since ?? '3m' });
+          await runUploadHistory({ since: options.since ?? '30d' });
           return;
         }
         const drillDown = options.drillDown ?? false;
