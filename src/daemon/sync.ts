@@ -5,9 +5,11 @@
 // cloudSyncIntervalHours, else the 5h default — see resolveSyncIntervalMs).
 // The proxy reads rules-cache.json via getConfig() to enforce cloud-defined rules
 // even when offline.
+import { parseAddonPolicy, type AddonPolicy } from '../addons/policy';
 import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import { readAppsFile } from '../apps/state.js';
 import { collectAddons } from '../addons/collect.js';
+import { writeMcpIndex } from '../addons/index-file';
 import fs from 'fs';
 import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
 import https from 'https';
@@ -221,6 +223,8 @@ export interface ManagedConfigCache {
   appPermissions?: Record<string, Record<string, string>>;
   /** node9Firewall#390: { serverKey: appSlug }, a server an admin linked. */
   appLinks?: Record<string, string>;
+  /** node9Firewall#376 item 6 phase 3: the approved list of add-ons. */
+  addons?: AddonPolicy;
   locked: string[];
 }
 
@@ -283,6 +287,7 @@ export interface CloudPolicyBody {
     trustedHosts?: unknown;
     appPermissions?: unknown;
     appLinks?: unknown;
+    addons?: unknown;
     locked?: unknown;
   }; // M2 settings
   /** Phase 3a: `{ version: "2", checks, tuning, packs, approvals }`. */
@@ -920,6 +925,10 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     // A present-but-empty map is a valid REPLACE that clears old links.
     out.appLinks = links;
   }
+  // The approved list of add-ons. Absent from the body means the workspace
+  // has none (or its plan lost it): the cache then holds none either.
+  const addons = parseAddonPolicy(mc.addons);
+  if (addons) out.addons = addons;
   // Nothing actually managed → omit entirely.
   return out.mode !== undefined ||
     out.egress !== undefined ||
@@ -938,7 +947,8 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.jailPaths !== undefined ||
     out.trustedHosts !== undefined ||
     out.appPermissions !== undefined ||
-    out.appLinks !== undefined
+    out.appLinks !== undefined ||
+    out.addons !== undefined
     ? out
     : undefined;
 }
@@ -1219,11 +1229,19 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
     // fw#390: what node9 found on this machine, names only.
     body.apps = snapshotApps(readAppsFile());
     // fw#376 item 6: skills, plugins and MCP servers, names and hashes only.
-    body.addons = collectAddons();
+    body.addons = collectAddonsAndIndex();
     await shipPolicySnapshot(body, creds);
   } catch {
     // Silent — never break sync over a policy-mirror push.
   }
+}
+
+/** The add-ons report for the snapshot, and the MCP index the agent hook
+ *  reads to judge a server outside the gateway (addons/index-file.ts). */
+function collectAddonsAndIndex(): ReturnType<typeof collectAddons> {
+  const report = collectAddons();
+  writeMcpIndex(report.mcp);
+  return report;
 }
 
 /** `node9 policy push` — mirror this machine's policy to the dashboard now. */
@@ -1259,7 +1277,7 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
     // fw#390: what node9 found on this machine, names only.
     body.apps = snapshotApps(readAppsFile());
     // fw#376 item 6: skills, plugins and MCP servers, names and hashes only.
-    body.addons = collectAddons();
+    body.addons = collectAddonsAndIndex();
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
   } catch (e) {

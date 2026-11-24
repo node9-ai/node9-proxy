@@ -32,6 +32,7 @@ import {
   refreshStaleDaemon,
 } from '../daemon-starter';
 import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
+import { addonVerdictForHookCall } from '../../addons/resolve';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
 import {
@@ -1047,12 +1048,26 @@ export function registerCheckCommand(program: Command): void {
           // A call the after-run hook can vouch for (blocked-calls.ts): its
           // flagged rows say so, so the cloud reads a missing run as one.
           const tracksRun = canTrackRun(payload as Record<string, unknown>, agent);
+          // The workspace's approved list of add-ons (node9Firewall#376 item 6,
+          // phase 3): the MCP server or Claude Code skill this call uses, and
+          // its verdict. Allow when nothing is enforced; never throws.
+          const addon = await addonVerdictForHookCall(config.policy.addons, {
+            toolName,
+            toolInput,
+            mcpServer,
+            agent,
+            cwd:
+              typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd)
+                ? payloadCwd
+                : undefined,
+          });
           const meta = {
             agent,
             mcpServer,
             sessionId,
             transcriptPath,
             ...(tracksRun && { tracksRun: true }),
+            ...(addon.action !== 'allow' && { addon }),
           };
 
           // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──

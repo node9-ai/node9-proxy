@@ -27,6 +27,8 @@ import { buildNegotiationMessage, isHumanDecision } from '../policy/negotiation'
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
+import { mcpIdentityFromCommand } from '../addons/identity';
+import { mcpVerdict, type AddonVerdict } from '../addons/policy';
 import type { McpToolInfo } from '../daemon/mcp-tools';
 import { getServerConfig, deriveServerName, sanitizeToolAnnotations } from '../daemon/mcp-tools';
 import {
@@ -319,6 +321,12 @@ export async function runMcpGateway(
   // and verify tool definitions against the pinned hash.
   const pendingToolsListIds = new Set<string | number | null>();
   const serverKey = getServerKey(upstreamCommand);
+  // The workspace's approved list of add-ons (node9Firewall#376 item 6): this
+  // server's identity, the same one the add-ons report gives the dashboard
+  // (collect.ts derives it from the same `--upstream`). A review the person
+  // approved holds for the rest of this session: one card per server.
+  const addonIdentity = mcpIdentityFromCommand(cmd ?? '', cmdArgs);
+  let addonReviewApproved = false;
 
   // Session quarantine: tracks whether pin validation has passed for this session.
   // 'pending'    — no tools/list response checked yet; tools/call blocked
@@ -496,6 +504,13 @@ export async function runMcpGateway(
         // policy source (local ↔ workspace) goes unnoticed until restart.
         // The daemon already resets per-check; the gateway now matches.
         _resetConfigCache();
+        let addon: AddonVerdict = { action: 'allow' };
+        try {
+          addon = mcpVerdict(getConfig().policy.addons, addonIdentity);
+        } catch {
+          /* no readable list enforces nothing: node9 failing never stops the agent */
+        }
+        if (addon.action === 'review' && addonReviewApproved) addon = { action: 'allow' };
         const result = await authorizeHeadless(
           toolName,
           toolArgs,
@@ -506,12 +521,14 @@ export async function runMcpGateway(
             // hash) — pass it so authorizeHeadless can enforce block/review.
             serverKey,
             sessionId: gatewaySessionId,
+            ...(addon.action !== 'allow' && { addon }),
           },
           // cwd: the gateway's own working directory is the project the agent
           // launched it from; without it every write would be "outside".
           { sessionTaintGated: !readOnlyTools.has(toolName), cwd: gatewayCwd }
         );
 
+        if (result.approved && addon.action === 'review') addonReviewApproved = true;
         if (!result.approved) {
           console.error(chalk.red(`\n🛑 Node9 MCP Gateway: Action Blocked`));
           console.error(chalk.gray(`   Tool: ${toolName}`));

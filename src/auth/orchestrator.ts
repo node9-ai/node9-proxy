@@ -1,5 +1,6 @@
 // src/auth/orchestrator.ts
 // The multi-channel race engine: coordinates cloud, native, browser, and terminal approval channels.
+import type { AddonVerdict } from '../addons/policy';
 import { randomUUID } from 'crypto';
 import { resolveLinkedServer } from '../apps/state';
 import os from 'os';
@@ -455,6 +456,8 @@ export async function authorizeHeadless(
     transcriptPath?: string;
     /** The hook tracks this call to its run (blocked-calls.ts). */
     tracksRun?: boolean;
+    /** The add-on this call uses, judged by the approved list (addons/policy). */
+    addon?: AddonVerdict;
   },
   options?: {
     calledFromDaemon?: boolean;
@@ -573,6 +576,7 @@ export async function _authorizeHeadlessCore(
     transcriptPath?: string;
     workingDir?: string;
     tracksRun?: boolean;
+    addon?: AddonVerdict;
   },
   options?: {
     calledFromDaemon?: boolean;
@@ -1880,7 +1884,7 @@ export async function _authorizeHeadlessCore(
   // so a shield/smart-rule hard-block still wins (review can add friction, never
   // remove it). `block` (and review under panic mode) hard-denies here.
   let appPermReview: string | null = null;
-  let appPermReviewTool: string | null = null; // bareTool — for audit attribution
+  let appPermRuleName: string | null = null; // audit attribution of appPermReview
 
   /**
    * The review reasons, as two predicates every guard below asks instead of
@@ -1962,8 +1966,41 @@ export async function _authorizeHeadlessCore(
       // Fall through — but through the FULL policy block (fix #3): a hard-block
       // verdict there still wins; only allow/review verdicts reach the race.
       appPermReview = `App permission: "${bareTool}" requires human approval (workspace policy).`;
-      appPermReviewTool = bareTool;
+      appPermRuleName = `app-permission:${bareTool}`;
     }
+  }
+  // The workspace's approved list of add-ons (node9Firewall#376 item 6,
+  // phase 3). The caller resolved the add-on this call uses (an MCP server by
+  // identity, a skill by content hash) and its verdict; it rides the same
+  // path as an app permission: a block returns here, a review joins the
+  // org-set reviews no standing decision or cloud auto-allow can answer.
+  const addon = meta?.addon;
+  if (addon && (addon.action === 'block' || addon.action === 'review')) {
+    const addonBlock =
+      addon.action === 'block' || (addon.action === 'review' && config.settings.panicMode === true);
+    if (addonBlock) {
+      if (!isManual)
+        appendLocalAudit(
+          toolName,
+          args,
+          'deny',
+          'addon-block',
+          { ...meta, ruleName: addon.ruleName },
+          hashAuditArgs
+        );
+      return {
+        approved: false,
+        blockedBy: 'local-config',
+        reason:
+          addon.action === 'block'
+            ? addon.reason
+            : `${addon.reason} The workspace is in panic mode: all review actions are blocked.`,
+        blockedByLabel:
+          addon.action === 'block' ? '🔒 Node9 Add-on (Blocked)' : '🚨 Panic mode (org policy)',
+      };
+    }
+    appPermReview = appPermReview ? `${appPermReview}\n${addon.reason}` : addon.reason;
+    appPermRuleName ??= addon.ruleName;
   }
 
   // Fast Paths (Ignore, Trust, Policy Allow)
@@ -2495,8 +2532,12 @@ export async function _authorizeHeadlessCore(
     // Re-review fix: when a DLP credential-review ALSO applies, combine (don't
     // overwrite) so the approver still sees the secret context — same pattern as
     // fix #7 (taint+review).
+    // The approved list of add-ons rides this path too: name it on the card.
+    const reviewWord = appPermRuleName?.startsWith('addon:')
+      ? 'Add-on (Review)'
+      : 'App Permission (Review)';
     if (dlpReviewFlagged) {
-      explainableLabel = '🚨 Node9 DLP (Credential Review) + 🔒 App Permission (Review)';
+      explainableLabel = `🚨 Node9 DLP (Credential Review) + 🔒 ${reviewWord}`;
       riskMetadata = computeRiskMetadata(
         args,
         6,
@@ -2506,7 +2547,7 @@ export async function _authorizeHeadlessCore(
         `A credential was detected in this call (DLP review).\n${appPermReview}`
       );
     } else {
-      explainableLabel = '🔒 Node9 App Permission (Review)';
+      explainableLabel = `🔒 Node9 ${reviewWord}`;
       riskMetadata = computeRiskMetadata(
         args,
         5,
@@ -3043,8 +3084,8 @@ export async function _authorizeHeadlessCore(
         toolName,
         args,
         'deny',
-        'app-permission-review',
-        { ...ownRowMeta(false), ruleName: `app-permission:${appPermReviewTool}` },
+        appPermRuleName?.startsWith('addon:') ? 'addon-review' : 'app-permission-review',
+        { ...ownRowMeta(false), ruleName: appPermRuleName ?? 'app-permission' },
         hashAuditArgs
       );
     else if (!isManual && exposureReview)
@@ -3164,7 +3205,7 @@ export async function _authorizeHeadlessCore(
       {
         ...ownRowMeta(finalResult.approved),
         ...(cloudRequestId && { cloudRequestId }),
-        ...(appPermReview && { ruleName: `app-permission:${appPermReviewTool}` }),
+        ...(appPermReview && { ruleName: appPermRuleName ?? 'app-permission' }),
         // Who decided, from the decision record, and the card: the daemon
         // writes its own row for the same card, and the report counts one.
         ...(finalResult.decidedBy && { decidedBy: finalResult.decidedBy }),
