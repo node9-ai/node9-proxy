@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { collectAddons, findSkillDirs } from '../collect';
 
 const homes: string[] = [];
@@ -92,6 +93,25 @@ describe('collectAddons: skills', () => {
     fs.mkdirSync(path.join(h, '.claude', 'skills'), { recursive: true });
     fs.symlinkSync(path.join(outside, 'evil'), path.join(h, '.claude', 'skills', 'evil'));
     expect(collectAddons(h, {}).skills).toEqual([]);
+  });
+
+  it('does not read a SKILL.md that is a symlink or a FIFO', () => {
+    const h = home();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-outside-'));
+    homes.push(outside);
+    fs.writeFileSync(path.join(outside, 'SKILL.md'), '---\nname: leaked-name\n---\n');
+    const linked = path.join(h, '.claude', 'skills', 'linked');
+    fs.mkdirSync(linked, { recursive: true });
+    fs.symlinkSync(path.join(outside, 'SKILL.md'), path.join(linked, 'SKILL.md'));
+    if (process.platform !== 'win32') {
+      const fifoDir = path.join(h, '.claude', 'skills', 'fifo');
+      fs.mkdirSync(fifoDir, { recursive: true });
+      // A FIFO with no writer would block a plain open forever.
+      const r = spawnSync('mkfifo', [path.join(fifoDir, 'SKILL.md')]);
+      expect(r.status).toBe(0);
+    }
+    const names = collectAddons(h, {}).skills.map((s) => s.name);
+    expect(names).not.toContain('leaked-name');
   });
 
   it('reports project skills from folders in the audit log, without the path', () => {

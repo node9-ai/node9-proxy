@@ -96,13 +96,26 @@ function label(v: unknown): string | null {
   return t ? t.slice(0, MAX_NAME) : null;
 }
 
+/**
+ * A regular file's text, read through one descriptor: no symlink is followed,
+ * and the type and size checked are those of the file read (a check by path
+ * and a read by path could see two different files). O_NONBLOCK keeps a FIFO
+ * from blocking the open; fstat then rejects it.
+ */
 function readText(file: string): string | null {
+  let fd: number | undefined;
   try {
-    const st = fs.lstatSync(file);
+    const c = fs.constants;
+    fd = fs.openSync(file, c.O_RDONLY | (c.O_NOFOLLOW ?? 0) | (c.O_NONBLOCK ?? 0));
+    const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > MAX_MD_BYTES) return null;
-    return fs.readFileSync(file, 'utf8');
+    const buf = Buffer.alloc(st.size);
+    const n = fs.readSync(fd, buf, 0, st.size, 0);
+    return buf.subarray(0, n).toString('utf8');
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 
