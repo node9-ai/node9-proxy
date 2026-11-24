@@ -7,6 +7,7 @@
 // even when offline.
 import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import { readAppsFile } from '../apps/state.js';
+import { collectAddons } from '../addons/collect.js';
 import fs from 'fs';
 import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
 import https from 'https';
@@ -1217,6 +1218,8 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
     );
     // fw#390: what node9 found on this machine, names only.
     body.apps = snapshotApps(readAppsFile());
+    // fw#376 item 6: skills, plugins and MCP servers, names and hashes only.
+    body.addons = collectAddons();
     await shipPolicySnapshot(body, creds);
   } catch {
     // Silent — never break sync over a policy-mirror push.
@@ -1255,6 +1258,8 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
     );
     // fw#390: what node9 found on this machine, names only.
     body.apps = snapshotApps(readAppsFile());
+    // fw#376 item 6: skills, plugins and MCP servers, names and hashes only.
+    body.addons = collectAddons();
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
   } catch (e) {
