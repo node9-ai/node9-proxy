@@ -25,9 +25,9 @@ export function policySnapshotUrlFrom(apiUrl: string): string | null {
  * the WHOLE snapshot (config mirror, drift, device info) whenever the proxy
  * is newer than the dashboard. On a 400 the snapshot is sent once more
  * without these (fw#390: `apps` reached the proxy one release before the
- * dashboard that reads it).
+ * dashboard that reads it; fw#376 `addons` the same way).
  */
-export const FIELDS_A_SERVER_MAY_NOT_KNOW = ['apps'] as const;
+export const FIELDS_A_SERVER_MAY_NOT_KNOW = ['apps', 'addons'] as const;
 
 /** POST the snapshot. Resolves true on a 2xx, false on any failure/timeout. */
 export async function shipPolicySnapshot(

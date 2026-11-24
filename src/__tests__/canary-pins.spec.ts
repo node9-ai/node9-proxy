@@ -128,6 +128,9 @@ describe('F2: dlp-scanner per-pass dedup', () => {
     fs.mkdirSync(projDir, { recursive: true });
     fs.mkdirSync(path.join(tmpHome, '.node9'), { recursive: true });
     auditFile = path.join(tmpHome, '.node9', 'audit.log');
+    // The daemon is already watching: its first pass reads nothing
+    // (forward only, dlp-scanner-noise.spec.ts).
+    runDlpScan();
   });
   afterEach(() => {
     fs.rmSync(tmpHome, { recursive: true, force: true });

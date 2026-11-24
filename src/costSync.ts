@@ -1,6 +1,7 @@
 // src/costSync.ts
 // Background cost sync: reads Claude Code session data and posts daily cost
 // summaries to the Node9 backend every 10 minutes.
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -9,6 +10,13 @@ import { getCredentials } from './config';
 import { HOOK_DEBUG_LOG } from './audit';
 
 const SYNC_INTERVAL_MS = 10 * 60 * 1000;
+/** The first run waits until the daemon has bound its port and answered the
+ *  takeover handshake: a full-history parse is synchronous (tens of seconds on
+ *  a heavy machine) and, run at startup, it blocked the event loop long enough
+ *  that a refresh after an upgrade gave up and left the old daemon running. */
+export const FIRST_RUN_DELAY_MS = 60 * 1000;
+/** Files written while a sync was collecting are read again next time. */
+const SINCE_OVERLAP_MS = 5 * 60 * 1000;
 
 // Pricing now lives in src/pricing/litellm.ts — fetched from the
 // LiteLLM community-maintained JSON with a bundled fallback. Stops the
@@ -309,7 +317,8 @@ export async function postCostBatches(
   apiKey: string,
   machineId: string,
   entries: DailyEntry[]
-): Promise<void> {
+): Promise<number> {
+  let failed = 0;
   for (const batch of chunk(entries, COST_BATCH_SIZE)) {
     try {
       const res = await fetch(`${apiUrl}/cost-sync`, {
@@ -319,6 +328,7 @@ export async function postCostBatches(
         signal: AbortSignal.timeout(15000),
       });
       if (!res.ok) {
+        failed++;
         fs.appendFileSync(HOOK_DEBUG_LOG, `[cost-sync] HTTP ${res.status}\n`);
       } else {
         // Guard 2: the SaaS reports { received, stored }. If it stored fewer
@@ -337,13 +347,16 @@ export async function postCostBatches(
           // non-JSON / old SaaS — no shortfall info, nothing to log
         }
         if (typeof stored === 'number' && stored < batch.length) {
+          failed++;
           debugLog(`[cost-sync] dropped ${batch.length - stored} of ${batch.length} rows\n`);
         }
       }
     } catch (err) {
+      failed++;
       debugLog(`[cost-sync] ${safeMessage(err)}\n`);
     }
   }
+  return failed;
 }
 
 /** Append to hook-debug.log, creating ~/.node9 first. A failed write must not abort the
@@ -358,7 +371,79 @@ function debugLog(line: string): void {
   }
 }
 
-async function syncCost(): Promise<void> {
+/**
+ * The cost sync's state (`~/.node9/cost-sync-state.json`):
+ *
+ * - `watchFrom`: the start of the UTC day the daemon's cost sync first ran.
+ *   Nothing dated before it is uploaded: the daemon reads forward only, the
+ *   rule the watermark scanner follows (src/daemon/scan-watermark.ts). A day,
+ *   not an instant: a cost row is an absolute total per (date, model, working
+ *   dir, session), so a cut inside a day would overwrite an uploaded total
+ *   with a partial one. History is uploaded only on request
+ *   (`node9 scan --upload-history`).
+ * - `account` / `syncedAt`: where the last complete upload stands. The next
+ *   run reads only the session files written since (each such file whole; the
+ *   cloud upserts each row, so its totals stay complete). Another account
+ *   starts again from `watchFrom`.
+ */
+interface CostSyncState {
+  watchFrom?: number;
+  account?: string;
+  syncedAt?: number;
+}
+
+function costSyncStatePath(): string {
+  return path.join(os.homedir(), '.node9', 'cost-sync-state.json');
+}
+
+function accountOf(apiUrl: string, apiKey: string): string {
+  return crypto.createHash('sha256').update(`${apiUrl}\n${apiKey}`).digest('hex').slice(0, 16);
+}
+
+function readCostSyncState(): CostSyncState {
+  try {
+    const raw = JSON.parse(fs.readFileSync(costSyncStatePath(), 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    // A time in the future (a clock set back) would skip files forever.
+    const past = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) && v <= Date.now() ? v : undefined;
+    return {
+      watchFrom: past(raw.watchFrom),
+      account: typeof raw.account === 'string' ? raw.account : undefined,
+      syncedAt: past(raw.syncedAt),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeCostSyncState(state: CostSyncState): void {
+  try {
+    fs.mkdirSync(path.dirname(costSyncStatePath()), { recursive: true });
+    fs.writeFileSync(costSyncStatePath(), JSON.stringify(state) + '\n', { mode: 0o600 });
+  } catch (err) {
+    debugLog(`[cost-sync] could not record the sync: ${safeMessage(err)}\n`);
+  }
+}
+
+/** The start of the UTC day of `ms`. */
+function utcDayStart(ms: number): number {
+  const d = new Date(ms);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+export async function syncCost(): Promise<void> {
+  // Recorded on the first run, signed in or not: the day the daemon started
+  // watching.
+  const state = readCostSyncState();
+  if (state.watchFrom === undefined) {
+    state.watchFrom = utcDayStart(Date.now());
+    writeCostSyncState(state);
+  }
+  const watchFrom = state.watchFrom;
+
   const creds = getCredentials();
   if (!creds?.apiKey || !creds?.apiUrl) return;
 
@@ -367,8 +452,20 @@ async function syncCost(): Promise<void> {
   // we never block cost-sync on a network hiccup.
   await ensurePricingLoaded();
 
-  const entries = collectEntries();
-  if (entries.length === 0) return;
+  const account = accountOf(creds.apiUrl, creds.apiKey);
+  const since =
+    state.account === account && state.syncedAt !== undefined
+      ? Math.max(watchFrom, state.syncedAt - SINCE_OVERLAP_MS)
+      : watchFrom;
+  const watchDay = new Date(watchFrom).toISOString().slice(0, 10);
+
+  const startedAt = Date.now();
+  const entries = collectEntries(since).filter((e) => e.date >= watchDay);
+  const done = (): void => writeCostSyncState({ watchFrom, account, syncedAt: startedAt });
+  if (entries.length === 0) {
+    done();
+    return;
+  }
 
   let username = 'unknown';
   try {
@@ -376,7 +473,10 @@ async function syncCost(): Promise<void> {
   } catch {}
   const machineId = `${os.hostname()}:${username}`;
 
-  await postCostBatches(creds.apiUrl, creds.apiKey, machineId, entries);
+  const failed = await postCostBatches(creds.apiUrl, creds.apiKey, machineId, entries);
+  // A batch that did not land in full is sent again next time: the cutoff
+  // only moves after a complete upload.
+  if (failed === 0) done();
 }
 
 /** Today's spend per session, for behavior.cost-budget (node9Firewall#427).
@@ -392,11 +492,10 @@ export function writeLedgerOnce(now = new Date()): void {
 }
 
 export function startCostSync(): void {
-  writeLedgerOnce();
-  syncCost().catch(() => {});
-  const timer = setInterval(() => {
+  const tick = (): void => {
     writeLedgerOnce();
     syncCost().catch(() => {});
-  }, SYNC_INTERVAL_MS);
-  timer.unref();
+  };
+  setTimeout(tick, FIRST_RUN_DELAY_MS).unref();
+  setInterval(tick, SYNC_INTERVAL_MS).unref();
 }

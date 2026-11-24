@@ -15,6 +15,7 @@ import type { McpToolsConfig, McpToolAnnotations } from '../daemon/mcp-tools.js'
 import type { McpStatusEntry } from '../mcp-status.js';
 import type { SyncHealth } from '../daemon/sync.js';
 import type { AppsFile } from '../apps/state.js';
+import type { AddonsReport } from '../addons/collect.js';
 import { isRecordOnly } from '@node9/policy-engine';
 
 const MAX_RULES = 500;
@@ -79,6 +80,9 @@ export interface PolicySnapshotBody {
   /** fw#390: the apps node9 found on this machine and the decision on each
    *  (apps.json). Names only; no project paths. */
   apps?: SnapshotApp[];
+  /** fw#376 item 6: the skills, Claude Code plugins and MCP servers this
+   *  machine's agents load. Names, hashes and rule ids only (addons/collect.ts). */
+  addons?: AddonsReport;
 }
 
 export interface SnapshotApp {

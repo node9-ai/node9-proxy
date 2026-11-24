@@ -1,7 +1,8 @@
 // src/daemon/dlp-scanner.ts
 // Background DLP scanner for Claude response text.
 // Runs on daemon startup and every hour — reads ~/.claude/projects/**/*.jsonl,
-// processes only new content (delta via ~/.node9/dlp-index.json), and fires a
+// processes only content written since the daemon started watching (delta via
+// ~/.node9/dlp-index.json; the first pass reads nothing), and fires a
 // desktop notification + audit log entry when a secret is found in response text.
 
 import fs from 'fs';
@@ -22,7 +23,9 @@ const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 // delta-scan of the new bytes, which is where the N-identical-matches storm lives.
 type DlpIndex = Record<string, number>;
 
-function loadIndex(): DlpIndex {
+/** The saved offsets, or null when there are none yet: the daemon's first
+ *  pass (no index file, or one that cannot be read). */
+function loadIndex(): DlpIndex | null {
   try {
     const raw = JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8')) as unknown;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -32,13 +35,14 @@ function loadIndex(): DlpIndex {
       return r as DlpIndex; // flat filePath → offset map
     }
   } catch {
-    /* fall through to empty */
+    /* fall through: no index */
   }
-  return {};
+  return null;
 }
 
 function saveIndex(index: DlpIndex): void {
   try {
+    fs.mkdirSync(path.dirname(INDEX_FILE), { recursive: true });
     fs.writeFileSync(INDEX_FILE, JSON.stringify(index), { encoding: 'utf-8', mode: 0o600 });
   } catch {}
 }
@@ -62,9 +66,20 @@ export function runDlpScan(): void {
     canaryVals = [];
   }
   const canaryFindings: Array<{ path: string; project: string }> = [];
-  if (!fs.existsSync(PROJECTS_DIR)) return;
 
-  const index = loadIndex();
+  // Forward only, like the watermark scanner (scan-watermark.ts): the first
+  // pass records where every transcript ends and reads nothing, so text the
+  // agent wrote before the daemon started watching is never scanned. Files
+  // that appear later are read whole.
+  const loaded = loadIndex();
+  const firstPass = loaded === null;
+  const index: DlpIndex = loaded ?? {};
+  if (!fs.existsSync(PROJECTS_DIR)) {
+    // Watching begins now even before Claude Code has written anything: its
+    // first transcripts are then new files, read whole.
+    if (firstPass) saveIndex(index);
+    return;
+  }
   const seenThisPass = new Set<string>(); // dedup within THIS pass only
   // Collected across the whole pass so we emit ONE notification, not one per match.
   const newFindings: { patternName: string; redactedSample: string; project: string }[] = [];
@@ -110,6 +125,11 @@ export function runDlpScan(): void {
         continue;
       }
 
+      if (firstPass) {
+        index[filePath] = size;
+        updated = true;
+        continue;
+      }
       if (size <= lastOffset) continue;
 
       let fd: number;
@@ -244,7 +264,8 @@ export function runDlpScan(): void {
     );
   }
 
-  if (updated) saveIndex(index);
+  // The first pass saves even an empty index: it marks that watching began.
+  if (updated || firstPass) saveIndex(index);
 }
 
 export function startDlpScanner(): void {

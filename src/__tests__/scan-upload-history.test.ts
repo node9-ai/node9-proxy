@@ -38,11 +38,23 @@ describe('parseSinceCutoff', () => {
     expect(parseSinceCutoff('2026-01-01', now)).toBe(Date.parse('2026-01-01T00:00:00Z'));
   });
 
-  it('falls back to 3 months on malformed input (defence-in-depth)', () => {
-    const fallback = now.getTime() - 90 * 86_400_000;
+  it('falls back to the 30-day window on malformed input (defence-in-depth)', () => {
+    const fallback = now.getTime() - 30 * 86_400_000;
     expect(parseSinceCutoff('not-a-date', now)).toBe(fallback);
     expect(parseSinceCutoff('', now)).toBe(fallback);
     expect(parseSinceCutoff('foo123', now)).toBe(fallback);
+  });
+});
+
+describe('scan --upload-history window', () => {
+  it('defaults to 30 days, the window of node9 scan', async () => {
+    const { Command } = await import('commander');
+    const { registerScanCommand } = await import('../cli/commands/scan.js');
+    const program = new Command();
+    registerScanCommand(program);
+    const scan = program.commands.find((c) => c.name() === 'scan');
+    expect(scan?.options.find((o) => o.long === '--since')?.defaultValue).toBe('30d');
+    expect(scan?.options.find((o) => o.long === '--days')?.defaultValue).toBe('30');
   });
 });
 
