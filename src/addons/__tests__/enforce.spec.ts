@@ -355,3 +355,108 @@ describe('the MCP index the hook reads', () => {
     expect(readMcpIndex(home())).toEqual([]);
   });
 });
+
+describe('a SKILL.md read directly loads the skill, for agents with no skill tool', () => {
+  const blockAll = policy({ unapproved: 'block' });
+
+  it("another agent's file read of a user skill is judged as that skill", async () => {
+    const h = home();
+    const dir = skill(path.join(h, '.claude', 'skills', 'deploy'), 'deploy');
+    const call = {
+      toolName: 'read_file',
+      toolInput: { file_path: path.join(dir, 'SKILL.md') },
+      agent: 'Gemini CLI',
+      cwd: h,
+    };
+    expect(await addonVerdictForHookCall(blockAll, call, h)).toMatchObject({
+      action: 'block',
+      ruleName: 'addon:skill:deploy',
+    });
+    const approved = policy({
+      unapproved: 'block',
+      skills: { deploy: { decision: 'approved', hashes: [hashSkillRoot(dir).contentHash] } },
+    });
+    expect(await addonVerdictForHookCall(approved, call, h)).toEqual({ action: 'allow' });
+  });
+
+  it("Claude Code's Read of a SKILL.md is not a load: skills it writes stay editable", async () => {
+    const h = home();
+    const dir = skill(path.join(h, 'work', 'app', '.claude', 'skills', 'release'), 'release');
+    expect(
+      await addonVerdictForHookCall(
+        blockAll,
+        {
+          toolName: 'Read',
+          toolInput: { file_path: path.join(dir, 'SKILL.md') },
+          agent: 'Claude Code',
+          cwd: path.join(h, 'work', 'app'),
+        },
+        h
+      )
+    ).toEqual({ action: 'allow' });
+  });
+
+  it('a Codex shell read of a skill in ~/.codex/skills is judged; its system skills are not', async () => {
+    const h = home();
+    skill(path.join(h, '.codex', 'skills', 'fmt'), 'fmt');
+    skill(path.join(h, '.codex', 'skills', '.system', 'plan'), 'plan');
+    const bash = (command: string) => ({
+      toolName: 'Bash',
+      toolInput: { command },
+      agent: 'Codex',
+      cwd: h,
+    });
+    expect(
+      await addonVerdictForHookCall(blockAll, bash(`cat ${h}/.codex/skills/fmt/SKILL.md`), h)
+    ).toMatchObject({ action: 'block', ruleName: 'addon:skill:fmt' });
+    expect(
+      await addonVerdictForHookCall(
+        blockAll,
+        bash(`sed -n '1,80p' ${h}/.codex/skills/.system/plan/SKILL.md`),
+        h
+      )
+    ).toEqual({ action: 'allow' });
+  });
+
+  it('a read through a link outside the skill folders is still the skill', async () => {
+    const h = home();
+    skill(path.join(h, '.codex', 'skills', 'fmt'), 'fmt');
+    fs.symlinkSync(path.join(h, '.codex', 'skills', 'fmt'), path.join(h, 'lnk'));
+    expect(
+      await addonVerdictForHookCall(
+        blockAll,
+        {
+          toolName: 'Bash',
+          toolInput: { command: `cat ${h}/lnk/SKILL.md` },
+          agent: 'Codex',
+          cwd: h,
+        },
+        h
+      )
+    ).toMatchObject({ action: 'block', ruleName: 'addon:skill:fmt' });
+  });
+
+  it("a project's skill counts from its working directory; a skill elsewhere is just a file", async () => {
+    const h = home();
+    const proj = path.join(h, 'work', 'app');
+    const own = skill(path.join(proj, '.agents', 'skills', 'release'), 'release');
+    const other = skill(path.join(h, 'review', 'repo', '.agents', 'skills', 'x'), 'x');
+    const cat = (file: string) => ({
+      toolName: 'Bash',
+      toolInput: { command: `cat ${file}` },
+      agent: 'Codex',
+      cwd: proj,
+    });
+    expect(
+      await addonVerdictForHookCall(blockAll, cat(path.join(own, 'SKILL.md')), h)
+    ).toMatchObject({ action: 'block' });
+    expect(await addonVerdictForHookCall(blockAll, cat(path.join(other, 'SKILL.md')), h)).toEqual({
+      action: 'allow',
+    });
+    // Another file in the skill folder is not the load.
+    fs.writeFileSync(path.join(own, 'notes.md'), 'x');
+    expect(await addonVerdictForHookCall(blockAll, cat(path.join(own, 'notes.md')), h)).toEqual({
+      action: 'allow',
+    });
+  });
+});

@@ -18,8 +18,10 @@
 // Read-only and bounded; any failure yields "nothing to judge", never a throw:
 // node9 failing must never stop the agent.
 
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { collectFileAccesses, normalizeFilePath } from '@node9/policy-engine';
 import { hashSkillRoot } from '../skill-pin';
 import { readMcpIndex } from './index-file';
 import { claudeMcpEntries } from './claude-mcp';
@@ -168,10 +170,97 @@ export async function resolveSkillUses(
   return out;
 }
 
+function inside(p: string, root: string): boolean {
+  return p.startsWith(root + path.sep);
+}
+
+function realDir(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * The skills a call loads by reading their SKILL.md directly, for agents with
+ * no skill tool: Codex loads a skill by reading the file through the shell.
+ * Claude Code loads skills through its Skill tool (and a typed slash
+ * command), and its Read of a SKILL.md is how a skill gets edited, so it is
+ * not judged here: under the block rule nobody could edit a skill they are
+ * writing. A SKILL.md counts only inside a folder the agents load skills
+ * from (the user's, a plugin's, the project's), compared after resolving
+ * links; a skill anywhere else (a repository under review) is a file. Codex's
+ * own system skills (`~/.codex/skills/.system`) are built in, not add-ons.
+ */
+export async function skillReadUses(
+  toolName: string,
+  toolInput: unknown,
+  cwd: string | undefined,
+  home: string = os.homedir()
+): Promise<SkillUse[]> {
+  const base = cwd && path.isAbsolute(cwd) ? cwd : home;
+  const read = collectFileAccesses(toolName, toolInput, { cwd: base, homeDirs: [home] })
+    .filter((a) => a.operation === 'read' && !a.listing)
+    .flatMap((a) => a.candidates ?? [normalizeFilePath(a.path, a.cwd ?? base, home)])
+    .filter((p) => path.isAbsolute(p) && path.basename(p).toLowerCase() === 'skill.md');
+  if (read.length === 0) return [];
+  const sfs = await import('./skill-fs.js');
+  const roots: Array<{
+    root: string;
+    plugin?: { name: string; marketplace: string; installPath: string; version?: string };
+  }> = [
+    { root: path.join(home, '.claude', 'skills') },
+    { root: path.join(home, '.codex', 'skills') },
+    { root: path.join(home, '.agents', 'skills') },
+    ...projectDirs(cwd, home).flatMap((d) => [
+      { root: path.join(d, '.claude', 'skills') },
+      { root: path.join(d, '.agents', 'skills') },
+    ]),
+  ];
+  for (const p of sfs.installedPlugins(home))
+    if (p.installPath)
+      roots.push({
+        root: path.join(p.installPath, 'skills'),
+        plugin: {
+          name: p.name,
+          marketplace: p.marketplace,
+          installPath: p.installPath,
+          version: p.version,
+        },
+      });
+  const realRoots = roots.map((r) => ({ ...r, real: realDir(r.root) }));
+  const builtIn = path.join(home, '.codex', 'skills', '.system');
+  const builtInReal = realDir(builtIn);
+  const out: SkillUse[] = [];
+  for (const file of new Set(read)) {
+    const dir = path.dirname(file);
+    const real = realDir(dir);
+    const isIn = (p: string, root: string) => p === root || inside(p, root);
+    if (isIn(dir, builtIn) || isIn(real, builtInReal)) continue;
+    const where = realRoots.find((r) => inside(dir, r.root) || inside(real, r.real));
+    if (!where) continue;
+    const name = sfs.skillNameOf(real);
+    const h = hashSkillRoot(real);
+    if (!name || !h.exists) continue;
+    let plugin: SkillUse['plugin'];
+    if (where.plugin) {
+      // Hashed only for the plugin the file is in.
+      const ph = hashSkillRoot(where.plugin.installPath);
+      plugin = {
+        key: `${where.plugin.name}@${where.plugin.marketplace}`,
+        versionId: ph.exists ? ph.contentHash : `v:${where.plugin.version ?? '?'}`,
+      };
+    }
+    out.push({ name, hash: h.contentHash, ...(plugin ? { plugin } : {}) });
+  }
+  return out;
+}
+
 /**
  * The approved list's verdict on one hook call: an MCP tool by its server's
- * identity, a Claude Code `Skill` call by the skill's folder. Allow when the
- * list enforces nothing (no blocks, unapproved off or log), before any file
+ * identity, a Claude Code `Skill` call by the skill's folder, another agent's
+ * read of a skill's SKILL.md by that skill. Allow when the list enforces nothing (no blocks, unapproved off or log), before any file
  * is read.
  */
 export async function addonVerdictForHookCall(
@@ -201,6 +290,12 @@ export async function addonVerdictForHookCall(
         v = stricter(v, skillVerdict(policy, use));
       return v;
     }
+    // Claude Code loads skills through the Skill tool (above); see skillReadUses.
+    if (call.agent === 'Claude Code') return ALLOW;
+    let v = ALLOW;
+    for (const use of await skillReadUses(call.toolName, call.toolInput, call.cwd, home))
+      v = stricter(v, skillVerdict(policy, use));
+    return v;
   } catch {
     /* an unreadable config or folder judges nothing */
   }

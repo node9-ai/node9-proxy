@@ -134,4 +134,44 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
     expect(denied(r)).toBe(true);
     expect(r.out).toContain('npm:@acme/db-mcp');
   });
+
+  it('stops a blocked skill the user starts with its slash command', () => {
+    const dir = path.join(home, '.claude', 'skills', 'deploy');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: deploy\n---\nDeploy the app.\n');
+    seedPolicy({
+      unapproved: 'log',
+      mcp: {},
+      skills: { deploy: { decision: 'blocked' } },
+      plugins: {},
+    });
+    const prompt = (text: string) => ({
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'addon-session',
+      cwd: home,
+      prompt: text,
+    });
+    const blocked = runCheck(home, prompt('/deploy to staging'));
+    expect(denied(blocked)).toBe(true);
+    expect(blocked.out).toContain('deploy');
+    // A slash command that is no skill folder, and plain text, pass.
+    expect(denied(runCheck(home, prompt('/model')))).toBe(false);
+    expect(denied(runCheck(home, prompt('deploy to staging please')))).toBe(false);
+    // Another agent's slash command is its own built-in, not this skill.
+    expect(denied(runCheck(home, { ...prompt('/deploy'), turn_id: 't1' }))).toBe(false);
+  });
+
+  it('lets a typed slash command through under the review rule: the person typing is the reviewer', () => {
+    const dir = path.join(home, '.claude', 'skills', 'deploy');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: deploy\n---\nDeploy the app.\n');
+    seedPolicy({ unapproved: 'review', mcp: {}, skills: {}, plugins: {} });
+    const r = runCheck(home, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'addon-session',
+      cwd: home,
+      prompt: '/deploy',
+    });
+    expect(denied(r)).toBe(false);
+  });
 });

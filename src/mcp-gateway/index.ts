@@ -28,7 +28,8 @@ import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
 import { mcpIdentityFromCommand } from '../addons/identity';
-import { mcpVerdict, type AddonVerdict } from '../addons/policy';
+import type { AddonVerdict } from '../addons/policy';
+import { AddonSessionGate } from '../addons/gateway-gate';
 import type { McpToolInfo } from '../daemon/mcp-tools';
 import { getServerConfig, deriveServerName, sanitizeToolAnnotations } from '../daemon/mcp-tools';
 import {
@@ -325,8 +326,7 @@ export async function runMcpGateway(
   // server's identity, the same one the add-ons report gives the dashboard
   // (collect.ts derives it from the same `--upstream`). A review the person
   // approved holds for the rest of this session: one card per server.
-  const addonIdentity = mcpIdentityFromCommand(cmd ?? '', cmdArgs);
-  let addonReviewApproved = false;
+  const addonGate = new AddonSessionGate(mcpIdentityFromCommand(cmd ?? '', cmdArgs));
 
   // Session quarantine: tracks whether pin validation has passed for this session.
   // 'pending'    — no tools/list response checked yet; tools/call blocked
@@ -506,11 +506,10 @@ export async function runMcpGateway(
         _resetConfigCache();
         let addon: AddonVerdict = { action: 'allow' };
         try {
-          addon = mcpVerdict(getConfig().policy.addons, addonIdentity);
+          addon = addonGate.verdict(getConfig().policy.addons);
         } catch {
           /* no readable list enforces nothing: node9 failing never stops the agent */
         }
-        if (addon.action === 'review' && addonReviewApproved) addon = { action: 'allow' };
         const result = await authorizeHeadless(
           toolName,
           toolArgs,
@@ -528,7 +527,7 @@ export async function runMcpGateway(
           { sessionTaintGated: !readOnlyTools.has(toolName), cwd: gatewayCwd }
         );
 
-        if (result.approved && addon.action === 'review') addonReviewApproved = true;
+        addonGate.record(addon, result.approved);
         if (!result.approved) {
           console.error(chalk.red(`\n🛑 Node9 MCP Gateway: Action Blocked`));
           console.error(chalk.gray(`   Tool: ${toolName}`));

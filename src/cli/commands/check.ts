@@ -430,6 +430,61 @@ export function registerCheckCommand(program: Command): void {
             // (dogfound 2026-07-05). Same guard pair as the orchestrator.
             if (process.env.NODE9_PAUSED === '1' || checkPause().paused) allowPrompt();
 
+            // node9Firewall#376 item 6: a skill the user starts by typing its
+            // slash command (`/deploy ...`) loads without a Skill tool call, so
+            // the approved list is applied here. Only a block stops it: the
+            // person typing is the one a review would ask. A name with no skill
+            // folder (a built-in or a custom command) is not an add-on.
+            // Claude Code only: the folders searched are its skill folders, and
+            // another agent's slash commands are its own built-ins.
+            const slash = /^\/([A-Za-z0-9][\w.:-]{0,200})(?:\s|$)/.exec(prompt.trimStart());
+            if (slash && (agentOverride ?? detectAiAgent(payload)) === 'Claude Code') {
+              try {
+                const promptCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                const promptAgent = agentOverride ?? detectAiAgent(payload);
+                const verdict = await addonVerdictForHookCall(getConfig(promptCwd).policy.addons, {
+                  toolName: 'Skill',
+                  toolInput: { skill: slash[1] },
+                  agent: promptAgent,
+                  cwd: promptCwd,
+                });
+                if (verdict.action === 'block') {
+                  appendLocalAudit(
+                    'UserPromptSubmit',
+                    { skill: slash[1] },
+                    'deny',
+                    'addon-block',
+                    {
+                      agent: promptAgent,
+                      sessionId:
+                        typeof payload.session_id === 'string' ? payload.session_id : undefined,
+                      ruleName: verdict.ruleName,
+                    },
+                    true
+                  );
+                  const reason = `🛡️ Node9 blocked: ${verdict.reason}`;
+                  process.stdout.write(
+                    JSON.stringify({
+                      decision: 'block',
+                      reason,
+                      systemMessage: reason,
+                      hookSpecificOutput: {
+                        hookEventName: 'UserPromptSubmit',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: reason,
+                      },
+                    }) + '\n'
+                  );
+                  process.exit(2);
+                }
+              } catch {
+                /* the add-on gate never stops a prompt on its own failure */
+              }
+            }
+
             const dlpMatch = scanArgs({ prompt });
             // Decoy credentials: a planted value pasted into a prompt is the same
             // value on the same path as one in a reply (canary-design.md H10).
