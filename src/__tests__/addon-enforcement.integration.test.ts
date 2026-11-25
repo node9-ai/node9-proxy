@@ -24,6 +24,10 @@ function runCheck(home: string, payload: object): { status: number | null; out: 
   const env = { ...process.env };
   delete env.NODE9_API_KEY;
   delete env.NODE9_API_URL;
+  // The agent is told by the payload, as on any machine: inherited from a
+  // developer's Claude Code shell, these passed a payload CI would not.
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_SESSION_ID;
   const r = spawnSync(process.execPath, [CLI, 'check', JSON.stringify(payload)], {
     encoding: 'utf-8',
     timeout: 60000,
@@ -147,6 +151,8 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
     });
     const prompt = (text: string) => ({
       hook_event_name: 'UserPromptSubmit',
+      // Claude Code sends it on every event; it is how node9 knows the agent.
+      permission_mode: 'default',
       session_id: 'addon-session',
       cwd: home,
       prompt: text,
@@ -168,6 +174,8 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
     seedPolicy({ unapproved: 'review', mcp: {}, skills: {}, plugins: {} });
     const r = runCheck(home, {
       hook_event_name: 'UserPromptSubmit',
+      // Claude Code sends it on every event; it is how node9 knows the agent.
+      permission_mode: 'default',
       session_id: 'addon-session',
       cwd: home,
       prompt: '/deploy',
