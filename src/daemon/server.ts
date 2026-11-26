@@ -3,6 +3,7 @@
 // All route handlers live here; shared state is in daemon/state.ts.
 import { scheduleAutostartSelfHeal } from './service';
 import { startAppDetection } from '../apps/daemon';
+import { startAddonsIndexRefresh } from './addons-index';
 import http from 'http';
 import { autoMigrateLocalConfig } from '../config/migrate';
 import fs from 'fs';
@@ -297,6 +298,7 @@ export function startDaemon(): void {
     startDlpScanner();
     startOsvSync();
     startMcpReconciler();
+    startAddonsIndexRefresh(); // fw#376: the hook judges MCP servers from it
     startHookHeal();
     startAppDetection(); // fw#390: found = protected
     loadInsightCounts(); // restore persisted nudge counters across restarts

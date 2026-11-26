@@ -62,10 +62,17 @@ afterEach(() => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+/** An installed plugin: a folder under ~/.claude/plugins and its entry in
+ *  installed_plugins.json (a marketplace folder alone is the catalog). */
 function plugin(name: string): void {
-  fs.mkdirSync(path.join(home, '.claude', 'plugins', 'marketplaces', 'm', 'plugins', name), {
-    recursive: true,
-  });
+  const dir = path.join(home, '.claude', 'plugins', 'cache', 'm', name, '1.0.0');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(home, '.claude', 'plugins', 'installed_plugins.json');
+  const cur = fs.existsSync(file)
+    ? (JSON.parse(fs.readFileSync(file, 'utf8')) as { plugins: Record<string, unknown> })
+    : { plugins: {} };
+  cur.plugins[`${name}@m`] = [{ version: '1.0.0', installPath: dir }];
+  fs.writeFileSync(file, JSON.stringify(cur));
 }
 
 describe('Supply chain: plugins and the package check', () => {
@@ -79,7 +86,13 @@ describe('Supply chain: plugins and the package check', () => {
       path.join(home, '.node9', 'skill-pins.json'),
       JSON.stringify({
         roots: {
-          [getRootKey(root)]: { rootPath: root, contentHash: 'h', exists: true, fileCount: 0 },
+          // Plugins are pinned under their identity, not their folder.
+          [getRootKey('plugin:alpha@m')]: {
+            rootPath: root,
+            contentHash: 'h',
+            exists: true,
+            fileCount: 0,
+          },
         },
       })
     );
@@ -90,7 +103,8 @@ describe('Supply chain: plugins and the package check', () => {
     plugin('alpha');
     plugin('beta');
     const { roots, unpinned } = pluginPinState(home);
-    expect(roots.map((r) => path.basename(r)).sort()).toEqual(['alpha', 'beta']);
+    // .../cache/<marketplace>/<plugin>/<version>
+    expect(roots.map((r) => path.basename(path.dirname(r))).sort()).toEqual(['alpha', 'beta']);
     expect(unpinned).toEqual(roots);
   });
 

@@ -314,6 +314,20 @@ Do NOT attempt to bypass this rule.
     );
   }
 
+  // The workspace's approved list of add-ons (node9Firewall#376 item 6): the
+  // reason names the add-on and, for one nobody approved, who can approve it
+  // and where. Both reach the agent whole, so it can tell the user the way out.
+  if (label.includes('add-on') && humanReason) {
+    return withUserLine(
+      `Node9 blocked: ${reasonSentence(humanReason) || 'an add-on your workspace did not approve'}`,
+      `NODE9: Action blocked by your workspace's add-on policy.
+REASON: ${oneLine(humanReason)}
+INSTRUCTIONS:
+- Do NOT retry with this add-on or try to load a copy of it another way.
+- Tell the user which add-on was stopped. A workspace owner or admin decides on the Add-ons page of the node9 dashboard.`
+    );
+  }
+
   // Generic fallback. A timed-out approval lands here too (its label names the
   // timer, not a rule); the user line says so instead of "[Approval Timeout]".
   const timedOut = label.includes('approval timeout');

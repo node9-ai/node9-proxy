@@ -551,3 +551,22 @@ describe('extractManagedConfig: the monthly budget status (node9Firewall#427)', 
     expect(bad?.spendBudget).toBeUndefined();
   });
 });
+
+describe('extractManagedConfig: the approved list of add-ons (node9Firewall#376)', () => {
+  it('keeps the list a sync carries, so the cache holds it', () => {
+    const addons = {
+      unapproved: 'review',
+      mcp: { 'npm:@acme/db-mcp': 'blocked' },
+      skills: { deploy: { decision: 'approved', hashes: ['a'.repeat(64)] } },
+      plugins: {},
+    };
+    expect(extractManagedConfig({ managedConfig: { addons } } as never)?.addons).toEqual(addons);
+  });
+
+  it('drops it when the sync carries none (a downgrade), and keeps nothing malformed', () => {
+    expect(extractManagedConfig({ managedConfig: { mode: 'standard' } } as never)?.addons).toBe(
+      undefined
+    );
+    expect(extractManagedConfig({ managedConfig: { addons: 'block' } } as never)).toBeUndefined();
+  });
+});

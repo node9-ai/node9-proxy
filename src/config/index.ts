@@ -3,6 +3,7 @@ import type { ToolInspection } from '@node9/policy-engine';
 // Config types, constants, and runtime config loading.
 // Kept separate from core.ts policy logic so tests can import config types
 // without pulling in the full authorization stack.
+import { addonPolicyEnforces, parseAddonPolicy, type AddonPolicy } from '../addons/policy';
 import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import fs from 'fs';
 import path from 'path';
@@ -294,6 +295,9 @@ export interface Config {
     // Managed server links { serverKey: appSlug } (node9Firewall#390): a server
     // an admin said is an app is judged as that app at the gate.
     appLinks: Record<string, string>;
+    // The workspace's approved list of add-ons (node9Firewall#376 item 6,
+    // phase 3). Cloud-only: no local file writes it; undefined enforces nothing.
+    addons?: AddonPolicy;
     // Task #22: org-mandated credential-jail paths (managedConfig.jailPaths).
     // They also expand into org:-prefixed smartRules, but the orchestrator's
     // file-tool guard needs the PATHS themselves: rules alone can't tell it
@@ -1510,6 +1514,7 @@ export function getConfig(cwd?: string): Config {
           trustedHosts?: unknown;
           appPermissions?: unknown;
           appLinks?: unknown;
+          addons?: unknown;
           locked?: unknown;
         };
         const locked: string[] = Array.isArray(mc.locked)
@@ -1858,6 +1863,11 @@ export function getConfig(cwd?: string): Config {
             Object.values(tools).some((d) => d === 'block' || d === 'review')
           );
         }
+        // The approved list of add-ons: applied as a whole, never merged with
+        // anything local. A list that blocks or holds something is a mandate
+        // (below), or observe mode would approve the call before the gate.
+        const addonPolicy = parseAddonPolicy(mc.addons);
+        if (addonPolicy) mergedPolicy.addons = addonPolicy;
         // Task #21: does the org mandate ANY enforcement? observe/audit make
         // the orchestrator approve every call before a gate runs, so a mandate
         // that doesn't floor the mode is silently unenforced — B1 #1 already
@@ -1876,6 +1886,7 @@ export function getConfig(cwd?: string): Config {
           !!v && typeof v === 'object' && (v as { enabled?: unknown }).enabled === true;
         cloudMandatesEnforcement =
           cloudMandatesAppPerm ||
+          addonPolicyEnforces(addonPolicy) ||
           (Array.isArray(mc.jailPaths) &&
             mc.jailPaths.some((jp) => typeof jp?.path === 'string' && jp.path.trim() !== '')) ||
           on(mc.egress) ||

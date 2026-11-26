@@ -23,6 +23,18 @@ import { getServerKey } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
 import { scanText } from '../dlp';
 import { mcpIdentityFromCommand, mcpIdentityFromUrl } from './identity';
+import {
+  MAX_SKILLS,
+  SKILL_SEARCH_DEPTH,
+  findSkillDirs,
+  installedPlugins,
+  label,
+  readText,
+  skillMdPath,
+} from './skill-fs';
+
+// Re-exported: the collector's tests and callers read them from here.
+export { findSkillDirs, installedPlugins, skillNameOf } from './skill-fs';
 
 export type SkillScope = 'user' | 'plugin' | 'project';
 export type SkillSource = 'synced' | 'built-in';
@@ -71,14 +83,9 @@ export interface AddonsReport {
   capped?: boolean;
 }
 
-const MAX_SKILLS = 200;
-const MAX_PLUGINS = 100;
 const MAX_MCP = 100;
 const MAX_GRANTS = 30;
-const MAX_NAME = 128;
-const SKILL_SEARCH_DEPTH = 4;
 const MAX_MD_PER_SKILL = 50;
-const MAX_MD_BYTES = 256 * 1024;
 const SEVERITY_RANK: Record<string, number> = {
   critical: 5,
   high: 4,
@@ -87,73 +94,6 @@ const SEVERITY_RANK: Record<string, number> = {
   advisory: 1,
   info: 0,
 };
-
-/** Printable, bounded label text. */
-function label(v: unknown): string | null {
-  if (typeof v !== 'string') return null;
-  // eslint-disable-next-line no-control-regex
-  const t = v.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
-  return t ? t.slice(0, MAX_NAME) : null;
-}
-
-/**
- * A regular file's text, read through one descriptor: no symlink is followed,
- * and the type and size checked are those of the file read (a check by path
- * and a read by path could see two different files). O_NONBLOCK keeps a FIFO
- * from blocking the open; fstat then rejects it.
- */
-function readText(file: string): string | null {
-  let fd: number | undefined;
-  try {
-    const c = fs.constants;
-    fd = fs.openSync(file, c.O_RDONLY | (c.O_NOFOLLOW ?? 0) | (c.O_NONBLOCK ?? 0));
-    const st = fs.fstatSync(fd);
-    if (!st.isFile() || st.size > MAX_MD_BYTES) return null;
-    const buf = Buffer.alloc(st.size);
-    const n = fs.readSync(fd, buf, 0, st.size, 0);
-    return buf.subarray(0, n).toString('utf8');
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-}
-
-function isDir(p: string): boolean {
-  try {
-    return fs.lstatSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** Skill folders under a root: a directory holding SKILL.md. Symlinks are not
- *  followed; a skill's own sub-folders are not searched for more skills. */
-export function findSkillDirs(
-  root: string,
-  depth = SKILL_SEARCH_DEPTH,
-  out: string[] = [],
-  limit = MAX_SKILLS
-): string[] {
-  if (depth < 0 || out.length >= limit || !isDir(root)) return out;
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  if (entries.some((e) => e.isFile() && e.name.toLowerCase() === 'skill.md')) {
-    out.push(root);
-    return out;
-  }
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  for (const e of entries) {
-    if (out.length >= limit) break;
-    if (e.isDirectory() && e.name !== 'node_modules' && e.name !== '.git')
-      findSkillDirs(path.join(root, e.name), depth - 1, out, limit);
-  }
-  return out;
-}
 
 function mdFiles(dir: string, depth = 3, out: string[] = []): string[] {
   if (depth < 0 || out.length >= MAX_MD_PER_SKILL) return out;
@@ -170,15 +110,6 @@ function mdFiles(dir: string, depth = 3, out: string[] = []): string[] {
     else if (e.isFile() && /\.md$/i.test(e.name)) out.push(p);
   }
   return out;
-}
-
-function skillMdPath(dir: string): string | null {
-  try {
-    const f = fs.readdirSync(dir).find((n) => n.toLowerCase() === 'skill.md');
-    return f ? path.join(dir, f) : null;
-  } catch {
-    return null;
-  }
 }
 
 /** One skill folder as a report row. */
@@ -233,52 +164,6 @@ function userSource(root: string, dir: string): string | undefined {
   if (rel[0] === 'synced') return 'synced';
   if (rel[0] === '.system') return 'built-in';
   return undefined;
-}
-
-interface InstalledPlugin {
-  key: string;
-  name: string;
-  marketplace: string;
-  version?: string;
-  installPath?: string;
-}
-
-/** Claude Code's installed plugins (`~/.claude/plugins/installed_plugins.json`).
- *  A marketplace folder holds the whole catalog, installed or not, so it is
- *  never read as the installed list. Accepts the map-of-object and the
- *  map-of-array shapes. */
-export function installedPlugins(home: string): InstalledPlugin[] {
-  const pluginsRoot = path.join(home, '.claude', 'plugins');
-  let raw: unknown;
-  try {
-    raw = JSON.parse(fs.readFileSync(path.join(pluginsRoot, 'installed_plugins.json'), 'utf8'));
-  } catch {
-    return [];
-  }
-  const map = (raw as { plugins?: unknown })?.plugins;
-  if (!map || typeof map !== 'object' || Array.isArray(map)) return [];
-  const out: InstalledPlugin[] = [];
-  for (const [key, val] of Object.entries(map as Record<string, unknown>)) {
-    if (out.length >= MAX_PLUGINS) break;
-    const at = key.lastIndexOf('@');
-    const name = label(at > 0 ? key.slice(0, at) : key);
-    const marketplace = label(at > 0 ? key.slice(at + 1) : '') ?? 'unknown';
-    if (!name) continue;
-    const first = (Array.isArray(val) ? val[0] : val) as
-      { version?: unknown; installPath?: unknown } | undefined;
-    const ip = typeof first?.installPath === 'string' ? path.resolve(first.installPath) : undefined;
-    // Only a folder under ~/.claude/plugins is hashed or searched: the file is
-    // data, and a path elsewhere is not followed.
-    const inside = ip && (ip + path.sep).startsWith(pluginsRoot + path.sep) ? ip : undefined;
-    out.push({
-      key,
-      name,
-      marketplace,
-      ...(label(first?.version) ? { version: label(first?.version)!.slice(0, 64) } : {}),
-      ...(inside ? { installPath: inside } : {}),
-    });
-  }
-  return out;
 }
 
 function enabledPlugins(home: string): Record<string, boolean> {
@@ -353,6 +238,15 @@ function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
     });
   }
   return [...byKey.values()];
+}
+
+/** The MCP part only, for the index the agent hook reads (index-file.ts):
+ *  config reads, no skill hashing, so the daemon can rebuild it often. */
+export function collectMcpOnly(
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): AddonMcp[] {
+  return collectMcp(home, env);
 }
 
 /** Build the add-ons report for this machine. Never throws. */

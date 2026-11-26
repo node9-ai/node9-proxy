@@ -15,6 +15,7 @@ import {
 } from '../../audit';
 import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
+import { approveAddonForSession } from '../../addons/session-approvals';
 import { resolveBlockedCall } from '../../blocked-calls';
 import {
   notifyTaintPropagate,
@@ -437,6 +438,11 @@ export function registerLogCommand(program: Command): void {
             // shell destinations and written paths alike.
             await approveSessionExposure(payloadSessionId, resolvedReview.exposureKeys ?? []);
           }
+
+          // fw#376: the dev accepted the agent's prompt for an add-on's review
+          // (the tool ran): that add-on is approved for the rest of the session.
+          if (resolvedReview?.addonRule && typeof payloadSessionId === 'string')
+            approveAddonForSession(payloadSessionId, resolvedReview.addonRule);
 
           // v2 (review-ask-inline-v2-spec.md): the dev's inline approve is a real
           // DECISION and must reach the dashboard — the post-hook row above has no

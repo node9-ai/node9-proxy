@@ -18,6 +18,8 @@ import {
   updatePin,
   removePin,
   clearAllPins,
+  defaultSkillRootEntries,
+  verifyAndPinRoots,
 } from '../skill-pin';
 
 // ---------------------------------------------------------------------------
@@ -204,5 +206,74 @@ describe('pin file operations', () => {
     updatePin(getRootKey('/p'), '/p', 'a'.repeat(64), true, 1);
     const ok = readSkillPinsSafe();
     expect(ok.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Installed plugins as roots (review of the marketplace-catalog fix)
+// ---------------------------------------------------------------------------
+
+describe('installed plugins as pin roots', () => {
+  let tmpHome: string;
+  let origHome: string;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skillpin-roots-'));
+    origHome = process.env.HOME!;
+    process.env.HOME = tmpHome;
+    process.env.USERPROFILE = tmpHome;
+  });
+
+  afterEach(() => {
+    process.env.HOME = origHome;
+    process.env.USERPROFILE = origHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function install(count: number): void {
+    const plugins: Record<string, unknown> = {};
+    for (let i = 0; i < count; i++) {
+      const dir = path.join(tmpHome, '.claude', 'plugins', 'cache', 'm', `p${i}`, '1.0.0');
+      fs.mkdirSync(dir, { recursive: true });
+      plugins[`p${i}@m`] = [{ version: '1.0.0', installPath: dir }];
+    }
+    fs.writeFileSync(
+      path.join(tmpHome, '.claude', 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ plugins })
+    );
+  }
+
+  it('pins every installed plugin, past the add-ons report cap of 100', () => {
+    install(120);
+    expect(defaultSkillRootEntries(tmpHome)).toHaveLength(120);
+  });
+
+  it('drops the pins of marketplace catalog folders that earlier versions wrote', () => {
+    install(1);
+    const catalog = path.join(tmpHome, '.claude', 'plugins', 'marketplaces', 'm', 'plugins', 'x');
+    updatePin(getRootKey(catalog), catalog, 'a'.repeat(64), true, 1);
+    updatePin(getRootKey('/my/AGENTS.md'), '/my/AGENTS.md', 'b'.repeat(64), true, 1);
+    expect(verifyAndPinRoots(defaultSkillRootEntries(tmpHome))).toEqual({ kind: 'verified' });
+    const roots = Object.values(readSkillPins().roots).map((r) => r.rootPath);
+    expect(roots).not.toContain(catalog);
+    // A pin the user asked for stays; the installed plugin is pinned.
+    expect(roots).toContain('/my/AGENTS.md');
+    expect(roots).toHaveLength(2);
+  });
+
+  it('a plugin version the workspace approved is re-pinned, not drift; any other change is', () => {
+    install(1);
+    const [root] = defaultSkillRootEntries(tmpHome);
+    expect(root.plugin).toBe('p0@m');
+    expect(verifyAndPinRoots([root])).toEqual({ kind: 'verified' });
+    fs.writeFileSync(path.join(root.path, 'SKILL.md'), 'v2');
+    const v2 = hashSkillRoot(root.path).contentHash;
+    const approvedV2 = (_r: unknown, hash: string) => hash === v2;
+    expect(verifyAndPinRoots([root], approvedV2)).toEqual({ kind: 'verified' });
+    // v2 is now the pin: unchanged, it verifies without the approval.
+    expect(verifyAndPinRoots([root])).toEqual({ kind: 'verified' });
+    // A further change nobody approved is drift.
+    fs.writeFileSync(path.join(root.path, 'SKILL.md'), 'v3');
+    expect(verifyAndPinRoots([root], approvedV2).kind).toBe('drift');
   });
 });

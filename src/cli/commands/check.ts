@@ -31,7 +31,14 @@ import {
   logAutostartSkipThrottled,
   refreshStaleDaemon,
 } from '../daemon-starter';
-import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
+import {
+  defaultSkillRootEntries,
+  pathRoot,
+  resolveUserSkillRoot,
+  verifyAndPinRoots,
+} from '../../skill-pin';
+import { addonVerdictForHookCall } from '../../addons/resolve';
+import { addonApprovedForSession, approveAddonForSession } from '../../addons/session-approvals';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
 import {
@@ -428,6 +435,61 @@ export function registerCheckCommand(program: Command): void {
             // this, prompts stayed BLOCKED while everything else was paused
             // (dogfound 2026-07-05). Same guard pair as the orchestrator.
             if (process.env.NODE9_PAUSED === '1' || checkPause().paused) allowPrompt();
+
+            // node9Firewall#376 item 6: a skill the user starts by typing its
+            // slash command (`/deploy ...`) loads without a Skill tool call, so
+            // the approved list is applied here. Only a block stops it: the
+            // person typing is the one a review would ask. A name with no skill
+            // folder (a built-in or a custom command) is not an add-on.
+            // Claude Code only: the folders searched are its skill folders, and
+            // another agent's slash commands are its own built-ins.
+            const slash = /^\/([A-Za-z0-9][\w.:-]{0,200})(?:\s|$)/.exec(prompt.trimStart());
+            if (slash && (agentOverride ?? detectAiAgent(payload)) === 'Claude Code') {
+              try {
+                const promptCwd =
+                  typeof payload.cwd === 'string' && path.isAbsolute(payload.cwd)
+                    ? payload.cwd
+                    : undefined;
+                const promptAgent = agentOverride ?? detectAiAgent(payload);
+                const verdict = await addonVerdictForHookCall(getConfig(promptCwd).policy.addons, {
+                  toolName: 'Skill',
+                  toolInput: { skill: slash[1] },
+                  agent: promptAgent,
+                  cwd: promptCwd,
+                });
+                if (verdict.action === 'block') {
+                  appendLocalAudit(
+                    'UserPromptSubmit',
+                    { skill: slash[1] },
+                    'deny',
+                    'addon-block',
+                    {
+                      agent: promptAgent,
+                      sessionId:
+                        typeof payload.session_id === 'string' ? payload.session_id : undefined,
+                      ruleName: verdict.ruleName,
+                    },
+                    true
+                  );
+                  const reason = `🛡️ Node9 blocked: ${verdict.reason}`;
+                  process.stdout.write(
+                    JSON.stringify({
+                      decision: 'block',
+                      reason,
+                      systemMessage: reason,
+                      hookSpecificOutput: {
+                        hookEventName: 'UserPromptSubmit',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: reason,
+                      },
+                    }) + '\n'
+                  );
+                  process.exit(2);
+                }
+              } catch {
+                /* the add-on gate never stops a prompt on its own failure */
+              }
+            }
 
             const dlpMatch = scanArgs({ prompt });
             // Decoy credentials: a planted value pasted into a prompt is the same
@@ -986,6 +1048,7 @@ export function registerCheckCommand(program: Command): void {
                   label: result.blockedByLabel,
                   ...(result.exposureKeys?.length ? { exposureKeys: result.exposureKeys } : {}),
                   ...(result.exposureFromEid ? { exposureFromEid: result.exposureFromEid } : {}),
+                  ...(addon.action === 'review' ? { addonRule: addon.ruleName } : {}),
                 });
               }
             } catch {
@@ -1047,12 +1110,30 @@ export function registerCheckCommand(program: Command): void {
           // A call the after-run hook can vouch for (blocked-calls.ts): its
           // flagged rows say so, so the cloud reads a missing run as one.
           const tracksRun = canTrackRun(payload as Record<string, unknown>, agent);
+          // The workspace's approved list of add-ons (node9Firewall#376 item 6,
+          // phase 3): the MCP server or Claude Code skill this call uses, and
+          // its verdict. Allow when nothing is enforced; never throws.
+          let addon = await addonVerdictForHookCall(config.policy.addons, {
+            toolName,
+            toolInput,
+            mcpServer,
+            agent,
+            cwd:
+              typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd)
+                ? payloadCwd
+                : undefined,
+          });
+          // A person already approved this add-on in this session: one ask
+          // per add-on per session, as the MCP gateway does per connection.
+          if (addon.action === 'review' && addonApprovedForSession(sessionId, addon.ruleName))
+            addon = { action: 'allow' };
           const meta = {
             agent,
             mcpServer,
             sessionId,
             transcriptPath,
             ...(tracksRun && { tracksRun: true }),
+            ...(addon.action !== 'allow' && { addon }),
           };
 
           // ── Skill pinning — supply chain & update drift defense (AST 02 + AST 07) ──
@@ -1145,10 +1226,17 @@ export function registerCheckCommand(program: Command): void {
                 const extraRoots = skillPinCfg.roots;
                 const resolvedExtra = extraRoots
                   .map((r) => resolveUserSkillRoot(r, absoluteCwd))
-                  .filter((r): r is string => typeof r === 'string');
-                const roots = [...defaultSkillRoots(absoluteCwd), ...resolvedExtra];
+                  .filter((r): r is string => typeof r === 'string')
+                  .map(pathRoot);
+                const roots = [...defaultSkillRootEntries(), ...resolvedExtra];
 
-                const result = verifyAndPinRoots(roots);
+                // A plugin version the workspace approved on its Add-ons page
+                // is a change someone already reviewed: pin it, no quarantine.
+                const approvedPlugins = config.policy.addons?.plugins ?? {};
+                const result = verifyAndPinRoots(roots, (root, hash) => {
+                  const d = root.plugin ? approvedPlugins[root.plugin] : undefined;
+                  return d?.decision === 'approved' && (d.hashes ?? []).includes(hash);
+                });
 
                 if (result.kind === 'corrupt') {
                   if (skillPinCfg.mode === 'block') {
@@ -1310,6 +1398,12 @@ export function registerCheckCommand(program: Command): void {
           };
 
           if (result.approved) {
+            // A person answered the add-on's review (a card, not the agent's
+            // own prompt): it holds for the rest of the session.
+            // Only a person's answer: an approval by a mode (observe, a shadow
+            // rollout) answered nobody, and must not outlive it.
+            if (addon.action === 'review' && result.decidedBy === 'person')
+              approveAddonForSession(sessionId, addon.ruleName);
             // Only write to stderr in debug mode — Claude Code treats any stderr
             // output as a hook error regardless of exit code (see GitHub issue).
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')

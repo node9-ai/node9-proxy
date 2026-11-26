@@ -506,3 +506,15 @@ describe('the user line cannot be split or stretched by its inputs (fw#420)', ()
     ).toBeUndefined();
   });
 });
+
+describe('an add-on the workspace did not approve (node9Firewall#376)', () => {
+  it('gives the agent the whole reason, with who can approve it and where', () => {
+    const reason =
+      'the skill "deploy" is not on your workspace\'s approved list. ' +
+      'An admin can approve it on the Add-ons page of the node9 dashboard.';
+    const msg = buildNegotiationMessage('🔒 Node9 Add-on (Blocked)', false, reason);
+    expect(msg).toContain('the skill "deploy"');
+    expect(msg).toContain('Add-ons page');
+    expect(msg).not.toMatch(/rejected this action/);
+  });
+});

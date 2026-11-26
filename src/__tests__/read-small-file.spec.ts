@@ -56,4 +56,27 @@ describe('readSmallFile', () => {
     fs.symlinkSync(real, link);
     expect(readSmallFile(link, 1024)).toBe('linked');
   });
+
+  posix('follows a link by default (dotfile managers link config files)', () => {
+    const r = room();
+    const real = path.join(r, 'real.json');
+    fs.writeFileSync(real, '{"a":1}');
+    const link = path.join(r, 'link.json');
+    fs.symlinkSync(real, link);
+    expect(readSmallFile(link, 1024)).toBe('{"a":1}');
+  });
+
+  posix('with noFollow refuses a link, even one to a valid file', () => {
+    // The add-on session approvals file is written by node9 itself; a link
+    // there can only be planted, and must not be read as approvals.
+    const r = room();
+    const planted = path.join(r, 'planted.json');
+    fs.writeFileSync(planted, '{"rules":["addon:skill:deploy"]}');
+    const link = path.join(r, 'session.json');
+    fs.symlinkSync(planted, link);
+    expect(readSmallFile(link, 1024, { noFollow: true })).toBeNull();
+    expect(readSmallFile(planted, 1024, { noFollow: true })).toBe(
+      '{"rules":["addon:skill:deploy"]}'
+    );
+  });
 });

@@ -13,7 +13,7 @@ import { parse as parseToml } from 'smol-toml';
 import { checkProvenance } from '../utils/provenance';
 import { checkValue } from '@node9/policy-engine';
 import { getConfig, catalogSettingsFrom } from '../config';
-import { defaultSkillRoots, getRootKey, readSkillPinsSafe } from '../skill-pin';
+import { defaultSkillRootEntries, readSkillPinsSafe } from '../skill-pin';
 import { AGENT_SPECS, type McpFormat } from '../agent-wiring';
 import type { CheckContext, Finding } from './types';
 import { isCodexAppManagedServer } from '../setup';
@@ -143,11 +143,14 @@ export function checkSupplyChain(ctx: CheckContext): Finding[] {
 
 /** Installed plugin roots and which of them have a pin. Exported for tests. */
 export function pluginPinState(home: string): { roots: string[]; unpinned: string[] } {
-  const roots = defaultSkillRoots(undefined, home);
+  const entries = defaultSkillRootEntries(home);
   // The pins of the same home the roots came from.
   const pins = readSkillPinsSafe(home);
   const pinned = pins.ok ? pins.pins.roots : {};
-  return { roots, unpinned: roots.filter((r) => !pinned[getRootKey(r)]) };
+  return {
+    roots: entries.map((r) => r.path),
+    unpinned: entries.filter((r) => !pinned[r.key]).map((r) => r.path),
+  };
 }
 
 function pluginsAndPackages(ctx: CheckContext, home: string): Finding[] {
