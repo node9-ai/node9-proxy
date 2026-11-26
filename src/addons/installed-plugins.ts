@@ -29,7 +29,7 @@ export interface InstalledPlugin {
  *  A marketplace folder holds the whole catalog, installed or not, so it is
  *  never read as the installed list. Accepts the map-of-object and the
  *  map-of-array shapes. */
-export function installedPlugins(home: string): InstalledPlugin[] {
+export function installedPlugins(home: string, limit = MAX_PLUGINS): InstalledPlugin[] {
   const pluginsRoot = path.join(home, '.claude', 'plugins');
   let raw: unknown;
   try {
@@ -41,7 +41,7 @@ export function installedPlugins(home: string): InstalledPlugin[] {
   if (!map || typeof map !== 'object' || Array.isArray(map)) return [];
   const out: InstalledPlugin[] = [];
   for (const [key, val] of Object.entries(map as Record<string, unknown>)) {
-    if (out.length >= MAX_PLUGINS) break;
+    if (out.length >= limit) break;
     const at = key.lastIndexOf('@');
     const name = label(at > 0 ? key.slice(0, at) : key);
     const marketplace = label(at > 0 ? key.slice(at + 1) : '') ?? 'unknown';

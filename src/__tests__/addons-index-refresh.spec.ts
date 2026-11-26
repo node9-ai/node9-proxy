@@ -54,4 +54,19 @@ describe('refreshAddonsIndex', () => {
     refreshAddonsIndex(sig, h, {});
     expect(readMcpIndex(h).map((e) => e.identity)).toEqual(['npm:mcp-files']);
   });
+
+  it('does not rewrite an index that did not change', () => {
+    const h = home();
+    codex(h, 'db', '@acme/db-mcp');
+    refreshAddonsIndex(undefined, h, {});
+    const file = path.join(h, '.node9', 'addons-index.json');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(file, old, old);
+    // A config write that leaves the MCP servers as they were.
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(path.join(h, '.codex', 'config.toml'), later, later);
+    refreshAddonsIndex('stale', h, {});
+    // Untouched: still the old time (to the second; mtimes are not exact ms).
+    expect(Math.round(fs.statSync(file).mtimeMs / 1000)).toBe(Math.round(old.getTime() / 1000));
+  });
 });

@@ -244,6 +244,11 @@ export function verifyAndPinRoots(roots: Array<string | SkillRoot>): VerifyResul
   let mutated = false;
 
   const seen = new Set<string>();
+  for (const [key, entry] of Object.entries(pins.roots))
+    if (entry && typeof entry.rootPath === 'string' && isLegacyCatalogPin(entry.rootPath)) {
+      delete pins.roots[key];
+      mutated = true;
+    }
   for (const root of roots) {
     const { path: rootPath, key: rootKey } = typeof root === 'string' ? pathRoot(root) : root;
     if (seen.has(rootKey)) continue;
@@ -277,6 +282,17 @@ export function verifyAndPinRoots(roots: Array<string | SkillRoot>): VerifyResul
 // Root resolution (used by the check hook)
 // ---------------------------------------------------------------------------
 
+/** A bound against a corrupt installed list, far above any real install. */
+const MAX_PINNED_PLUGINS = 5000;
+
+/** Pins written by earlier versions keyed marketplace catalog folders; they are
+ *  never checked again, so they are dropped instead of lingering in
+ *  `node9 skill pin list`. */
+function isLegacyCatalogPin(rootPath: string): boolean {
+  const marker = `${path.sep}.claude${path.sep}plugins${path.sep}marketplaces${path.sep}`;
+  return rootPath.includes(marker);
+}
+
 /** A root to pin and the key its pin is filed under. */
 export interface SkillRoot {
   path: string;
@@ -307,7 +323,8 @@ export function pathRoot(absPath: string): SkillRoot {
  * `config.policy.skillPinning.roots`.
  */
 export function defaultSkillRootEntries(home: string = os.homedir()): SkillRoot[] {
-  return installedPlugins(home)
+  // No report-size cap here: every installed plugin gets its pin.
+  return installedPlugins(home, MAX_PINNED_PLUGINS)
     .filter((p): p is typeof p & { installPath: string } => !!p.installPath)
     .map((p) => ({ path: p.installPath, key: getRootKey(`plugin:${p.key}`) }));
 }

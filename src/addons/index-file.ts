@@ -40,7 +40,15 @@ export function writeMcpIndex(entries: McpIndexEntry[], home: string = os.homedi
       state: e.state,
       agents: e.agents,
     }));
-    atomicWriteSync(addonsIndexPath(home), JSON.stringify({ v: 1, mcp }), { mode: 0o600 });
+    const data = JSON.stringify({ v: 1, mcp });
+    // The daemon refreshes often (Claude Code rewrites its config all the
+    // time): an unchanged index is not written again.
+    try {
+      if (fs.readFileSync(addonsIndexPath(home), 'utf8') === data) return;
+    } catch {
+      /* none yet */
+    }
+    atomicWriteSync(addonsIndexPath(home), data, { mode: 0o600 });
   } catch {
     /* the hook then judges no MCP server outside the gateway until the next write */
   }
