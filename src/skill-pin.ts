@@ -13,6 +13,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { readCapped } from './utils/read-capped';
+import { installedPlugins } from './addons/installed-plugins';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -234,7 +235,7 @@ export type VerifyResult =
  * First drift short-circuits and returns `drift`. New roots are pinned in a
  * single batched write.
  */
-export function verifyAndPinRoots(roots: string[]): VerifyResult {
+export function verifyAndPinRoots(roots: Array<string | SkillRoot>): VerifyResult {
   const pinsRead = readSkillPinsSafe();
   if (!pinsRead.ok && pinsRead.reason === 'corrupt') {
     return { kind: 'corrupt', detail: pinsRead.detail };
@@ -242,8 +243,11 @@ export function verifyAndPinRoots(roots: string[]): VerifyResult {
   const pins: SkillPinsFile = pinsRead.ok ? pinsRead.pins : { roots: {} };
   let mutated = false;
 
-  for (const rootPath of new Set(roots)) {
-    const rootKey = getRootKey(rootPath);
+  const seen = new Set<string>();
+  for (const root of roots) {
+    const { path: rootPath, key: rootKey } = typeof root === 'string' ? pathRoot(root) : root;
+    if (seen.has(rootKey)) continue;
+    seen.add(rootKey);
     const current = hashSkillRoot(rootPath);
     const existing = pins.roots[rootKey];
     if (!existing) {
@@ -273,45 +277,44 @@ export function verifyAndPinRoots(roots: string[]): VerifyResult {
 // Root resolution (used by the check hook)
 // ---------------------------------------------------------------------------
 
+/** A root to pin and the key its pin is filed under. */
+export interface SkillRoot {
+  path: string;
+  key: string;
+}
+
+/** A root keyed by its path: a folder the user named in `policy.skillPinning.roots`. */
+export function pathRoot(absPath: string): SkillRoot {
+  return { path: absPath, key: getRootKey(absPath) };
+}
+
 /**
- * Auto-discover installed marketplace plugins as individual pin roots.
+ * The installed Claude Code plugins, one pin root each.
  *
- * Enumerates `~/.claude/plugins/marketplaces/<registry>/plugins/<name>/`
- * and returns each plugin directory as its own root — exactly how MCP
- * pinning gives each server its own pin via `getServerKey(upstreamCommand)`.
+ * Installed only: `~/.claude/plugins/installed_plugins.json`. The marketplace
+ * folders (`~/.claude/plugins/marketplaces/<registry>/plugins/*`) hold the
+ * whole catalog, installed or not, and Claude Code refreshes them on its own,
+ * so pinning them quarantined sessions over plugins that never run.
  *
- * Why per-plugin, not per-tree:
- *   - Installing a NEW plugin creates a new pin silently (no drift on existing).
- *   - Only changes to an ALREADY-PINNED plugin trigger drift.
- *   - This matches MCP semantics: new server = new pin; changed server = drift.
+ * Keyed by the plugin (`name@marketplace`), not its path: each version is
+ * installed in a folder of its own, so a path key would take every update for
+ * a new plugin and trust it silently. Under this key an update is a change to
+ * the pinned plugin, which is what the pin exists to catch; `node9 skill pin
+ * update <key>` drops the pin and the next session pins the new folder.
  *
- * User-authored files (CLAUDE.md, .cursor/rules/) are not included.
- * Extend via `config.policy.skillPinning.roots`.
+ * A new plugin creates its pin silently, the way a new MCP server does. User
+ * files (CLAUDE.md, .cursor/rules/) are not included; extend with
+ * `config.policy.skillPinning.roots`.
  */
+export function defaultSkillRootEntries(home: string = os.homedir()): SkillRoot[] {
+  return installedPlugins(home)
+    .filter((p): p is typeof p & { installPath: string } => !!p.installPath)
+    .map((p) => ({ path: p.installPath, key: getRootKey(`plugin:${p.key}`) }));
+}
+
+/** The installed plugins' folders (for reports that list them). */
 export function defaultSkillRoots(_cwd: string | undefined, home: string = os.homedir()): string[] {
-  const marketplaces = path.join(home, '.claude', 'plugins', 'marketplaces');
-  const roots: string[] = [];
-  let registries: fs.Dirent[];
-  try {
-    registries = fs.readdirSync(marketplaces, { withFileTypes: true });
-  } catch {
-    return []; // no marketplace directory — nothing to pin
-  }
-  for (const registry of registries) {
-    if (!registry.isDirectory()) continue;
-    const pluginsDir = path.join(marketplaces, registry.name, 'plugins');
-    let plugins: fs.Dirent[];
-    try {
-      plugins = fs.readdirSync(pluginsDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const plugin of plugins) {
-      if (!plugin.isDirectory()) continue;
-      roots.push(path.join(pluginsDir, plugin.name));
-    }
-  }
-  return roots;
+  return defaultSkillRootEntries(home).map((r) => r.path);
 }
 
 /** Resolve a user-supplied entry: absolute, `~/`-prefixed, or cwd-relative. */

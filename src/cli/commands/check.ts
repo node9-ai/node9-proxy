@@ -31,7 +31,12 @@ import {
   logAutostartSkipThrottled,
   refreshStaleDaemon,
 } from '../daemon-starter';
-import { defaultSkillRoots, resolveUserSkillRoot, verifyAndPinRoots } from '../../skill-pin';
+import {
+  defaultSkillRootEntries,
+  pathRoot,
+  resolveUserSkillRoot,
+  verifyAndPinRoots,
+} from '../../skill-pin';
 import { addonVerdictForHookCall } from '../../addons/resolve';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
@@ -1215,8 +1220,9 @@ export function registerCheckCommand(program: Command): void {
                 const extraRoots = skillPinCfg.roots;
                 const resolvedExtra = extraRoots
                   .map((r) => resolveUserSkillRoot(r, absoluteCwd))
-                  .filter((r): r is string => typeof r === 'string');
-                const roots = [...defaultSkillRoots(absoluteCwd), ...resolvedExtra];
+                  .filter((r): r is string => typeof r === 'string')
+                  .map(pathRoot);
+                const roots = [...defaultSkillRootEntries(), ...resolvedExtra];
 
                 const result = verifyAndPinRoots(roots);
 
