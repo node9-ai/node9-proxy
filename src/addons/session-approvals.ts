@@ -14,6 +14,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ensureOwnDir, isSameOwnDir } from '../utils/own-dir';
+import { readSmallFile } from '../utils/read-small-file';
 
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_RULES = 200;
@@ -25,9 +26,11 @@ function dirOf(home: string): string {
 
 function readRules(file: string): string[] {
   try {
-    const st = fs.lstatSync(file);
-    if (!st.isFile() || st.size > 64 * 1024) return [];
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { rules?: unknown };
+    // One descriptor checks and reads, and a link is never followed: a check
+    // by path and a read by path could see two different files.
+    const text = readSmallFile(file, 64 * 1024, { noFollow: true });
+    if (text === null) return [];
+    const raw = JSON.parse(text) as { rules?: unknown };
     return Array.isArray(raw.rules)
       ? raw.rules.filter((r): r is string => typeof r === 'string')
       : [];

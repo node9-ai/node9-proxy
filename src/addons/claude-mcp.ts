@@ -7,11 +7,11 @@
 // reads, and nothing from them leaves this function but names, identities and
 // whether the server runs through node9.
 
-import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { MCP_WRAP_SUBCOMMAND, gatewayUpstream, parseNode9Launch } from '../mcp-entry';
 import { tokenize } from '../mcp-cmd';
+import { readSmallFile } from '../utils/read-small-file';
 import { mcpIdentityFromCommand, mcpIdentityFromUrl } from './identity';
 import type { McpIndexEntry } from './index-file';
 
@@ -20,9 +20,11 @@ const MAX_BYTES = 8 * 1024 * 1024;
 
 function readJson(file: string): Record<string, unknown> | null {
   try {
-    const st = fs.statSync(file);
-    if (!st.isFile() || st.size > MAX_BYTES) return null;
-    const v = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    // One descriptor checks and reads (a link is followed: dotfile managers
+    // link ~/.claude.json).
+    const text = readSmallFile(file, MAX_BYTES);
+    if (text === null) return null;
+    const v = JSON.parse(text) as unknown;
     return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   } catch {
     return null;

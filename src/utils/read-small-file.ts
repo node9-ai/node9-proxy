@@ -6,11 +6,25 @@ import fs from 'fs';
  * the check cannot be read instead (CodeQL js/file-system-race); O_NONBLOCK
  * keeps a FIFO from stalling the open, and the read never goes past the limit.
  * A link is followed: dotfile managers link CLAUDE.md and settings files.
+ * Pass `{ noFollow: true }` for a file node9 writes itself, where a link can
+ * only have been planted: the open then fails on a link (O_NOFOLLOW).
  */
-export function readSmallFile(file: string, maxBytes: number): string | null {
+export function readSmallFile(
+  file: string,
+  maxBytes: number,
+  opts: { noFollow?: boolean } = {}
+): string | null {
   let fd: number;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    const c = fs.constants;
+    // Windows has no O_NOFOLLOW: there the link is refused by path first,
+    // which is weaker (a race remains) but no worse than before.
+    if (opts.noFollow && c.O_NOFOLLOW === undefined && fs.lstatSync(file).isSymbolicLink())
+      return null;
+    fd = fs.openSync(
+      file,
+      c.O_RDONLY | (c.O_NONBLOCK ?? 0) | (opts.noFollow ? (c.O_NOFOLLOW ?? 0) : 0)
+    );
   } catch {
     return null;
   }

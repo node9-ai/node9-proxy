@@ -37,4 +37,17 @@ describe('add-on approvals per session', () => {
     approveAddonForSession('s1', 'addon:skill:x', h);
     expect(fs.readdirSync(elsewhere)).toEqual([]);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'a session file planted as a link to approvals elsewhere is not honoured',
+    () => {
+      const h = home();
+      const dir = path.join(h, '.node9', 'addon-sessions');
+      fs.mkdirSync(dir, { recursive: true });
+      const planted = path.join(h, 'planted.json');
+      fs.writeFileSync(planted, JSON.stringify({ rules: ['addon:skill:deploy'] }));
+      fs.symlinkSync(planted, path.join(dir, 's1.json'));
+      expect(addonApprovedForSession('s1', 'addon:skill:deploy', h)).toBe(false);
+    }
+  );
 });
