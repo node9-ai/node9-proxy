@@ -170,8 +170,45 @@ export async function resolveSkillUses(
   return out;
 }
 
+/** `p` is strictly below `root`. path.relative compares with the platform's
+ *  rules (case-insensitive on Windows, either separator). */
 function inside(p: string, root: string): boolean {
-  return p.startsWith(root + path.sep);
+  const rel = path.relative(root, p);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+// A Windows path: drive letter (C:\, C:/) or UNC (\\server\share).
+const WIN_PATH = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+
+/**
+ * The absolute path a read names. The policy engine's normalizer is POSIX
+ * only: it glues the working directory in front of `C:\...` and its shell
+ * parser drops the backslashes of an unquoted Windows path. On Windows a
+ * Windows-shaped path is resolved with Windows rules instead.
+ */
+function readTarget(p: string, cwd: string, home: string): string {
+  if (process.platform === 'win32' && (WIN_PATH.test(p) || WIN_PATH.test(cwd))) {
+    const expanded = p === '~' || /^~[\\/]/.test(p) ? home + p.slice(1) : p;
+    return path.resolve(cwd, expanded);
+  }
+  return normalizeFilePath(p, cwd, home);
+}
+
+// SKILL.md paths written into a command, for Windows only, where the shell
+// is not bash and a parse as bash loses the backslashes. Quoted or bare,
+// either separator; anything found must still sit in a skill folder below.
+const WIN_SKILL_IN_COMMAND =
+  /(?:"([^"]*?skill\.md)"|'([^']*?skill\.md)'|((?:[A-Za-z]:|\\\\)[^\s"'`|;&<>]*?skill\.md))(?=$|[\s"'`|;&<>)])/gi;
+
+function windowsSkillPathsInCommand(toolInput: unknown): string[] {
+  const command = (toolInput as { command?: unknown } | null)?.command;
+  if (typeof command !== 'string') return [];
+  const out: string[] = [];
+  for (const m of command.matchAll(WIN_SKILL_IN_COMMAND)) {
+    const p = m[1] ?? m[2] ?? m[3];
+    if (p && WIN_PATH.test(p)) out.push(path.resolve(p));
+  }
+  return out;
 }
 
 function realDir(p: string): string {
@@ -202,7 +239,12 @@ export async function skillReadUses(
   const base = cwd && path.isAbsolute(cwd) ? cwd : home;
   const read = collectFileAccesses(toolName, toolInput, { cwd: base, homeDirs: [home] })
     .filter((a) => a.operation === 'read' && !a.listing)
-    .flatMap((a) => a.candidates ?? [normalizeFilePath(a.path, a.cwd ?? base, home)])
+    .flatMap((a) =>
+      a.candidates && !(process.platform === 'win32' && WIN_PATH.test(a.path))
+        ? a.candidates
+        : [readTarget(a.path, a.cwd ?? base, home)]
+    )
+    .concat(process.platform === 'win32' ? windowsSkillPathsInCommand(toolInput) : [])
     .filter((p) => path.isAbsolute(p) && path.basename(p).toLowerCase() === 'skill.md');
   if (read.length === 0) return [];
   const sfs = await import('./skill-fs.js');
