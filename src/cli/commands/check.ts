@@ -1400,7 +1400,10 @@ export function registerCheckCommand(program: Command): void {
           if (result.approved) {
             // A person answered the add-on's review (a card, not the agent's
             // own prompt): it holds for the rest of the session.
-            if (addon.action === 'review') approveAddonForSession(sessionId, addon.ruleName);
+            // Only a person's answer: an approval by a mode (observe, a shadow
+            // rollout) answered nobody, and must not outlive it.
+            if (addon.action === 'review' && result.decidedBy === 'person')
+              approveAddonForSession(sessionId, addon.ruleName);
             // Only write to stderr in debug mode — Claude Code treats any stderr
             // output as a hook error regardless of exit code (see GitHub issue).
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')

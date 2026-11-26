@@ -13,7 +13,7 @@ import { AGENT_SPECS } from '../agent-wiring';
 import { collectMcpOnly } from '../addons/collect';
 import { writeMcpIndex } from '../addons/index-file';
 import { applyPluginBlocks } from '../addons/plugin-blocks';
-import { getConfig } from '../config';
+import { _resetConfigCache, getConfig } from '../config';
 
 export const REFRESH_MS = 30_000;
 
@@ -83,6 +83,9 @@ export function refreshAddonsIndex(
 function tick(last: string | undefined): string | undefined {
   const next = refreshAddonsIndex(last);
   try {
+    // Fresh: the daemon's config cache is reset only when a check arrives,
+    // and an idle machine must still pick up a new block from policy sync.
+    _resetConfigCache();
     applyPluginBlocks(getConfig().policy.addons);
   } catch {
     /* never crash the daemon over a settings file */

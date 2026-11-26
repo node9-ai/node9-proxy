@@ -106,4 +106,11 @@ describe('applyPluginBlocks', () => {
       []
     );
   });
+
+  it.skipIf(process.platform === 'win32')('keeps the settings file mode', () => {
+    const h = home({ 'lint@m': true });
+    fs.chmodSync(path.join(h, '.claude', 'settings.json'), 0o600);
+    applyPluginBlocks(list({ 'lint@m': { decision: 'blocked' } }), h);
+    expect(fs.statSync(path.join(h, '.claude', 'settings.json')).mode & 0o777).toBe(0o600);
+  });
 });

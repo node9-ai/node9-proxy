@@ -77,8 +77,10 @@ export function applyPluginBlocks(
 
   let settings: Record<string, unknown>;
   let text: string | null = null;
+  let mode: number | undefined;
   try {
     text = fs.readFileSync(settingsPath(home), 'utf8');
+    mode = fs.statSync(settingsPath(home)).mode & 0o777;
   } catch {
     /* no settings file: start one */
   }
@@ -118,7 +120,9 @@ export function applyPluginBlocks(
       fs.mkdirSync(path.dirname(settingsPath(home)), { recursive: true });
       atomicWriteSync(
         settingsPath(home),
-        JSON.stringify({ ...settings, enabledPlugins: enabled }, null, 2) + '\n'
+        JSON.stringify({ ...settings, enabledPlugins: enabled }, null, 2) + '\n',
+        // The file keeps the permissions it had.
+        mode === undefined ? undefined : { mode }
       );
     }
     atomicWriteSync(recordPath(home), JSON.stringify(record), { mode: 0o600 });

@@ -229,4 +229,38 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
     // Another session asks again.
     expect(asked(runCheck(home, call('s-other', 'tu3')))).toBe(true);
   });
+
+  it('an approval no person gave (a shadow rollout) is not remembered for the session', () => {
+    const dir = path.join(home, '.claude', 'skills', 'deploy');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: deploy\n---\nDeploy the app.\n');
+    const cache = (shadowMode: boolean) =>
+      fs.writeFileSync(
+        path.join(home, '.node9', 'rules-cache.json'),
+        JSON.stringify({
+          fetchedAt: new Date().toISOString(),
+          rules: [],
+          shadowMode,
+          managedConfig: {
+            addons: { unapproved: 'review', mcp: {}, skills: {}, plugins: {} },
+            locked: [],
+          },
+        })
+      );
+    const call = (tuid: string) => ({
+      hook_event_name: 'PreToolUse',
+      permission_mode: 'default',
+      session_id: 's-shadow',
+      tool_use_id: tuid,
+      cwd: home,
+      tool_name: 'Skill',
+      tool_input: { skill: 'deploy' },
+    });
+    // During the rollout the call goes through without asking anyone.
+    cache(true);
+    expect(asked(runCheck(home, call('tu1')))).toBe(false);
+    // The rollout ends: the same session is asked, nothing was remembered.
+    cache(false);
+    expect(asked(runCheck(home, call('tu2')))).toBe(true);
+  });
 });
