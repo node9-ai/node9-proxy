@@ -12,6 +12,8 @@ import os from 'os';
 import { AGENT_SPECS } from '../agent-wiring';
 import { collectMcpOnly } from '../addons/collect';
 import { writeMcpIndex } from '../addons/index-file';
+import { applyPluginBlocks } from '../addons/plugin-blocks';
+import { getConfig } from '../config';
 
 export const REFRESH_MS = 30_000;
 
@@ -76,13 +78,25 @@ export function refreshAddonsIndex(
   return sig;
 }
 
-/** Write the index now, then keep it current. */
+/** One round: the index, and the plugins the workspace blocked turned off
+ *  in Claude Code (addons/plugin-blocks.ts). */
+function tick(last: string | undefined): string | undefined {
+  const next = refreshAddonsIndex(last);
+  try {
+    applyPluginBlocks(getConfig().policy.addons);
+  } catch {
+    /* never crash the daemon over a settings file */
+  }
+  return next;
+}
+
+/** Write the index now, then keep it (and the plugin blocks) current. */
 export function startAddonsIndexRefresh(): void {
   let last: string | undefined;
   setImmediate(() => {
-    last = refreshAddonsIndex(last);
+    last = tick(last);
   });
   setInterval(() => {
-    last = refreshAddonsIndex(last);
+    last = tick(last);
   }, REFRESH_MS).unref();
 }
