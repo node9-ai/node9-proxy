@@ -240,6 +240,15 @@ function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
   return [...byKey.values()];
 }
 
+/** The MCP part only, for the index the agent hook reads (index-file.ts):
+ *  config reads, no skill hashing, so the daemon can rebuild it often. */
+export function collectMcpOnly(
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): AddonMcp[] {
+  return collectMcp(home, env);
+}
+
 /** Build the add-ons report for this machine. Never throws. */
 export function collectAddons(
   home: string = os.homedir(),
