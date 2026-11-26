@@ -18,6 +18,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { hashSkillRoot } from '../skill-pin';
 import { keySafeEnv } from './helpers/env';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
@@ -204,6 +205,36 @@ describe('skillPinning mode=block (strict)', () => {
       fs.readFileSync(path.join(tmpHome, '.node9', 'skill-sessions', 'v2.node9-flag'), 'utf-8')
     );
     expect(flag.state).toBe('quarantined');
+  });
+
+  it('an update the workspace approved on its Add-ons page is pinned, not quarantined', () => {
+    runCheck(payload('a1', tmpProject), { HOME: tmpHome }, tmpProject);
+    installPlugin(tmpHome, '1.1.0', 'New content in the next version.');
+    // The workspace approved this exact version (the hash the add-ons
+    // report gives the plugin row), through policy sync.
+    fs.writeFileSync(
+      path.join(tmpHome, '.node9', 'rules-cache.json'),
+      JSON.stringify({
+        fetchedAt: new Date().toISOString(),
+        rules: [],
+        managedConfig: {
+          addons: {
+            unapproved: 'log',
+            mcp: {},
+            skills: {},
+            plugins: {
+              'test-plugin@test-registry': {
+                decision: 'approved',
+                hashes: [hashSkillRoot(pluginDir(tmpHome, '1.1.0')).contentHash],
+              },
+            },
+          },
+          locked: [],
+        },
+      })
+    );
+    const r = runCheck(payload('a2', tmpProject), { HOME: tmpHome }, tmpProject);
+    expect(r.status).toBe(0);
   });
 
   it('a change in the marketplace catalog (not installed) never quarantines', () => {

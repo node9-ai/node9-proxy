@@ -260,4 +260,20 @@ describe('installed plugins as pin roots', () => {
     expect(roots).toContain('/my/AGENTS.md');
     expect(roots).toHaveLength(2);
   });
+
+  it('a plugin version the workspace approved is re-pinned, not drift; any other change is', () => {
+    install(1);
+    const [root] = defaultSkillRootEntries(tmpHome);
+    expect(root.plugin).toBe('p0@m');
+    expect(verifyAndPinRoots([root])).toEqual({ kind: 'verified' });
+    fs.writeFileSync(path.join(root.path, 'SKILL.md'), 'v2');
+    const v2 = hashSkillRoot(root.path).contentHash;
+    const approvedV2 = (_r: unknown, hash: string) => hash === v2;
+    expect(verifyAndPinRoots([root], approvedV2)).toEqual({ kind: 'verified' });
+    // v2 is now the pin: unchanged, it verifies without the approval.
+    expect(verifyAndPinRoots([root])).toEqual({ kind: 'verified' });
+    // A further change nobody approved is drift.
+    fs.writeFileSync(path.join(root.path, 'SKILL.md'), 'v3');
+    expect(verifyAndPinRoots([root], approvedV2).kind).toBe('drift');
+  });
 });

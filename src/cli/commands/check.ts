@@ -1224,7 +1224,13 @@ export function registerCheckCommand(program: Command): void {
                   .map(pathRoot);
                 const roots = [...defaultSkillRootEntries(), ...resolvedExtra];
 
-                const result = verifyAndPinRoots(roots);
+                // A plugin version the workspace approved on its Add-ons page
+                // is a change someone already reviewed: pin it, no quarantine.
+                const approvedPlugins = config.policy.addons?.plugins ?? {};
+                const result = verifyAndPinRoots(roots, (root, hash) => {
+                  const d = root.plugin ? approvedPlugins[root.plugin] : undefined;
+                  return d?.decision === 'approved' && (d.hashes ?? []).includes(hash);
+                });
 
                 if (result.kind === 'corrupt') {
                   if (skillPinCfg.mode === 'block') {

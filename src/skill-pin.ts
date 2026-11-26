@@ -235,7 +235,12 @@ export type VerifyResult =
  * First drift short-circuits and returns `drift`. New roots are pinned in a
  * single batched write.
  */
-export function verifyAndPinRoots(roots: Array<string | SkillRoot>): VerifyResult {
+export function verifyAndPinRoots(
+  roots: Array<string | SkillRoot>,
+  /** A change someone already approved elsewhere (the workspace's approved
+   *  list of add-ons, node9Firewall#376): re-pinned silently, not drift. */
+  acknowledged?: (root: SkillRoot, contentHash: string) => boolean
+): VerifyResult {
   const pinsRead = readSkillPinsSafe();
   if (!pinsRead.ok && pinsRead.reason === 'corrupt') {
     return { kind: 'corrupt', detail: pinsRead.detail };
@@ -250,7 +255,8 @@ export function verifyAndPinRoots(roots: Array<string | SkillRoot>): VerifyResul
       mutated = true;
     }
   for (const root of roots) {
-    const { path: rootPath, key: rootKey } = typeof root === 'string' ? pathRoot(root) : root;
+    const entry: SkillRoot = typeof root === 'string' ? pathRoot(root) : root;
+    const { path: rootPath, key: rootKey } = entry;
     if (seen.has(rootKey)) continue;
     seen.add(rootKey);
     const current = hashSkillRoot(rootPath);
@@ -259,6 +265,21 @@ export function verifyAndPinRoots(roots: Array<string | SkillRoot>): VerifyResul
       pins.roots[rootKey] = {
         rootPath,
         exists: current.exists,
+        contentHash: current.contentHash,
+        fileCount: current.fileCount,
+        pinnedAt: new Date().toISOString(),
+      };
+      mutated = true;
+      continue;
+    }
+    if (
+      current.exists &&
+      (existing.exists !== current.exists || existing.contentHash !== current.contentHash) &&
+      acknowledged?.(entry, current.contentHash)
+    ) {
+      pins.roots[rootKey] = {
+        rootPath,
+        exists: true,
         contentHash: current.contentHash,
         fileCount: current.fileCount,
         pinnedAt: new Date().toISOString(),
@@ -297,6 +318,9 @@ function isLegacyCatalogPin(rootPath: string): boolean {
 export interface SkillRoot {
   path: string;
   key: string;
+  /** For an installed plugin: `name@marketplace`, the key the workspace's
+   *  approved list of add-ons files it under. */
+  plugin?: string;
 }
 
 /** A root keyed by its path: a folder the user named in `policy.skillPinning.roots`. */
@@ -326,7 +350,7 @@ export function defaultSkillRootEntries(home: string = os.homedir()): SkillRoot[
   // No report-size cap here: every installed plugin gets its pin.
   return installedPlugins(home, MAX_PINNED_PLUGINS)
     .filter((p): p is typeof p & { installPath: string } => !!p.installPath)
-    .map((p) => ({ path: p.installPath, key: getRootKey(`plugin:${p.key}`) }));
+    .map((p) => ({ path: p.installPath, key: getRootKey(`plugin:${p.key}`), plugin: p.key }));
 }
 
 /** The installed plugins' folders (for reports that list them). */
