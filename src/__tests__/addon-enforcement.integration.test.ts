@@ -44,6 +44,27 @@ function runCheck(home: string, payload: object): { status: number | null; out: 
   return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
+/** The after-run hook (PostToolUse), the way Claude Code calls it. */
+function runLog(home: string, payload: object): void {
+  const env = { ...process.env };
+  delete env.NODE9_API_KEY;
+  delete env.NODE9_API_URL;
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_SESSION_ID;
+  const r = spawnSync(process.execPath, [CLI, 'log', JSON.stringify(payload)], {
+    encoding: 'utf-8',
+    timeout: 60000,
+    cwd: home,
+    env: { ...env, HOME: home, USERPROFILE: home, NODE9_NO_AUTO_DAEMON: '1', NODE9_TESTING: '1' },
+  });
+  expect(r.error).toBeUndefined();
+}
+
+/** Handed to Claude Code's own approval prompt. */
+function asked(r: { status: number | null; out: string }): boolean {
+  return /"permissionDecision":\s*"ask"/.test(r.out);
+}
+
 /** Stopped, in any of the shapes the hook answers Claude Code with. */
 function denied(r: { status: number | null; out: string }): boolean {
   return r.status === 2 || /"permissionDecision":\s*"deny"|"decision":\s*"block"/.test(r.out);
@@ -181,5 +202,31 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
       prompt: '/deploy',
     });
     expect(denied(r)).toBe(false);
+  });
+
+  it('asks once per session for an add-on under the review rule', () => {
+    const dir = path.join(home, '.claude', 'skills', 'deploy');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: deploy\n---\nDeploy the app.\n');
+    seedPolicy({ unapproved: 'review', mcp: {}, skills: {}, plugins: {} });
+    const call = (session: string, tuid: string) => ({
+      hook_event_name: 'PreToolUse',
+      permission_mode: 'default',
+      session_id: session,
+      tool_use_id: tuid,
+      cwd: home,
+      tool_name: 'Skill',
+      tool_input: { skill: 'deploy' },
+    });
+    // First use: Claude Code's prompt asks the person.
+    expect(asked(runCheck(home, call('s-review', 'tu1')))).toBe(true);
+    // They accept, so the tool runs and the after-run hook fires.
+    runLog(home, { ...call('s-review', 'tu1'), hook_event_name: 'PostToolUse', tool_response: {} });
+    // The same skill again in the session: no second ask.
+    const again = runCheck(home, call('s-review', 'tu2'));
+    expect(asked(again)).toBe(false);
+    expect(denied(again)).toBe(false);
+    // Another session asks again.
+    expect(asked(runCheck(home, call('s-other', 'tu3')))).toBe(true);
   });
 });

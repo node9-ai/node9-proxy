@@ -42,6 +42,9 @@ export interface PendingReview {
   exposureKeys?: string[];
   /** fw#318 2b: the eid of the read this held send followed. */
   exposureFromEid?: string;
+  /** fw#376: the add-on whose `review` this prompt asked about; approved for
+   *  the rest of the session when the prompt is accepted. */
+  addonRule?: string;
 }
 
 interface Store {

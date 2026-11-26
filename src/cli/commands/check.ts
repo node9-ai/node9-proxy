@@ -38,6 +38,7 @@ import {
   verifyAndPinRoots,
 } from '../../skill-pin';
 import { addonVerdictForHookCall } from '../../addons/resolve';
+import { addonApprovedForSession, approveAddonForSession } from '../../addons/session-approvals';
 import { scanArgs, matchCanaryArgs } from '../../dlp';
 import { canaryValues, loadCanaries } from '../../canary/registry';
 import {
@@ -1047,6 +1048,7 @@ export function registerCheckCommand(program: Command): void {
                   label: result.blockedByLabel,
                   ...(result.exposureKeys?.length ? { exposureKeys: result.exposureKeys } : {}),
                   ...(result.exposureFromEid ? { exposureFromEid: result.exposureFromEid } : {}),
+                  ...(addon.action === 'review' ? { addonRule: addon.ruleName } : {}),
                 });
               }
             } catch {
@@ -1111,7 +1113,7 @@ export function registerCheckCommand(program: Command): void {
           // The workspace's approved list of add-ons (node9Firewall#376 item 6,
           // phase 3): the MCP server or Claude Code skill this call uses, and
           // its verdict. Allow when nothing is enforced; never throws.
-          const addon = await addonVerdictForHookCall(config.policy.addons, {
+          let addon = await addonVerdictForHookCall(config.policy.addons, {
             toolName,
             toolInput,
             mcpServer,
@@ -1121,6 +1123,10 @@ export function registerCheckCommand(program: Command): void {
                 ? payloadCwd
                 : undefined,
           });
+          // A person already approved this add-on in this session: one ask
+          // per add-on per session, as the MCP gateway does per connection.
+          if (addon.action === 'review' && addonApprovedForSession(sessionId, addon.ruleName))
+            addon = { action: 'allow' };
           const meta = {
             agent,
             mcpServer,
@@ -1392,6 +1398,9 @@ export function registerCheckCommand(program: Command): void {
           };
 
           if (result.approved) {
+            // A person answered the add-on's review (a card, not the agent's
+            // own prompt): it holds for the rest of the session.
+            if (addon.action === 'review') approveAddonForSession(sessionId, addon.ruleName);
             // Only write to stderr in debug mode — Claude Code treats any stderr
             // output as a hook error regardless of exit code (see GitHub issue).
             if (result.checkedBy && process.env.NODE9_DEBUG === '1')
