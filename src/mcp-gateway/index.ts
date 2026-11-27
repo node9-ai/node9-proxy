@@ -30,6 +30,8 @@ import { tokenize } from '../mcp-cmd';
 import { mcpIdentityFromCommand, mcpPackageFromCommand } from '../addons/identity';
 import { maliciousVerdict, type AddonVerdict } from '../addons/policy';
 import { knownMalicious } from '../addons/malicious-local';
+import { writeDefinitionScan } from '../addons/definitions-file';
+import { scanToolCatalog, type DefinitionBlockReason } from './definition-scan';
 import { AddonSessionGate } from '../addons/gateway-gate';
 import type { McpToolInfo } from '../daemon/mcp-tools';
 import { getServerConfig, deriveServerName, sanitizeToolAnnotations } from '../daemon/mcp-tools';
@@ -358,6 +360,24 @@ export async function runMcpGateway(
   // 'validated'  — pin check passed (new or match); tools/call allowed
   // 'quarantined' — pin mismatch or corrupt pin file; tools/call permanently blocked
   let pinState: 'pending' | 'validated' | 'quarantined' = 'pending';
+  // Set when the quarantine came from the scan of the tool definitions
+  // (node9Firewall#342), so the refusal says what was found and that no pin
+  // command lifts it.
+  let definitionQuarantine: DefinitionBlockReason | null = null;
+  const definitionMode = (): 'off' | 'log' | 'block' => {
+    try {
+      return getConfig().policy.mcpDefinitions.mode;
+    } catch {
+      return 'log'; // no readable config: look, stop nothing
+    }
+  };
+  const DEFINITION_WHY: Record<DefinitionBlockReason, string> = {
+    'definition-injection':
+      'a tool definition of this MCP server carries instructions for the agent that a tool description has no reason to give',
+    'definition-secret': 'a tool definition of this MCP server contains a secret',
+    'catalog-inspection-incomplete':
+      'the tool definitions of this MCP server are too large or too deeply nested to inspect',
+  };
 
   // Queue for tool call lines that arrive while pin validation is pending.
   // These are replayed (in order) once pin validation completes.
@@ -475,14 +495,22 @@ export async function runMcpGateway(
         const errorResponse = {
           jsonrpc: '2.0',
           id: message.id,
-          error: {
-            code: RPC_SERVER_ERROR,
-            message:
-              'Node9 Security: This MCP session is quarantined due to a tool definition mismatch or corrupt pin state. ' +
-              'The human operator must review and approve changes before tool calls are allowed. ' +
-              `Run: node9 mcp pin update ${serverKey}`,
-            data: { reason: 'pin-quarantine', serverKey, pinState },
-          },
+          error: definitionQuarantine
+            ? {
+                code: RPC_SERVER_ERROR,
+                message:
+                  `Node9 Security: this MCP session is quarantined: ${DEFINITION_WHY[definitionQuarantine]}. ` +
+                  'No tool of this server runs. The human operator must inspect the server or remove it.',
+                data: { reason: definitionQuarantine, serverKey, pinState },
+              }
+            : {
+                code: RPC_SERVER_ERROR,
+                message:
+                  'Node9 Security: This MCP session is quarantined due to a tool definition mismatch or corrupt pin state. ' +
+                  'The human operator must review and approve changes before tool calls are allowed. ' +
+                  `Run: node9 mcp pin update ${serverKey}`,
+                data: { reason: 'pin-quarantine', serverKey, pinState },
+              },
         };
         process.stdout.write(JSON.stringify(errorResponse) + '\n');
         return;
@@ -721,6 +749,61 @@ export async function runMcpGateway(
       // Only check pins and apply filtering on successful responses that contain tools
       if (parsed.result && Array.isArray(parsed.result.tools)) {
         const tools = (parsed.result.tools as McpToolInfo[]) || [];
+
+        // The definitions are scanned BEFORE anything trusts them: the pin,
+        // the daemon's inventory, the cloud report and the agent all come
+        // after. Every catalog is scanned, a matching pin included: a pin
+        // made before this scan existed is not a pass, and neither is one a
+        // `pin update` just wrote (node9Firewall#342).
+        const defMode = definitionMode();
+        if (defMode !== 'off') {
+          const scan = scanToolCatalog(parsed.result.tools);
+          // For the server's row on the Add-ons page (collect.ts): rule ids
+          // and severities, never a name or a description.
+          writeDefinitionScan(serverKey, {
+            identity: upstreamIdentity,
+            findings: scan.findings.map((f) => ({ rule: f.rule, severity: f.severity })),
+            scannedAt: new Date().toISOString(),
+          });
+          if (scan.blockReason && defMode === 'block') {
+            pinState = 'quarantined';
+            definitionQuarantine = scan.blockReason;
+            console.error(
+              chalk.red(
+                `\n🚨 Node9: ${DEFINITION_WHY[scan.blockReason]} (${scan.toolNames.join(', ')}).`
+              )
+            );
+            console.error(
+              chalk.red('   Session quarantined: the catalog was not pinned and no tool runs.\n')
+            );
+            const errorResponse = {
+              jsonrpc: '2.0',
+              id: parsed.id,
+              error: {
+                code: RPC_SERVER_ERROR,
+                message:
+                  `Node9 Security: ${DEFINITION_WHY[scan.blockReason]}. ` +
+                  'Session quarantined: no tool of this server runs. ' +
+                  'The human operator must inspect the server or remove it.',
+                data: { reason: scan.blockReason, serverKey },
+              },
+            };
+            process.stdout.write(JSON.stringify(errorResponse) + '\n');
+            void drainPendingToolCalls();
+            return;
+          }
+          if (scan.findings.length > 0)
+            console.error(
+              chalk.yellow(
+                `⚠️  Node9: the tool definitions of this MCP server have findings (${scan.findings
+                  .map((f) => `${f.rule} x${f.tools}`)
+                  .join(
+                    ', '
+                  )}). Recorded; nothing was stopped (policy.mcpDefinitions.mode is "log").`
+              )
+            );
+        }
+
         readOnlyTools.clear();
         for (const t of tools as unknown[]) {
           const tool = t as { name?: unknown; annotations?: { readOnlyHint?: unknown } };

@@ -108,6 +108,10 @@ export {
 // The agent's own instruction and memory files (node9Firewall#413 part 4).
 export { agentFileKind, type AgentFileKind } from './files/agent-files';
 export { scanInstructionWrite } from './dlp/instruction-write';
+// Its own module, not re-exported through dlp/index.ts: that file is one of
+// the extractor's hashed sources, and this scanner is not part of the extractor.
+export { scanToolDefinitionText, MAX_DEFINITION_CHARS } from './dlp/tool-definition';
+export type { DefinitionMatch, DefinitionConfidence } from './dlp/tool-definition';
 
 // Git, read from the parsed command (node9Firewall#413).
 export {

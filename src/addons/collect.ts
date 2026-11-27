@@ -29,6 +29,7 @@ import {
   type McpPackage,
 } from './identity';
 import { readStanding } from './standing-file';
+import { readDefinitionScans } from './definitions-file';
 import {
   MAX_SKILLS,
   SKILL_SEARCH_DEPTH,
@@ -79,9 +80,13 @@ export interface AddonMcp {
   state: 'governed' | 'outside' | 'remote';
   /** For a governed server: the key the mcpServers rows carry, to join them. */
   serverKey?: string;
-  /** What the package check found (phase 4). Absent = not checked: not a
-   *  registry package, the registry did not answer, or no check ran yet. */
+  /** What the checks named in `checks` found (phase 4). Absent when none ran. */
   findings?: Array<{ rule: string; severity: string }>;
+  /** The checks that ran for this server, so no finding reads as "nothing
+   *  found" only for a check that is listed. `package`: the package check
+   *  got an answer from the registry (or found something anyway).
+   *  `definitions`: the gateway scanned the server's tool definitions. */
+  checks?: Array<'package' | 'definitions'>;
 }
 
 /** One configured server with the package the check looks up, when it has one. */
@@ -270,19 +275,31 @@ export function collectMcpDetail(
   return [...byKey.values()];
 }
 
-/** The MCP rows of the report, with what the package check last found for
- *  each (standing-file.ts, written by the daemon). Advisory ids stay on the
- *  machine: the report carries rule ids and severities, as for skills. */
+/** The MCP rows of the report, with what the checks last found for each:
+ *  the package check (standing-file.ts, written by the daemon) and the scan
+ *  of tool definitions (definitions-file.ts, written by the gateway).
+ *  Advisory ids stay on the machine: the report carries rule ids and
+ *  severities, as for skills. */
 function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
   const standing = readStanding(home).entries;
+  const definitions = readDefinitionScans(home);
   return collectMcpDetail(home, env).map(({ entry, pkg }) => {
+    const checks: NonNullable<AddonMcp['checks']> = [];
+    const findings: NonNullable<AddonMcp['findings']> = [];
     const s = pkg ? standing[entry.identity] : undefined;
     // "Checked" only when the registry answered, or something was found anyway.
-    if (!s || (!s.registry && s.findings.length === 0)) return entry;
-    return {
-      ...entry,
-      findings: s.findings.map((f) => ({ rule: f.rule, severity: f.severity })),
-    };
+    if (s && (s.registry || s.findings.length > 0)) {
+      checks.push('package');
+      for (const f of s.findings) findings.push({ rule: f.rule, severity: f.severity });
+    }
+    // Only a server that runs through the gateway is scanned: a record left
+    // from before it was unwrapped says nothing about what it serves now.
+    const d = entry.state === 'governed' ? definitions.get(entry.identity) : undefined;
+    if (d) {
+      checks.push('definitions');
+      for (const f of d.findings) findings.push({ rule: f.rule, severity: f.severity });
+    }
+    return checks.length > 0 ? { ...entry, findings, checks } : entry;
   });
 }
 
