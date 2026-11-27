@@ -792,6 +792,9 @@ export async function runMcpGateway(
             void drainPendingToolCalls();
             return;
           }
+          // This catalog passed (or the mode only records): a refusal of an
+          // earlier catalog no longer describes the session.
+          definitionQuarantine = null;
           if (scan.findings.length > 0)
             console.error(
               chalk.yellow(

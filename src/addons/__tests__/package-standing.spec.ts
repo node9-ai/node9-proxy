@@ -326,6 +326,18 @@ describe('a server whose package is on the malicious list, at the hook', () => {
     );
   });
 
+  it('reads no agent config when nothing malicious is stored (the hook runs on every MCP call)', async () => {
+    const h = home();
+    // A config that would throw if it were parsed as JSON and reported.
+    fs.writeFileSync(path.join(h, '.claude.json'), '{ this is not json');
+    const read = vi.spyOn(fs, 'readFileSync');
+    const before = read.mock.calls.length;
+    expect((await addonVerdictForHookCall(undefined, call, h, 'block')).action).toBe('allow');
+    const paths = read.mock.calls.slice(before).map((c) => String(c[0]));
+    read.mockRestore();
+    expect(paths.some((p) => p.endsWith('.claude.json'))).toBe(false);
+  });
+
   it('leaves another server alone', async () => {
     const h = withMalicious();
     fs.writeFileSync(

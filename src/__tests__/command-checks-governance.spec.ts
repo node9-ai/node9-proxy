@@ -171,6 +171,29 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     expect(cc.sqlDdl ?? 'review').toBe('review');
   });
 
+  // node9Firewall#342: the scan of MCP tool definitions. The repository an
+  // agent works in also configures MCP servers; it must not switch the check
+  // on those servers off.
+  it('a repo node9.config.json cannot weaken the MCP definition scan, and can tighten it', () => {
+    seedHome({ mcpDefinitions: { mode: 'block' } });
+    const off = seedProject({ mcpDefinitions: { mode: 'off' } });
+    expect(getConfig(off).policy.mcpDefinitions.mode).toBe('block');
+    const log = seedProject({ mcpDefinitions: { mode: 'log' } });
+    expect(getConfig(log).policy.mcpDefinitions.mode).toBe('block');
+    // The default (log) is not weakened to off either.
+    seedHome({});
+    expect(
+      getConfig(seedProject({ mcpDefinitions: { mode: 'off' } })).policy.mcpDefinitions.mode
+    ).toBe('log');
+    // CONTROL: the project file is read, and tightening is honoured.
+    expect(
+      getConfig(seedProject({ mcpDefinitions: { mode: 'block' } })).policy.mcpDefinitions.mode
+    ).toBe('block');
+    // The user's own (global) file may set any value.
+    seedHome({ mcpDefinitions: { mode: 'off' } });
+    expect(getConfig(seedProject({})).policy.mcpDefinitions.mode).toBe('off');
+  });
+
   it('CONTROL: the project file IS read for each clamped key (tighten works per key)', () => {
     // Without this, the clamp assertions above are indistinguishable from a
     // fixture that was never loaded (wrong path, parse error swallowed).

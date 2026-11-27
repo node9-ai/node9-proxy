@@ -111,6 +111,14 @@ export function writeStanding(data: StandingFile, home: string = os.homedir()): 
   }
 }
 
+/** Whether any stored result is a malicious package. One small file read:
+ *  the hook asks this before it reads any agent config. */
+export function anyMalicious(home: string = os.homedir()): boolean {
+  return Object.values(readStanding(home).entries).some((e) =>
+    e.findings.some((f) => f.rule === MALICIOUS_RULE)
+  );
+}
+
 /**
  * The advisory ids when the server's package is on the malicious-package list
  * at the version in use, else null. An empty list means "on the list, id not

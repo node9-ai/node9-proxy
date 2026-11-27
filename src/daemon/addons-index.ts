@@ -97,6 +97,7 @@ function tick(last: string | undefined): string | undefined {
 /** The package check looks again at least this often: a stored result goes
  *  stale by its own clock (package-standing.ts), not by a config change. */
 export const STANDING_EVERY_MS = 10 * 60_000;
+const FIRST_STANDING_DELAY_MS = 60_000;
 
 let standingRunning = false;
 
@@ -128,12 +129,17 @@ export async function refreshStandingOnce(
 /** Write the index now, then keep it (and the plugin blocks) current. */
 export function startAddonsIndexRefresh(): void {
   let last: string | undefined;
-  let standingAt = 0;
+  // The first package check waits a minute: nothing the daemon does at start
+  // should wait on a registry. After that: on a config change (a server
+  // added or re-pinned), and on its own clock.
+  let standingAt = Date.now() - STANDING_EVERY_MS + FIRST_STANDING_DELAY_MS;
+  let started = false;
   const round = () => {
     const before = last;
     last = tick(last);
-    // On a config change (a server added or re-pinned), and on its own clock.
-    if (last !== before || Date.now() - standingAt >= STANDING_EVERY_MS) {
+    const changed = started && last !== before;
+    started = true;
+    if (changed || Date.now() - standingAt >= STANDING_EVERY_MS) {
       standingAt = Date.now();
       void refreshStandingOnce();
     }

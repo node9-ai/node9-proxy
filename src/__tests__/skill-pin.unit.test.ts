@@ -277,3 +277,35 @@ describe('installed plugins as pin roots', () => {
     expect(verifyAndPinRoots([root], approvedV2).kind).toBe('drift');
   });
 });
+
+// The vendor skill index on the server hashes every version a vendor
+// published with its own copy of this algorithm (node9Firewall
+// be/src/firewall/skill-vendors/skill-hash.ts). The same files and the same
+// expected hash are in that repository's test: if either side changes how a
+// skill folder is hashed, one of the two tests fails.
+describe('hashSkillRoot: vendor index vector', () => {
+  it('gives the hash the server computes for the same files', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-skill-vector-'));
+    try {
+      const files: Record<string, string> = {
+        'SKILL.md': '---\nname: deploy\n---\nDeploy the app.\n',
+        'references/hosts.md': 'Use https://api.vendor-cloud.com/v1\n',
+        'scripts/run.sh': '#!/bin/sh\necho ok\n',
+        'Zeta.md': 'upper-case first letter\n',
+        '_notes.md': 'underscore first\n',
+        'a-b.md': 'hyphen\n',
+      };
+      for (const [rel, text] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+        fs.writeFileSync(path.join(dir, rel), text);
+      }
+      expect(hashSkillRoot(dir)).toEqual({
+        exists: true,
+        contentHash: 'd9a2ec4d97132011001d4071c879b584be979bb4bb47be94b2a1486cc774080b',
+        fileCount: 6,
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

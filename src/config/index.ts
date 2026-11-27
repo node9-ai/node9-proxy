@@ -1344,7 +1344,14 @@ export function getConfig(cwd?: string): Config {
     }
     if (p.mcpDefinitions && typeof p.mcpDefinitions === 'object') {
       const mode = (p.mcpDefinitions as { mode?: unknown }).mode;
-      if (mode === 'off' || mode === 'log' || mode === 'block')
+      const rank = { off: 0, log: 1, block: 2 } as const;
+      // A repository's own config may make the scan stricter, never weaker:
+      // the repo an agent works in must not switch off the check on the MCP
+      // servers that same repo configures.
+      if (
+        (mode === 'off' || mode === 'log' || mode === 'block') &&
+        !(isProject && rank[mode] < rank[mergedPolicy.mcpDefinitions.mode])
+      )
         mergedPolicy.mcpDefinitions.mode = mode;
     }
     if (p.skillPinning && typeof p.skillPinning === 'object') {

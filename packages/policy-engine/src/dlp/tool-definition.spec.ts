@@ -96,4 +96,26 @@ describe('scanToolDefinitionText', () => {
     expect(scanToolDefinitionText('x'.repeat(100_001) + tail)).toBeNull();
     expect(grade('ok '.repeat(10) + tail)).toBe('high');
   });
+
+  // The text is the server's to choose. Each shape below nearly matches one
+  // signal at every position and never completes it: the worst case for a
+  // backtracking engine. Measured 2026-11-27: 2 to 22 ms each at the cap; the
+  // bound here is loose on purpose, it guards against a regex that explodes,
+  // not against a slow machine.
+  it('stays fast on 100,000 characters built to make each signal backtrack', () => {
+    const fill = (unit: string) => unit.repeat(Math.ceil(100_000 / unit.length)).slice(0, 100_000);
+    const shapes = [
+      'when it is called then is used ',
+      'do not really ever tell ',
+      'read access open load ',
+      'pass its content as the a ',
+      'send upload post forward to an ',
+      'curl a b c d ',
+      '<!-- ',
+      'when using a_b also ',
+    ];
+    const started = performance.now();
+    for (const unit of shapes) scanToolDefinitionText(fill(unit));
+    expect(performance.now() - started).toBeLessThan(5000);
+  });
 });
