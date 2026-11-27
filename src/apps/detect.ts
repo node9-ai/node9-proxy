@@ -60,7 +60,40 @@ const WRAPPERS = new Set([
 export interface Observed {
   servers: Set<string>;
   commands: Set<string>;
+  /** Every folder an agent ran a call in (newest first). */
   projects: string[];
+  /** The folders agent sessions were started in (newest first): what an
+   *  agent loads project add-ons from. An agent that `cd`s into another
+   *  repository runs calls there (`projects`) without loading that
+   *  repository's skills. */
+  launchDirs: string[];
+}
+
+/** How Claude Code names the folder of a project's transcripts:
+ *  `/home/u/my.repo` is kept in `~/.claude/projects/-home-u-my-repo/`. */
+function claudeProjectName(dir: string): string {
+  return dir.replace(/[^A-Za-z0-9]/g, '-');
+}
+
+/** The transcripts folder name in a Claude Code transcript path, else null. */
+function transcriptProject(transcriptPath: unknown): string | null {
+  if (typeof transcriptPath !== 'string') return null;
+  const m = /[\\/]\.claude[\\/]projects[\\/]([^\\/]+)[\\/][^\\/]+$/.exec(transcriptPath);
+  return m ? m[1] : null;
+}
+
+/** The folder the session was started in: `dir` or the parent of it whose
+ *  name Claude Code filed the transcript under. Null when the call ran
+ *  outside the start folder's tree. */
+function launchDirOf(dir: string, project: string): string | null {
+  let cur = dir;
+  for (let i = 0; i < 64; i++) {
+    if (claudeProjectName(cur) === project) return cur;
+    const up = path.dirname(cur);
+    if (up === cur) return null;
+    cur = up;
+  }
+  return null;
 }
 
 function readTail(file: string, bytes: number): string {
@@ -112,12 +145,31 @@ export function observeAudit(auditFile: string): Observed {
   const commands = new Set<string>();
   const dirs: string[] = [];
   const seenDirs = new Set<string>();
+  // Start folders, in the order first met (newest first). A session whose
+  // start folder cannot be told (another agent, a transcript layout not known
+  // here) counts by its working folders, as every session did before.
+  const launch: string[] = [];
+  const seenLaunch = new Set<string>();
+  const addLaunch = (d: string): void => {
+    if (!seenLaunch.has(d) && launch.length < MAX_PROJECTS) {
+      seenLaunch.add(d);
+      launch.push(d);
+    }
+  };
+  const resolved = new Set<string>();
+  const unresolved = new Map<string, string[]>();
   const lines = readTail(auditFile, AUDIT_TAIL_BYTES).split('\n');
   // Newest first, so the 50 projects kept are the recent ones.
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line.startsWith('{')) continue;
-    let row: { tool?: unknown; argsPreview?: unknown; workingDir?: unknown; mcpServer?: unknown };
+    let row: {
+      tool?: unknown;
+      argsPreview?: unknown;
+      workingDir?: unknown;
+      mcpServer?: unknown;
+      transcriptPath?: unknown;
+    };
     try {
       row = JSON.parse(line);
     } catch {
@@ -136,8 +188,22 @@ export function observeAudit(auditFile: string): Observed {
       seenDirs.add(dir);
       dirs.push(dir);
     }
+    if (dir && path.isAbsolute(dir)) {
+      const project = transcriptProject(row.transcriptPath);
+      const started = project ? launchDirOf(dir, project) : null;
+      if (!project) addLaunch(dir);
+      else if (started) {
+        resolved.add(project);
+        addLaunch(started);
+      } else {
+        const held = unresolved.get(project) ?? [];
+        if (held.length < MAX_PROJECTS && !held.includes(dir)) held.push(dir);
+        unresolved.set(project, held);
+      }
+    }
   }
-  return { servers, commands, projects: dirs };
+  for (const [project, held] of unresolved) if (!resolved.has(project)) held.forEach(addLaunch);
+  return { servers, commands, projects: dirs, launchDirs: launch };
 }
 
 /** Open once, check and read through the same descriptor: a stat followed by
@@ -233,7 +299,8 @@ function packageMatches(name: string, wanted: string): boolean {
 
 /** Match what was observed against the catalog. */
 export function matchApps(
-  obs: Observed,
+  // Not the start folders: an app is found wherever an agent ran a call.
+  obs: Pick<Observed, 'servers' | 'commands' | 'projects'>,
   projectFacts: Array<{ dir: string; packages: Set<string>; envNames: Set<string> }>,
   catalog: readonly AppEntry[] = APP_CATALOG
 ): FoundApp[] {

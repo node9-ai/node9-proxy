@@ -1,14 +1,17 @@
 // The daemon keeps the hook's MCP index current (node9Firewall#376 item 6).
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { readMcpIndex } from '../addons/index-file';
-import { refreshAddonsIndex } from '../daemon/addons-index';
+import { refreshAddonsIndex, refreshStandingOnce } from '../daemon/addons-index';
+import { _resetConfigCache } from '../config';
 
 const homes: string[] = [];
 afterEach(() => {
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  _resetConfigCache();
 });
 
 function home(): string {
@@ -68,5 +71,91 @@ describe('refreshAddonsIndex', () => {
     refreshAddonsIndex('stale', h, {});
     // Untouched: still the old time (to the second; mtimes are not exact ms).
     expect(Math.round(fs.statSync(file).mtimeMs / 1000)).toBe(Math.round(old.getTime() / 1000));
+  });
+});
+
+// Phase 4, check D: the package check for the configured MCP servers.
+describe('refreshStandingOnce', () => {
+  function asHome(h: string, policy: object = {}): void {
+    vi.stubEnv('HOME', h);
+    vi.stubEnv('USERPROFILE', h);
+    fs.writeFileSync(path.join(h, '.node9', 'config.json'), JSON.stringify({ policy }));
+    _resetConfigCache();
+  }
+
+  it('checks the servers that run a registry package, by identity and package', async () => {
+    const h = home();
+    asHome(h);
+    fs.writeFileSync(
+      path.join(h, '.codex', 'config.toml'),
+      '[mcp_servers.db]\ncommand = "npx"\nargs = ["-y", "@acme/db-mcp@1.2.3"]\n' +
+        '[mcp_servers.img]\ncommand = "docker"\nargs = ["run", "-i", "ghcr.io/acme/mcp"]\n'
+    );
+    const seen: unknown[] = [];
+    const run = vi.fn(async (targets: unknown) => {
+      seen.push(targets);
+      return { v: 1 as const, entries: {} };
+    });
+    await refreshStandingOnce(h, {}, run);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toEqual([
+      {
+        identity: 'npm:@acme/db-mcp',
+        pkg: { ecosystem: 'npm', name: '@acme/db-mcp', version: '1.2.3' },
+      },
+    ]);
+  });
+
+  // Release review 2026-11-27: the hook stops a call to a project's server
+  // whose package is malicious, so the daemon must check those packages too.
+  it("also checks the servers a Claude Code project configures, in ~/.claude.json and the project's .mcp.json", async () => {
+    const h = home();
+    asHome(h);
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-proj-'));
+    try {
+      fs.writeFileSync(
+        path.join(proj, '.mcp.json'),
+        JSON.stringify({ mcpServers: { evil: { command: 'npx', args: ['-y', 'evil-mcp'] } } })
+      );
+      fs.writeFileSync(
+        path.join(h, '.claude.json'),
+        JSON.stringify({
+          projects: {
+            [proj]: { mcpServers: { db: { command: 'uvx', args: ['acme-db-mcp'] } } },
+          },
+        })
+      );
+      const seen: Array<Array<{ identity: string }>> = [];
+      await refreshStandingOnce(h, {}, async (targets) => {
+        seen.push(targets as Array<{ identity: string }>);
+        return { v: 1 as const, entries: {} };
+      });
+      expect(seen[0].map((t) => t.identity).sort()).toEqual(['npm:evil-mcp', 'pypi:acme-db-mcp']);
+    } finally {
+      fs.rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
+  it('asks no registry when the user switched the package check off', async () => {
+    const h = home();
+    asHome(h, { packageCheck: { enabled: false } });
+    codex(h, 'db', '@acme/db-mcp');
+    const run = vi.fn(async () => ({ v: 1 as const, entries: {} }));
+    await refreshStandingOnce(h, {}, run);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('never throws, and runs again after a failed round', async () => {
+    const h = home();
+    asHome(h);
+    codex(h, 'db', '@acme/db-mcp');
+    await expect(
+      refreshStandingOnce(h, {}, async () => {
+        throw new Error('registry down');
+      })
+    ).resolves.toBeUndefined();
+    const run = vi.fn(async () => ({ v: 1 as const, entries: {} }));
+    await refreshStandingOnce(h, {}, run);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

@@ -16,6 +16,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { indexKey, shardOf, writeMeta, writeShard } from '../supply-chain/osv-index';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 const NODE = process.execPath;
@@ -151,5 +152,95 @@ describe('the approved list of add-ons at the MCP gateway (phase 3)', () => {
     const { call, executed } = run(list({ unapproved: 'block' }));
     expect(call?.error?.message).toContain('Add-ons page');
     expect(executed).toBe(0);
+  });
+});
+
+// Phase 4, check D: the gateway starts the server, so it can refuse to. The
+// upstream is the real shape (`npx -y <package>`); a stand-in `npx` first on
+// PATH records whether it was ever started.
+describe('an MCP server whose package is on the malicious list, at the gateway', () => {
+  const PKG = '@node9-test/malicious-mcp';
+
+  function start(seed: (home: string) => void): {
+    status: number | null;
+    started: boolean;
+    err: string;
+  } {
+    const home = makeHome({});
+    fs.rmSync(path.join(home, '.node9', 'rules-cache.json'));
+    const bin = path.join(home, 'bin');
+    fs.mkdirSync(bin);
+    const marker = path.join(home, 'started');
+    fs.writeFileSync(path.join(bin, 'npx'), `#!/bin/sh\necho started > "${marker}"\n`, {
+      mode: 0o755,
+    });
+    seed(home);
+    const cleanEnv = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([k]) => !k.startsWith('NODE9_') && k !== 'NODE_OPTIONS' && k !== 'LD_PRELOAD'
+      )
+    );
+    try {
+      const r = spawnSync(NODE, [CLI, 'mcp-gateway', '--upstream', `npx -y ${PKG}`], {
+        input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) + '\n',
+        encoding: 'utf-8',
+        timeout: 20000,
+        env: {
+          ...cleanEnv,
+          HOME: home,
+          USERPROFILE: home,
+          NODE9_TESTING: '1',
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+        },
+      });
+      if (r.error) throw r.error;
+      return { status: r.status, started: fs.existsSync(marker), err: r.stderr ?? '' };
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  /** A record in the local malicious-package index that covers every version. */
+  function indexMalicious(home: string): void {
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const key = indexKey('npm', PKG);
+      writeShard('npm', shardOf(key), { [key]: [{ id: 'MAL-2026-7', all: true }] });
+      writeMeta('npm', {
+        syncedAt: new Date().toISOString(),
+        lastModifiedMs: Date.now(),
+        records: 1,
+        mode: 'full',
+      });
+    } finally {
+      process.env.HOME = prevHome;
+      process.env.USERPROFILE = prevProfile;
+    }
+  }
+
+  itUnix('is never started, and the gateway says why', () => {
+    const r = start(indexMalicious);
+    expect(r.started).toBe(false);
+    expect(r.status).toBe(1);
+    expect(r.err).toContain('MAL-2026-7');
+  });
+
+  itUnix('a package with no record is started as before', () => {
+    const r = start(() => {});
+    expect(r.started).toBe(true);
+  });
+
+  itUnix('is started when the user switched the package check off', () => {
+    const r = start((home) => {
+      indexMalicious(home);
+      const cfg = path.join(home, '.node9', 'config.json');
+      const c = JSON.parse(fs.readFileSync(cfg, 'utf-8')) as { policy: object };
+      c.policy = { packageCheck: { enabled: false } };
+      fs.writeFileSync(cfg, JSON.stringify(c));
+    });
+    expect(r.started).toBe(true);
   });
 });

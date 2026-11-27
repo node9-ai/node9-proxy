@@ -263,4 +263,61 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
     cache(false);
     expect(asked(runCheck(home, call('tu2')))).toBe(true);
   });
+
+  // Phase 4, check D: a server whose package is on the malicious-package
+  // list. No approved list is involved: it holds on every plan.
+  describe('an MCP server whose package is on the malicious list', () => {
+    function configure(): void {
+      // The server as Claude Code holds it, outside the gateway.
+      fs.writeFileSync(
+        path.join(home, '.claude.json'),
+        JSON.stringify({ mcpServers: { db: { command: 'npx', args: ['-y', '@acme/db-mcp'] } } })
+      );
+    }
+    /** What the daemon's package check stores (addons/standing-file.ts). */
+    function storeMalicious(): void {
+      fs.writeFileSync(
+        path.join(home, '.node9', 'addons-standing.json'),
+        JSON.stringify({
+          v: 1,
+          entries: {
+            'npm:@acme/db-mcp': {
+              findings: [
+                { rule: 'mcp.package-malicious', severity: 'critical', advisories: ['MAL-2026-1'] },
+              ],
+              registry: true,
+              checkedAt: new Date().toISOString(),
+            },
+          },
+        })
+      );
+    }
+    const call = () => ({
+      ...payload('mcp__db__query', { sql: 'select 1' }),
+      permission_mode: 'default',
+    });
+
+    it('is stopped on a machine with no approved list, and the reason names the advisory', () => {
+      configure();
+      storeMalicious();
+      const r = runCheck(home, call());
+      expect(denied(r)).toBe(true);
+      expect(r.out).toContain('MAL-2026-1');
+    });
+
+    it('runs as before when the package check found nothing', () => {
+      configure();
+      expect(denied(runCheck(home, call()))).toBe(false);
+    });
+
+    it('is not stopped when the user switched the package check off', () => {
+      configure();
+      storeMalicious();
+      const cfg = path.join(home, '.node9', 'config.json');
+      const c = JSON.parse(fs.readFileSync(cfg, 'utf-8')) as { policy: object };
+      c.policy = { packageCheck: { enabled: false } };
+      fs.writeFileSync(cfg, JSON.stringify(c));
+      expect(denied(runCheck(home, call()))).toBe(false);
+    });
+  });
 });

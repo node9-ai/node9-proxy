@@ -1113,16 +1113,25 @@ export function registerCheckCommand(program: Command): void {
           // The workspace's approved list of add-ons (node9Firewall#376 item 6,
           // phase 3): the MCP server or Claude Code skill this call uses, and
           // its verdict. Allow when nothing is enforced; never throws.
-          let addon = await addonVerdictForHookCall(config.policy.addons, {
-            toolName,
-            toolInput,
-            mcpServer,
-            agent,
-            cwd:
-              typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd)
-                ? payloadCwd
-                : undefined,
-          });
+          let addon = await addonVerdictForHookCall(
+            config.policy.addons,
+            {
+              toolName,
+              toolInput,
+              mcpServer,
+              agent,
+              cwd:
+                typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd)
+                  ? payloadCwd
+                  : undefined,
+            },
+            undefined,
+            // A server whose package is on the malicious-package list is
+            // stopped with the setting the install gate has, list or no list.
+            config.policy.packageCheck?.enabled === false
+              ? undefined
+              : config.policy.packageCheck?.onMalicious
+          );
           // A person already approved this add-on in this session: one ask
           // per add-on per session, as the MCP gateway does per connection.
           if (addon.action === 'review' && addonApprovedForSession(sessionId, addon.ruleName))

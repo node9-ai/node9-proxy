@@ -8,7 +8,7 @@
 import { parseAddonPolicy, type AddonPolicy } from '../addons/policy';
 import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import { readAppsFile } from '../apps/state.js';
-import { collectAddons } from '../addons/collect.js';
+import { collectAddons, collectAddonsWithLookups } from '../addons/collect.js';
 import { writeMcpIndex } from '../addons/index-file';
 import fs from 'fs';
 import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
@@ -1229,7 +1229,7 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
     // fw#390: what node9 found on this machine, names only.
     body.apps = snapshotApps(readAppsFile());
     // fw#376 item 6: skills, plugins and MCP servers, names and hashes only.
-    body.addons = collectAddonsAndIndex();
+    body.addons = await collectAddonsAndIndex();
     await shipPolicySnapshot(body, creds);
   } catch {
     // Silent — never break sync over a policy-mirror push.
@@ -1238,8 +1238,12 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
 
 /** The add-ons report for the snapshot, and the MCP index the agent hook
  *  reads to judge a server outside the gateway (addons/index-file.ts). */
-function collectAddonsAndIndex(): ReturnType<typeof collectAddons> {
-  const report = collectAddons();
+async function collectAddonsAndIndex(): Promise<ReturnType<typeof collectAddons>> {
+  // The host check asks DNS about the domains skills name (cached for a
+  // day); the package check's switch turns node9's own lookups off.
+  const report = await collectAddonsWithLookups(undefined, undefined, {
+    lookupsAllowed: getConfig().policy.packageCheck?.enabled !== false,
+  });
   writeMcpIndex(report.mcp);
   return report;
 }
@@ -1277,7 +1281,7 @@ export async function runPolicyPush(): Promise<{ ok: true } | { ok: false; reaso
     // fw#390: what node9 found on this machine, names only.
     body.apps = snapshotApps(readAppsFile());
     // fw#376 item 6: skills, plugins and MCP servers, names and hashes only.
-    body.addons = collectAddonsAndIndex();
+    body.addons = await collectAddonsAndIndex();
     const sent = await shipPolicySnapshot(body, creds);
     return sent ? { ok: true } : { ok: false, reason: 'Push failed (network or server error)' };
   } catch (e) {

@@ -40,6 +40,61 @@ describe('programsOf: the program each command segment runs', () => {
   });
 });
 
+describe('observeAudit: the folders sessions were started in', () => {
+  const transcript = (launch: string, id = 's1') =>
+    `/home/u/.claude/projects/${launch.replace(/[^A-Za-z0-9]/g, '-')}/${id}.jsonl`;
+
+  function auditOf(rows: object[]): string {
+    const file = path.join(tmp(), 'audit.log');
+    fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    return file;
+  }
+
+  it('a session that cd-ed into other repositories counts by its start folder', () => {
+    const t = transcript('/home/u/work');
+    const obs = observeAudit(
+      auditOf([
+        { tool: 'Bash', workingDir: '/home/u/work', transcriptPath: t },
+        { tool: 'Read', workingDir: '/home/u/work/scans/repos/someone_repo', transcriptPath: t },
+        { tool: 'Read', workingDir: '/home/u/work/scans/repos/other.repo/src', transcriptPath: t },
+      ])
+    );
+    expect(obs.launchDirs).toEqual(['/home/u/work']);
+    // Every folder a call ran in is still known (apps are found there).
+    expect(obs.projects).toHaveLength(3);
+  });
+
+  it('tells the start folder even when its own rows are not in the tail read', () => {
+    const t = transcript('/home/u/my.project');
+    const obs = observeAudit(
+      auditOf([{ tool: 'Read', workingDir: '/home/u/my.project/packages/api', transcriptPath: t }])
+    );
+    expect(obs.launchDirs).toEqual(['/home/u/my.project']);
+  });
+
+  it('keeps the working folder when the start folder cannot be told', () => {
+    const obs = observeAudit(
+      auditOf([
+        // Another agent: no Claude Code transcript.
+        { tool: 'Bash', workingDir: '/srv/codex-project' },
+        // A call outside the start folder's tree, and no other row of that session.
+        { tool: 'Bash', workingDir: '/tmp/elsewhere', transcriptPath: transcript('/home/u/gone') },
+      ])
+    );
+    expect(obs.launchDirs.sort()).toEqual(['/srv/codex-project', '/tmp/elsewhere']);
+  });
+
+  it('two sessions started in different folders give both', () => {
+    const obs = observeAudit(
+      auditOf([
+        { tool: 'Bash', workingDir: '/home/u/a/sub', transcriptPath: transcript('/home/u/a', 'x') },
+        { tool: 'Bash', workingDir: '/home/u/b', transcriptPath: transcript('/home/u/b', 'y') },
+      ])
+    );
+    expect(obs.launchDirs.sort()).toEqual(['/home/u/a', '/home/u/b']);
+  });
+});
+
 describe('observeAudit', () => {
   it('reads MCP servers, Bash programs and working directories, newest first', () => {
     const d = tmp();

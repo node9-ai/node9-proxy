@@ -234,6 +234,7 @@ export const ConfigFileSchema = z
               .optional(),
           })
           .optional(),
+        mcpDefinitions: z.object({ mode: z.enum(['off', 'log', 'block']).optional() }).optional(),
         skillPinning: z
           .object({
             enabled: z.boolean().optional(),

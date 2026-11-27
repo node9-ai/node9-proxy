@@ -30,9 +30,11 @@ import {
   mcpVerdict,
   skillVerdict,
   stricter,
+  maliciousVerdict,
   type AddonPolicy,
   type AddonVerdict,
 } from './policy';
+import { anyMalicious, maliciousAdvisories } from './standing-file';
 
 const ALLOW: AddonVerdict = { action: 'allow' };
 
@@ -314,16 +316,31 @@ export async function addonVerdictForHookCall(
     agent?: string;
     cwd?: string;
   },
-  home: string = os.homedir()
+  home: string = os.homedir(),
+  /** `policy.packageCheck.onMalicious` when the package check is on: what a
+   *  server whose package is on the malicious list gets, list or no list. */
+  onMalicious?: 'block' | 'review'
 ): Promise<AddonVerdict> {
-  if (!addonPolicyEnforces(policy)) return ALLOW;
+  const listEnforces = addonPolicyEnforces(policy);
   try {
+    // With no list in force, the only question left is the malicious-package
+    // one, and on almost every machine the answer is "nothing stored": said
+    // from one small file, before any agent config is read (Claude Code's
+    // can be megabytes, and this runs on every MCP call).
+    const checkMalicious = !!onMalicious && !!call.mcpServer && anyMalicious(home);
+    if (!listEnforces && !checkMalicious) return ALLOW;
     if (call.mcpServer) {
       let v = ALLOW;
-      for (const id of mcpIdentitiesForHook(call.mcpServer, call.agent, home, call.cwd))
-        v = stricter(v, mcpVerdict(policy, id));
+      for (const id of mcpIdentitiesForHook(call.mcpServer, call.agent, home, call.cwd)) {
+        if (listEnforces) v = stricter(v, mcpVerdict(policy, id));
+        if (checkMalicious && onMalicious) {
+          const advisories = maliciousAdvisories(id, home);
+          if (advisories) v = stricter(v, maliciousVerdict(id, advisories, onMalicious));
+        }
+      }
       return v;
     }
+    if (!listEnforces) return ALLOW;
     if (call.toolName === 'Skill') {
       const input = call.toolInput as { skill?: unknown } | null;
       if (typeof input?.skill !== 'string') return ALLOW;

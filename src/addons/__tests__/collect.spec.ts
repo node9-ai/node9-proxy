@@ -114,6 +114,33 @@ describe('collectAddons: skills', () => {
     expect(names).not.toContain('leaked-name');
   });
 
+  it('does not report the skills of a repository the agent only cd-ed into', () => {
+    const h = home();
+    const work = path.join(h, 'work');
+    const scanned = path.join(work, 'scans', 'repos', 'someone_repo');
+    skill(path.join(work, '.claude', 'skills', 'release'), '---\nname: release\n---\n');
+    skill(path.join(scanned, '.claude', 'skills', 'theirs'), '---\nname: theirs\n---\n');
+    skill(path.join(scanned, '.agents', 'skills', 'theirs-too'), '---\nname: theirs-too\n---\n');
+    // One Claude Code session, started in `work`, that read files in the scanned repository.
+    const transcriptPath = path.join(
+      h,
+      '.claude',
+      'projects',
+      work.replace(/[^A-Za-z0-9]/g, '-'),
+      's1.jsonl'
+    );
+    fs.writeFileSync(
+      path.join(h, '.node9', 'audit.log'),
+      [
+        { tool: 'Bash', workingDir: work, transcriptPath },
+        { tool: 'Read', workingDir: scanned, transcriptPath },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join('\n') + '\n'
+    );
+    expect(collectAddons(h, {}).skills.map((s) => s.name)).toEqual(['release']);
+  });
+
   it('reports project skills from folders in the audit log, without the path', () => {
     const h = home();
     const project = path.join(h, 'work', 'client-acme');

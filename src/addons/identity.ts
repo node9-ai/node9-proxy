@@ -186,3 +186,36 @@ export function mcpIdentityFromUrl(url: unknown): string {
     return 'url:unknown';
   }
 }
+
+/** The registry package behind a local MCP server, for the package check. */
+export interface McpPackage {
+  ecosystem: 'npm' | 'PyPI';
+  /** As the identity names it (`@scope/pkg`, `mcp-server-fetch`). */
+  name: string;
+  /** The exact version the launch command pins, when it pins one. Stays on the
+   *  machine: the identity an admin approves carries no version (plan D4). */
+  version?: string;
+}
+
+const EXACT_VERSION = /^\d+(\.\d+){1,3}([-+.][0-9A-Za-z.+-]+)?$/;
+
+/**
+ * The package a launch command runs, or null when the identity is not a
+ * registry package (an image, a binary, a script). Derived from the identity,
+ * so the two can never name different packages.
+ */
+export function mcpPackageFromCommand(command: string, args: string[]): McpPackage | null {
+  const m = /^(npm|pypi):(.+)$/.exec(mcpIdentityFromCommand(command, args));
+  if (!m) return null;
+  const ecosystem = m[1] === 'npm' ? 'npm' : 'PyPI';
+  const name = m[2];
+  const pin = ecosystem === 'npm' ? `${name}@` : `${name}==`;
+  let version: string | undefined;
+  for (const a of args) {
+    if (!a.startsWith(pin)) continue;
+    const v = a.slice(pin.length);
+    if (EXACT_VERSION.test(v)) version = v;
+    break;
+  }
+  return { ecosystem, name, ...(version ? { version } : {}) };
+}

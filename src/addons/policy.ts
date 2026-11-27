@@ -141,6 +141,32 @@ function verdictFor(
   return { action: 'allow' };
 }
 
+/**
+ * An MCP server whose package is on the malicious-package list (phase 4,
+ * check D). Not a decision of the workspace's list: it holds on every plan
+ * and with no list at all, and no approval answers it. `onMalicious` is the
+ * setting the install gate already has (`policy.packageCheck.onMalicious`).
+ */
+export function maliciousVerdict(
+  identity: string,
+  advisories: string[],
+  onMalicious: 'block' | 'review'
+): AddonVerdict {
+  const ids = advisories.length ? ` (${advisories.slice(0, 3).join(', ')})` : '';
+  const what = `the MCP server "${identity}" runs a package that is on the malicious-package list${ids}`;
+  return onMalicious === 'review'
+    ? {
+        action: 'review',
+        reason: `${what}, so a person must approve this use.`,
+        ruleName: `addon:mcp-malicious:${identity}`,
+      }
+    : {
+        action: 'block',
+        reason: `${what}. Remove the server from the agent's configuration.`,
+        ruleName: `addon:mcp-malicious:${identity}`,
+      };
+}
+
 /** One call to an MCP server, by its identity (`npm:<pkg>`, `url:<host>`...). */
 export function mcpVerdict(policy: AddonPolicy | undefined, identity: string): AddonVerdict {
   if (!policy || !identity) return { action: 'allow' };

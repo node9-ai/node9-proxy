@@ -265,6 +265,11 @@ export interface Config {
       mode: 'warn' | 'block';
       roots: string[];
     };
+    // The gateway's scan of MCP tool definitions before the agent sees them
+    // (node9Firewall#342). `log` records what it finds and shows it on the
+    // server's Add-ons row; `block` also refuses a catalog with injected
+    // instructions, a secret, or one it could not read to the end.
+    mcpDefinitions: { mode: 'off' | 'log' | 'block' };
     // fw#318: a session that READ outside content (an email, a web page, an
     // issue) is exposed; its later sends are judged by destination. `spotlight`
     // frames every source result for the model; `afterExposure` is what a held
@@ -625,6 +630,7 @@ export const DEFAULT_CONFIG: Config = {
       allow: [],
     },
     skillPinning: { enabled: false, mode: 'warn', roots: [] },
+    mcpDefinitions: { mode: 'log' },
     untrustedContent: {
       enabled: true,
       spotlight: true,
@@ -1074,6 +1080,7 @@ export function getConfig(cwd?: string): Config {
       ...DEFAULT_CONFIG.policy.skillPinning,
       roots: [...DEFAULT_CONFIG.policy.skillPinning.roots],
     },
+    mcpDefinitions: { ...DEFAULT_CONFIG.policy.mcpDefinitions },
     untrustedContent: {
       ...DEFAULT_CONFIG.policy.untrustedContent,
       orgDomains: [...DEFAULT_CONFIG.policy.untrustedContent.orgDomains],
@@ -1311,8 +1318,15 @@ export function getConfig(cwd?: string): Config {
     if (p.packageCheck && typeof p.packageCheck === 'object') {
       const pc = p.packageCheck as Partial<Config['policy']['packageCheck']>;
       const cur = mergedPolicy.packageCheck;
-      if (typeof pc.enabled === 'boolean') cur.enabled = pc.enabled;
-      if (pc.onMalicious === 'block' || pc.onMalicious === 'review')
+      // A repository's own config may not switch the check off or soften the
+      // stop on a known-malicious package: the repo an agent works in may be
+      // the one that configures that package (an MCP server in its .mcp.json).
+      if (typeof pc.enabled === 'boolean' && !(isProject && pc.enabled === false))
+        cur.enabled = pc.enabled;
+      if (
+        (pc.onMalicious === 'block' || pc.onMalicious === 'review') &&
+        !(isProject && pc.onMalicious === 'review' && cur.onMalicious === 'block')
+      )
         cur.onMalicious = pc.onMalicious;
       // Legacy first, so an explicit newPackage / installScript wins over it.
       if ((pc as { registrySignals?: unknown }).registrySignals === false) {
@@ -1334,6 +1348,18 @@ export function getConfig(cwd?: string): Config {
           if (typeof a === 'string' && a.length > 0) cur.allow.push(a);
         }
       }
+    }
+    if (p.mcpDefinitions && typeof p.mcpDefinitions === 'object') {
+      const mode = (p.mcpDefinitions as { mode?: unknown }).mode;
+      const rank = { off: 0, log: 1, block: 2 } as const;
+      // A repository's own config may make the scan stricter, never weaker:
+      // the repo an agent works in must not switch off the check on the MCP
+      // servers that same repo configures.
+      if (
+        (mode === 'off' || mode === 'log' || mode === 'block') &&
+        !(isProject && rank[mode] < rank[mergedPolicy.mcpDefinitions.mode])
+      )
+        mergedPolicy.mcpDefinitions.mode = mode;
     }
     if (p.skillPinning && typeof p.skillPinning === 'object') {
       const sp = p.skillPinning as Partial<Config['policy']['skillPinning']>;
