@@ -191,6 +191,29 @@ describe('refreshPackageStanding', () => {
 });
 
 describe('the standing file', () => {
+  // CodeQL js/file-system-race (release PR): one descriptor checks and reads,
+  // and a link planted where node9 writes its own file is not followed.
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a link in place of the file',
+    async () => {
+      const h = home();
+      const elsewhere = path.join(h, 'elsewhere.json');
+      const db = {
+        identity: 'npm:@acme/db-mcp',
+        pkg: { ecosystem: 'npm' as const, name: '@acme/db-mcp' },
+      };
+      await refreshPackageStanding([db], h, {
+        check: async () => [clean({ findings: [finding('malicious', ['MAL-1'])] })],
+        now: NOW,
+      });
+      // CONTROL: the file as written is read.
+      expect(Object.keys(readStanding(h).entries)).toEqual(['npm:@acme/db-mcp']);
+      fs.renameSync(standingPath(h), elsewhere);
+      fs.symlinkSync(elsewhere, standingPath(h));
+      expect(readStanding(h).entries).toEqual({});
+    }
+  );
+
   it('reads nothing from a missing, oversized or malformed file, and drops a bad entry only', () => {
     const h = home();
     expect(readStanding(h).entries).toEqual({});

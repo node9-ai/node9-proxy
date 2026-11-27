@@ -13,6 +13,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { atomicWriteSync } from '../utils/atomic-write';
+import { readSmallFile } from '../utils/read-small-file';
 
 /** The rule for a package the malicious-package list covers at the version in use. */
 export const MALICIOUS_RULE = 'mcp.package-malicious';
@@ -82,9 +83,11 @@ function entryOf(raw: unknown): StandingEntry | null {
 export function readStanding(home: string = os.homedir()): StandingFile {
   const out: StandingFile = { v: 1, entries: {} };
   try {
-    const file = standingPath(home);
-    if (fs.statSync(file).size > MAX_BYTES) return out;
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { entries?: unknown };
+    // One descriptor checks and reads (CodeQL js/file-system-race); node9
+    // writes this file itself, so a link in its place is refused.
+    const text = readSmallFile(standingPath(home), MAX_BYTES, { noFollow: true });
+    if (text === null) return out;
+    const raw = JSON.parse(text) as { entries?: unknown };
     if (!raw.entries || typeof raw.entries !== 'object' || Array.isArray(raw.entries)) return out;
     for (const [identity, v] of Object.entries(raw.entries).slice(0, MAX_ENTRIES)) {
       const e = entryOf(v);

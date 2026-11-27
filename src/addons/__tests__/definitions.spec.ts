@@ -25,6 +25,18 @@ const AT = '2026-11-27T10:00:00.000Z';
 const INJECTION = { rule: 'mcp.definition-injection', severity: 'high' as const };
 
 describe('the stored definition scans', () => {
+  // CodeQL js/file-system-race (release PR): one descriptor checks and reads,
+  // and a link planted where the gateway writes its own file is not followed.
+  it.skipIf(process.platform === 'win32')('does not follow a link in place of a record', () => {
+    const h = home();
+    writeDefinitionScan(KEY_A, { identity: 'npm:x', findings: [INJECTION], scannedAt: AT }, h);
+    const file = path.join(definitionsDir(h), `${KEY_A}.json`);
+    const elsewhere = path.join(h, 'elsewhere.json');
+    fs.renameSync(file, elsewhere);
+    fs.symlinkSync(elsewhere, file);
+    expect(readDefinitionScans(h).size).toBe(0);
+  });
+
   it('keeps one record per server and gives them back by identity', () => {
     const h = home();
     writeDefinitionScan(

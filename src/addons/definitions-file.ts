@@ -12,6 +12,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { atomicWriteSync } from '../utils/atomic-write';
+import { readSmallFile } from '../utils/read-small-file';
 
 export interface DefinitionScanRecord {
   identity: string;
@@ -87,9 +88,13 @@ export function readDefinitionScans(
   }
   for (const name of names.slice(0, MAX_FILES)) {
     try {
-      const file = path.join(definitionsDir(home), name);
-      if (fs.statSync(file).size > MAX_BYTES) continue;
-      const rec = recordOf(JSON.parse(fs.readFileSync(file, 'utf8')));
+      // One descriptor checks and reads (CodeQL js/file-system-race); the
+      // gateway writes these files itself, so a link in their place is refused.
+      const text = readSmallFile(path.join(definitionsDir(home), name), MAX_BYTES, {
+        noFollow: true,
+      });
+      if (text === null) continue;
+      const rec = recordOf(JSON.parse(text));
       if (!rec) continue;
       const cur = out.get(rec.identity);
       if (!cur) {
