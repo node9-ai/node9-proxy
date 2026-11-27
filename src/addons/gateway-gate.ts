@@ -5,16 +5,19 @@
 // session: one card per server, not one per call. A denial holds nothing, so
 // the next call asks again. A block is never cached away.
 
-import { mcpVerdict, type AddonPolicy, type AddonVerdict } from './policy';
+import { mcpVerdict, stricter, type AddonPolicy, type AddonVerdict } from './policy';
 
 export class AddonSessionGate {
   private reviewApproved = false;
 
   constructor(readonly identity: string) {}
 
-  /** The verdict for the next call, under the list as it is now. */
-  verdict(policy: AddonPolicy | undefined): AddonVerdict {
-    const v = mcpVerdict(policy, this.identity);
+  /** The verdict for the next call, under the list as it is now. `also` is a
+   *  verdict from outside the list (a package on the malicious list): the
+   *  stricter of the two holds, and an approved review covers both. */
+  verdict(policy: AddonPolicy | undefined, also?: AddonVerdict): AddonVerdict {
+    const own = mcpVerdict(policy, this.identity);
+    const v = also ? stricter(own, also) : own;
     return v.action === 'review' && this.reviewApproved ? { action: 'allow' } : v;
   }
 

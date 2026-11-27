@@ -22,7 +22,13 @@ import { substituteEnv } from '../mcp-status';
 import { getServerKey } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
 import { scanText } from '../dlp';
-import { mcpIdentityFromCommand, mcpIdentityFromUrl } from './identity';
+import {
+  mcpIdentityFromCommand,
+  mcpIdentityFromUrl,
+  mcpPackageFromCommand,
+  type McpPackage,
+} from './identity';
+import { readStanding } from './standing-file';
 import {
   MAX_SKILLS,
   SKILL_SEARCH_DEPTH,
@@ -73,6 +79,15 @@ export interface AddonMcp {
   state: 'governed' | 'outside' | 'remote';
   /** For a governed server: the key the mcpServers rows carry, to join them. */
   serverKey?: string;
+  /** What the package check found (phase 4). Absent = not checked: not a
+   *  registry package, the registry did not answer, or no check ran yet. */
+  findings?: Array<{ rule: string; severity: string }>;
+}
+
+/** One configured server with the package the check looks up, when it has one. */
+export interface McpDetail {
+  entry: AddonMcp;
+  pkg: McpPackage | null;
 }
 
 export interface AddonsReport {
@@ -197,19 +212,25 @@ function recentProjects(home: string): string[] {
   }
 }
 
-function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
+/** The configured servers, each with its package when it runs one. Config
+ *  reads only: no file hashing, no network. */
+export function collectMcpDetail(
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): McpDetail[] {
   let entries: ReturnType<typeof inventoryMcp>;
   try {
     entries = inventoryMcp(home);
   } catch {
     return [];
   }
-  const byKey = new Map<string, AddonMcp>();
+  const byKey = new Map<string, McpDetail>();
   for (const e of entries) {
     if (e.state === 'node9-self') continue;
     let identity: string;
     let serverKey: string | undefined;
     let state: AddonMcp['state'];
+    let pkg: McpPackage | null = null;
     if (e.state === 'remote') {
       const raw = (e.raw ?? {}) as Record<string, unknown>;
       identity = mcpIdentityFromUrl(raw.url ?? raw.httpUrl ?? raw.serverUrl);
@@ -219,29 +240,50 @@ function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
       if (!upstream) continue;
       const [command, ...args] = tokenize(upstream);
       identity = mcpIdentityFromCommand(command ?? '', args);
+      pkg = mcpPackageFromCommand(command ?? '', args);
       serverKey = getServerKey(substituteEnv(upstream, env).resolved);
       state = 'governed';
     } else {
       identity = mcpIdentityFromCommand(e.command, e.args);
+      pkg = mcpPackageFromCommand(e.command, e.args);
       state = 'outside';
     }
     const name = label(e.name) ?? identity;
     const key = `${name}\0${identity}\0${state}`;
     const row = byKey.get(key);
     if (row) {
-      if (!row.agents.includes(e.agent)) row.agents.push(e.agent);
+      if (!row.entry.agents.includes(e.agent)) row.entry.agents.push(e.agent);
       continue;
     }
     if (byKey.size >= MAX_MCP) break;
     byKey.set(key, {
-      name,
-      identity,
-      agents: [e.agent],
-      state,
-      ...(serverKey ? { serverKey } : {}),
+      entry: {
+        name,
+        identity,
+        agents: [e.agent],
+        state,
+        ...(serverKey ? { serverKey } : {}),
+      },
+      pkg,
     });
   }
   return [...byKey.values()];
+}
+
+/** The MCP rows of the report, with what the package check last found for
+ *  each (standing-file.ts, written by the daemon). Advisory ids stay on the
+ *  machine: the report carries rule ids and severities, as for skills. */
+function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
+  const standing = readStanding(home).entries;
+  return collectMcpDetail(home, env).map(({ entry, pkg }) => {
+    const s = pkg ? standing[entry.identity] : undefined;
+    // "Checked" only when the registry answered, or something was found anyway.
+    if (!s || (!s.registry && s.findings.length === 0)) return entry;
+    return {
+      ...entry,
+      findings: s.findings.map((f) => ({ rule: f.rule, severity: f.severity })),
+    };
+  });
 }
 
 /** The MCP part only, for the index the agent hook reads (index-file.ts):

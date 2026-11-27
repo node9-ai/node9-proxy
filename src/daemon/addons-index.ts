@@ -10,7 +10,8 @@
 import fs from 'fs';
 import os from 'os';
 import { AGENT_SPECS } from '../agent-wiring';
-import { collectMcpOnly } from '../addons/collect';
+import { collectMcpDetail, collectMcpOnly } from '../addons/collect';
+import { refreshPackageStanding } from '../addons/package-standing';
 import { writeMcpIndex } from '../addons/index-file';
 import { applyPluginBlocks } from '../addons/plugin-blocks';
 import { _resetConfigCache, getConfig } from '../config';
@@ -93,13 +94,50 @@ function tick(last: string | undefined): string | undefined {
   return next;
 }
 
+/** The package check looks again at least this often: a stored result goes
+ *  stale by its own clock (package-standing.ts), not by a config change. */
+export const STANDING_EVERY_MS = 10 * 60_000;
+
+let standingRunning = false;
+
+/**
+ * The package check for the configured MCP servers (phase 4, check D). It asks
+ * registries, so it runs here and never in a hook; a user who switched the
+ * package check off gets no lookups. One run at a time; never throws.
+ */
+export async function refreshStandingOnce(
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+  run: typeof refreshPackageStanding = refreshPackageStanding
+): Promise<void> {
+  if (standingRunning) return;
+  standingRunning = true;
+  try {
+    if (getConfig().policy.packageCheck?.enabled === false) return;
+    const targets = collectMcpDetail(home, env).flatMap(({ entry, pkg }) =>
+      pkg ? [{ identity: entry.identity, pkg }] : []
+    );
+    await run(targets, home);
+  } catch {
+    /* the next round tries again */
+  } finally {
+    standingRunning = false;
+  }
+}
+
 /** Write the index now, then keep it (and the plugin blocks) current. */
 export function startAddonsIndexRefresh(): void {
   let last: string | undefined;
-  setImmediate(() => {
+  let standingAt = 0;
+  const round = () => {
+    const before = last;
     last = tick(last);
-  });
-  setInterval(() => {
-    last = tick(last);
-  }, REFRESH_MS).unref();
+    // On a config change (a server added or re-pinned), and on its own clock.
+    if (last !== before || Date.now() - standingAt >= STANDING_EVERY_MS) {
+      standingAt = Date.now();
+      void refreshStandingOnce();
+    }
+  };
+  setImmediate(round);
+  setInterval(round, REFRESH_MS).unref();
 }

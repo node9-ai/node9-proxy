@@ -27,8 +27,9 @@ import { buildNegotiationMessage, isHumanDecision } from '../policy/negotiation'
 import { checkProvenance } from '../utils/provenance.js';
 import { hashToolDefinitions, getServerKey, checkPin, updatePin } from '../mcp-pin';
 import { tokenize } from '../mcp-cmd';
-import { mcpIdentityFromCommand } from '../addons/identity';
-import type { AddonVerdict } from '../addons/policy';
+import { mcpIdentityFromCommand, mcpPackageFromCommand } from '../addons/identity';
+import { maliciousVerdict, type AddonVerdict } from '../addons/policy';
+import { knownMalicious } from '../addons/malicious-local';
 import { AddonSessionGate } from '../addons/gateway-gate';
 import type { McpToolInfo } from '../daemon/mcp-tools';
 import { getServerConfig, deriveServerName, sanitizeToolAnnotations } from '../daemon/mcp-tools';
@@ -272,6 +273,30 @@ export async function runMcpGateway(
     console.error(chalk.red('   Verify this binary is trusted before proceeding.'));
   }
 
+  // A server whose package is on the malicious-package list is not started
+  // (node9Firewall#376 item 6, phase 4): starting it is what runs its code.
+  // Same setting as the install gate; `review` is asked on the first call
+  // instead, since nobody can be asked before the agent has connected.
+  const upstreamIdentity = mcpIdentityFromCommand(cmd ?? '', cmdArgs);
+  const upstreamPkg = mcpPackageFromCommand(cmd ?? '', cmdArgs);
+  const onMaliciousPackage = (): 'block' | 'review' | undefined => {
+    try {
+      const pc = getConfig().policy.packageCheck;
+      return pc?.enabled === false ? undefined : pc?.onMalicious;
+    } catch {
+      return undefined; // no readable config stops nothing
+    }
+  };
+  if (onMaliciousPackage() === 'block') {
+    const advisories = knownMalicious(upstreamIdentity, upstreamPkg);
+    if (advisories) {
+      const v = maliciousVerdict(upstreamIdentity, advisories, 'block');
+      const why = v.action === 'allow' ? '' : v.reason.replace(/^the /, 'The ');
+      console.error(chalk.red(`\n🛑 Node9: not starting this MCP server. ${why}\n`));
+      process.exit(1);
+    }
+  }
+
   // stderr only — stdout must stay clean for the JSON-RPC stdio protocol
   console.error(chalk.green(`🚀 Node9 MCP Gateway: Monitoring [${upstreamCommand}]`));
 
@@ -326,7 +351,7 @@ export async function runMcpGateway(
   // server's identity, the same one the add-ons report gives the dashboard
   // (collect.ts derives it from the same `--upstream`). A review the person
   // approved holds for the rest of this session: one card per server.
-  const addonGate = new AddonSessionGate(mcpIdentityFromCommand(cmd ?? '', cmdArgs));
+  const addonGate = new AddonSessionGate(upstreamIdentity);
 
   // Session quarantine: tracks whether pin validation has passed for this session.
   // 'pending'    — no tools/list response checked yet; tools/call blocked
@@ -506,7 +531,16 @@ export async function runMcpGateway(
         _resetConfigCache();
         let addon: AddonVerdict = { action: 'allow' };
         try {
-          addon = addonGate.verdict(getConfig().policy.addons);
+          // The package check may reach its verdict after this gateway
+          // started (the daemon asks the registry), so it is read per call.
+          const onMalicious = onMaliciousPackage();
+          const advisories = onMalicious ? knownMalicious(upstreamIdentity, upstreamPkg) : null;
+          addon = addonGate.verdict(
+            getConfig().policy.addons,
+            advisories && onMalicious
+              ? maliciousVerdict(upstreamIdentity, advisories, onMalicious)
+              : undefined
+          );
         } catch {
           /* no readable list enforces nothing: node9 failing never stops the agent */
         }
