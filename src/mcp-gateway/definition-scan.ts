@@ -41,7 +41,12 @@ export interface CatalogScan {
  *  Past any of them the catalog is "incomplete", never "clean". */
 const MAX_TOOLS = 2000;
 const MAX_DEPTH = 32;
+/** Per tool: one definition past this is incomplete, the others are still
+ *  read. A catalog-wide budget would call a large honest server (hundreds of
+ *  tools, enum-heavy schemas) incomplete as a whole. */
 const MAX_NODES = 10_000;
+/** The whole catalog: what one `tools/list` may cost to read at most. */
+const MAX_CATALOG_NODES = 400_000;
 
 const SAFE_NAME = /[^A-Za-z0-9_.:/-]/g;
 function safeName(name: unknown): string {
@@ -94,7 +99,7 @@ export function scanToolCatalog(tools: unknown): CatalogScan {
     'catalog-inspection-incomplete': [],
   };
   const list = Array.isArray(tools) ? tools : [];
-  const budget = new Budget();
+  let catalogNodes = 0;
   let scanned = 0;
   if (!Array.isArray(tools) || list.length > MAX_TOOLS) {
     count['mcp.definition-incomplete']++;
@@ -103,13 +108,20 @@ export function scanToolCatalog(tools: unknown): CatalogScan {
   for (const tool of list.slice(0, MAX_TOOLS)) {
     const name = safeName((tool as { name?: unknown } | null)?.name);
     const parts: string[] = [];
+    const budget = new Budget();
     texts(tool, parts, budget);
+    catalogNodes += budget.nodes;
     const text = parts.join('\n');
     if (budget.exceeded || text.length > MAX_DEFINITION_CHARS) {
       count['mcp.definition-incomplete']++;
       names['catalog-inspection-incomplete'].push(name);
-      if (budget.exceeded) break; // nothing after this point was read
       continue;
+    }
+    if (catalogNodes > MAX_CATALOG_NODES) {
+      // Nothing from here on is read: the catalog as a whole is incomplete.
+      count['mcp.definition-incomplete']++;
+      names['catalog-inspection-incomplete'].push('(catalog)');
+      break;
     }
     scanned++;
     const inj = scanToolDefinitionText(text);

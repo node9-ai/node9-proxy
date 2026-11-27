@@ -106,6 +106,36 @@ describe('refreshStandingOnce', () => {
     ]);
   });
 
+  // Release review 2026-11-27: the hook stops a call to a project's server
+  // whose package is malicious, so the daemon must check those packages too.
+  it("also checks the servers a Claude Code project configures, in ~/.claude.json and the project's .mcp.json", async () => {
+    const h = home();
+    asHome(h);
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-proj-'));
+    try {
+      fs.writeFileSync(
+        path.join(proj, '.mcp.json'),
+        JSON.stringify({ mcpServers: { evil: { command: 'npx', args: ['-y', 'evil-mcp'] } } })
+      );
+      fs.writeFileSync(
+        path.join(h, '.claude.json'),
+        JSON.stringify({
+          projects: {
+            [proj]: { mcpServers: { db: { command: 'uvx', args: ['acme-db-mcp'] } } },
+          },
+        })
+      );
+      const seen: Array<Array<{ identity: string }>> = [];
+      await refreshStandingOnce(h, {}, async (targets) => {
+        seen.push(targets as Array<{ identity: string }>);
+        return { v: 1 as const, entries: {} };
+      });
+      expect(seen[0].map((t) => t.identity).sort()).toEqual(['npm:evil-mcp', 'pypi:acme-db-mcp']);
+    } finally {
+      fs.rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
   it('asks no registry when the user switched the package check off', async () => {
     const h = home();
     asHome(h, { packageCheck: { enabled: false } });

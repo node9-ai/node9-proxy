@@ -26,9 +26,17 @@ export interface DefinitionMatch {
   confidence: DefinitionConfidence;
 }
 
-// A credential or agent-config path. `.env.example` and friends are templates.
-const SENSITIVE_PATH =
-  /(~\/\.ssh\b|\bid_(rsa|ed25519|ecdsa)\b|(^|[\s"'`/(])\.env(?!\.(example|sample|template|dist)\b)\b|\.aws\/credentials|~\/\.aws\b|\bmcp\.json\b|\.npmrc\b|\.netrc\b|~\/\.cursor\b|\.claude\.json\b|\/etc\/(passwd|shadow)\b|\bssh keys?\b|\bprivate key\b)/;
+// A file that holds a credential and nothing else: no honest tool
+// description tells the model to read one.
+const SECRET_PATH =
+  /(~\/\.ssh\b|\bid_(rsa|ed25519|ecdsa)\b|\.aws\/credentials|~\/\.aws\b|\.npmrc\b|\.netrc\b|\/etc\/shadow\b|\bssh keys?\b)/;
+// A file an honest tool may well read (a dotenv loader, an MCP manager, a
+// wallet that signs with a private key), and an attack reads too.
+// `.env.example` and friends are templates.
+const CONFIG_PATH =
+  /((^|[\s"'`/(])\.env(?!\.(example|sample|template|dist)\b)\b|\bmcp\.json\b|~\/\.cursor\b|\.claude\.json\b|\/etc\/passwd\b|\bprivate keys?\b)/;
+const READ_VERB =
+  '\\b(read|access|open|load|cat|include|pass|send|upload|exfiltrate|copy|fetch)\\b[^.\\n]{0,60}';
 
 const SIGNALS: ReadonlyArray<{ name: string; re: RegExp }> = [
   {
@@ -37,12 +45,14 @@ const SIGNALS: ReadonlyArray<{ name: string; re: RegExp }> = [
     re: /\b(do not|don'?t|never|must not|should not|without)\s+(?:\w+\s+){0,2}?(mention|tell|notify|inform|alert)\b[^.\n]{0,80}\b(the\s+)?(user|human|operator)\b|\b(do not|don'?t|never|must not)\s+(reveal|mention|disclose)\s+(this|these|the)\s+(instructions?|steps?|rules?|notes?)\b|\b(could|would|will|might)\s+upset\s+the\s+user\b|\bwithout\s+(the\s+user('s)?\s+(knowledge|knowing|consent)|telling\s+the\s+user)\b|\bsilently\s+(send|upload|forward|copy|post|transmit|read|exfiltrate|include|add)\b/i,
   },
   {
-    // A verb that takes a file, then a credential path, in one clause.
+    // A verb that takes a file, then a credential file, in one clause.
     name: 'credential-read',
-    re: new RegExp(
-      `\\b(read|access|open|load|cat|include|pass|send|upload|exfiltrate|copy|fetch)\\b[^.\\n]{0,60}${SENSITIVE_PATH.source}`,
-      'i'
-    ),
+    re: new RegExp(`${READ_VERB}${SECRET_PATH.source}`, 'i'),
+  },
+  {
+    // The same with a file honest tools read too: weak on its own.
+    name: 'config-read',
+    re: new RegExp(`${READ_VERB}${CONFIG_PATH.source}`, 'i'),
   },
   {
     // Instructions about ANOTHER tool: the shape of tool shadowing.
@@ -63,14 +73,24 @@ const SIGNALS: ReadonlyArray<{ name: string; re: RegExp }> = [
     re: /<\/?(system|important|instructions?|admin|secret)>|\[(system|admin)\b[^\]\n]{0,30}\]/i,
   },
   {
-    // Text a person reviewing the definition does not see: zero-width and bidi
-    // control characters, or an HTML comment.
+    // Text a person reviewing the definition does not see: a zero-width
+    // space, word joiner or invisible operator, a bidi embedding or override
+    // (the Trojan Source shape), a byte-order mark past the start, a Unicode
+    // tag character (the "ASCII smuggling" shape), or an HTML comment.
+    // The joiners and direction marks (U+200C-U+200F) are left out: Persian,
+    // Hebrew, Arabic and every multi-person emoji need them.
     name: 'hidden-text',
-    re: /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]|<!--[\s\S]{0,400}?-->/,
+    re: /[\u200b\u202a-\u202e\u2060-\u2064]|(?<!^)\ufeff|[\u{e0000}-\u{e007f}]|<!--[\s\S]{0,400}?-->/u,
   },
   {
     name: 'exfiltration',
-    re: /\bexfiltrat(e|ion)\b|\b(send|upload|post|forward)\b[^.\n]{0,60}\b(to|at)\s+(an?\s+)?(external|remote|third[- ]party|attacker)/i,
+    re: /\bexfiltrat(e|ion)\b|\b(send|upload|post|forward|copy)\b[^.\n]{0,60}\bto\s+(an?\s+|the\s+)?attacker/i,
+  },
+  {
+    // Data going out of the machine: what an upload or webhook tool does,
+    // and what an exfiltration does. Weak on its own.
+    name: 'outbound-transfer',
+    re: /\b(send|upload|post|forward)\b[^.\n]{0,60}\b(to|at)\s+(an?\s+|the\s+)?(external|remote|third[- ]party|server|endpoint|webhook)\b/i,
   },
   {
     name: 'guardrail-off',
@@ -81,6 +101,11 @@ const SIGNALS: ReadonlyArray<{ name: string; re: RegExp }> = [
 /** One of these alone is `high`: no honest description needs it. */
 const STRONG = new Set(['conceal-from-user', 'credential-read', 'hidden-text', 'exfiltration']);
 
+/** What honest tools say too (a destination next to an action verb, reading
+ *  a .env or mcp.json, sending to a remote server). Alone it is `low`; two
+ *  of them are `medium`; with any other signal it is `high`. */
+const WEAK = new Set(['action-to-destination', 'config-read', 'outbound-transfer']);
+
 /** A definition longer than this is not scanned past it; the caller decides
  *  what an oversized definition means (the gateway calls it incomplete). */
 export const MAX_DEFINITION_CHARS = 100_000;
@@ -89,10 +114,10 @@ export const MAX_DEFINITION_CHARS = 100_000;
  * Grade the text of one tool's definition (name, title, description, schema
  * text, annotations, joined by the caller). Null when nothing matched.
  *
- *   high    two signals, or one strong one
- *   medium  one other signal
- *   low     only a destination next to an action verb ("send a text via
- *           https://..."), which honest tools say too
+ *   high    one strong signal, or two signals of which one is not weak
+ *   medium  one signal that is neither strong nor weak, or two weak ones
+ *   low     one weak signal ("send a text via https://...", "read the .env
+ *           file"), which honest tools say too
  */
 export function scanToolDefinitionText(text: string): DefinitionMatch | null {
   if (!text) return null;
@@ -106,11 +131,13 @@ export function scanToolDefinitionText(text: string): DefinitionMatch | null {
     if (!signals.includes(s)) signals.push(s);
   }
   if (signals.length === 0) return null;
+  const weak = signals.filter((s) => WEAK.has(s)).length;
+  const other = signals.length - weak;
   const confidence: DefinitionConfidence =
-    signals.length >= 2 || signals.some((s) => STRONG.has(s))
+    signals.some((s) => STRONG.has(s)) || (other >= 1 && signals.length >= 2)
       ? 'high'
-      : signals[0] === 'action-to-destination'
-        ? 'low'
-        : 'medium';
+      : other === 1 || weak >= 2
+        ? 'medium'
+        : 'low';
   return { signals, confidence };
 }

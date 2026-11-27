@@ -223,7 +223,8 @@ describe('lookupDomains', () => {
     const h = home();
     const r = resolver({ 'example.com': 'ok', com: 'ok' });
     await lookupDomains(['gone-vendor.com'], h, { query: r.query, now: NOW });
-    expect(fs.statSync(hostCachePath(h)).mode & 0o077).toBe(0);
+    // Windows has no POSIX mode bits: statSync reports 0o666 for any file.
+    if (process.platform !== 'win32') expect(fs.statSync(hostCachePath(h)).mode & 0o077).toBe(0);
     fs.writeFileSync(hostCachePath(h), '{not json');
     const got = await lookupDomains(['gone-vendor.com'], h, { query: r.query, now: NOW });
     expect(got.get('gone-vendor.com')).toBe(false);
@@ -289,6 +290,28 @@ describe('the add-ons report with the host check', () => {
       expect.arrayContaining(['gone-vendor.com', 'gone-hooks.io', 'live-vendor.com']),
     ]);
     expect(l.asked[0]).toHaveLength(3);
+  });
+
+  // Release review 2026-11-27: a domain DNS gave no answer for (past the
+  // round's cap or time, SERVFAIL) must not let its skill read as checked.
+  it('a skill with a domain that got no answer is not marked checked', async () => {
+    const h = home();
+    skill(h, 'asked', 'See https://docs.live-vendor.com/ for details.');
+    skill(
+      h,
+      'unasked',
+      'Fetch from https://api.slow-vendor.com/v1 and https://docs.live-vendor.com/'
+    );
+    const fn = async (domains: string[]) => ({
+      ok: true,
+      answers: new Map<string, boolean | null>(
+        domains.map((d) => [d, d === 'slow-vendor.com' ? null : true])
+      ),
+    });
+    const skills = byName((await collectAddonsWithLookups(h, {}, { lookup: fn })).skills);
+    expect(skills.asked.checks).toEqual(['hosts']);
+    expect(skills.unasked.checks).toBeUndefined();
+    expect(skills.unasked.findings).toEqual([]);
   });
 
   it('sends the finding but not the domain for a skill inside a project', async () => {

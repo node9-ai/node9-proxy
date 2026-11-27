@@ -11,6 +11,7 @@ import fs from 'fs';
 import os from 'os';
 import { AGENT_SPECS } from '../agent-wiring';
 import { collectMcpDetail, collectMcpOnly } from '../addons/collect';
+import { claudeProjectMcpPackages } from '../addons/claude-mcp';
 import { refreshPackageStanding } from '../addons/package-standing';
 import { writeMcpIndex } from '../addons/index-file';
 import { applyPluginBlocks } from '../addons/plugin-blocks';
@@ -118,6 +119,10 @@ export async function refreshStandingOnce(
     const targets = collectMcpDetail(home, env).flatMap(({ entry, pkg }) =>
       pkg ? [{ identity: entry.identity, pkg }] : []
     );
+    // And the servers Claude Code projects configure: the hook stops those
+    // too, so their packages must be checked (release review 2026-11-27).
+    const known = new Set(targets.map((t) => t.identity));
+    for (const t of claudeProjectMcpPackages(home)) if (!known.has(t.identity)) targets.push(t);
     await run(targets, home);
   } catch {
     /* the next round tries again */

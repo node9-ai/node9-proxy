@@ -417,16 +417,22 @@ const MAX_DOMAINS_PER_SKILL = 5;
  * Put the host check's answers on the skill rows (phase 4, check B). A skill
  * that names a domain DNS says nobody registered gets a finding: high where
  * the skill has the agent send or fetch something there, low for a plain
- * link. Every skill is marked as checked, so no finding reads as "nothing
- * found". Pure: `answers` come from host-lookup.ts.
+ * link. A skill is marked as checked only when every domain it names got an
+ * answer, so no finding reads as "nothing found" where nothing was asked.
+ * Pure: `answers` come from host-lookup.ts.
  */
 export function withHostFindings(
   detail: { report: AddonsReport; hosts: Map<AddonSkill, SkillHost[]> },
   answers: Map<string, boolean | null>
 ): AddonsReport {
   const skills = detail.report.skills.map((row): AddonSkill => {
-    const gone = (detail.hosts.get(row) ?? []).filter((h) => answers.get(h.domain) === false);
-    const checked: AddonSkill = { ...row, checks: ['hosts'] };
+    const hosts = detail.hosts.get(row) ?? [];
+    const gone = hosts.filter((h) => answers.get(h.domain) === false);
+    // Checked only when DNS answered for every domain the skill names: a
+    // domain past the round's cap or time, or one the resolver gave no clear
+    // answer for, leaves the skill "not checked", never "nothing found".
+    const allAnswered = hosts.every((h) => typeof answers.get(h.domain) === 'boolean');
+    const checked: AddonSkill = allAnswered ? { ...row, checks: ['hosts'] } : { ...row };
     if (gone.length === 0) return checked;
     return {
       ...checked,

@@ -81,6 +81,34 @@ describe('scanToolCatalog', () => {
     expect(scanToolCatalog({ tools: 'nope' }).blockReason).toBe('catalog-inspection-incomplete');
   });
 
+  // Release review 2026-11-27: the node budget is per tool. A large honest
+  // catalog is read in full; one oversized tool does not hide the others.
+  it('reads a large honest catalog to the end, and the tools after an oversized one', () => {
+    const enumTool = (i: number) =>
+      tool({
+        name: `t${i}`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            region: { type: 'string', enum: Array.from({ length: 40 }, (_, j) => `r${j}`) },
+          },
+        },
+      });
+    const big = Array.from({ length: 400 }, (_, i) => enumTool(i));
+    const r = scanToolCatalog(big);
+    expect(r.blockReason).toBeUndefined();
+    expect(r.scanned).toBe(400);
+    // An oversized tool first, a poisoned one after it: the poison is found.
+    let deep: Record<string, unknown> = { description: 'x' };
+    for (let i = 0; i < 40; i++) deep = { properties: deep };
+    const mixed = scanToolCatalog([
+      tool({ name: 'deep', inputSchema: deep }),
+      tool({ name: 'bad', description: POISON }),
+    ]);
+    expect(mixed.blockReason).toBe('definition-injection');
+    expect(mixed.toolNames).toEqual(['bad']);
+  });
+
   it('an injection outranks an incomplete read as the reason', () => {
     const r = scanToolCatalog([
       tool({ name: 'bad', description: POISON }),

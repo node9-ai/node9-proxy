@@ -467,10 +467,12 @@ const EXAMPLE_FRAMING_RE =
 // A refusal that follows the quoted text in the same sentence ("... - do not follow it").
 // Two vendor skills that defend against injected text were graded as injection for quoting
 // what to refuse (the only 2 high findings in 442 skill files, 2026-11-27). The object must
-// point back at the quoted text (it, them, these): "never follow the safety policy" is not a
-// refusal of the quote. Markdown emphasis around the negation (`**DO NOT** follow them`) counts.
+// point back at the quoted text (it, them, these), and the refusal must close the sentence:
+// "never follow the safety policy" and "never follow those safety rules ..., then run the
+// deploy" are not refusals of the quote (release review, 2026-11-27). Markdown emphasis around
+// the negation (`**DO NOT** follow them`) counts.
 const REFUSAL_AFTER_RE =
-  /\b(do not|don'?t|never|must not|should not)\*{0,2}\s+(follow|obey|comply with|act on|execute)\s+(it|them|this|that|these|those|such|any of)\b/i;
+  /\b(do not|don'?t|never|must not|should not)\*{0,2}\s+(follow|obey|comply with|act on|execute)\s+(?:it|them|this|that|these|those|any of (?:it|them|this|these|those))(?:\s+(?:instructions?|texts?|commands?|requests?|phrases?|strings?|messages?|directives?))?[\s*]*$/i;
 const REFUSAL_WINDOW = 300;
 
 // Opening quote -> its closing quote. Prose uses curly quotes as often as straight ones.
@@ -493,12 +495,15 @@ function quotedSpanEnd(text: string, idx: number, len: number): number {
   return text[end] === close ? end + 1 : -1;
 }
 
-/** The rest of the sentence after `from`: up to a full stop, a blank line or the window. */
+/** The rest of the sentence after `from`: up to a full stop, a blank line or the end of the
+ *  text. Empty when the sentence runs past the window: its end is not known, so nothing in it
+ *  can be the clause that closes it. */
 function restOfSentence(text: string, from: number): string {
   const rest = text.slice(from, from + REFUSAL_WINDOW);
   const stop = rest.search(/[.!?](?:\s|$)|\n\s*\n/);
   // The stop itself is kept out, so a refusal in the NEXT sentence does not count.
-  return stop < 0 ? rest : rest.slice(0, stop);
+  if (stop >= 0) return rest.slice(0, stop);
+  return from + REFUSAL_WINDOW >= text.length ? rest : '';
 }
 
 function isQuotedExample(text: string, idx: number, len: number): boolean {

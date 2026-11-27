@@ -1318,8 +1318,15 @@ export function getConfig(cwd?: string): Config {
     if (p.packageCheck && typeof p.packageCheck === 'object') {
       const pc = p.packageCheck as Partial<Config['policy']['packageCheck']>;
       const cur = mergedPolicy.packageCheck;
-      if (typeof pc.enabled === 'boolean') cur.enabled = pc.enabled;
-      if (pc.onMalicious === 'block' || pc.onMalicious === 'review')
+      // A repository's own config may not switch the check off or soften the
+      // stop on a known-malicious package: the repo an agent works in may be
+      // the one that configures that package (an MCP server in its .mcp.json).
+      if (typeof pc.enabled === 'boolean' && !(isProject && pc.enabled === false))
+        cur.enabled = pc.enabled;
+      if (
+        (pc.onMalicious === 'block' || pc.onMalicious === 'review') &&
+        !(isProject && pc.onMalicious === 'review' && cur.onMalicious === 'block')
+      )
         cur.onMalicious = pc.onMalicious;
       // Legacy first, so an explicit newPackage / installScript wins over it.
       if ((pc as { registrySignals?: unknown }).registrySignals === false) {

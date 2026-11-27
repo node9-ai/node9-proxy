@@ -171,6 +171,25 @@ describe('command-checks governance integrity (/code-review wf_0ff1bc3d)', () =>
     expect(cc.sqlDdl ?? 'review').toBe('review');
   });
 
+  // Release review 2026-11-27: the same setting stops a known-malicious MCP
+  // server (hook and gateway), so the repo that configures the server must
+  // not be able to switch it off.
+  it('a repo node9.config.json cannot switch the package check off or soften the malicious stop', () => {
+    seedHome({});
+    const off = seedProject({ packageCheck: { enabled: false, onMalicious: 'review' } });
+    expect(getConfig(off).policy.packageCheck.enabled).toBe(true);
+    expect(getConfig(off).policy.packageCheck.onMalicious).toBe('block');
+    // CONTROL: the project file is read (a tightening field is honoured).
+    seedHome({ packageCheck: { onMalicious: 'review' } });
+    expect(
+      getConfig(seedProject({ packageCheck: { onMalicious: 'block' } })).policy.packageCheck
+        .onMalicious
+    ).toBe('block');
+    // The user's own (global) file may set any value.
+    seedHome({ packageCheck: { enabled: false } });
+    expect(getConfig(seedProject({})).policy.packageCheck.enabled).toBe(false);
+  });
+
   // node9Firewall#342: the scan of MCP tool definitions. The repository an
   // agent works in also configures MCP servers; it must not switch the check
   // on those servers off.

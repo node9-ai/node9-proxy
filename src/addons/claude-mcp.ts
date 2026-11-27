@@ -12,7 +12,12 @@ import path from 'path';
 import { MCP_WRAP_SUBCOMMAND, gatewayUpstream, parseNode9Launch } from '../mcp-entry';
 import { tokenize } from '../mcp-cmd';
 import { readSmallFile } from '../utils/read-small-file';
-import { mcpIdentityFromCommand, mcpIdentityFromUrl } from './identity';
+import {
+  mcpIdentityFromCommand,
+  mcpIdentityFromUrl,
+  mcpPackageFromCommand,
+  type McpPackage,
+} from './identity';
 import type { McpIndexEntry } from './index-file';
 
 /** ~/.claude.json carries prompt history too; past this it is not read. */
@@ -97,4 +102,60 @@ export function claudeMcpEntries(
     }
   }
   return out;
+}
+
+/** Project folders read for their MCP servers, at most. */
+const MAX_PROJECTS = 200;
+
+/** The command a config entry launches (the upstream, for a gateway wrap);
+ *  null for a remote server or node9's own. */
+function launchOf(raw: unknown): { command: string; args: string[] } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as { command?: unknown; args?: unknown };
+  const launch = parseNode9Launch(s);
+  if (launch) {
+    const upstream =
+      launch.subcommand === MCP_WRAP_SUBCOMMAND || gatewayUpstream(launch) !== null
+        ? gatewayUpstream(launch)
+        : null;
+    if (!upstream) return null;
+    const [command, ...args] = tokenize(upstream);
+    return command ? { command, args } : null;
+  }
+  if (typeof s.command !== 'string' || s.command.trim() === '') return null;
+  const args = Array.isArray(s.args)
+    ? s.args.filter((a): a is string => typeof a === 'string')
+    : [];
+  return { command: s.command, args };
+}
+
+/**
+ * The registry packages the MCP servers of Claude Code's projects run: the
+ * servers each project in ~/.claude.json configures (`projects[dir]
+ * .mcpServers`) and the ones in that folder's `.mcp.json`. The hook stops a
+ * call to such a server when its package is malicious (resolve.ts), so the
+ * daemon's package check must know about them as it knows the user-level ones
+ * (release review 2026-11-27). Daemon only: it reads a file per project.
+ */
+export function claudeProjectMcpPackages(
+  home: string = os.homedir()
+): Array<{ identity: string; pkg: McpPackage }> {
+  const out = new Map<string, McpPackage>();
+  const add = (servers: Record<string, unknown>) => {
+    for (const raw of Object.values(servers).slice(0, 200)) {
+      const l = launchOf(raw);
+      const pkg = l ? mcpPackageFromCommand(l.command, l.args) : null;
+      if (l && pkg) {
+        const identity = mcpIdentityFromCommand(l.command, l.args);
+        if (!out.has(identity)) out.set(identity, pkg);
+      }
+    }
+  };
+  const projects = serversOf(readJson(path.join(home, '.claude.json'))?.projects);
+  for (const [dir, p] of Object.entries(projects).slice(0, MAX_PROJECTS)) {
+    add(serversOf((p as { mcpServers?: unknown } | null)?.mcpServers));
+    if (path.isAbsolute(dir) && path.resolve(dir) !== path.resolve(home))
+      add(serversOf(readJson(path.join(dir, '.mcp.json'))?.mcpServers));
+  }
+  return [...out].map(([identity, pkg]) => ({ identity, pkg }));
 }
