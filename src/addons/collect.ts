@@ -182,10 +182,14 @@ function enabledPlugins(home: string): Record<string, boolean> {
   }
 }
 
-/** The project folders agents worked in lately (from the audit log). */
+/** The project folders agent sessions were started in lately (from the audit
+ *  log): where an agent loads project skills from. Not every folder a call
+ *  ran in: an agent that `cd`s into a repository it is only reading (a
+ *  checkout under review) does not load that repository's skills, and
+ *  listing them filled the inventory with add-ons nobody uses. */
 function recentProjects(home: string): string[] {
   try {
-    return observeAudit(path.join(home, '.node9', 'audit.log')).projects.filter(
+    return observeAudit(path.join(home, '.node9', 'audit.log')).launchDirs.filter(
       (d) => path.isAbsolute(d) && d !== home
     );
   } catch {
