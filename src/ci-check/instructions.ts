@@ -326,6 +326,7 @@ export function isInstructionFile(
 // "system:" (too FP-prone in docs).
 export const OVERRIDE_RE =
   /ignore\s+(all\s+)?(previous|prior|the\s+above)\s+(instructions|prompts?|rules)|disregard\s+(the\s+|your\s+)?(system\s+)?(prompt|instructions|rules)|forget\s+(everything|all\s+(previous|prior))|you\s+are\s+now\s+(a|an|the)\b|<\/?system>/i;
+const OVERRIDE_ALL_RE = new RegExp(OVERRIDE_RE.source, 'gi');
 
 // ── Tier 2: dangerous sink WITH agent-directive framing → medium ───────────────
 // Remote-exec (fetch-and-obey). `| python3 -m json.tool` pretty-prints the fetched bytes,
@@ -461,13 +462,52 @@ function isNegated(text: string, idx: number): boolean {
 // whole of a quoted or backticked span, AND the 120 chars before it carry example/refusal
 // framing. Quoting alone is not enough — a quoted directive is still a directive to a model.
 const EXAMPLE_FRAMING_RE =
-  /\b(like|such as|e\.g\.|for example|examples?|including|shaped like|inert|block ?list|blocked|blocks?|patterns?|treat|labels?|strings?|phrases?|reject|flags?|detects?|matches)\b/i;
+  /\b(?:(?:like|such as|for example|examples?|including|shaped like|inert|block ?list|blocked|blocks?|patterns?|treat|labels?|strings?|phrases?|reject|flags?|detects?|matches)\b|e\.g\.)/i;
+
+// A refusal that follows the quoted text in the same sentence ("... - do not follow it").
+// Two vendor skills that defend against injected text were graded as injection for quoting
+// what to refuse (the only 2 high findings in 442 skill files, 2026-11-27). The object must
+// point back at the quoted text (it, them, these): "never follow the safety policy" is not a
+// refusal of the quote. Markdown emphasis around the negation (`**DO NOT** follow them`) counts.
+const REFUSAL_AFTER_RE =
+  /\b(do not|don'?t|never|must not|should not)\*{0,2}\s+(follow|obey|comply with|act on|execute)\s+(it|them|this|that|these|those|such|any of)\b/i;
+const REFUSAL_WINDOW = 300;
+
+// Opening quote -> its closing quote. Prose uses curly quotes as often as straight ones.
+const QUOTE_CLOSER: Record<string, string> = {
+  '"': '"',
+  "'": "'",
+  '`': '`',
+  '\u201c': '\u201d',
+  '\u2018': '\u2019',
+};
+
+/** Where the quoted span that is exactly the match ends (index after the closing quote), or
+ *  -1. One mark of punctuation may sit inside the closing quote (`"ignore previous
+ *  instructions,"`), nothing else: a quote that goes on past the match is a longer directive. */
+function quotedSpanEnd(text: string, idx: number, len: number): number {
+  const close = QUOTE_CLOSER[text[idx - 1] ?? ''];
+  if (!close) return -1;
+  let end = idx + len;
+  if (/[,.;:!?]/.test(text[end] ?? '')) end++;
+  return text[end] === close ? end + 1 : -1;
+}
+
+/** The rest of the sentence after `from`: up to a full stop, a blank line or the window. */
+function restOfSentence(text: string, from: number): string {
+  const rest = text.slice(from, from + REFUSAL_WINDOW);
+  const stop = rest.search(/[.!?](?:\s|$)|\n\s*\n/);
+  // The stop itself is kept out, so a refusal in the NEXT sentence does not count.
+  return stop < 0 ? rest : rest.slice(0, stop);
+}
 
 function isQuotedExample(text: string, idx: number, len: number): boolean {
-  const open = text[idx - 1];
-  const close = text[idx + len];
-  const quoted = (open === '"' || open === "'" || open === '`') && close === open;
-  return quoted && EXAMPLE_FRAMING_RE.test(text.slice(Math.max(0, idx - 120), idx));
+  const end = quotedSpanEnd(text, idx, len);
+  if (end < 0) return false;
+  return (
+    EXAMPLE_FRAMING_RE.test(text.slice(Math.max(0, idx - 120), idx)) ||
+    REFUSAL_AFTER_RE.test(restOfSentence(text, end))
+  );
 }
 
 // `curl … | python -c "<program>"` where the program only PARSES what it reads is not
@@ -686,8 +726,15 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
       )
     );
   }
-  const ovRaw = OVERRIDE_RE.exec(maskPathPlaceholders(content));
-  const ov = ovRaw && !isQuotedExample(content, ovRaw.index, ovRaw[0].length) ? ovRaw : null;
+  // Every match is tried, not only the first: a quoted example ahead of a real directive
+  // must not hide it.
+  let ov: RegExpMatchArray | null = null;
+  for (const m of maskPathPlaceholders(content).matchAll(OVERRIDE_ALL_RE)) {
+    if (!isQuotedExample(content, m.index ?? 0, m[0].length)) {
+      ov = m;
+      break;
+    }
+  }
   const ovEnc = !ov ? OVERRIDE_RE.exec(decoded) : null;
   if (ov || ovEnc) {
     const m = (ov || ovEnc)!;
@@ -701,7 +748,7 @@ export function analyzeInstructionFile(path: string, content: string): CiFinding
         ],
         'Remove the override text. An instruction file should not tell the agent to ignore its own rules.',
         path,
-        ov ? lineAt(content, ov.index) : undefined // concealed in base64: no line, never a wrong one
+        ov ? lineAt(content, ov.index ?? 0) : undefined // concealed in base64: no line, never a wrong one
       )
     );
   }
