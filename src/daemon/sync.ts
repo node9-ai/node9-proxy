@@ -193,6 +193,9 @@ export interface ManagedConfigCache {
   commandChecks?: Record<string, string>;
   approvers?: { native?: boolean; browser?: boolean; cloud?: boolean; terminal?: boolean };
   reviewChannel?: string;
+  /** What a hook does when node9 itself fails on a call (hook-error.ts reads
+   *  this file raw). Only `block` is ever stored: `allow` is the default. */
+  onHookError?: 'block';
   approvalTimeoutMs?: number;
   injectionScan?: { enabled: boolean; minConfidence: string; allow: string[] };
   loopDetection?: { enabled: boolean; threshold: number; windowSeconds: number };
@@ -259,6 +262,7 @@ export interface CloudPolicyBody {
     commandChecks?: Record<string, unknown>;
     approvers?: { native?: unknown; browser?: unknown; cloud?: unknown; terminal?: unknown };
     reviewChannel?: unknown;
+    onHookError?: unknown;
     approvalTimeoutMs?: unknown;
     injectionScan?: { enabled?: unknown; minConfidence?: unknown; allow?: unknown };
     loopDetection?: { enabled?: unknown; threshold?: unknown; windowSeconds?: unknown };
@@ -769,6 +773,9 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
   if (mc.reviewChannel === 'ask' || mc.reviewChannel === 'approver') {
     out.reviewChannel = mc.reviewChannel;
   }
+  // node9Firewall#383: the workspace can only tighten the fail policy, so only
+  // `block` crosses this seam; `allow` and junk are the same as silence.
+  if (mc.onHookError === 'block') out.onHookError = 'block';
   // Positive only — a stored 0 would auto-deny every daemon-held card instantly
   // (daemon timer: 0 ?? DEFAULT === 0). Unset falls back to the default timeout.
   if (typeof mc.approvalTimeoutMs === 'number' && mc.approvalTimeoutMs > 0) {
@@ -938,6 +945,7 @@ export function extractManagedConfig(body: CloudPolicyBody): ManagedConfigCache 
     out.commandChecks !== undefined ||
     out.approvers !== undefined ||
     out.reviewChannel !== undefined ||
+    out.onHookError !== undefined ||
     out.approvalTimeoutMs !== undefined ||
     out.injectionScan !== undefined ||
     out.loopDetection !== undefined ||

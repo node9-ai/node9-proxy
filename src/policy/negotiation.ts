@@ -135,6 +135,23 @@ function reasonSentence(reason: string | undefined): string {
   return userLinePart(s);
 }
 
+/**
+ * The block message for a call node9 could not check (node9Firewall#383): the
+ * hook failed, and this machine is set to stop a call that was not checked.
+ * It says plainly that this is not a judgement about the call, so the agent
+ * neither argues with a rule that does not exist nor looks for another way.
+ */
+export function buildCheckFailedMessage(toolName: string): string {
+  const tool = userLineValue(toolName, 60) || 'a tool call';
+  return withUserLine(
+    `Node9 stopped ${tool}: it could not check this call`,
+    'NODE9: Not checked. node9 hit an internal error before it could check this call, and this ' +
+      'machine is set to stop a call that was not checked. This is not a judgement about the ' +
+      'call. Do not retry it and do not try another way to do the same thing. Tell the user to ' +
+      'run `node9 doctor`; the error is in ~/.node9/hook-debug.log.'
+  );
+}
+
 /** "cors-utils is a known malicious package (MAL-2025-5493)" from the package
  *  check's reason ('Known malicious package: npm package "cors-utils@0.0.1"
  *  (MAL-...); ...'), every package it names, or '' when it has no such name. */

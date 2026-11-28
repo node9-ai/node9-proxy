@@ -11,6 +11,7 @@ import { forecastRun } from '../auth/forecast-context';
 import { sessionTurn } from './session-turn';
 import { findProjectRoot, MAX_PROJECT_ROOT } from './read-outside';
 import { MAX_REF_EIDS, RAN_AFTER_FLAG } from '../blocked-calls';
+import { HOOK_ERROR_CHECKED_BY } from '../hook-error';
 import {
   checkIdForRule,
   checkIdForCheckedBy,
@@ -394,7 +395,11 @@ export function appendLocalAudit(
     Boolean(meta?.piiPatterns) ||
     Boolean(meta?.canaryId) ||
     /dlp|taint/i.test(String(meta?.ruleName ?? ''));
-  const preview = auditHashArgsEnabled && !isDlpRow ? buildArgsPreview(args) : undefined;
+  // A check that was not performed (node9Firewall#383): the secret scan never
+  // ran on these arguments, so nothing vouches that a preview is clean.
+  const unscanned = checkedBy === HOOK_ERROR_CHECKED_BY;
+  const preview =
+    auditHashArgsEnabled && !isDlpRow && !unscanned ? buildArgsPreview(args) : undefined;
   const argsField = auditHashArgsEnabled
     ? { argsHash: hashArgs(args), ...(preview ? { argsPreview: preview } : {}) }
     : { args: args ? redactAuditArgs(args) : {} };

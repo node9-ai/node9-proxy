@@ -46,7 +46,21 @@ describe('hook code paths preserve audit-guard catches', () => {
     // The audit-guard pattern: a `catch (err...)` block followed within ~500
     // characters by a hook-debug.log write. This proves at least one error
     // path on this file's surface logs to hook-debug.log.
-    expect(src).toMatch(/catch\s*\([^)]*err[^)]*\)[\s\S]{0,500}hook-debug\.log/);
+    // Since node9Firewall#383 the write is `failHook(` (the outer catch: one
+    // line in hook-debug.log and one audit row, always) or an `appendToLog(
+    // HOOK_DEBUG_LOG` entry; hook-fail-policy.integration.test.ts proves both
+    // reach the file. The literal path is no longer next to the catch.
+    expect(src).toMatch(
+      /catch\s*\([^)]*err[^)]*\)[\s\S]{0,500}(hook-debug\.log|HOOK_DEBUG_LOG|failHook\()/
+    );
+  });
+
+  it('the outer catch of check.ts hands every failure to failHook', () => {
+    const src = fs.readFileSync(CHECK_TS, 'utf-8');
+    // The last catch of processPayload: no exit, no branch, before the record.
+    expect(src).toMatch(/catch \(err: unknown\) \{[^}]*failHook\('engine', err,/);
+    // And nothing in the file ends a failed check with a bare exit(0) again.
+    expect(src).not.toMatch(/Fail open so we never break/);
   });
 
   it('log.ts has at least one catch block writing to hook-debug.log', () => {

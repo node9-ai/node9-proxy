@@ -10,11 +10,9 @@
 
 import { Command } from 'commander';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import { registerCheckCommand } from './cli/commands/check';
+import { failCurrentCheck, registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
-import { getConfig } from './config';
 
 const { version } = JSON.parse(
   fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8')
@@ -26,21 +24,22 @@ program.name('node9').description('The Sudo Command for AI Agents').version(vers
 registerCheckCommand(program);
 registerLogCommand(program);
 
-// The same last-resort handler the full CLI installs for these commands: a
-// hook must never surface an unhandled rejection to the agent; `check` fails
-// open (exit 0) as it always has, `log` reports and exits 1.
+// The same last-resort handlers the full CLI installs for these commands: a
+// hook must never surface an unhandled error to the agent. `check` records
+// that the call was not checked and follows the machine's fail policy
+// (node9Firewall#383); `log` reports and exits 1.
 process.on('unhandledRejection', (reason) => {
-  if (process.argv[2] === 'check') {
-    if (process.env.NODE9_DEBUG === '1' || getConfig().settings.enableHookLogDebug) {
-      const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
-      const msg = reason instanceof Error ? reason.message : String(reason);
-      fs.appendFileSync(logPath, `[${new Date().toISOString()}] UNHANDLED: ${msg}\n`);
-    }
-    process.exit(0);
-  } else {
-    console.error('[Node9] Unhandled error:', reason);
-    process.exit(1);
-  }
+  if (process.argv[2] === 'check') failCurrentCheck(reason);
+  console.error('[Node9] Unhandled error:', reason);
+  process.exit(1);
+});
+// Without this, an exception in an event handler ends `check` with Node's own
+// stack trace and exit 1, which an agent reads as a broken hook: the call runs
+// and nothing records it.
+process.on('uncaughtException', (err) => {
+  if (process.argv[2] === 'check') failCurrentCheck(err);
+  console.error('[Node9] Unhandled error:', err);
+  process.exit(1);
 });
 
 void program.parseAsync();

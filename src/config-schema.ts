@@ -114,6 +114,12 @@ export const ConfigFileSchema = z
         // ships to the dashboard as audit; admins force routing via managed
         // reviewChannel, which outranks the local --ask flag).
         reviewChannel: z.enum(['ask', 'approver']).optional(),
+        // What a hook does when node9 itself fails on a call (node9Firewall#383):
+        // 'allow' (default) lets the call run, 'block' stops it. Read raw by
+        // hook-error.ts, not through the loaded config: the loader may be what
+        // failed. The workspace and NODE9_ON_HOOK_ERROR can also ask for 'block';
+        // nothing can turn a 'block' back into 'allow'.
+        onHookError: z.enum(['allow', 'block']).optional(),
         // When true, agents may call WEAKENING node9 MCP tools (shield_disable,
         // approver_set). Default (unset/false): those tools refuse over MCP — a human
         // must run them from the CLI. node9's threat model is the agent itself.

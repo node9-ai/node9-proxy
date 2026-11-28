@@ -26,6 +26,7 @@ import { undoLeftoverPaths } from '../../utils/undo-leftovers';
 import { locatorCommand } from '../../utils/platform-shell';
 import { mcpLaunchHealth, readMcpNodeFailures, launcherState } from '../../mcp-launch-health';
 import { pinsNode } from '../../node9-shim';
+import { describeHookErrorPolicy, readHookErrorPolicy, recentHookErrors } from '../../hook-error';
 
 /**
  * Did the cloud REJECT this machine's key? A 401 in the sync-health record is
@@ -177,6 +178,20 @@ export function registerDoctorCommand(program: Command, version: string): void {
         warn(
           'No cloud credentials — running in local-only mode',
           'Run: node9 login <apiKey>  (or skip for local-only)'
+        );
+      }
+
+      // node9Firewall#383: what happens when node9 itself fails on a call, and
+      // how often it did. A check that did not run is a gap in what node9
+      // guards, so it is a warning here even though each one is in the audit log.
+      pass(describeHookErrorPolicy(readHookErrorPolicy(homeDir)));
+      const notChecked = recentHookErrors(Date.now() - 7 * 24 * 60 * 60 * 1000, homeDir);
+      if (notChecked.count > 0) {
+        const ran = notChecked.count - notChecked.stopped;
+        warn(
+          `${notChecked.count} ${notChecked.count === 1 ? 'call was' : 'calls were'} not checked in the last 7 days because node9 failed` +
+            ` (${ran} ran, ${notChecked.stopped} stopped)`,
+          `Last: ${notChecked.last?.ts ?? ''} ${notChecked.last?.what ?? ''} · details: ~/.node9/hook-debug.log (event "hook-error")`
         );
       }
 

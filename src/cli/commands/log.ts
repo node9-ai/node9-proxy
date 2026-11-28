@@ -17,6 +17,8 @@ import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
 import { approveAddonForSession } from '../../addons/session-approvals';
 import { resolveBlockedCall } from '../../blocked-calls';
+import { checkedCallKey, checkedCallState } from '../../checked-calls';
+import { HOOK_ERROR_CHECKED_BY, recordHookError } from '../../hook-error';
 import {
   notifyTaintPropagate,
   notifyTaint,
@@ -71,6 +73,7 @@ import {
   canonicalToolName,
   canonicalToolInput,
   agentLabelFromFlag,
+  inspectablePayload,
 } from '../../utils/hook-payload';
 import { stripControlChars } from '../../utils/safe-text';
 
@@ -205,7 +208,13 @@ export function registerLogCommand(program: Command): void {
       const logPayload = async (raw: string) => {
         try {
           if (!raw || raw.trim() === '') process.exit(0);
-          const payload = JSON.parse(raw) as {
+          const parsed: unknown = JSON.parse(raw);
+          // Not a JSON object: no call to record.
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+            process.exit(0);
+          // The same safe copy `check` inspects (hook-payload.ts), so both
+          // hooks derive the same keys for one call.
+          const payload = inspectablePayload(parsed) as {
             tool_name?: string;
             name?: string;
             tool_input?: unknown;
@@ -522,6 +531,48 @@ export function registerLogCommand(program: Command): void {
             appendToLog(HOOK_DEBUG_LOG, {
               ts: new Date().toISOString(),
               event: 'ran-after-block-row-fail',
+              tool,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+
+          // The before-run hook never finished for this call (checked-calls.ts):
+          // the agent's host killed it at its timeout, or it never ran. The
+          // call ran with no verdict, and this row is the only thing that
+          // says so (node9Firewall#383, phase 3). Same row and same counters
+          // as a check that failed inside node9.
+          try {
+            const checkedKey = checkedCallKey(payload as Record<string, unknown>, agent);
+            if (checkedKey && checkedCallState(checkedKey) === 'unchecked') {
+              recordHookError(
+                'no-verdict',
+                new Error('the before-run hook did not finish for this call'),
+                {
+                  agent,
+                  tool,
+                  decision: 'allow',
+                  policySource: 'after-run',
+                }
+              );
+              appendLocalAudit(
+                tool,
+                rawInput,
+                'allow',
+                HOOK_ERROR_CHECKED_BY,
+                {
+                  agent,
+                  ruleName: `${HOOK_ERROR_CHECKED_BY}:no-verdict`,
+                  ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                  ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
+                  ...(safeCwd ? { workingDir: safeCwd } : {}),
+                },
+                true
+              );
+            }
+          } catch (err) {
+            appendToLog(HOOK_DEBUG_LOG, {
+              ts: new Date().toISOString(),
+              event: 'no-verdict-row-fail',
               tool,
               error: err instanceof Error ? err.message : String(err),
             });

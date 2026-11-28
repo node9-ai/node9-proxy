@@ -46,7 +46,7 @@ import {
   toSafeJson,
 } from './cli/render/explain-display';
 import type { ExplainResult } from './policy';
-import { registerCheckCommand } from './cli/commands/check';
+import { failCurrentCheck, registerCheckCommand } from './cli/commands/check';
 import { registerLogCommand } from './cli/commands/log';
 import { registerShieldCommand } from './cli/commands/shield';
 import { registerAppsCommand } from './cli/commands/apps';
@@ -963,18 +963,11 @@ registerBlastCommand(program);
 // cli.ts is always the process entry point, never imported as a library.
 if (process.argv[2] !== 'daemon') {
   process.on('unhandledRejection', (reason) => {
-    const isCheckHook = process.argv[2] === 'check';
-    if (isCheckHook) {
-      if (process.env.NODE9_DEBUG === '1' || getConfig().settings.enableHookLogDebug) {
-        const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
-        const msg = reason instanceof Error ? reason.message : String(reason);
-        fs.appendFileSync(logPath, `[${new Date().toISOString()}] UNHANDLED: ${msg}\n`);
-      }
-      process.exit(0);
-    } else {
-      console.error('[Node9] Unhandled error:', reason);
-      process.exit(1);
-    }
+    // `check` records that the call was not checked and follows the machine's
+    // fail policy (node9Firewall#383), as the hook bundle does.
+    if (process.argv[2] === 'check') failCurrentCheck(reason);
+    console.error('[Node9] Unhandled error:', reason);
+    process.exit(1);
   });
 }
 

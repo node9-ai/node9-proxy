@@ -20,11 +20,21 @@ import { budgetNoticeLine, claimBudgetNotice, judgeSpendBudget } from '../../aut
 import { openStartupLogFd, recordStartupState } from '../../daemon/startup-log';
 import { getConfig, type Config } from '../../config';
 import {
+  buildCheckFailedMessage,
   buildNegotiationMessage,
   buildReviewMessage,
   userLineOf,
   isHumanDecision,
 } from '../../policy/negotiation';
+import {
+  agentFromRawPayload,
+  eventFromRawPayload,
+  HOOK_ERROR_CHECKED_BY,
+  hookErrorText,
+  readHookErrorPolicy,
+  recordHookError,
+  type HookErrorStage,
+} from '../../hook-error';
 import {
   autoStartDaemonAndWait,
   isTestingMode,
@@ -57,12 +67,14 @@ import {
   discardPendingReview,
 } from '../../review-pending';
 import { blockedCallKey, canTrackRun, noteBlockedCall } from '../../blocked-calls';
+import { checkedCallKey, noteCheckedCall } from '../../checked-calls';
 import {
   extractToolName,
   extractToolInput,
   canonicalToolName,
   canonicalToolInput,
   agentLabelFromFlag,
+  inspectablePayload,
 } from '../../utils/hook-payload';
 import { stripControlChars } from '../../utils/safe-text';
 import { atomicWriteSync } from '../../utils/atomic-write';
@@ -229,6 +241,261 @@ function exitCodexBlock(reason: string): never {
   process.exit(2);
 }
 
+/**
+ * Tell the agent a tool call is stopped, in the one shape that agent honours,
+ * and exit. `sendBlock` ends here; so does the hook's error path, which is why
+ * this needs nothing but the agent's name: no config, no payload, no engine.
+ */
+function deliverBlock(agent: string, message: string): never {
+  if (agent === 'Antigravity') {
+    // Antigravity honours ONLY `decision: "deny"` — verified live
+    // against agy 1.0.6: the Claude shape below (`decision:
+    // "block"` + exit 2) is silently ignored and the tool RUNS
+    // (fail-open). The reason string is surfaced to the model as
+    // "Tool call denied with reason: …", so the negotiation
+    // message still works. Exit code is ignored by agy; exit 0
+    // matches the verified capture exactly.
+    process.stdout.write(JSON.stringify({ decision: 'deny', reason: message }) + '\n');
+    process.exit(0);
+  }
+  if (agent === 'GitHub Copilot') {
+    // GitHub Copilot CLI's preToolUse decision is a flat
+    // `permissionDecision`/`permissionDecisionReason` (NOT Claude's
+    // nested hookSpecificOutput). Verified live against Copilot CLI
+    // 1.0.60: this shape with exit 0 blocks and surfaces the reason
+    // to the model as "Denied by preToolUse hook: …". The Claude
+    // shape below also blocks here (preToolUse is fail-closed on
+    // non-zero exit), but the reason then shows only as a bare
+    // warning — the native shape gives the clean negotiation UX.
+    process.stdout.write(
+      JSON.stringify({
+        permissionDecision: 'deny',
+        permissionDecisionReason: message,
+      }) + '\n'
+    );
+    process.exit(0);
+  }
+  // Codex: the reason on stderr, exit 2, nothing on stdout (#473).
+  if (agent === 'Codex') exitCodexBlock(message);
+  // fw#420: the CLI shows systemMessage to the user directly, so a
+  // Claude Code user sees node9's own line even if the agent does not
+  // quote it. Claude Code only: other agents' schemas are unverified,
+  // and an unknown field must never put a block at risk.
+  const userLine = userLineOf(message);
+  process.stdout.write(
+    JSON.stringify({
+      decision: 'block',
+      reason: message, // This is the core instruction
+      ...(agent === 'Claude Code' && userLine ? { systemMessage: userLine } : {}),
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: message,
+      },
+    }) + '\n'
+  );
+  // Exit code 2 signals a block to Claude Code. Exit 0 = allow, non-zero = block.
+  process.exit(2);
+}
+
+/** The hook payload fields `check` reads, across the agent dialects. A type
+ *  alias, not an interface: it is passed where a plain record is expected. */
+type CheckPayload = {
+  tool_name?: string;
+  tool_input?: unknown;
+  name?: string;
+  args?: unknown;
+  cwd?: string;
+  session_id?: string;
+  // Path to the agent's session JSONL/transcript file. Both Claude
+  // Code and Gemini CLI populate this in the hook payload. Forwarded
+  // to the SaaS so the dashboard can correlate audit rows to the
+  // session content — essential for Gemini, where session_id can
+  // drift across resumes but transcript_path is stable.
+  transcript_path?: string;
+  hook_event_name?: string; // Claude: "PreToolUse" | Gemini: "BeforeTool"
+  tool_use_id?: string; // Claude-only
+  permission_mode?: string; // Claude-only
+  timestamp?: string; // Gemini-only
+  turn_id?: string; // Codex-only (#178 fingerprint)
+  prompt?: string; // UserPromptSubmit payload body
+  // Antigravity (agy) dialect — verified against agy 1.0.6:
+  toolCall?: { name?: string; args?: unknown } | null;
+  conversationId?: string; // agy's session_id equivalent
+  transcriptPath?: string; // agy's transcript_path equivalent
+  workspacePaths?: string[]; // agy has no top-level cwd; [0] is the workspace root
+};
+
+/**
+ * node9 failed while checking a call (node9Firewall#383). Never silent: one
+ * line in hook-debug.log and one audit row say the check was not performed,
+ * whatever happens next. Then the machine's fail policy decides: `allow` lets
+ * the call run, as node9 always has; `block` stops it.
+ *
+ * Only a tool call is ever stopped. A prompt the person typed and a session
+ * start go through under either policy: stopping the person's own prompt
+ * leaves them no way to ask what went wrong.
+ *
+ * Nothing here loads the config or the engine (either may be what failed),
+ * and every step is on its own: a failed log or audit write still ends in
+ * the policy's exit.
+ */
+function failHook(
+  stage: HookErrorStage,
+  err: unknown,
+  ctx: { raw: string; payload: CheckPayload; agentOverride?: string }
+): never {
+  let agent = ctx.agentOverride;
+  let tool = '';
+  let event: unknown;
+  try {
+    agent ??=
+      stage === 'parse'
+        ? (agentFromRawPayload(ctx.raw) ?? detectAiAgent({}))
+        : detectAiAgent(ctx.payload as Record<string, unknown>);
+    tool = canonicalToolName(stripControlChars(extractToolName(ctx.payload)));
+    event = stage === 'parse' ? eventFromRawPayload(ctx.raw) : ctx.payload.hook_event_name;
+  } catch {
+    /* an unknown agent gets the default block shape below */
+  }
+  const isToolCall = event !== 'UserPromptSubmit' && event !== 'SessionStart';
+  const reading = readHookErrorPolicy();
+  // A paused node9 checks nothing, so it has nothing to stop either.
+  let paused = process.env.NODE9_PAUSED === '1';
+  try {
+    paused ||= checkPause().paused;
+  } catch {
+    /* an unreadable pause file is not a pause */
+  }
+  const stop = reading.policy === 'block' && isToolCall && !paused;
+  const decision = stop ? 'deny' : 'allow';
+
+  recordHookError(stage, err, {
+    agent,
+    tool,
+    decision,
+    policySource: !isToolCall ? 'not-a-tool-call' : paused ? 'paused' : reading.source,
+  });
+
+  // The row is shipped, so it names the stage and the error's class only: a
+  // parse error's message can quote the payload. It carries the arguments'
+  // hash and no preview (audit/index.ts): no scan vouched for them.
+  const sessionId =
+    typeof ctx.payload.session_id === 'string'
+      ? ctx.payload.session_id
+      : typeof ctx.payload.conversationId === 'string'
+        ? ctx.payload.conversationId
+        : undefined;
+  const auditMeta = {
+    agent,
+    sessionId,
+    ruleName: `${HOOK_ERROR_CHECKED_BY}:${stage}:${err instanceof Error ? err.name : 'thrown'}`,
+  };
+  const auditTool = tool || (event === 'UserPromptSubmit' ? 'UserPromptSubmit' : 'unknown');
+  try {
+    appendLocalAudit(
+      auditTool,
+      isToolCall ? extractToolInput(ctx.payload) : {},
+      decision,
+      HOOK_ERROR_CHECKED_BY,
+      auditMeta,
+      true
+    );
+  } catch {
+    // The arguments themselves may be what cannot be handled: keep the row.
+    try {
+      appendLocalAudit(auditTool, {}, decision, HOOK_ERROR_CHECKED_BY, auditMeta, true);
+    } catch (auditErr) {
+      recordHookError('engine', auditErr, {
+        agent,
+        tool,
+        decision,
+        policySource: 'audit-row-not-written',
+      });
+    }
+  }
+
+  // Proof that the stop held (blocked-calls.ts), as for any other block: if
+  // the agent runs the call anyway, its after-run hook records that.
+  if (stop) {
+    try {
+      const key = blockedCallKey(ctx.payload as Record<string, unknown>, agent ?? 'Unknown Agent');
+      if (key) {
+        noteBlockedCall({
+          key,
+          tool: tool || 'unknown',
+          agent: agent ?? 'Unknown Agent',
+          ...(sessionId && { sessionId }),
+          ruleName: auditMeta.ruleName,
+          ts: Date.now(),
+        });
+      }
+    } catch {
+      /* the proof is best-effort; the stop is not */
+    }
+  }
+
+  // The person at the terminal. Never stderr: Claude Code reads any stderr
+  // from a hook as a hook error, and Codex reads it as the block reason.
+  if (isToolCall) {
+    try {
+      const ttyFd = fs.openSync('/dev/tty', 'w');
+      try {
+        fs.writeSync(
+          ttyFd,
+          chalk.yellow(
+            `\n⚠️  Node9 could not check ${tool ? `"${tool}"` : 'a tool call'} (internal error: ${hookErrorText(err)}).\n`
+          ) +
+            chalk.gray(
+              `   The call was ${stop ? 'stopped' : 'not checked and ran'}. Details: ~/.node9/hook-debug.log, or run: node9 doctor\n\n`
+            )
+        );
+      } finally {
+        fs.closeSync(ttyFd);
+      }
+    } catch {
+      // /dev/tty unavailable (CI, non-interactive) — skip visual output.
+    }
+  }
+
+  if (stop) deliverBlock(agent ?? 'Unknown Agent', buildCheckFailedMessage(tool));
+  process.exit(0);
+}
+
+/** The call this process is checking, for the last-resort handlers below. */
+let currentCheck: { raw: string; payload: CheckPayload; agentOverride?: string } | null = null;
+
+/**
+ * Proof that this hook finished (checked-calls.ts): on an orderly exit, with
+ * any verdict, the call is noted in the journal. A hook the agent's host
+ * kills at its timeout never gets here, and the after-run hook of a call
+ * with no note reports that it ran unchecked. Registered once per process.
+ */
+let checkedCallNote: string | null = null;
+let exitNoteRegistered = false;
+function noteThisCallOnExit(payload: CheckPayload, agent: string): void {
+  try {
+    checkedCallNote = checkedCallKey(payload as Record<string, unknown>, agent);
+  } catch {
+    checkedCallNote = null;
+  }
+  if (exitNoteRegistered) return;
+  exitNoteRegistered = true;
+  process.on('exit', () => {
+    if (checkedCallNote) noteCheckedCall(checkedCallNote);
+  });
+}
+
+/**
+ * The last-resort path for `node9 check`: an error no `try` caught (an
+ * unhandled rejection, an exception in an event handler). The same record and
+ * the same fail policy as any other failed check, instead of a silent exit 0
+ * or Node's own exit 1, which an agent reads as "the hook broke, run the call".
+ */
+export function failCurrentCheck(err: unknown): never {
+  failHook('engine', err, currentCheck ?? { raw: '', payload: {} });
+}
+
 // Whether a `review` verdict for this call is deferred to the agent's inline
 // prompt (true) vs. node9's own approver (false). Precedence (v2 — the cloud
 // carve-out is deleted, see review-ask-inline-v2-spec.md: cloud is the record,
@@ -270,51 +537,29 @@ export function registerCheckCommand(program: Command): void {
     .action(async (data, opts: { agent?: string; ask?: boolean }) => {
       const agentOverride = agentLabelFromFlag(opts?.agent);
       const processPayload = async (raw: string) => {
+        // Outside the try: the error path names the agent and the tool from it.
+        let payload: CheckPayload = {};
+        currentCheck = { raw, payload, agentOverride };
         try {
           if (!raw || raw.trim() === '') process.exit(0);
 
-          let payload = JSON.parse(raw) as {
-            tool_name?: string;
-            tool_input?: unknown;
-            name?: string;
-            args?: unknown;
-            cwd?: string;
-            session_id?: string;
-            // Path to the agent's session JSONL/transcript file. Both Claude
-            // Code and Gemini CLI populate this in the hook payload. Forwarded
-            // to the SaaS so the dashboard can correlate audit rows to the
-            // session content — essential for Gemini, where session_id can
-            // drift across resumes but transcript_path is stable.
-            transcript_path?: string;
-            hook_event_name?: string; // Claude: "PreToolUse" | Gemini: "BeforeTool"
-            tool_use_id?: string; // Claude-only
-            permission_mode?: string; // Claude-only
-            timestamp?: string; // Gemini-only
-            turn_id?: string; // Codex-only (#178 fingerprint)
-            prompt?: string; // UserPromptSubmit payload body
-            // Antigravity (agy) dialect — verified against agy 1.0.6:
-            toolCall?: { name?: string; args?: unknown } | null;
-            conversationId?: string; // agy's session_id equivalent
-            transcriptPath?: string; // agy's transcript_path equivalent
-            workspacePaths?: string[]; // agy has no top-level cwd; [0] is the workspace root
-          };
-
+          let parsed: unknown;
           try {
-            payload = JSON.parse(raw);
+            parsed = JSON.parse(raw);
           } catch (err) {
-            // If JSON is broken (e.g. half-sent due to timeout), log it and fail open.
-            // We load config temporarily just to check if debug logging is on.
-            const tempConfig = getConfig();
-            if (process.env.NODE9_DEBUG === '1' || tempConfig.settings.enableHookLogDebug) {
-              const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
-              const errMsg = err instanceof Error ? err.message : String(err);
-              fs.appendFileSync(
-                logPath,
-                `[${new Date().toISOString()}] JSON_PARSE_ERROR: ${errMsg}\nRAW: ${raw}\n`
-              );
-            }
-            process.exit(0);
+            // A payload that is not JSON (half-sent on a timeout, for one) is
+            // a call node9 cannot check: the same path as any other failure.
+            failHook('parse', err, { raw, payload, agentOverride });
           }
+          // What node9 inspects from here on: safe to walk and to coerce,
+          // with nothing dropped (hook-payload.ts).
+          payload = inspectablePayload(parsed) as CheckPayload;
+          currentCheck = { raw, payload, agentOverride };
+          noteThisCallOnExit(payload, agentOverride ?? detectAiAgent(payload));
+
+          // Test seam, honoured only under NODE9_TESTING: fail where a real
+          // fault would, so the error path is exercised end to end.
+          const testFault = isTestingMode() ? process.env.NODE9_TEST_HOOK_FAULT : undefined;
 
           // A Codex session starts: tell the user, once per session, that node9
           // is on and at which level, before the first prompt (Claude Code gets
@@ -373,6 +618,7 @@ export function registerCheckCommand(program: Command): void {
           // reaches the model. No tool-call config/orchestrator path needed —
           // DLP is enabled by default for these patterns.
           if (payload.hook_event_name === 'UserPromptSubmit') {
+            if (testFault === 'prompt') throw new Error('test fault: prompt');
             const prompt = typeof payload.prompt === 'string' ? payload.prompt : '';
 
             // Debug logging — sanitize the prompt before persisting so a
@@ -486,8 +732,15 @@ export function registerCheckCommand(program: Command): void {
                   );
                   process.exit(2);
                 }
-              } catch {
-                /* the add-on gate never stops a prompt on its own failure */
+              } catch (err) {
+                // The add-on gate never stops a prompt on its own failure,
+                // and never fails unseen.
+                appendToLog(HOOK_DEBUG_LOG, {
+                  ts: new Date().toISOString(),
+                  event: 'check-skipped',
+                  check: 'addon-slash-command',
+                  error: hookErrorText(err),
+                });
               }
             }
 
@@ -634,6 +887,13 @@ export function registerCheckCommand(program: Command): void {
           const safeCwdForConfig =
             typeof payloadCwd === 'string' && path.isAbsolute(payloadCwd) ? payloadCwd : undefined;
           const config = getConfig(safeCwdForConfig);
+          if (testFault === 'engine') throw new Error('test fault: engine');
+          // Stays in the check until the test kills it, as a host does at its timeout.
+          if (testFault === 'hang') await new Promise((resolve) => setTimeout(resolve, 60000));
+          if (testFault === 'unhandled') {
+            void Promise.reject(new Error('test fault: unhandled'));
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          }
 
           // Eagerly start the daemon for activity logging (fire-and-forget).
           // Without this, tool events never reach `node9 tail` if the daemon
@@ -920,57 +1180,7 @@ export function registerCheckCommand(program: Command): void {
             );
 
             // 5. Send the structured JSON back to the LLM agent
-            if (agent === 'Antigravity') {
-              // Antigravity honours ONLY `decision: "deny"` — verified live
-              // against agy 1.0.6: the Claude shape below (`decision:
-              // "block"` + exit 2) is silently ignored and the tool RUNS
-              // (fail-open). The reason string is surfaced to the model as
-              // "Tool call denied with reason: …", so the negotiation
-              // message still works. Exit code is ignored by agy; exit 0
-              // matches the verified capture exactly.
-              process.stdout.write(
-                JSON.stringify({ decision: 'deny', reason: aiFeedbackMessage }) + '\n'
-              );
-              process.exit(0);
-            }
-            if (agent === 'GitHub Copilot') {
-              // GitHub Copilot CLI's preToolUse decision is a flat
-              // `permissionDecision`/`permissionDecisionReason` (NOT Claude's
-              // nested hookSpecificOutput). Verified live against Copilot CLI
-              // 1.0.60: this shape with exit 0 blocks and surfaces the reason
-              // to the model as "Denied by preToolUse hook: …". The Claude
-              // shape below also blocks here (preToolUse is fail-closed on
-              // non-zero exit), but the reason then shows only as a bare
-              // warning — the native shape gives the clean negotiation UX.
-              process.stdout.write(
-                JSON.stringify({
-                  permissionDecision: 'deny',
-                  permissionDecisionReason: aiFeedbackMessage,
-                }) + '\n'
-              );
-              process.exit(0);
-            }
-            // Codex: the reason on stderr, exit 2, nothing on stdout (#473).
-            if (agent === 'Codex') exitCodexBlock(aiFeedbackMessage);
-            // fw#420: the CLI shows systemMessage to the user directly, so a
-            // Claude Code user sees node9's own line even if the agent does not
-            // quote it. Claude Code only: other agents' schemas are unverified,
-            // and an unknown field must never put a block at risk.
-            const userLine = userLineOf(aiFeedbackMessage);
-            process.stdout.write(
-              JSON.stringify({
-                decision: 'block',
-                reason: aiFeedbackMessage, // This is the core instruction
-                ...(agent === 'Claude Code' && userLine ? { systemMessage: userLine } : {}),
-                hookSpecificOutput: {
-                  hookEventName: 'PreToolUse',
-                  permissionDecision: 'deny',
-                  permissionDecisionReason: aiFeedbackMessage,
-                },
-              }) + '\n'
-            );
-            // Exit code 2 signals a block to Claude Code. Exit 0 = allow, non-zero = block.
-            process.exit(2);
+            deliverBlock(agent, aiFeedbackMessage);
           };
 
           // A call node9 flagged and is letting through, or handing to the
@@ -1297,15 +1507,15 @@ export function registerCheckCommand(program: Command): void {
                   }
               }
             } catch (err) {
-              if (process.env.NODE9_DEBUG === '1') {
-                try {
-                  const dbg = path.join(os.homedir(), '.node9', 'hook-debug.log');
-                  const msg = err instanceof Error ? err.message : String(err);
-                  fs.appendFileSync(dbg, `[${new Date().toISOString()}] SKILL_PIN_ERROR: ${msg}\n`);
-                } catch {
-                  /* ignore */
-                }
-              }
+              // The skill check did not run for this call; the rest of the
+              // gate still does. Always logged: a check that silently stops
+              // running is the gap node9Firewall#383 closes.
+              appendToLog(HOOK_DEBUG_LOG, {
+                ts: new Date().toISOString(),
+                event: 'check-skipped',
+                check: 'skill-pin',
+                error: hookErrorText(err),
+              });
             }
           }
 
@@ -1472,12 +1682,9 @@ export function registerCheckCommand(program: Command): void {
             blockedByLabel: result.blockedByLabel,
           });
         } catch (err: unknown) {
-          if (process.env.NODE9_DEBUG === '1') {
-            const logPath = path.join(os.homedir(), '.node9', 'hook-debug.log');
-            const errMsg = err instanceof Error ? err.message : String(err);
-            fs.appendFileSync(logPath, `[${new Date().toISOString()}] ERROR: ${errMsg}\n`);
-          }
-          process.exit(0); // Fail open so we never break Claude on a parse error
+          // node9 itself failed: record it, then the machine's fail policy
+          // decides whether the call runs (node9Firewall#383).
+          failHook('engine', err, { raw, payload, agentOverride });
         }
       };
 
