@@ -4,7 +4,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { readMcpIndex } from '../addons/index-file';
-import { refreshAddonsIndex, refreshStandingOnce } from '../daemon/addons-index';
+import { refreshAddonsIndex, refreshIndexRound, refreshStandingOnce } from '../daemon/addons-index';
+import { _resetMcpSeenCursor } from '../addons/mcp-seen';
 import { _resetConfigCache } from '../config';
 
 const homes: string[] = [];
@@ -47,6 +48,32 @@ describe('refreshAddonsIndex', () => {
     fs.utimesSync(path.join(h, '.codex', 'config.toml'), later, later);
     refreshAddonsIndex(sig, h, {});
     expect(readMcpIndex(h).map((e) => e.name)).toEqual(['db2']);
+  });
+
+  it('a round picks up a server seen only in calls, though no config changed', () => {
+    _resetMcpSeenCursor();
+    const h = home();
+    codex(h, 'db', '@acme/db-mcp');
+    let sig = refreshIndexRound(undefined, h, {});
+    expect(readMcpIndex(h).map((e) => e.name)).toEqual(['db']);
+    // The hook audits a call to a server no config names (the row it writes).
+    const auditRow = (tool: string) =>
+      JSON.stringify({ ts: new Date().toISOString(), tool, decision: 'allow', agent: 'Codex' }) +
+      '\n';
+    fs.appendFileSync(path.join(h, '.node9', 'audit.log'), auditRow('mcp__codex_apps__open'));
+    // The round at daemon start does not read the audit log.
+    sig = refreshIndexRound(sig, h, {}, false);
+    expect(readMcpIndex(h).map((e) => e.name)).toEqual(['db']);
+    sig = refreshIndexRound(sig, h, {});
+    expect(readMcpIndex(h)).toEqual([
+      { name: 'db', identity: 'npm:@acme/db-mcp', state: 'outside', agents: ['codex'] },
+      { name: 'codex_apps', identity: 'name:codex_apps', state: 'seen', agents: ['codex'] },
+    ]);
+    // Another call to the same server changes nothing: no rebuild.
+    fs.writeFileSync(path.join(h, '.node9', 'addons-index.json'), '{"v":1,"mcp":[]}');
+    fs.appendFileSync(path.join(h, '.node9', 'audit.log'), auditRow('mcp__codex_apps__close'));
+    refreshIndexRound(sig, h, {});
+    expect(readMcpIndex(h)).toEqual([]);
   });
 
   it('a config created after the start counts as a change', () => {

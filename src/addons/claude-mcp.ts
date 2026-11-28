@@ -130,6 +130,27 @@ function launchOf(raw: unknown): { command: string; args: string[] } | null {
 }
 
 /**
+ * The names Claude Code's projects give their MCP servers (`projects[dir]
+ * .mcpServers` in ~/.claude.json and each folder's `.mcp.json`), node9's own
+ * included. The hook judges a call to such a server by what its config runs
+ * (claudeMcpEntries), so the list of servers seen only in calls
+ * (mcp-seen.ts) must leave these names out. Daemon and CLI only.
+ */
+export function claudeProjectMcpNames(home: string = os.homedir()): string[] {
+  const out = new Set<string>();
+  const add = (servers: Record<string, unknown>) => {
+    for (const name of Object.keys(servers).slice(0, 200)) out.add(name);
+  };
+  const projects = serversOf(readJson(path.join(home, '.claude.json'))?.projects);
+  for (const [dir, p] of Object.entries(projects).slice(0, MAX_PROJECTS)) {
+    add(serversOf((p as { mcpServers?: unknown } | null)?.mcpServers));
+    if (path.isAbsolute(dir) && path.resolve(dir) !== path.resolve(home))
+      add(serversOf(readJson(path.join(dir, '.mcp.json'))?.mcpServers));
+  }
+  return [...out];
+}
+
+/**
  * The registry packages the MCP servers of Claude Code's projects run: the
  * servers each project in ~/.claude.json configures (`projects[dir]
  * .mcpServers`) and the ones in that folder's `.mcp.json`. The hook stops a

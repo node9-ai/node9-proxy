@@ -167,6 +167,21 @@ export function maliciousVerdict(
       };
 }
 
+/**
+ * One call to an MCP server no agent config names (mcp-seen.ts): a
+ * claude.ai connector, a plugin's server, a tool the agent's app adds. Only
+ * an explicit block stops it. The rule for add-ons nobody approved does not
+ * apply: under `block` it would stop the agent's own tools on their first
+ * call (plan decision D4).
+ */
+export function seenMcpVerdict(policy: AddonPolicy | undefined, identity: string): AddonVerdict {
+  if (!policy || !identity || policy.mcp[identity] !== 'blocked') return { action: 'allow' };
+  const what = identity.startsWith('name:')
+    ? `the MCP server "${identity.slice('name:'.length)}"`
+    : `the MCP server "${identity}"`;
+  return verdictFor(policy, 'blocked', what, `addon:mcp:${identity}`);
+}
+
 /** One call to an MCP server, by its identity (`npm:<pkg>`, `url:<host>`...). */
 export function mcpVerdict(policy: AddonPolicy | undefined, identity: string): AddonVerdict {
   if (!policy || !identity) return { action: 'allow' };

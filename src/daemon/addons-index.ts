@@ -14,6 +14,7 @@ import { collectMcpDetail, collectMcpOnly } from '../addons/collect';
 import { claudeProjectMcpPackages } from '../addons/claude-mcp';
 import { refreshPackageStanding } from '../addons/package-standing';
 import { writeMcpIndex } from '../addons/index-file';
+import { refreshMcpSeen } from '../addons/mcp-seen';
 import { applyPluginBlocks } from '../addons/plugin-blocks';
 import { _resetConfigCache, getConfig } from '../config';
 
@@ -80,10 +81,27 @@ export function refreshAddonsIndex(
   return sig;
 }
 
+/**
+ * One round of the index: the servers no config names are brought up to
+ * date from the audit log (mcp-seen.ts), then the index is rebuilt when an
+ * agent config changed or that list did (a new server, a connector that just
+ * got its name). `readAudit: false` skips the audit log: its first read can
+ * be megabytes, and nothing the daemon does at start should wait on it.
+ */
+export function refreshIndexRound(
+  last: string | undefined,
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+  readAudit = true
+): string | undefined {
+  const seenChanged = readAudit && refreshMcpSeen(home);
+  return refreshAddonsIndex(seenChanged ? undefined : last, home, env);
+}
+
 /** One round: the index, and the plugins the workspace blocked turned off
  *  in Claude Code (addons/plugin-blocks.ts). */
-function tick(last: string | undefined): string | undefined {
-  const next = refreshAddonsIndex(last);
+function tick(last: string | undefined, readAudit: boolean): string | undefined {
+  const next = refreshIndexRound(last, undefined, undefined, readAudit);
   try {
     // Fresh: the daemon's config cache is reset only when a check arrives,
     // and an idle machine must still pick up a new block from policy sync.
@@ -141,7 +159,8 @@ export function startAddonsIndexRefresh(): void {
   let started = false;
   const round = () => {
     const before = last;
-    last = tick(last);
+    // The round at start leaves the audit log for the next one.
+    last = tick(last, started);
     const changed = started && last !== before;
     started = true;
     if (changed || Date.now() - standingAt >= STANDING_EVERY_MS) {

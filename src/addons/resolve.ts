@@ -7,8 +7,12 @@
 //                          configs, by identity, from the index the inventory
 //                          writes (index-file.ts). Servers that run through the
 //                          node9 gateway are left to it (it sees every call and
-//                          holds one review per session); a name in no config
-//                          (an agent's own built-in server) is not an add-on.
+//                          holds one review per session). A name in no config
+//                          (a claude.ai connector, a plugin's server, a tool
+//                          the agent's app adds) is stopped only when the
+//                          workspace blocked it: the rule for add-ons nobody
+//                          approved does not apply, so an agent's own tools
+//                          never break (mcp-seen.ts).
 //   Skill { skill }        Claude Code loads a skill through this tool call. The
 //                          skill's folder is found by name and hashed now, so a
 //                          copy that changed after the last report is judged as
@@ -25,9 +29,11 @@ import { collectFileAccesses, normalizeFilePath } from '@node9/policy-engine';
 import { hashSkillRoot } from '../skill-pin';
 import { readMcpIndex } from './index-file';
 import { claudeMcpEntries } from './claude-mcp';
+import { agentIdOf } from './agent-ids';
 import {
   addonPolicyEnforces,
   mcpVerdict,
+  seenMcpVerdict,
   skillVerdict,
   stricter,
   maliciousVerdict,
@@ -43,48 +49,48 @@ export function toolServerName(configName: string): string {
   return configName.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
-/** The agent ids the add-ons inventory files a server under, by the name the
- *  hook gives the calling agent. */
-const AGENT_ID: Record<string, string> = {
-  'Claude Code': 'claude',
-  Codex: 'codex',
-  'Gemini CLI': 'gemini',
-  Antigravity: 'antigravity',
-  'GitHub Copilot': 'copilot',
-  Cursor: 'cursor',
-  Windsurf: 'windsurf',
-  VSCode: 'vscode',
-  'Claude Desktop': 'claudeDesktop',
-  Hermes: 'hermes',
-  'Hermes Agent': 'hermes',
-  OpenCode: 'opencode',
-  Pi: 'pi',
-};
+/** A server the hook must judge: its identity, and whether a config names
+ *  it. `seen`: no config does (mcp-seen.ts), so only an explicit block holds. */
+export interface McpHookTarget {
+  identity: string;
+  seen: boolean;
+}
 
 /**
- * The identities of the servers named `server` that the hook must judge: in
- * the calling agent's config when it has one by that name, else in any. None
- * when every such entry runs through the gateway, or no config names it.
- * Claude Code's own config files are read now (claude-mcp.ts), so a server
- * renamed or added since the last report is still judged; other agents come
- * from the inventory index.
+ * The servers named `server` that the hook must judge: in the calling
+ * agent's config when it has one by that name, else in any. None when every
+ * such entry runs through the gateway. Claude Code's own config files are
+ * read now (claude-mcp.ts), so a server renamed or added since the last
+ * report is still judged; other agents come from the inventory index.
+ *
+ * A name no config holds is judged as a seen server: by the identity the
+ * index gives it (a connector's `url:<host>`), and always by its own name
+ * (`name:<server>`), which needs no index and so holds from the first call.
  */
-export function mcpIdentitiesForHook(
+export function mcpTargetsForHook(
   server: string,
   agentLabel: string | undefined,
   home: string = os.homedir(),
   cwd?: string
-): string[] {
-  const id = agentLabel ? AGENT_ID[agentLabel] : undefined;
+): McpHookTarget[] {
+  const id = agentIdOf(agentLabel);
   const entries = [
     ...(id === 'claude' || id === undefined ? claudeMcpEntries(cwd, home) : []),
     ...readMcpIndex(home),
   ];
   const named = entries.filter((e) => toolServerName(e.name) === server);
-  const own = id ? named.filter((e) => e.agents.includes(id)) : [];
-  const out = new Set<string>();
-  for (const e of own.length ? own : named) if (e.state !== 'governed') out.add(e.identity);
-  return [...out];
+  // A config row always wins: the server is then judged by what it runs.
+  const configured = named.filter((e) => e.state !== 'seen');
+  const out = new Map<string, McpHookTarget>();
+  if (configured.length > 0) {
+    const own = id ? configured.filter((e) => e.agents.includes(id)) : [];
+    for (const e of own.length ? own : configured)
+      if (e.state !== 'governed') out.set(e.identity, { identity: e.identity, seen: false });
+    return [...out.values()];
+  }
+  for (const e of named) out.set(e.identity, { identity: e.identity, seen: true });
+  out.set(`name:${server}`, { identity: `name:${server}`, seen: true });
+  return [...out.values()];
 }
 
 export interface SkillUse {
@@ -331,11 +337,16 @@ export async function addonVerdictForHookCall(
     if (!listEnforces && !checkMalicious) return ALLOW;
     if (call.mcpServer) {
       let v = ALLOW;
-      for (const id of mcpIdentitiesForHook(call.mcpServer, call.agent, home, call.cwd)) {
-        if (listEnforces) v = stricter(v, mcpVerdict(policy, id));
+      for (const t of mcpTargetsForHook(call.mcpServer, call.agent, home, call.cwd)) {
+        if (t.seen) {
+          // No package to look up, and no "nobody approved" rule: a block only.
+          if (listEnforces) v = stricter(v, seenMcpVerdict(policy, t.identity));
+          continue;
+        }
+        if (listEnforces) v = stricter(v, mcpVerdict(policy, t.identity));
         if (checkMalicious && onMalicious) {
-          const advisories = maliciousAdvisories(id, home);
-          if (advisories) v = stricter(v, maliciousVerdict(id, advisories, onMalicious));
+          const advisories = maliciousAdvisories(t.identity, home);
+          if (advisories) v = stricter(v, maliciousVerdict(t.identity, advisories, onMalicious));
         }
       }
       return v;
