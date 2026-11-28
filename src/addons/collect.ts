@@ -29,6 +29,9 @@ import {
   type McpPackage,
 } from './identity';
 import { readStanding } from './standing-file';
+import { claudeProjectMcpNames } from './claude-mcp';
+import { readSeenServers, seenMcpRows } from './mcp-seen';
+import { toolServerName } from './resolve';
 import { readDefinitionScans } from './definitions-file';
 import { skillHosts, type SkillHost } from './skill-hosts';
 import { lookupDomainsRound } from './host-lookup';
@@ -84,8 +87,13 @@ export interface AddonMcp {
   identity: string;
   agents: string[];
   /** governed = runs through the node9 gateway; outside = spawned directly;
-   *  remote = a URL server node9 cannot wrap. */
-  state: 'governed' | 'outside' | 'remote';
+   *  remote = a URL server node9 cannot wrap; seen = in no agent config,
+   *  found in the calls the hook audited (mcp-seen.ts). */
+  state: 'governed' | 'outside' | 'remote' | 'seen';
+  /** `seen` only: a connector's readable name, when the agent's app gave one. */
+  label?: string;
+  /** `seen` only: the day of the newest call (YYYY-MM-DD). */
+  lastSeenDay?: string;
   /** For a governed server: the key the mcpServers rows carry, to join them. */
   serverKey?: string;
   /** What the checks named in `checks` found (phase 4). Absent when none ran. */
@@ -305,7 +313,7 @@ export function collectMcpDetail(
 function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
   const standing = readStanding(home).entries;
   const definitions = readDefinitionScans(home);
-  return collectMcpDetail(home, env).map(({ entry, pkg }) => {
+  const configured = collectMcpDetail(home, env).map(({ entry, pkg }) => {
     const checks: NonNullable<AddonMcp['checks']> = [];
     const findings: NonNullable<AddonMcp['findings']> = [];
     const s = pkg ? standing[entry.identity] : undefined;
@@ -323,6 +331,38 @@ function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
     }
     return checks.length > 0 ? { ...entry, findings, checks } : entry;
   });
+  // Then the servers no config names, while the report has room for them.
+  return [...configured, ...seenMcp(home).slice(0, Math.max(0, MAX_MCP - configured.length))];
+}
+
+/** The names the agents' configs give their MCP servers, as a tool name
+ *  spells them (`mcp__<name>__<tool>`): node9's own server and the servers
+ *  of Claude Code's projects included. */
+function configuredToolNames(home: string): Set<string> {
+  const out = new Set<string>();
+  try {
+    for (const e of inventoryMcp(home)) out.add(toolServerName(e.name));
+  } catch {
+    /* an unreadable config names nothing */
+  }
+  try {
+    for (const n of claudeProjectMcpNames(home)) out.add(toolServerName(n));
+  } catch {
+    /* as above */
+  }
+  return out;
+}
+
+/** The servers seen only in calls (mcp-seen.ts). Never throws. */
+function seenMcp(home: string): AddonMcp[] {
+  try {
+    // No call ever seen: the agents' configs are not read a second time.
+    const servers = readSeenServers(home);
+    if (servers.length === 0) return [];
+    return seenMcpRows(configuredToolNames(home), home, servers);
+  } catch {
+    return [];
+  }
 }
 
 /** The MCP part only, for the index the agent hook reads (index-file.ts):

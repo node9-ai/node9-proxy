@@ -20,7 +20,9 @@ export interface McpIndexEntry {
   /** The name in the agent's config, as written there. */
   name: string;
   identity: string;
-  state: 'governed' | 'outside' | 'remote';
+  /** `seen`: in no agent config, found in the audit log (mcp-seen.ts). The
+   *  hook stops a call to it only on an explicit block. */
+  state: 'governed' | 'outside' | 'remote' | 'seen';
   /** Agent ids (`claude`, `codex`...). */
   agents: string[];
 }
@@ -65,7 +67,10 @@ export function readMcpIndex(home: string = os.homedir()): McpIndexEntry[] {
       if (
         typeof r?.name === 'string' &&
         typeof r.identity === 'string' &&
-        (r.state === 'governed' || r.state === 'outside' || r.state === 'remote') &&
+        (r.state === 'governed' ||
+          r.state === 'outside' ||
+          r.state === 'remote' ||
+          r.state === 'seen') &&
         Array.isArray(r.agents)
       )
         out.push({

@@ -17,6 +17,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { hashSkillRoot } from '../skill-pin';
+import { _resetMcpSeenCursor, refreshMcpSeen } from '../addons/mcp-seen';
+import { readMcpIndex } from '../addons/index-file';
+import { refreshAddonsIndex } from '../daemon/addons-index';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
 
@@ -94,6 +97,7 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
   });
 
   beforeEach(() => {
+    _resetMcpSeenCursor();
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'node9-addon-hook-'));
     fs.mkdirSync(path.join(home, '.node9'), { recursive: true });
     fs.writeFileSync(
@@ -158,6 +162,65 @@ describe('the approved list of add-ons through the real hook (phase 3)', () => {
     const r = runCheck(home, payload('mcp__acme_db__query', { sql: 'select 1' }));
     expect(denied(r)).toBe(true);
     expect(r.out).toContain('npm:@acme/db-mcp');
+  });
+
+  // Servers no agent config names (docs: addons-mcp-seen-in-calls-plan.md).
+  it("never stops an agent app's own tool under the block rule, and stops a server blocked by name", () => {
+    seedPolicy({
+      unapproved: 'block',
+      mcp: { 'name:plugin_reviewer_search': 'blocked' },
+      skills: {},
+      plugins: {},
+    });
+    // No config names `ccd_turn`: nobody approved it, and it still runs.
+    expect(denied(runCheck(home, payload('mcp__ccd_turn__wrap_up', { recap: 'done' })))).toBe(
+      false
+    );
+    const blocked = runCheck(home, payload('mcp__plugin_reviewer_search__find', { q: 'x' }));
+    expect(denied(blocked)).toBe(true);
+    expect(blocked.out).toContain('plugin_reviewer_search');
+  });
+
+  it('a claude.ai connector: the hook audits the call, the daemon names it, and a block on its host stops the next call', () => {
+    const id = 'f39ead4b-3003-4639-9d3b-d0425096c1bd';
+    const tool = `mcp__${id}__search_threads`;
+    seedPolicy({ unapproved: 'log', mcp: {}, skills: {}, plugins: {} });
+    const first = payload(tool, { query: 'is:unread' });
+    expect(denied(runCheck(home, first))).toBe(false);
+    runLog(home, { ...first, hook_event_name: 'PostToolUse', tool_response: { ok: true } });
+
+    // What the daemon does on its next round, on the row the real hook wrote:
+    // the desktop app's session file names the id, and the index gets it.
+    const root = path.join(home, 'sessions');
+    fs.mkdirSync(path.join(root, 'acct', 'org'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'acct', 'org', 'local_one.json'),
+      JSON.stringify({
+        cliSessionId: 'addon-session',
+        remoteMcpServersConfig: [
+          { uuid: id, name: 'Gmail', url: 'https://mail.connectors.example.com/mcp', tools: [] },
+        ],
+      })
+    );
+    expect(refreshMcpSeen(home, Date.now(), [root])).toBe(true);
+    refreshAddonsIndex(undefined, home, {});
+    expect(readMcpIndex(home)).toEqual([
+      { name: id, identity: 'url:mail.connectors.example.com', state: 'seen', agents: ['claude'] },
+    ]);
+
+    // Still allowed while nobody decided, even under the block rule.
+    seedPolicy({ unapproved: 'block', mcp: {}, skills: {}, plugins: {} });
+    expect(denied(runCheck(home, payload(tool, { query: 'is:unread' })))).toBe(false);
+    // The admin blocks the connector's row.
+    seedPolicy({
+      unapproved: 'log',
+      mcp: { 'url:mail.connectors.example.com': 'blocked' },
+      skills: {},
+      plugins: {},
+    });
+    const blocked = runCheck(home, payload(tool, { query: 'is:unread' }));
+    expect(denied(blocked)).toBe(true);
+    expect(blocked.out).toContain('mail.connectors.example.com');
   });
 
   it('stops a blocked skill the user starts with its slash command', () => {
