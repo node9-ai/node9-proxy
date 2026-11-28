@@ -38,6 +38,7 @@ import { broadcastForensic } from './state.js';
 import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
 import { createSyncTrigger } from './sync-trigger';
+import { createPushSoon } from './push-soon';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -1091,9 +1092,7 @@ async function syncOnce(): Promise<void> {
 
   // Config mirror: ship the effective local policy so the dashboard can show
   // what this machine enforces. Opt-out via NODE9_POLICY_MIRROR_DISABLE=1.
-  if (process.env.NODE9_POLICY_MIRROR_DISABLE !== '1') {
-    void pushPolicySnapshot(creds);
-  }
+  void pushPolicySnapshotIfKeyed();
 }
 
 /**
@@ -1235,6 +1234,21 @@ async function pushPolicySnapshot(creds: { apiKey: string; apiUrl: string }): Pr
     // Silent — never break sync over a policy-mirror push.
   }
 }
+
+/** The policy snapshot the sync sends, when this machine has a key and the
+ *  mirror is on (opt-out: NODE9_POLICY_MIRROR_DISABLE=1). Resolves whether a
+ *  push was attempted. Exported for its test. */
+export async function pushPolicySnapshotIfKeyed(): Promise<boolean> {
+  if (process.env.NODE9_POLICY_MIRROR_DISABLE === '1') return false;
+  const creds = readCredentials();
+  if (!creds) return false;
+  await pushPolicySnapshot(creds);
+  return true;
+}
+
+/** The same push, a short time after the MCP servers seen in calls changed,
+ *  not at the next policy sync (push-soon.ts). The sync schedule is as it was. */
+export const pushPolicySnapshotSoon = createPushSoon(pushPolicySnapshotIfKeyed);
 
 /** The add-ons report for the snapshot, and the MCP index the agent hook
  *  reads to judge a server outside the gateway (addons/index-file.ts). */

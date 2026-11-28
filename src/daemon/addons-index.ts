@@ -17,6 +17,7 @@ import { writeMcpIndex } from '../addons/index-file';
 import { refreshMcpSeen } from '../addons/mcp-seen';
 import { applyPluginBlocks } from '../addons/plugin-blocks';
 import { _resetConfigCache, getConfig } from '../config';
+import { pushPolicySnapshotSoon } from './sync';
 
 export const REFRESH_MS = 30_000;
 
@@ -87,21 +88,26 @@ export function refreshAddonsIndex(
  * agent config changed or that list did (a new server, a connector that just
  * got its name). `readAudit: false` skips the audit log: its first read can
  * be megabytes, and nothing the daemon does at start should wait on it.
+ * `onSeenChange` runs when that list changed: the daemon sends the add-ons
+ * report soon instead of at the next policy sync, hours away.
  */
 export function refreshIndexRound(
   last: string | undefined,
   home: string = os.homedir(),
   env: NodeJS.ProcessEnv = process.env,
-  readAudit = true
+  readAudit = true,
+  onSeenChange: () => void = () => {}
 ): string | undefined {
   const seenChanged = readAudit && refreshMcpSeen(home);
-  return refreshAddonsIndex(seenChanged ? undefined : last, home, env);
+  const next = refreshAddonsIndex(seenChanged ? undefined : last, home, env);
+  if (seenChanged) onSeenChange();
+  return next;
 }
 
 /** One round: the index, and the plugins the workspace blocked turned off
  *  in Claude Code (addons/plugin-blocks.ts). */
 function tick(last: string | undefined, readAudit: boolean): string | undefined {
-  const next = refreshIndexRound(last, undefined, undefined, readAudit);
+  const next = refreshIndexRound(last, undefined, undefined, readAudit, pushPolicySnapshotSoon);
   try {
     // Fresh: the daemon's config cache is reset only when a check arrives,
     // and an idle machine must still pick up a new block from policy sync.
