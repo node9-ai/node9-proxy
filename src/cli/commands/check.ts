@@ -39,6 +39,7 @@ import {
   autoStartDaemonAndWait,
   isTestingMode,
   logAutostartSkipThrottled,
+  logCheckSkippedThrottled,
   refreshStaleDaemon,
 } from '../daemon-starter';
 import {
@@ -345,6 +346,12 @@ function failHook(
   err: unknown,
   ctx: { raw: string; payload: CheckPayload; agentOverride?: string }
 ): never {
+  // A second failure while the first is being handled (this function threw,
+  // and a last-resort handler called it again): no second record, and the
+  // exit the first pass decided on. Exit 2 stops the call on every agent that
+  // reads an exit code.
+  if (failHookExit !== null) process.exit(failHookExit);
+  failHookExit = 0;
   let agent = ctx.agentOverride;
   let tool = '';
   let event: unknown;
@@ -368,6 +375,7 @@ function failHook(
     /* an unreadable pause file is not a pause */
   }
   const stop = reading.policy === 'block' && isToolCall && !paused;
+  if (stop) failHookExit = 2;
   const decision = stop ? 'deny' : 'allow';
 
   recordHookError(stage, err, {
@@ -458,9 +466,27 @@ function failHook(
     }
   }
 
-  if (stop) deliverBlock(agent ?? 'Unknown Agent', buildCheckFailedMessage(tool));
+  if (stop) {
+    // The stop must not depend on anything that can fail: the message has a
+    // fixed fallback, and a block that cannot be delivered still exits 2.
+    let message = 'NODE9: Not checked. node9 hit an internal error and stopped this call.';
+    try {
+      message = buildCheckFailedMessage(tool);
+    } catch {
+      /* the fixed message */
+    }
+    try {
+      deliverBlock(agent ?? 'Unknown Agent', message);
+    } catch {
+      /* stdout is gone: the exit code still says stop */
+    }
+    process.exit(2);
+  }
   process.exit(0);
 }
+
+/** Set once failHook has started: the exit code it decided on (see failHook). */
+let failHookExit: number | null = null;
 
 /** The call this process is checking, for the last-resort handlers below. */
 let currentCheck: { raw: string; payload: CheckPayload; agentOverride?: string } | null = null;
@@ -471,6 +497,8 @@ let currentCheck: { raw: string; payload: CheckPayload; agentOverride?: string }
  * kills at its timeout never gets here, and the after-run hook of a call
  * with no note reports that it ran unchecked. Registered once per process.
  */
+/** Just under the timeout node9 registers its hooks with (setup.ts: 600 s). */
+const CHECKED_NOTE_MAX_UPTIME_S = 590;
 let checkedCallNote: string | null = null;
 let exitNoteRegistered = false;
 function noteThisCallOnExit(payload: CheckPayload, agent: string): void {
@@ -482,7 +510,11 @@ function noteThisCallOnExit(payload: CheckPayload, agent: string): void {
   if (exitNoteRegistered) return;
   exitNoteRegistered = true;
   process.on('exit', () => {
-    if (checkedCallNote) noteCheckedCall(checkedCallNote);
+    // A hook that ran this long was given up on: node9 registers its hooks
+    // with a 600 s timeout, and a host that stops waiting without killing the
+    // process has already run the call. Its late exit proves nothing.
+    if (checkedCallNote && process.uptime() < CHECKED_NOTE_MAX_UPTIME_S)
+      noteCheckedCall(checkedCallNote);
   });
 }
 
@@ -735,12 +767,7 @@ export function registerCheckCommand(program: Command): void {
               } catch (err) {
                 // The add-on gate never stops a prompt on its own failure,
                 // and never fails unseen.
-                appendToLog(HOOK_DEBUG_LOG, {
-                  ts: new Date().toISOString(),
-                  event: 'check-skipped',
-                  check: 'addon-slash-command',
-                  error: hookErrorText(err),
-                });
+                logCheckSkippedThrottled('addon-slash-command', hookErrorText(err));
               }
             }
 
@@ -1508,14 +1535,10 @@ export function registerCheckCommand(program: Command): void {
               }
             } catch (err) {
               // The skill check did not run for this call; the rest of the
-              // gate still does. Always logged: a check that silently stops
-              // running is the gap node9Firewall#383 closes.
-              appendToLog(HOOK_DEBUG_LOG, {
-                ts: new Date().toISOString(),
-                event: 'check-skipped',
-                check: 'skill-pin',
-                error: hookErrorText(err),
-              });
+              // gate still does. Logged without NODE9_DEBUG (a check that
+              // silently stops running is the gap node9Firewall#383 closes),
+              // once an hour: a failure that holds would write on every call.
+              logCheckSkippedThrottled('skill-pin', hookErrorText(err));
             }
           }
 

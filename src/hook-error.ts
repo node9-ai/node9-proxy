@@ -36,10 +36,6 @@ export const HOOK_ERROR_CHECKED_BY = 'hook-error';
  */
 export type HookErrorStage = 'parse' | 'engine' | 'no-verdict';
 
-/** Stop appending once the debug log is this large: a machine whose every
- *  call fails must not fill the disk one line at a time. */
-const DEBUG_LOG_CEILING_BYTES = 16 * 1024 * 1024;
-
 function asksForBlock(value: unknown): boolean {
   return typeof value === 'string' && value.trim().toLowerCase() === 'block';
 }
@@ -123,11 +119,10 @@ export function recordHookError(
   try {
     const logPath = path.join(home, '.node9', 'hook-debug.log');
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    try {
-      if (fs.statSync(logPath).size > DEBUG_LOG_CEILING_BYTES) return;
-    } catch {
-      /* no log yet */
-    }
+    // No size ceiling: the file is shared, and other writers (every payload,
+    // when debug logging is on) take it past any limit, which would drop this
+    // line on the very machine someone is debugging. One short line per
+    // failed check; each one already has an audit row.
     fs.appendFileSync(
       logPath,
       JSON.stringify({
@@ -174,15 +169,9 @@ export function recentHookErrors(
     count: 0,
     stopped: 0,
   };
-  let text: string;
-  try {
-    text = fs.readFileSync(path.join(home, '.node9', 'audit.log'), 'utf-8');
-  } catch {
-    return out;
-  }
   const marker = `"checkedBy":"${HOOK_ERROR_CHECKED_BY}"`;
-  for (const line of text.split('\n')) {
-    if (!line.includes(marker)) continue;
+  const take = (line: string): void => {
+    if (!line.includes(marker)) return;
     try {
       const row = JSON.parse(line) as {
         ts?: unknown;
@@ -190,9 +179,9 @@ export function recentHookErrors(
         decision?: unknown;
         ruleName?: unknown;
       };
-      if (row.checkedBy !== HOOK_ERROR_CHECKED_BY || typeof row.ts !== 'string') continue;
+      if (row.checkedBy !== HOOK_ERROR_CHECKED_BY || typeof row.ts !== 'string') return;
       const at = Date.parse(row.ts);
-      if (!Number.isFinite(at) || at < sinceMs) continue;
+      if (!Number.isFinite(at) || at < sinceMs) return;
       out.count++;
       if (row.decision === 'deny') out.stopped++;
       if (!out.last || row.ts > out.last.ts) {
@@ -201,6 +190,31 @@ export function recentHookErrors(
     } catch {
       /* a torn line is not a row */
     }
+  };
+  // In pieces: the audit log grows to hundreds of megabytes, and this is a
+  // count. latin1 keeps one byte per character, so a piece boundary inside a
+  // multi-byte character cannot corrupt a line; the fields read here are ASCII.
+  let fd: number;
+  try {
+    fd = fs.openSync(path.join(home, '.node9', 'audit.log'), 'r');
+  } catch {
+    return out;
+  }
+  try {
+    const buf = Buffer.alloc(1024 * 1024);
+    let carry = '';
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      const lines = (carry + buf.toString('latin1', 0, n)).split('\n');
+      carry = lines.pop() ?? '';
+      for (const line of lines) take(line);
+    }
+    take(carry);
+  } catch {
+    /* what was counted so far */
+  } finally {
+    fs.closeSync(fd);
   }
   return out;
 }

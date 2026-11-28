@@ -71,6 +71,28 @@ export function checkedCallKey(
 }
 
 /**
+ * The agents a missing note is reported for. It takes more than a note being
+ * written: the agent must run its before-run hook for every call whose
+ * after-run hook it runs, or a healthy machine reports calls that were never
+ * handed to node9. Measured for Claude Code on two weeks of real use
+ * (2026-11-14 to 2026-11-28): 15,539 calls that ran, 2 without an earlier
+ * before-run payload. Not measured for Codex, whose calls are noted so the
+ * journal is ready, and not reported: a false "not checked" costs more than a
+ * missing one.
+ */
+const NO_VERDICT_REPORTED_AGENTS: ReadonlySet<string> = new Set(['Claude Code']);
+
+/** The key to look a call up under when its after-run hook fires, or null
+ *  when a missing note must not be reported for this agent. */
+export function reportableCallKey(
+  payload: Record<string, unknown>,
+  agent: string | undefined
+): string | null {
+  if (!agent || !NO_VERDICT_REPORTED_AGENTS.has(agent)) return null;
+  return checkedCallKey(payload, agent);
+}
+
+/**
  * Note that the before-run hook finished for this call. Runs in `check`'s
  * exit handler: synchronous, and never throws.
  */

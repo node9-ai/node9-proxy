@@ -287,6 +287,38 @@ describe('policy block: the call is stopped, in the shape each agent honours', (
   });
 });
 
+describe('a stop that cannot be delivered is still a stop', () => {
+  it('exits 2 when the agent has closed the pipe the block is written to', async () => {
+    const baseEnv: Record<string, string | undefined> = { ...process.env };
+    for (const k of Object.keys(baseEnv)) {
+      if (/^(NODE9_|CLAUDE|CODEX|GEMINI|CURSOR|HERMES|ANTIGRAVITY|AIDER)/.test(k))
+        delete baseEnv[k];
+    }
+    const child = spawn(process.execPath, [CLI, 'check'], {
+      cwd: os.tmpdir(),
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: {
+        ...baseEnv,
+        HOME: home,
+        USERPROFILE: home,
+        NODE9_TESTING: '1',
+        NODE9_NO_AUTO_DAEMON: '1',
+        NODE_DISABLE_COMPILE_CACHE: '1',
+        ...ENGINE_FAULT,
+        ...STRICT,
+      },
+    });
+    // Nobody reads the block: the write fails inside the error path itself.
+    child.stdout.destroy();
+    child.stdin.end(JSON.stringify(claude({ command: 'ls' })));
+    const status = await new Promise<number | null>((resolve) => child.on('close', resolve));
+    expect(status).toBe(2);
+    // Recorded once, not once per failure of the error path.
+    expect(hookErrorRows()).toHaveLength(1);
+    expect(hookErrorRows()[0]).toMatchObject({ decision: 'deny' });
+  });
+});
+
 describe('only a tool call is ever stopped', () => {
   const prompt = { hook_event_name: 'UserPromptSubmit', session_id: 'sess-1', prompt: 'hello' };
 
@@ -448,6 +480,21 @@ describe('phase 3: a call whose before-run hook never finished', () => {
       expect(hookErrorRows()[0]).toMatchObject({ ruleName: 'hook-error:no-verdict' });
     }
   );
+
+  it('reports it once when two after-run hooks fire for the one call', () => {
+    settleJournal();
+    check(claude({ command: 'ls' }, { tool_use_id: 'toolu_other' }));
+    log(after());
+    log(after());
+    expect(hookErrorRows()).toHaveLength(1);
+  });
+
+  it('does not report a Codex call: its hooks were not measured as a pair', () => {
+    settleJournal();
+    check(claude({ command: 'ls' }, { tool_use_id: 'toolu_other', turn_id: 'turn-1' }));
+    log(after({ turn_id: 'turn-1' }));
+    expect(hookErrorRows()).toEqual([]);
+  });
 
   it('says nothing while the journal is new: the check may have run before it existed', () => {
     check(claude({ command: 'ls' }, { tool_use_id: 'toolu_other' }));

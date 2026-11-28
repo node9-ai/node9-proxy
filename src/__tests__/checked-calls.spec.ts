@@ -9,6 +9,7 @@ import {
   checkedCallState,
   JOURNAL_SETTLE_MS,
   noteCheckedCall,
+  reportableCallKey,
 } from '../checked-calls';
 
 // isolate-home gives this file its own HOME; each test starts with no journal.
@@ -107,5 +108,19 @@ describe('checkedCallKey', () => {
     expect(checkedCallKey(payload, 'Antigravity')).toBeNull();
     expect(checkedCallKey(payload, undefined)).toBeNull();
     expect(checkedCallKey({ session_id: 'sess' }, 'Claude Code')).toBeNull();
+  });
+});
+
+describe('reportableCallKey', () => {
+  const payload = { session_id: 'sess', tool_use_id: 'toolu_1' };
+
+  it('reports for the agent it was measured on', () => {
+    expect(reportableCallKey(payload, 'Claude Code')).toBe('tuid:sess|toolu_1');
+  });
+
+  it('notes a Codex call and reports none: its two hooks were not measured as a pair', () => {
+    expect(checkedCallKey(payload, 'Codex')).not.toBeNull();
+    expect(reportableCallKey(payload, 'Codex')).toBeNull();
+    expect(reportableCallKey(payload, undefined)).toBeNull();
   });
 });

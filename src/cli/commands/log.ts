@@ -17,7 +17,7 @@ import { getConfig } from '../../config';
 import { reviewCorrelationKey, resolvePendingReview } from '../../review-pending';
 import { approveAddonForSession } from '../../addons/session-approvals';
 import { resolveBlockedCall } from '../../blocked-calls';
-import { checkedCallKey, checkedCallState } from '../../checked-calls';
+import { checkedCallState, noteCheckedCall, reportableCallKey } from '../../checked-calls';
 import { HOOK_ERROR_CHECKED_BY, recordHookError } from '../../hook-error';
 import {
   notifyTaintPropagate,
@@ -431,6 +431,52 @@ export function registerLogCommand(program: Command): void {
             }
           }
 
+          // The before-run hook never finished for this call (checked-calls.ts):
+          // the agent's host killed it at its timeout, or it never ran. The
+          // call ran with no verdict, and this row is the only thing that
+          // says so (node9Firewall#383, phase 3). Same row and same counters
+          // as a check that failed inside node9. Before the config load, like
+          // every audit write here: a config failure must not lose the row.
+          try {
+            const checkedKey = reportableCallKey(payload as Record<string, unknown>, agent);
+            if (checkedKey && checkedCallState(checkedKey) === 'unchecked') {
+              recordHookError(
+                'no-verdict',
+                new Error('the before-run hook did not finish for this call'),
+                {
+                  agent,
+                  tool,
+                  decision: 'allow',
+                  policySource: 'after-run',
+                }
+              );
+              appendLocalAudit(
+                tool,
+                rawInput,
+                'allow',
+                HOOK_ERROR_CHECKED_BY,
+                {
+                  agent,
+                  ruleName: `${HOOK_ERROR_CHECKED_BY}:no-verdict`,
+                  ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
+                  ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
+                  ...(safeCwd ? { workingDir: safeCwd } : {}),
+                },
+                true
+              );
+              // Reported once: a second after-run hook for this call (a
+              // duplicate registration) now finds it noted.
+              noteCheckedCall(checkedKey);
+            }
+          } catch (err) {
+            appendToLog(HOOK_DEBUG_LOG, {
+              ts: new Date().toISOString(),
+              event: 'no-verdict-row-fail',
+              tool,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+
           // Config load runs AFTER the audit write — a config failure here is
           // non-fatal and must not retroactively gap the audit trail above. It is
           // hoisted above the gap1 block (below) so injectionScan can read its flag.
@@ -531,48 +577,6 @@ export function registerLogCommand(program: Command): void {
             appendToLog(HOOK_DEBUG_LOG, {
               ts: new Date().toISOString(),
               event: 'ran-after-block-row-fail',
-              tool,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-
-          // The before-run hook never finished for this call (checked-calls.ts):
-          // the agent's host killed it at its timeout, or it never ran. The
-          // call ran with no verdict, and this row is the only thing that
-          // says so (node9Firewall#383, phase 3). Same row and same counters
-          // as a check that failed inside node9.
-          try {
-            const checkedKey = checkedCallKey(payload as Record<string, unknown>, agent);
-            if (checkedKey && checkedCallState(checkedKey) === 'unchecked') {
-              recordHookError(
-                'no-verdict',
-                new Error('the before-run hook did not finish for this call'),
-                {
-                  agent,
-                  tool,
-                  decision: 'allow',
-                  policySource: 'after-run',
-                }
-              );
-              appendLocalAudit(
-                tool,
-                rawInput,
-                'allow',
-                HOOK_ERROR_CHECKED_BY,
-                {
-                  agent,
-                  ruleName: `${HOOK_ERROR_CHECKED_BY}:no-verdict`,
-                  ...(rawToolName !== tool ? { agentToolName: rawToolName } : {}),
-                  ...(typeof payloadSessionId === 'string' ? { sessionId: payloadSessionId } : {}),
-                  ...(safeCwd ? { workingDir: safeCwd } : {}),
-                },
-                true
-              );
-            }
-          } catch (err) {
-            appendToLog(HOOK_DEBUG_LOG, {
-              ts: new Date().toISOString(),
-              event: 'no-verdict-row-fail',
               tool,
               error: err instanceof Error ? err.message : String(err),
             });

@@ -128,6 +128,16 @@ export function inspectablePayload(parsed: unknown): Record<string, unknown> {
 }
 
 /**
+ * The same safe copy for one call's arguments, for the callers that never see
+ * a hook payload: the MCP gateway, the proxy and the SDK hand their arguments
+ * straight to `authorizeHeadless`, which applies this at its entry. Copying an
+ * already safe value changes nothing.
+ */
+export function inspectableArgs(args: unknown): unknown {
+  return inspectableValue(args, 0);
+}
+
+/**
  * Read the tool arguments from a hook payload, falling back across the
  * known agent dialects. Returns an empty object when no field is present.
  *

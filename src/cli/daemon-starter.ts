@@ -79,6 +79,16 @@ export function logAutostartSkipThrottled(reason: string): void {
   logThrottled('.autostart-skip-stamp', 'daemon-autostart-skip', reason);
 }
 
+/**
+ * One of the gate's checks threw and was skipped for this call (the rest of
+ * the gate still ran): say so without NODE9_DEBUG, once an hour per check, so
+ * a failure that holds on every call never floods hook-debug.log.
+ * `check` is a fixed name from the call site, never input.
+ */
+export function logCheckSkippedThrottled(check: string, error: string): void {
+  logThrottled(`.check-skipped-${check}-stamp`, `check-skipped ${check}`, error);
+}
+
 /** Variables that can inject code into a spawned Node process. */
 const INJECTING_ENV = [
   'NODE_OPTIONS',

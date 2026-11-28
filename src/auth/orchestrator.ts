@@ -106,6 +106,7 @@ import { runPackageCheck } from '../supply-chain/check';
 import { readActiveShields } from '../shields';
 import { findJailedPath, findJailedPathIn, USER_JAIL_SHIELD } from '../shields/jail';
 import { safeMessage } from '../utils/safe-text';
+import { inspectableArgs } from '../utils/hook-payload';
 import { judgeSpendBudget } from './spend-budget';
 import { asApprovalRequest } from '../policy/negotiation';
 import { recordFromLegacyWait, type Channel, type DecidedBy } from './decision-record';
@@ -471,6 +472,12 @@ export async function authorizeHeadless(
     sessionTaintGated?: boolean;
   }
 ): Promise<AuthResult> {
+  // What every check below reads: safe to walk and to coerce, nothing dropped
+  // (hook-payload.ts, node9Firewall#383). Here, at the one entry the hook, the
+  // MCP gateway, the proxy and the SDK share, so arguments nested thousands of
+  // levels deep or carrying a `toString` key cannot make the gate throw: a
+  // throw lets the call run on the hook and stops every call on the gateway.
+  args = inspectableArgs(args);
   // Skip socket notification when called from daemon — daemon already broadcasts via SSE
   if (!options?.calledFromDaemon) {
     const actId = randomUUID();

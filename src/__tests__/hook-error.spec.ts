@@ -13,7 +13,7 @@ import {
   recentHookErrors,
   recordHookError,
 } from '../hook-error';
-import { extractManagedConfig } from '../daemon/sync';
+import { __writeCacheForTest, cacheFromSyncBody, extractManagedConfig } from '../daemon/sync';
 
 let home: string;
 beforeEach(() => {
@@ -185,6 +185,25 @@ describe('recentHookErrors', () => {
     });
   });
 
+  it('counts a log far larger than one read, with a row across the boundary', () => {
+    const now = Date.parse('2026-11-28T12:00:00Z');
+    const recent = new Date(now - 1000).toISOString();
+    const other = JSON.stringify({ ts: recent, checkedBy: 'local-policy', pad: 'é'.repeat(300) });
+    const lines: string[] = [];
+    let bytes = 0;
+    // Rows of another kind up to just short of the first megabyte, then the
+    // row that is counted, so it starts in one piece and ends in the next.
+    while (bytes < 1024 * 1024 - 60) {
+      lines.push(other);
+      bytes += Buffer.byteLength(other) + 1;
+    }
+    lines.push(row(recent, { ruleName: 'hook-error:no-verdict' }));
+    for (let i = 0; i < 2000; i++) lines.push(other);
+    lines.push(row(recent, { decision: 'deny' }));
+    fs.writeFileSync(path.join(home, '.node9', 'audit.log'), lines.join('\n'));
+    expect(recentHookErrors(now - 60_000, home)).toMatchObject({ count: 2, stopped: 1 });
+  });
+
   it('is zero without an audit log', () => {
     expect(recentHookErrors(0, home)).toEqual({ count: 0, stopped: 0 });
   });
@@ -229,5 +248,20 @@ describe('the workspace setting on its way to the cache', () => {
 
   it('counts as a managed setting on its own', () => {
     expect(extractManagedConfig({ managedConfig: { onHookError: 'block' } })).toBeDefined();
+  });
+});
+
+describe('the workspace setting, from the sync response to the hook', () => {
+  it('what the sync writes to the cache is what the fail policy reads', () => {
+    // The real mapping and the real writer, into this test's own HOME.
+    fs.mkdirSync(path.join(os.homedir(), '.node9'), { recursive: true });
+    __writeCacheForTest(cacheFromSyncBody({ managedConfig: { onHookError: 'block' } }, 'etag-1'));
+    expect(readHookErrorPolicy(os.homedir(), {})).toEqual({
+      policy: 'block',
+      source: 'workspace',
+    });
+
+    __writeCacheForTest(cacheFromSyncBody({ managedConfig: { mode: 'standard' } }, 'etag-2'));
+    expect(readHookErrorPolicy(os.homedir(), {})).toEqual({ policy: 'allow', source: 'default' });
   });
 });
