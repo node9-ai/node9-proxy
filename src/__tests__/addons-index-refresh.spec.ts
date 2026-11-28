@@ -76,6 +76,35 @@ describe('refreshAddonsIndex', () => {
     expect(readMcpIndex(h)).toEqual([]);
   });
 
+  // The add-ons report waited for the next policy sync (1 to 5 hours): the
+  // round now asks for a push when the seen list changed, and only then.
+  it('a round asks for the snapshot push when the seen list changed, and only then', () => {
+    _resetMcpSeenCursor();
+    const h = home();
+    codex(h, 'db', '@acme/db-mcp');
+    const pushSoon = vi.fn();
+    let sig = refreshIndexRound(undefined, h, {}, true, pushSoon);
+    expect(pushSoon).not.toHaveBeenCalled();
+    const auditRow = (tool: string) =>
+      JSON.stringify({ ts: new Date().toISOString(), tool, decision: 'allow', agent: 'Codex' }) +
+      '\n';
+    fs.appendFileSync(path.join(h, '.node9', 'audit.log'), auditRow('mcp__codex_apps__open'));
+    // The round at daemon start leaves the audit log, and asks for nothing.
+    sig = refreshIndexRound(sig, h, {}, false, pushSoon);
+    expect(pushSoon).not.toHaveBeenCalled();
+    sig = refreshIndexRound(sig, h, {}, true, pushSoon);
+    expect(pushSoon).toHaveBeenCalledTimes(1);
+    // The index the push reports from is already written when it is asked for.
+    expect(readMcpIndex(h).map((e) => e.name)).toEqual(['db', 'codex_apps']);
+    // Another call to a server already listed, and a config change: no ask.
+    fs.appendFileSync(path.join(h, '.node9', 'audit.log'), auditRow('mcp__codex_apps__close'));
+    codex(h, 'db2', '@acme/db-mcp');
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(path.join(h, '.codex', 'config.toml'), later, later);
+    refreshIndexRound(sig, h, {}, true, pushSoon);
+    expect(pushSoon).toHaveBeenCalledTimes(1);
+  });
+
   it('a config created after the start counts as a change', () => {
     const h = home();
     const sig = refreshAddonsIndex(undefined, h, {});
