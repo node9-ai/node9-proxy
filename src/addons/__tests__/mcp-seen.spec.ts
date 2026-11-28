@@ -303,11 +303,13 @@ describe('claude.ai connectors get their name from the desktop app', () => {
   });
 
   it('knows where the app keeps its sessions on each platform', () => {
+    // Joined with the separator of the machine the tests run on, as the
+    // code joins them (CI runs these on Windows too).
     expect(desktopSessionRoots('/home/u', {}, 'linux')).toEqual([
-      '/home/u/.config/Claude/claude-code-sessions',
+      path.join('/home/u', '.config', 'Claude', 'claude-code-sessions'),
     ]);
     expect(desktopSessionRoots('/Users/u', {}, 'darwin')).toEqual([
-      '/Users/u/Library/Application Support/Claude/claude-code-sessions',
+      path.join('/Users/u', 'Library', 'Application Support', 'Claude', 'claude-code-sessions'),
     ]);
     // Windows, a Microsoft Store install: found by pattern, not by a fixed id.
     const h = home();
