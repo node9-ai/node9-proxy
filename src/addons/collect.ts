@@ -29,7 +29,7 @@ import {
   type McpPackage,
 } from './identity';
 import { readStanding } from './standing-file';
-import { claudeProjectMcpNames } from './claude-mcp';
+import { claudeProjectMcp, type ClaudeProjectMcp } from './claude-mcp';
 import { readSeenServers, seenMcpRows } from './mcp-seen';
 import { toolServerName } from './resolve';
 import { readDefinitionScans } from './definitions-file';
@@ -305,15 +305,30 @@ export function collectMcpDetail(
   return [...byKey.values()];
 }
 
+/** The two MCP lists a machine keeps, built from one read of the configs. */
+export interface McpLists {
+  /** The add-ons report: user-level servers, the servers of Claude Code's
+   *  projects, then the servers seen only in calls. */
+  report: AddonMcp[];
+  /** The index the agent hook reads (index-file.ts): the report without the
+   *  project servers. The hook reads the project config of the call's own
+   *  folder itself; a project's server in the index would let a call from
+   *  another folder, or another agent, be judged by the wrong project. */
+  index: AddonMcp[];
+}
+
 /** The MCP rows of the report, with what the checks last found for each:
  *  the package check (standing-file.ts, written by the daemon) and the scan
  *  of tool definitions (definitions-file.ts, written by the gateway).
  *  Advisory ids stay on the machine: the report carries rule ids and
  *  severities, as for skills. */
-function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
+export function collectMcpLists(
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): McpLists {
   const standing = readStanding(home).entries;
   const definitions = readDefinitionScans(home);
-  const configured = collectMcpDetail(home, env).map(({ entry, pkg }) => {
+  const withChecks = ({ entry, pkg }: McpDetail): AddonMcp => {
     const checks: NonNullable<AddonMcp['checks']> = [];
     const findings: NonNullable<AddonMcp['findings']> = [];
     const s = pkg ? standing[entry.identity] : undefined;
@@ -330,48 +345,83 @@ function collectMcp(home: string, env: NodeJS.ProcessEnv): AddonMcp[] {
       for (const f of d.findings) findings.push({ rule: f.rule, severity: f.severity });
     }
     return checks.length > 0 ? { ...entry, findings, checks } : entry;
-  });
-  // Then the servers no config names, while the report has room for them.
-  return [...configured, ...seenMcp(home).slice(0, Math.max(0, MAX_MCP - configured.length))];
+  };
+  const userLevel = collectMcpDetail(home, env);
+  let project: ClaudeProjectMcp = { names: [], servers: [] };
+  try {
+    project = claudeProjectMcp(home);
+  } catch {
+    /* an unreadable project config adds nothing */
+  }
+  const seen = seenMcp(home, project.names);
+  const close = (configured: AddonMcp[]): AddonMcp[] => [
+    ...configured,
+    // The servers no config names, while the list has room for them.
+    ...seen.slice(0, Math.max(0, MAX_MCP - configured.length)),
+  ];
+  return {
+    report: close(withProjectServers(userLevel, project.servers).map(withChecks)),
+    index: close(userLevel.map(withChecks)),
+  };
+}
+
+/**
+ * The user-level servers and, after them, the servers of Claude Code's
+ * projects. A project server with the name, identity and state of a
+ * user-level one is the same row, with `claude` among its agents. The input
+ * is not changed.
+ */
+function withProjectServers(
+  userLevel: McpDetail[],
+  project: ClaudeProjectMcp['servers']
+): McpDetail[] {
+  const key = (e: { name: string; identity: string; state: string }) =>
+    `${e.name}\0${e.identity}\0${e.state}`;
+  const out = new Map<string, McpDetail>();
+  for (const d of userLevel)
+    out.set(key(d.entry), { entry: { ...d.entry, agents: [...d.entry.agents] }, pkg: d.pkg });
+  for (const { entry, pkg } of project) {
+    // Named as the user-level servers are (a config name is text from a file).
+    const name = label(entry.name) ?? entry.identity;
+    const k = key({ ...entry, name });
+    const row = out.get(k);
+    if (row) {
+      for (const a of entry.agents) if (!row.entry.agents.includes(a)) row.entry.agents.push(a);
+      continue;
+    }
+    if (out.size >= MAX_MCP) break;
+    out.set(k, {
+      entry: { name, identity: entry.identity, agents: [...entry.agents], state: entry.state },
+      pkg,
+    });
+  }
+  return [...out.values()];
 }
 
 /** The names the agents' configs give their MCP servers, as a tool name
  *  spells them (`mcp__<name>__<tool>`): node9's own server and the servers
  *  of Claude Code's projects included. */
-function configuredToolNames(home: string): Set<string> {
+function configuredToolNames(home: string, projectNames: string[]): Set<string> {
   const out = new Set<string>();
   try {
     for (const e of inventoryMcp(home)) out.add(toolServerName(e.name));
   } catch {
     /* an unreadable config names nothing */
   }
-  try {
-    for (const n of claudeProjectMcpNames(home)) out.add(toolServerName(n));
-  } catch {
-    /* as above */
-  }
+  for (const n of projectNames) out.add(toolServerName(n));
   return out;
 }
 
 /** The servers seen only in calls (mcp-seen.ts). Never throws. */
-function seenMcp(home: string): AddonMcp[] {
+function seenMcp(home: string, projectNames: string[]): AddonMcp[] {
   try {
     // No call ever seen: the agents' configs are not read a second time.
     const servers = readSeenServers(home);
     if (servers.length === 0) return [];
-    return seenMcpRows(configuredToolNames(home), home, servers);
+    return seenMcpRows(configuredToolNames(home, projectNames), home, servers);
   } catch {
     return [];
   }
-}
-
-/** The MCP part only, for the index the agent hook reads (index-file.ts):
- *  config reads, no skill hashing, so the daemon can rebuild it often. */
-export function collectMcpOnly(
-  home: string = os.homedir(),
-  env: NodeJS.ProcessEnv = process.env
-): AddonMcp[] {
-  return collectMcp(home, env);
 }
 
 /** Build the add-ons report for this machine. Never throws. */
@@ -387,7 +437,7 @@ export function collectAddons(
 export function collectAddonsDetail(
   home: string = os.homedir(),
   env: NodeJS.ProcessEnv = process.env
-): { report: AddonsReport; hosts: Map<AddonSkill, SkillHost[]> } {
+): { report: AddonsReport; hosts: Map<AddonSkill, SkillHost[]>; mcpIndex: AddonMcp[] } {
   const hosts = new Map<AddonSkill, SkillHost[]>();
   const skills: AddonSkill[] = [];
   let capped = false;
@@ -447,8 +497,13 @@ export function collectAddonsDetail(
     addSkills(path.join(dir, '.agents', 'skills'), 'shared', 'project');
   }
 
-  const mcp = collectMcp(home, env);
-  return { report: { skills, plugins, mcp, ...(capped ? { capped: true } : {}) }, hosts };
+  const lists = collectMcpLists(home, env);
+  return {
+    report: { skills, plugins, mcp: lists.report, ...(capped ? { capped: true } : {}) },
+    hosts,
+    // For the hook's index, never the report's list: see McpLists.
+    mcpIndex: lists.index,
+  };
 }
 
 const MAX_DOMAINS_PER_SKILL = 5;
@@ -503,13 +558,31 @@ export async function collectAddonsWithLookups(
     lookup?: typeof lookupDomainsRound;
   } = {}
 ): Promise<AddonsReport> {
+  return (await collectAddonsAndMcpIndex(home, env, opts)).report;
+}
+
+/**
+ * The report (with the host check's findings), and beside it the MCP list
+ * for the index the agent hook reads, from the same read of the configs. The
+ * two differ: the report lists the servers of Claude Code's projects, the
+ * index must not (McpLists).
+ */
+export async function collectAddonsAndMcpIndex(
+  home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+  opts: {
+    lookupsAllowed?: boolean;
+    lookup?: typeof lookupDomainsRound;
+  } = {}
+): Promise<{ report: AddonsReport; mcpIndex: AddonMcp[] }> {
   const detail = collectAddonsDetail(home, env);
-  if (opts.lookupsAllowed === false) return detail.report;
+  const { mcpIndex } = detail;
+  if (opts.lookupsAllowed === false) return { report: detail.report, mcpIndex };
   try {
     const domains = [...new Set([...detail.hosts.values()].flat().map((h) => h.domain))];
     const round = await (opts.lookup ?? lookupDomainsRound)(domains, home);
-    return round.ok ? withHostFindings(detail, round.answers) : detail.report;
+    return { report: round.ok ? withHostFindings(detail, round.answers) : detail.report, mcpIndex };
   } catch {
-    return detail.report;
+    return { report: detail.report, mcpIndex };
   }
 }

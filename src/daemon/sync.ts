@@ -8,7 +8,7 @@
 import { parseAddonPolicy, type AddonPolicy } from '../addons/policy';
 import { sanitizeSpendBudget, type SpendBudgetStatus } from '../auth/spend-budget';
 import { readAppsFile } from '../apps/state.js';
-import { collectAddons, collectAddonsWithLookups } from '../addons/collect.js';
+import { collectAddons, collectAddonsAndMcpIndex } from '../addons/collect.js';
 import { writeMcpIndex } from '../addons/index-file';
 import fs from 'fs';
 import { isVerdict, configurableValues, trustedEntryOf, type Verdict } from '@node9/policy-engine';
@@ -39,6 +39,7 @@ import { appendToLog, HOOK_DEBUG_LOG } from '../audit/index.js';
 import { getMachineId } from '../machine-id.js';
 import { createSyncTrigger } from './sync-trigger';
 import { createPushSoon } from './push-soon';
+import { policyChangeLines, recordPolicyChange } from './policy-change';
 
 // One row per session delta sent on /scan/report. The BE stores
 // these in ScanSessionSignals using INSERT-ON-CONFLICT INCREMENT, so
@@ -991,10 +992,19 @@ function sweepStaleTmp(target: string): void {
   }
 }
 
-function writeCache(cache: RulesCache): void {
+function writeCache(cache: RulesCache): string[] {
   const data = JSON.stringify(cache, null, 2) + '\n';
   sweepStaleTmp(rulesCacheFile());
+  // What this sync changes, read before the old cache is replaced
+  // (policy-change.ts). Never fails the write.
+  let changes: string[] = [];
+  try {
+    changes = policyChangeLines(readPolicyCacheRaw(), cache as unknown as Record<string, unknown>);
+  } catch {
+    /* an unreadable old cache has nothing to compare with */
+  }
   atomicWriteSync(rulesCacheFile(), data, 'utf-8');
+  recordPolicyChange(changes);
   // Keep a last-known-good copy alongside the primary. If the primary is later
   // corrupted by anything OTHER than our (atomic) writer — a disk fault, a crash
   // during an external edit — getConfig falls back to this instead of silently
@@ -1005,6 +1015,20 @@ function writeCache(cache: RulesCache): void {
     atomicWriteSync(rulesCacheBackupFile(), data, 'utf-8');
   } catch {
     /* best-effort */
+  }
+  return changes;
+}
+
+/** The policy cache as it is on disk, or null. For the change lines and the
+ *  state line of `node9 policy sync`; the engine reads it through getConfig. */
+export function readPolicyCacheRaw(): Record<string, unknown> | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(rulesCacheFile(), 'utf-8')) as unknown;
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1255,10 +1279,13 @@ export const pushPolicySnapshotSoon = createPushSoon(pushPolicySnapshotIfKeyed);
 async function collectAddonsAndIndex(): Promise<ReturnType<typeof collectAddons>> {
   // The host check asks DNS about the domains skills name (cached for a
   // day); the package check's switch turns node9's own lookups off.
-  const report = await collectAddonsWithLookups(undefined, undefined, {
+  const { report, mcpIndex } = await collectAddonsAndMcpIndex(undefined, undefined, {
     lookupsAllowed: getConfig().policy.packageCheck?.enabled !== false,
   });
-  writeMcpIndex(report.mcp);
+  // The index list, not the report's: the report also names the servers of
+  // Claude Code's projects, which the hook must read from the call's own
+  // folder (a project's server in the index would be judged for every folder).
+  writeMcpIndex(mcpIndex);
   return report;
 }
 
@@ -1418,7 +1445,7 @@ export async function pushScanSnapshot(creds: { apiKey: string; apiUrl: string }
  * and onboarding.
  */
 export async function runCloudSync(): Promise<
-  | { ok: true; rules: number; fetchedAt: string; unchanged?: boolean }
+  | { ok: true; rules: number; fetchedAt: string; unchanged?: boolean; changes?: string[] }
   | { ok: false; reason: string }
 > {
   const creds = readCredentials();
@@ -1440,9 +1467,9 @@ export async function runCloudSync(): Promise<
         : { ok: true, rules: 0, fetchedAt: new Date().toISOString(), unchanged: true };
     }
     const cache = cacheFromSyncBody(result.body, result.etag);
-    writeCache(cache);
+    const changes = writeCache(cache);
     recordSyncHealth({ ok: true, changed: true });
-    return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt };
+    return { ok: true, rules: cache.rules.length, fetchedAt: cache.fetchedAt, changes };
   } catch (err) {
     // Record the failure so a manual sync that can't reach the server counts
     // toward consecutiveFailures too (the CLI surfaces the reason to the user,

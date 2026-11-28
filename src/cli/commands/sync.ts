@@ -2,7 +2,37 @@
 // Registered as `node9 policy` by cli.ts.
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { runCloudSync, getCloudSyncStatus, getCloudRules, runPolicyPush } from '../../daemon/sync';
+import {
+  runCloudSync,
+  getCloudSyncStatus,
+  getCloudRules,
+  runPolicyPush,
+  readPolicyCacheRaw,
+} from '../../daemon/sync';
+import { policyStateLine, readPolicyChange } from '../../daemon/policy-change';
+
+/** "just now", "3 min ago", "2 h ago": how long since a recorded policy change. */
+function ago(at: string): string {
+  const min = Math.max(0, Math.round((Date.now() - new Date(at).getTime()) / 60_000));
+  if (min < 1) return 'just now';
+  return min < 60 ? `${min} min ago` : `${Math.round(min / 60)} h ago`;
+}
+
+/** The policy now, and what changed: in this sync, or in the last sync that
+ *  changed something (the daemon usually gets there first). node9-proxy#506. */
+function printPolicyState(changes: string[] | undefined): void {
+  const state = policyStateLine(readPolicyCacheRaw());
+  if (state) console.log(chalk.gray(`  ${state}`));
+  if (changes && changes.length > 0) {
+    console.log(chalk.yellow('  Changed in this sync:'));
+    for (const line of changes) console.log(chalk.yellow(`    ${line}`));
+    return;
+  }
+  const last = readPolicyChange();
+  if (!last) return;
+  console.log(chalk.gray(`  Last change, ${ago(last.at)}:`));
+  for (const line of last.lines) console.log(chalk.gray(`    ${line}`));
+}
 
 export function registerSyncCommand(program: Command): void {
   const policy = program.command('policy').description('Manage cloud policy rules');
@@ -47,12 +77,14 @@ export function registerSyncCommand(program: Command): void {
         );
         console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
         console.log(chalk.gray(`  Server returned 304 (no changes since last sync)`));
+        printPolicyState(undefined);
       } else {
         console.log(
           chalk.green(`✓ Synced ${result.rules} rule${result.rules === 1 ? '' : 's'} from cloud`)
         );
         console.log(chalk.gray(`  Cached at: ${result.fetchedAt}`));
         console.log(chalk.gray(`  File: ~/.node9/rules-cache.json`));
+        printPolicyState(result.changes);
       }
     });
 

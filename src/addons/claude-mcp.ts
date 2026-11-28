@@ -129,47 +129,35 @@ function launchOf(raw: unknown): { command: string; args: string[] } | null {
   return { command: s.command, args };
 }
 
-/**
- * The names Claude Code's projects give their MCP servers (`projects[dir]
- * .mcpServers` in ~/.claude.json and each folder's `.mcp.json`), node9's own
- * included. The hook judges a call to such a server by what its config runs
- * (claudeMcpEntries), so the list of servers seen only in calls
- * (mcp-seen.ts) must leave these names out. Daemon and CLI only.
- */
-export function claudeProjectMcpNames(home: string = os.homedir()): string[] {
-  const out = new Set<string>();
-  const add = (servers: Record<string, unknown>) => {
-    for (const name of Object.keys(servers).slice(0, 200)) out.add(name);
-  };
-  const projects = serversOf(readJson(path.join(home, '.claude.json'))?.projects);
-  for (const [dir, p] of Object.entries(projects).slice(0, MAX_PROJECTS)) {
-    add(serversOf((p as { mcpServers?: unknown } | null)?.mcpServers));
-    if (path.isAbsolute(dir) && path.resolve(dir) !== path.resolve(home))
-      add(serversOf(readJson(path.join(dir, '.mcp.json'))?.mcpServers));
-  }
-  return [...out];
+/** What Claude Code's projects configure, from one walk over them. */
+export interface ClaudeProjectMcp {
+  /** Every server name a project gives, node9's own included. */
+  names: string[];
+  /** One entry per name, identity and state, with its registry package when
+   *  it runs one. node9's own server is not an entry. */
+  servers: Array<{ entry: McpIndexEntry; pkg: McpPackage | null }>;
 }
 
 /**
- * The registry packages the MCP servers of Claude Code's projects run: the
- * servers each project in ~/.claude.json configures (`projects[dir]
- * .mcpServers`) and the ones in that folder's `.mcp.json`. The hook stops a
- * call to such a server when its package is malicious (resolve.ts), so the
- * daemon's package check must know about them as it knows the user-level ones
- * (release review 2026-11-27). Daemon only: it reads a file per project.
+ * The MCP servers of Claude Code's projects: `projects[dir].mcpServers` in
+ * ~/.claude.json and each folder's `.mcp.json`. One read of ~/.claude.json
+ * (it can be megabytes) and one of each project file serve the three things
+ * built on them: the names the seen list leaves out, the entries of the
+ * add-ons report, and the packages the daemon checks. Nothing about a project
+ * but names and identities leaves this function. Daemon and CLI only.
  */
-export function claudeProjectMcpPackages(
-  home: string = os.homedir()
-): Array<{ identity: string; pkg: McpPackage }> {
-  const out = new Map<string, McpPackage>();
-  const add = (servers: Record<string, unknown>) => {
-    for (const raw of Object.values(servers).slice(0, 200)) {
+export function claudeProjectMcp(home: string = os.homedir()): ClaudeProjectMcp {
+  const names = new Set<string>();
+  const servers = new Map<string, { entry: McpIndexEntry; pkg: McpPackage | null }>();
+  const add = (group: Record<string, unknown>) => {
+    for (const [name, raw] of Object.entries(group).slice(0, 200)) {
+      names.add(name);
+      const entry = entryOf(name, raw);
+      if (!entry) continue;
+      const key = `${entry.name}\0${entry.identity}\0${entry.state}`;
+      if (servers.has(key)) continue;
       const l = launchOf(raw);
-      const pkg = l ? mcpPackageFromCommand(l.command, l.args) : null;
-      if (l && pkg) {
-        const identity = mcpIdentityFromCommand(l.command, l.args);
-        if (!out.has(identity)) out.set(identity, pkg);
-      }
+      servers.set(key, { entry, pkg: l ? mcpPackageFromCommand(l.command, l.args) : null });
     }
   };
   const projects = serversOf(readJson(path.join(home, '.claude.json'))?.projects);
@@ -178,5 +166,30 @@ export function claudeProjectMcpPackages(
     if (path.isAbsolute(dir) && path.resolve(dir) !== path.resolve(home))
       add(serversOf(readJson(path.join(dir, '.mcp.json'))?.mcpServers));
   }
+  return { names: [...names], servers: [...servers.values()] };
+}
+
+/**
+ * The names Claude Code's projects give their MCP servers, node9's own
+ * included. The hook judges a call to such a server by what its config runs
+ * (claudeMcpEntries), so the list of servers seen only in calls
+ * (mcp-seen.ts) must leave these names out.
+ */
+export function claudeProjectMcpNames(home: string = os.homedir()): string[] {
+  return claudeProjectMcp(home).names;
+}
+
+/**
+ * The registry packages the MCP servers of Claude Code's projects run. The
+ * hook stops a call to such a server when its package is malicious
+ * (resolve.ts), so the daemon's package check must know about them as it
+ * knows the user-level ones (release review 2026-11-27).
+ */
+export function claudeProjectMcpPackages(
+  home: string = os.homedir()
+): Array<{ identity: string; pkg: McpPackage }> {
+  const out = new Map<string, McpPackage>();
+  for (const { entry, pkg } of claudeProjectMcp(home).servers)
+    if (pkg && !out.has(entry.identity)) out.set(entry.identity, pkg);
   return [...out].map(([identity, pkg]) => ({ identity, pkg }));
 }

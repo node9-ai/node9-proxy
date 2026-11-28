@@ -10,7 +10,7 @@
 import fs from 'fs';
 import os from 'os';
 import { AGENT_SPECS } from '../agent-wiring';
-import { collectMcpDetail, collectMcpOnly } from '../addons/collect';
+import { collectMcpDetail, collectMcpLists, type AddonMcp } from '../addons/collect';
 import { claudeProjectMcpPackages } from '../addons/claude-mcp';
 import { refreshPackageStanding } from '../addons/package-standing';
 import { writeMcpIndex } from '../addons/index-file';
@@ -49,15 +49,36 @@ export function mcpConfigSignature(home: string = os.homedir()): string {
     .join('|');
 }
 
+/** The MCP list of the add-ons report as of the last rebuild, per home
+ *  folder: what makes a rebuild news for the dashboard. In memory only. */
+const lastReported = new Map<string, string>();
+
+/** What the dashboard shows of a list: the servers, where each runs and for
+ *  which agents. Not the day of a seen server's newest call. */
+function listSummary(report: AddonMcp[]): string {
+  return report
+    .map((m) => `${m.name}\0${m.identity}\0${m.state}\0${[...m.agents].sort().join(',')}`)
+    .sort()
+    .join('\n');
+}
+
 /**
  * Rebuild the index when the agents' MCP configs changed since `last` (or
  * always, when `last` is undefined). Returns the signature to compare next
  * time. Never throws: a failure leaves the previous index.
+ *
+ * `onListChange` runs when the rebuild found a different list of servers
+ * than the one before it (a server added, removed, re-pointed, or moved
+ * behind the gateway). The config files' signature cannot say that:
+ * ~/.claude.json holds prompt history and changes on every prompt. The first
+ * rebuild after start only sets what to compare with; the sync at start
+ * sends a snapshot anyway.
  */
 export function refreshAddonsIndex(
   last: string | undefined,
   home: string = os.homedir(),
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  onListChange: () => void = () => {}
 ): string | undefined {
   let sig: string;
   try {
@@ -66,9 +87,11 @@ export function refreshAddonsIndex(
     return last;
   }
   if (sig === last) return last;
+  let summary: string;
   try {
+    const lists = collectMcpLists(home, env);
     writeMcpIndex(
-      collectMcpOnly(home, env).map((m) => ({
+      lists.index.map((m) => ({
         name: m.name,
         identity: m.identity,
         state: m.state,
@@ -76,8 +99,18 @@ export function refreshAddonsIndex(
       })),
       home
     );
+    summary = listSummary(lists.report);
   } catch {
     return last; // try again on the next tick
+  }
+  const before = lastReported.get(home);
+  lastReported.set(home, summary);
+  if (before !== undefined && before !== summary) {
+    try {
+      onListChange();
+    } catch {
+      /* a failed request for a push must not undo the rebuild */
+    }
   }
   return sig;
 }
@@ -88,19 +121,22 @@ export function refreshAddonsIndex(
  * agent config changed or that list did (a new server, a connector that just
  * got its name). `readAudit: false` skips the audit log: its first read can
  * be megabytes, and nothing the daemon does at start should wait on it.
- * `onSeenChange` runs when that list changed: the daemon sends the add-ons
- * report soon instead of at the next policy sync, hours away.
+ * `onListChange` runs once when either list changed (a server seen for the
+ * first time, or one added to an agent's config): the daemon sends the
+ * add-ons report soon instead of at the next policy sync, hours away.
  */
 export function refreshIndexRound(
   last: string | undefined,
   home: string = os.homedir(),
   env: NodeJS.ProcessEnv = process.env,
   readAudit = true,
-  onSeenChange: () => void = () => {}
+  onListChange: () => void = () => {}
 ): string | undefined {
-  const seenChanged = readAudit && refreshMcpSeen(home);
-  const next = refreshAddonsIndex(seenChanged ? undefined : last, home, env);
-  if (seenChanged) onSeenChange();
+  let changed = readAudit && refreshMcpSeen(home);
+  const next = refreshAddonsIndex(changed ? undefined : last, home, env, () => {
+    changed = true;
+  });
+  if (changed) onListChange();
   return next;
 }
 

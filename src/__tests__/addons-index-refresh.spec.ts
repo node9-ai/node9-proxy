@@ -96,13 +96,72 @@ describe('refreshAddonsIndex', () => {
     expect(pushSoon).toHaveBeenCalledTimes(1);
     // The index the push reports from is already written when it is asked for.
     expect(readMcpIndex(h).map((e) => e.name)).toEqual(['db', 'codex_apps']);
-    // Another call to a server already listed, and a config change: no ask.
+    // Another call to a server already listed: no ask.
     fs.appendFileSync(path.join(h, '.node9', 'audit.log'), auditRow('mcp__codex_apps__close'));
-    codex(h, 'db2', '@acme/db-mcp');
-    const later = new Date(Date.now() + 5000);
-    fs.utimesSync(path.join(h, '.codex', 'config.toml'), later, later);
     refreshIndexRound(sig, h, {}, true, pushSoon);
     expect(pushSoon).toHaveBeenCalledTimes(1);
+  });
+
+  it('a round asks for the snapshot push when the configured servers changed, not on every config write', () => {
+    _resetMcpSeenCursor();
+    const h = home();
+    const touch = (ms: number) => {
+      const t = new Date(Date.now() + ms);
+      fs.utimesSync(path.join(h, '.codex', 'config.toml'), t, t);
+    };
+    codex(h, 'db', '@acme/db-mcp');
+    const pushSoon = vi.fn();
+    // The first build after start sets what to compare with: the sync at
+    // start sends a snapshot anyway.
+    let sig = refreshIndexRound(undefined, h, {}, false, pushSoon);
+    expect(pushSoon).not.toHaveBeenCalled();
+    // The config is written again with the same servers (an agent rewrites
+    // its file on every prompt): a rebuild, and nothing to tell.
+    touch(5000);
+    const rebuilt = refreshIndexRound(sig, h, {}, true, pushSoon);
+    expect(rebuilt).not.toBe(sig);
+    sig = rebuilt;
+    expect(pushSoon).not.toHaveBeenCalled();
+    // A server added to the agent's config.
+    fs.appendFileSync(
+      path.join(h, '.codex', 'config.toml'),
+      '[mcp_servers.files]\ncommand = "npx"\nargs = ["-y", "mcp-files"]\n'
+    );
+    touch(10_000);
+    sig = refreshIndexRound(sig, h, {}, true, pushSoon);
+    expect(pushSoon).toHaveBeenCalledTimes(1);
+    expect(
+      readMcpIndex(h)
+        .map((e) => e.name)
+        .sort()
+    ).toEqual(['db', 'files']);
+    // A server re-pointed at another package under the same name.
+    codex(h, 'db', '@other/db-mcp');
+    touch(15_000);
+    refreshIndexRound(sig, h, {}, true, pushSoon);
+    expect(pushSoon).toHaveBeenCalledTimes(2);
+  });
+
+  it('a server added to a Claude Code project asks for the push too, though the hook index does not hold it', () => {
+    _resetMcpSeenCursor();
+    const h = home();
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-proj-'));
+    homes.push(proj);
+    const claude = (servers: Record<string, unknown>) =>
+      fs.writeFileSync(
+        path.join(h, '.claude.json'),
+        JSON.stringify({ projects: { [proj]: { mcpServers: servers } } })
+      );
+    claude({});
+    const pushSoon = vi.fn();
+    const sig = refreshIndexRound(undefined, h, {}, false, pushSoon);
+    // Claude Code registers the server in ~/.claude.json, which the daemon watches.
+    claude({ db: { command: 'uvx', args: ['acme-db-mcp'] } });
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(path.join(h, '.claude.json'), later, later);
+    refreshIndexRound(sig, h, {}, true, pushSoon);
+    expect(pushSoon).toHaveBeenCalledTimes(1);
+    expect(readMcpIndex(h)).toEqual([]);
   });
 
   it('a config created after the start counts as a change', () => {

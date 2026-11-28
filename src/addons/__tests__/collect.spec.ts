@@ -3,7 +3,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
-import { collectAddons, findSkillDirs } from '../collect';
+import { collectAddons, collectMcpLists, findSkillDirs } from '../collect';
+import { refreshMcpSeen, _resetMcpSeenCursor } from '../mcp-seen';
 
 const homes: string[] = [];
 afterEach(() => {
@@ -262,5 +263,114 @@ describe('collectAddons: MCP servers', () => {
     expect(byName.wrapped.serverKey).toMatch(/^[0-9a-f]{16}$/);
     expect(byName.remote).toMatchObject({ identity: 'url:mcp.example.com', state: 'remote' });
     expect(JSON.stringify(r)).not.toContain('hunter2');
+  });
+});
+
+describe("collectAddons: the MCP servers of Claude Code's projects", () => {
+  /** A project as Claude Code keeps it: listed in ~/.claude.json (with its
+   *  local-scope servers), and a `.mcp.json` in the folder. */
+  function project(
+    h: string,
+    local: Record<string, unknown>,
+    mcpJson: Record<string, unknown>,
+    user: Record<string, unknown> = {}
+  ): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'n9-proj-'));
+    homes.push(dir);
+    fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: mcpJson }));
+    fs.writeFileSync(
+      path.join(h, '.claude.json'),
+      JSON.stringify({ mcpServers: user, projects: { [dir]: { mcpServers: local } } })
+    );
+    return dir;
+  }
+
+  it('reports them as configured servers, by name and identity, and keeps them out of the hook index', () => {
+    const h = home();
+    const dir = project(
+      h,
+      { db: { command: 'uvx', args: ['acme-db-mcp', '--password', 'hunter2'] } },
+      {
+        files: { command: 'npx', args: ['-y', '@acme/files-mcp'] },
+        api: { type: 'http', url: 'https://mcp.example.com/v1?key=hunter2' },
+      }
+    );
+    // A server run from a script inside the project: its file name, never its folder.
+    const mcpJson = path.join(dir, '.mcp.json');
+    const servers = JSON.parse(fs.readFileSync(mcpJson, 'utf-8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    servers.mcpServers.local = {
+      command: 'node',
+      args: [path.join(dir, 'tools', 'server.js'), '--token', 'hunter2'],
+    };
+    fs.writeFileSync(mcpJson, JSON.stringify(servers));
+    const lists = collectMcpLists(h, {});
+    const byName = Object.fromEntries(lists.report.map((m) => [m.name, m]));
+    expect(byName.db).toMatchObject({
+      identity: 'pypi:acme-db-mcp',
+      state: 'outside',
+      agents: ['claude'],
+    });
+    expect(byName.files).toMatchObject({ identity: 'npm:@acme/files-mcp', state: 'outside' });
+    expect(byName.api).toMatchObject({ identity: 'url:mcp.example.com', state: 'remote' });
+    // The same list is what the report sends.
+    expect(
+      collectAddons(h, {})
+        .mcp.map((m) => m.name)
+        .sort()
+    ).toEqual(['api', 'db', 'files', 'local']);
+    expect(byName.local.identity).not.toContain(path.sep);
+    // Nothing of the project but names and identities: no folder, no arguments.
+    const wire = JSON.stringify(lists.report);
+    expect(wire).not.toContain(dir);
+    expect(wire).not.toContain(path.basename(dir));
+    expect(wire).not.toContain('hunter2');
+    // The hook reads the call's own project itself; the index holds no project server.
+    expect(lists.index).toEqual([]);
+  });
+
+  it('does not repeat a server the user-level config also names the same way', () => {
+    const h = home();
+    const same = { command: 'npx', args: ['-y', '@acme/files-mcp'] };
+    project(h, {}, { files: same }, { files: same });
+    const lists = collectMcpLists(h, {});
+    expect(lists.report.filter((m) => m.name === 'files')).toHaveLength(1);
+    expect(lists.report[0].agents).toEqual(['claude']);
+    // The user-level one stays in the index, as before.
+    expect(lists.index.map((m) => m.name)).toEqual(['files']);
+  });
+
+  it('lists a project server as configured, never also as seen in calls', () => {
+    _resetMcpSeenCursor();
+    const h = home();
+    project(h, {}, { files: { command: 'npx', args: ['-y', '@acme/files-mcp'] } });
+    // The row the hook writes for a call to it, and one to a server no config names.
+    const row = (tool: string) =>
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        tool,
+        decision: 'allow',
+        agent: 'Claude Code',
+      }) + '\n';
+    fs.writeFileSync(
+      path.join(h, '.node9', 'audit.log'),
+      row('mcp__files__read') + row('mcp__ccd_turn__wrap_up')
+    );
+    expect(refreshMcpSeen(h, Date.now(), [])).toBe(true);
+    const report = collectMcpLists(h, {}).report;
+    expect(report.map((m) => `${m.name}:${m.state}`).sort()).toEqual([
+      'ccd_turn:seen',
+      'files:outside',
+    ]);
+  });
+
+  it('never throws on a broken project file, and keeps the rest', () => {
+    const h = home();
+    const dir = project(h, { db: { command: 'uvx', args: ['acme-db-mcp'] } }, {});
+    fs.writeFileSync(path.join(dir, '.mcp.json'), '{not json');
+    expect(collectMcpLists(h, {}).report.map((m) => m.name)).toEqual(['db']);
+    fs.writeFileSync(path.join(h, '.claude.json'), '{not json');
+    expect(collectMcpLists(h, {})).toEqual({ report: [], index: [] });
   });
 });
